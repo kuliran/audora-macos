@@ -86,6 +86,7 @@ struct AudoraApp: App {
                     ContentView()
                         .frame(minWidth: 700, minHeight: 400)
                         .environmentObject(settingsViewModel)
+                        .environmentObject(convexService)
                         .background(OpenSettingsInstaller())
                 case .unauthenticated:
                     SignInView()
@@ -116,6 +117,7 @@ struct AudoraApp: App {
 
         SwiftUI.Settings {
             SettingsView(viewModel: settingsViewModel)
+                .environmentObject(convexService)
         }
 
         // Menu bar extra

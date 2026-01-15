@@ -66,6 +66,7 @@ struct SignInView: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .disabled(isSigningIn)
 
                 // Divider
                 HStack {
@@ -163,6 +164,14 @@ struct SignInView: View {
         print("🔐 [Clerk State] Checking Clerk configuration...")
         print("   - Clerk.shared.session: \(Clerk.shared.session != nil ? "exists" : "nil")")
         print("   - Clerk.shared.user: \(Clerk.shared.user != nil ? "exists (\(Clerk.shared.user?.id ?? "no id"))" : "nil")")
+        print("   - Clerk.shared.client: \(Clerk.shared.client != nil ? "exists" : "nil")")
+        if let client = Clerk.shared.client {
+            print("   - Client sessions count: \(client.sessions.count)")
+            print("   - Client lastActiveSessionId: \(client.lastActiveSessionId ?? "nil")")
+            for session in client.sessions {
+                print("   - Session: \(session.id), status: \(session.status)")
+            }
+        }
     }
 
     private func signIn() {
@@ -175,6 +184,13 @@ struct SignInView: View {
                 print("📧 [Email Sign-In] Calling SignIn.create...")
                 let signIn = try await SignIn.create(strategy: .identifier(email, password: password))
                 print("📧 [Email Sign-In] ✅ Success! SignIn ID: \(signIn.id)")
+                
+                // Set this session as active
+                if let sessionId = signIn.createdSessionId {
+                    print("📧 [Email Sign-In] Setting session active: \(sessionId)")
+                    try await Clerk.shared.setActive(sessionId: sessionId)
+                }
+                
                 logClerkState()
                 ConvexService.shared.onSignInComplete()
             } catch {
@@ -219,6 +235,17 @@ struct SignInView: View {
         }
     }
 
+    private func isCancellationError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        
+        // Common cancellation error codes:
+        // - NSURLErrorCancelled (-999)
+        // - ASWebAuthenticationSessionErrorCanceled (1)
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled ||
+               nsError.domain == "com.apple.AuthenticationServices.WebAuthenticationSession" && nsError.code == 1 ||
+               nsError.localizedDescription.lowercased().contains("cancel")
+    }
+
     private func signInWithGoogle() {
         print("🔵 [Google Sign-In] Starting...")
         isSigningIn = true
@@ -227,15 +254,31 @@ struct SignInView: View {
 
         Task {
             do {
-                print("🔵 [Google Sign-In] Calling SignIn.create with OAuth...")
-                let signIn = try await SignIn.create(strategy: .oauth(provider: .google))
-                print("🔵 [Google Sign-In] ✅ Success! SignIn ID: \(signIn.id)")
+                print("🔵 [Google Sign-In] Calling authenticateWithRedirect...")
+                try await SignIn.create(strategy: .oauth(provider: .google))
+                    .authenticateWithRedirect()
+                
+                print("🔵 [Google Sign-In] ✅ Authentication completed!")
+                
+                // Refresh client to get the new session
+                _ = try await Client.get()
                 logClerkState()
-                ConvexService.shared.onSignInComplete()
+                
+                if Clerk.shared.session != nil {
+                    print("🔵 [Google Sign-In] Session established!")
+                    ConvexService.shared.onSignInComplete()
+                } else {
+                    print("🔵 [Google Sign-In] ⚠️ No session after authentication")
+                    errorMessage = "Authentication completed but no session was created"
+                }
             } catch {
-                let fullError = formatDetailedError(error)
-                print("🔵 [Google Sign-In] ❌ Error: \(fullError)")
-                errorMessage = fullError
+                if isCancellationError(error) {
+                    print("🔵 [Google Sign-In] ℹ️ User cancelled sign-in")
+                } else {
+                    let fullError = formatDetailedError(error)
+                    print("🔵 [Google Sign-In] ❌ Error: \(fullError)")
+                    errorMessage = fullError
+                }
             }
             isSigningIn = false
         }

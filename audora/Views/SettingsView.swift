@@ -22,6 +22,8 @@ struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @Binding var navigationPath: NavigationPath
     @State private var selectedTab: SettingsTab = .general
+    @EnvironmentObject var convexService: ConvexService
+    @Environment(\.dismiss) private var dismiss
 
     init(viewModel: SettingsViewModel, navigationPath: Binding<NavigationPath> = .constant(NavigationPath())) {
         self.viewModel = viewModel
@@ -95,6 +97,12 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity)
         }
         .frame(minWidth: 700, minHeight: 500)
+        .onChange(of: convexService.authState) { oldValue, newValue in
+            if newValue == .unauthenticated {
+                // Use dismiss to close only this settings window
+                dismiss()
+            }
+        }
         .onAppear {
             viewModel.loadTemplates()
         }
@@ -115,6 +123,7 @@ struct SettingsView: View {
 
 struct GeneralSettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
+    @EnvironmentObject var convexService: ConvexService
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -182,6 +191,25 @@ struct GeneralSettingsView: View {
                     .fontWeight(.semibold)
 
                 VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Sign Out")
+                                .font(.body)
+                                .fontWeight(.medium)
+                            Text("Sign out and navigate to the Sign In screen.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Sign Out") {
+                            Task {
+                                await convexService.logout()
+                            }
+                        }
+                    }
+                    
+                    Divider()
+                    
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Reset Onboarding")
