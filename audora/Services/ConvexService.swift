@@ -1,5 +1,5 @@
 // ConvexService.swift
-// Handles interactions with Convex backend with Clerk authentication
+// Handles interactions with Convex backend
 
 import Foundation
 import ConvexMobile
@@ -13,7 +13,7 @@ enum AuthState: Equatable {
     case unauthenticated
 }
 
-/// Service for interacting with Convex backend with Clerk authentication
+/// Service for interacting with Convex backend
 @MainActor
 class ConvexService: ObservableObject {
     static let shared = ConvexService()
@@ -121,6 +121,121 @@ class ConvexService: ObservableObject {
 
         print("   ✅ JWT fetched successfully")
         return jwt
+    }
+
+    // MARK: - Conversation Management
+
+    /// Creates a new conversation for Mac app recording
+    /// Note: Will fail with authentication error until ConvexMobile SDK adds Clerk support
+    func createConversation(title: String?, calendarEventId: String?) async throws -> String {
+        guard let client = client else {
+            throw ConvexError.clientNotInitialized
+        }
+        
+        // Build args dictionary with ConvexEncodable types
+        var args: [String: (any ConvexEncodable)?] = [:]
+        if let title = title {
+            args["title"] = title as (any ConvexEncodable)?
+        }
+        if let calendarEventId = calendarEventId {
+            args["calendarEventId"] = calendarEventId as (any ConvexEncodable)?
+        }
+        
+        print("📝 Creating conversation in backend...")
+        let result: [String: String] = try await client.mutation(
+            "conversations:createMacConversation",
+            with: args
+        )
+        
+        guard let conversationId = result["id"] else {
+            throw ConvexError.netError("Failed to create conversation")
+        }
+        
+        print("   ✅ Conversation created: \(conversationId)")
+        return conversationId
+    }
+
+    /// Processes transcript with backend after recording completes
+    /// Note: Will fail with authentication error until ConvexMobile SDK adds Clerk support
+    func processRealtimeTranscript(
+        conversationId: String,
+        transcriptTurns: [[String: Any]],
+        initiatorName: String?
+    ) async throws -> [String: Any] {
+        guard let client = client else {
+            throw ConvexError.clientNotInitialized
+        }
+        
+        // Convert transcriptTurns to ConvexEncodable format
+        // Build array of dictionaries with ConvexEncodable values
+        let encodedTurns: [[String: (any ConvexEncodable)?]] = transcriptTurns.map { turn in
+            var encodedTurn: [String: (any ConvexEncodable)?] = [:]
+            if let speaker = turn["speaker"] as? String {
+                encodedTurn["speaker"] = speaker
+            }
+            if let text = turn["text"] as? String {
+                encodedTurn["text"] = text
+            }
+            if let startTime = turn["startTime"] as? Double {
+                encodedTurn["startTime"] = startTime
+            } else if let startTime = turn["startTime"] as? Int {
+                encodedTurn["startTime"] = Double(startTime)
+            }
+            if let endTime = turn["endTime"] as? Double {
+                encodedTurn["endTime"] = endTime
+            } else if let endTime = turn["endTime"] as? Int {
+                encodedTurn["endTime"] = Double(endTime)
+            }
+            return encodedTurn
+        }
+        
+        // Build args with proper ConvexEncodable types
+        var args: [String: (any ConvexEncodable)?] = [:]
+        args["conversationId"] = conversationId
+        
+        // Arrays conform to ConvexEncodable in ConvexMobile, but Swift's type system
+        // doesn't recognize [[String: (any ConvexEncodable)?]] as (any ConvexEncodable)?
+        // We use unsafe cast here because we know arrays are valid ConvexEncodable values
+        // This is a limitation of Swift's type system with protocol existentials
+        args["transcriptTurns"] = (encodedTurns as [Any]) as? (any ConvexEncodable) ?? encodedTurns as? (any ConvexEncodable)
+        
+        args["initiatorName"] = initiatorName ?? "Me"
+        args["scannerName"] = "System"
+        
+        print("📤 Processing transcript with backend...")
+        // Backend returns: { transcript: [...], S1_facts: [...], S2_facts: [...] }
+        struct ProcessTranscriptResponse: Decodable {
+            let transcript: [[String: String]]?
+            let S1_facts: [String]?
+            let S2_facts: [String]?
+            
+            enum CodingKeys: String, CodingKey {
+                case transcript
+                case S1_facts = "S1_facts"
+                case S2_facts = "S2_facts"
+            }
+        }
+        
+        // Try without explicit type on args to see if Swift infers correct overload
+        let response = try await client.action(
+            "realtimeTranscription:processRealtimeTranscript",
+            with: args
+        ) as ProcessTranscriptResponse
+        
+        // Convert to [String: Any] dictionary
+        var resultDict: [String: Any] = [:]
+        if let transcript = response.transcript {
+            resultDict["transcript"] = transcript
+        }
+        if let s1Facts = response.S1_facts {
+            resultDict["S1_facts"] = s1Facts
+        }
+        if let s2Facts = response.S2_facts {
+            resultDict["S2_facts"] = s2Facts
+        }
+        
+        print("   ✅ Transcript processed successfully")
+        return resultDict
     }
 
     /// Checks if Convex is properly configured
