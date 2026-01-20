@@ -97,7 +97,6 @@ struct SettingsView: View {
         .frame(minWidth: 700, minHeight: 500)
         .onAppear {
             viewModel.loadTemplates()
-            viewModel.loadAPIKey()
         }
         .onDisappear {
             DispatchQueue.main.async {
@@ -418,19 +417,14 @@ struct AISettingsView: View {
                 .font(.title2)
                 .fontWeight(.semibold)
 
-            // API Key
+            // Account Info
             VStack(alignment: .leading, spacing: 16) {
-                Text("OpenAI Configuration")
+                Text("Account")
                     .font(.headline)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    SecureField("OpenAI API Key", text: $viewModel.settings.openAIKey)
-                        .textFieldStyle(.roundedBorder)
-
-                    Text("Stored locally and encrypted in Keychain.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                Text("Transcription and AI features are powered by your Audora account.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
