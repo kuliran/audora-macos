@@ -3,6 +3,7 @@
 
 import Foundation
 import ConvexMobile
+import ConvexClerk
 import Clerk
 import Combine
 
@@ -18,16 +19,24 @@ enum AuthState: Equatable {
 class ConvexService: ObservableObject {
     static let shared = ConvexService()
 
-    private var client: ConvexClient?
+    private var client: ConvexClientWithAuth<ClerkCredentials>?
 
     @Published var authState: AuthState = .loading
     @Published var errorMessage: String?
 
     private init() {
-        // Initialize Convex client with deployment URL
+        // Initialize Convex client with Clerk authentication
         if let deploymentURL = getConvexDeploymentURL() {
-            client = ConvexClient(deploymentUrl: deploymentURL)
-            print("✅ Convex client initialized with URL: \(deploymentURL)")
+            // Create Clerk auth provider using ConvexClerk package
+            // jwtTemplate must match the template name in Clerk Dashboard (default: "convex")
+            let authProvider = ClerkAuthProvider(jwtTemplate: "convex")
+            
+            // Initialize authenticated client
+            client = ConvexClientWithAuth(
+                deploymentUrl: deploymentURL,
+                authProvider: authProvider
+            )
+            print("✅ Convex client initialized with Clerk authentication")
         } else {
             print("⚠️ Convex deployment URL not configured")
         }
@@ -58,6 +67,23 @@ class ConvexService: ObservableObject {
         return nil
     }
 
+    /// Gets the Clerk publishable key from environment or configuration
+    private func getClerkPublishableKey() -> String? {
+        // Check environment variable
+        let envKey = ProcessInfo.processInfo.environment["CLERK_PUBLISHABLE_KEY"]
+        if let key = envKey, !key.isEmpty {
+            return key
+        }
+        
+        // Check Info.plist
+        let plistKey = Bundle.main.object(forInfoDictionaryKey: "CLERK_PUBLISHABLE_KEY") as? String
+        if let key = plistKey, !key.isEmpty, key != "$(CLERK_PUBLISHABLE_KEY)" {
+            return key
+        }
+        
+        return nil
+    }
+
     // MARK: - Authentication
 
     /// Attempts to restore session from Clerk on app launch
@@ -79,6 +105,10 @@ class ConvexService: ObservableObject {
             print("   ✅ Session found: \(session.id)")
             if let user = Clerk.shared.user {
                 print("   ✅ User found: \(user.id)")
+                
+                // Authenticate the Convex client with Clerk session
+                await authenticateConvexClient()
+                
                 authState = .authenticated(userId: user.id)
                 return true
             }
@@ -93,12 +123,37 @@ class ConvexService: ObservableObject {
     func onSignInComplete() {
         if let user = Clerk.shared.user {
             authState = .authenticated(userId: user.id)
+            
+            // Authenticate the Convex client with new session
+            Task {
+                await authenticateConvexClient()
+            }
+        }
+    }
+    
+    /// Authenticates the Convex client using current Clerk session
+    private func authenticateConvexClient() async {
+        guard let client = client else { return }
+        
+        do {
+            // The ClerkAuthProvider should handle fetching the JWT automatically
+            // If it requires manual login, call:
+            try await client.login()
+            print("✅ Convex client authenticated with Clerk")
+        } catch {
+            print("❌ Failed to authenticate Convex client: \(error)")
         }
     }
 
     /// Signs out the current user
     func logout() async {
         do {
+            // Logout from Convex client first
+            if let client = client {
+                try await client.logout()
+            }
+            
+            // Then logout from Clerk
             try await Clerk.shared.signOut()
             authState = .unauthenticated
         } catch {
@@ -126,7 +181,6 @@ class ConvexService: ObservableObject {
     // MARK: - Conversation Management
 
     /// Creates a new conversation for Mac app recording
-    /// Note: Will fail with authentication error until ConvexMobile SDK adds Clerk support
     func createConversation(title: String?, calendarEventId: String?) async throws -> String {
         guard let client = client else {
             throw ConvexError.clientNotInitialized
@@ -156,7 +210,6 @@ class ConvexService: ObservableObject {
     }
 
     /// Processes transcript with backend after recording completes
-    /// Note: Will fail with authentication error until ConvexMobile SDK adds Clerk support
     func processRealtimeTranscript(
         conversationId: String,
         transcriptTurns: [[String: Any]],
