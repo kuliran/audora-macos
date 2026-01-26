@@ -140,8 +140,36 @@ class ConvexService: ObservableObject {
             // If it requires manual login, call:
             try await client.login()
             print("✅ Convex client authenticated with Clerk")
+            
+            // CRITICAL: Create/update user record in Convex database
+            // This must be done after authentication so the backend has a user record
+            try await ensureUserExists()
         } catch {
             print("❌ Failed to authenticate Convex client: \(error)")
+        }
+    }
+    
+    /// Ensures the user record exists in Convex database
+    private func ensureUserExists() async throws {
+        guard let client = client else { return }
+        
+        do {
+            print("👤 Ensuring user record exists in database...")
+            
+            // Define minimal response structure - we only care about success
+            struct UserResponse: Decodable {
+                let _id: String
+            }
+            
+            // Call upsertUser mutation to create/update user record
+            let _: UserResponse = try await client.mutation(
+                "users:upsertUser",
+                with: [:]
+            )
+            print("   ✅ User record ensured")
+        } catch {
+            print("   ⚠️ Failed to upsert user: \(error)")
+            // Don't throw - this is not critical for basic functionality
         }
     }
 
@@ -183,7 +211,14 @@ class ConvexService: ObservableObject {
     /// Creates a new conversation for Mac app recording
     func createConversation(title: String?, calendarEventId: String?) async throws -> String {
         guard let client = client else {
+            print("❌ Cannot create conversation: Client not initialized")
             throw ConvexError.clientNotInitialized
+        }
+        
+        // Check if user is authenticated
+        guard case .authenticated = authState else {
+            print("❌ Cannot create conversation: Not authenticated (authState: \(authState))")
+            throw ConvexError.authenticationRequired
         }
         
         // Build args dictionary with ConvexEncodable types
@@ -196,17 +231,28 @@ class ConvexService: ObservableObject {
         }
         
         print("📝 Creating conversation in backend...")
-        let result: [String: String] = try await client.mutation(
-            "conversations:createMacConversation",
-            with: args
-        )
+        print("   - Auth state: \(authState)")
+        print("   - Title: \(title ?? "nil")")
         
-        guard let conversationId = result["id"] else {
-            throw ConvexError.netError("Failed to create conversation")
+        do {
+            // Define response structure - backend returns { id: conversationId }
+            struct CreateConversationResponse: Decodable {
+                let id: String
+            }
+            
+            let result: CreateConversationResponse = try await client.mutation(
+                "conversations:createMacConversation",
+                with: args
+            )
+            
+            print("   ✅ Conversation created: \(result.id)")
+            return result.id
+        } catch {
+            print("❌ Conversation creation error: \(error)")
+            print("   - Error type: \(type(of: error))")
+            print("   - Error details: \(error.localizedDescription)")
+            throw error
         }
-        
-        print("   ✅ Conversation created: \(conversationId)")
-        return conversationId
     }
 
     /// Processes transcript with backend after recording completes
@@ -219,43 +265,22 @@ class ConvexService: ObservableObject {
             throw ConvexError.clientNotInitialized
         }
         
-        // Convert transcriptTurns to ConvexEncodable format
-        // Build array of dictionaries with ConvexEncodable values
-        let encodedTurns: [[String: (any ConvexEncodable)?]] = transcriptTurns.map { turn in
-            var encodedTurn: [String: (any ConvexEncodable)?] = [:]
-            if let speaker = turn["speaker"] as? String {
-                encodedTurn["speaker"] = speaker
-            }
-            if let text = turn["text"] as? String {
-                encodedTurn["text"] = text
-            }
-            if let startTime = turn["startTime"] as? Double {
-                encodedTurn["startTime"] = startTime
-            } else if let startTime = turn["startTime"] as? Int {
-                encodedTurn["startTime"] = Double(startTime)
-            }
-            if let endTime = turn["endTime"] as? Double {
-                encodedTurn["endTime"] = endTime
-            } else if let endTime = turn["endTime"] as? Int {
-                encodedTurn["endTime"] = Double(endTime)
-            }
-            return encodedTurn
+        // Serialize transcript to JSON string to bypass Swift's ConvexEncodable type system limitations
+        // This avoids the issue where [[String: (any ConvexEncodable)?]] cannot be cast to (any ConvexEncodable)
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: transcriptTurns, options: []),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            print("❌ Failed to serialize transcript to JSON")
+            throw ConvexError.netError("Failed to serialize transcript")
         }
         
-        // Build args with proper ConvexEncodable types
+        // Build args with JSON string (backend will parse it)
         var args: [String: (any ConvexEncodable)?] = [:]
         args["conversationId"] = conversationId
-        
-        // Arrays conform to ConvexEncodable in ConvexMobile, but Swift's type system
-        // doesn't recognize [[String: (any ConvexEncodable)?]] as (any ConvexEncodable)?
-        // We use unsafe cast here because we know arrays are valid ConvexEncodable values
-        // This is a limitation of Swift's type system with protocol existentials
-        args["transcriptTurns"] = (encodedTurns as [Any]) as? (any ConvexEncodable) ?? encodedTurns as? (any ConvexEncodable)
-        
+        args["transcriptTurnsJson"] = jsonString  // Send as JSON string
         args["initiatorName"] = initiatorName ?? "Me"
         args["scannerName"] = "System"
         
-        print("📤 Processing transcript with backend...")
+        print("📤 Processing transcript (\(transcriptTurns.count) turns) as JSON string")
         // Backend returns: { transcript: [...], S1_facts: [...], S2_facts: [...] }
         struct ProcessTranscriptResponse: Decodable {
             let transcript: [[String: String]]?

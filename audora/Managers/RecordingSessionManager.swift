@@ -84,17 +84,22 @@ class RecordingSessionManager: ObservableObject {
         // Create backend conversation in background
         Task {
             do {
+                print("🌐 Starting conversation creation task...")
                 let convexId = try await ConvexService.shared.createConversation(
                     title: title,
                     calendarEventId: calendarEventId
                 )
+                print("🌐 Conversation creation succeeded with ID: \(convexId)")
                 await MainActor.run {
                     self.currentConversationId = convexId
+                    print("🌐 Set currentConversationId to: \(convexId)")
                     // ⚠️ CRITICAL: Save conversation ID to meeting record immediately
                     self.saveMeetingConversationId(meetingId: meetingId, conversationId: convexId)
                 }
             } catch {
                 print("❌ Failed to create conversation: \(error)")
+                print("   - Error type: \(type(of: error))")
+                print("   - Error description: \(error.localizedDescription)")
                 // Continue anyway - will save locally
             }
         }
@@ -108,9 +113,14 @@ class RecordingSessionManager: ObservableObject {
         isRecording = false
         audioManager.stopRecording()
         
+        // Capture values before resetting (to avoid race condition with Task below)
+        let capturedMeetingId = activeMeetingId
+        let capturedConversationId = currentConversationId
+        let capturedTranscriptChunks = activeRecordingTranscriptChunks
+        
         // Save audio file and update meeting
         var audioFileURL: String? = nil
-        if let activeMeetingId = activeMeetingId {
+        if let activeMeetingId = capturedMeetingId {
             // Stop recording and get the audio file URL
             if let savedAudioURL = AudioRecordingManager.shared.stopRecordingAndSave(for: activeMeetingId) {
                 audioFileURL = savedAudioURL.path
@@ -118,17 +128,31 @@ class RecordingSessionManager: ObservableObject {
             }
             
             // Update meeting with transcript and audio file URL
-            updateActiveMeeting(meetingId: activeMeetingId, chunks: activeRecordingTranscriptChunks, audioFileURL: audioFileURL)
+            updateActiveMeeting(meetingId: activeMeetingId, chunks: capturedTranscriptChunks, audioFileURL: audioFileURL)
             
             // Process with backend if we have a conversation ID
             Task {
-                // ⚠️ TIMING FIX: Wait briefly for conversation ID if still being created
-                if currentConversationId == nil {
+                var conversationId = capturedConversationId
+                
+                // ⚠️ TIMING FIX: Wait for conversation ID if still being created
+                if conversationId == nil {
                     print("⏳ Waiting for conversation creation...")
-                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s max wait
+                    // Wait up to 3 seconds in 0.5s increments
+                    for attempt in 1...6 {
+                        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+                        conversationId = await MainActor.run { self.currentConversationId }
+                        if conversationId != nil {
+                            print("✅ Conversation ID became available after \(attempt * 500)ms")
+                            break
+                        }
+                        if attempt < 6 {
+                            print("   Still waiting... (\(attempt * 500)ms)")
+                        }
+                    }
                 }
                 
-                if let conversationId = currentConversationId {
+                if let conversationId = conversationId {
+                    print("🎯 Processing backend with conversation ID: \(conversationId)")
                     // Load meeting with latest transcript
                     if let meeting = LocalStorageManager.shared.loadMeetings().first(where: { $0.id == activeMeetingId }) {
                         await processTranscriptWithBackend(
@@ -137,11 +161,16 @@ class RecordingSessionManager: ObservableObject {
                         )
                     }
                 } else {
-                    print("⚠️ No conversation ID available - skipping backend processing")
+                    print("⚠️ No conversation ID available after 3s wait - skipping backend processing")
+                    print("   This usually means:")
+                    print("   1. Not authenticated with Clerk")
+                    print("   2. Backend conversation creation failed")
+                    print("   3. Check Xcode console for auth/API errors")
                 }
             }
         }
         
+        // Reset state after capturing values for the Task
         activeMeetingId = nil
         currentConversationId = nil
         activeRecordingTranscriptChunks = []
@@ -204,14 +233,17 @@ class RecordingSessionManager: ObservableObject {
     ) async {
         do {
             // Format transcript turns for backend
-            // ⚠️ CRITICAL: Convert Date to Unix timestamp (milliseconds) - backend expects numbers
+            // Get recording start time (first chunk timestamp) to calculate relative timestamps
+            let recordingStartTime = meeting.transcriptChunks.first?.timestamp ?? Date()
+            
+            // Format turns with RELATIVE timestamps in milliseconds (from recording start)
             let transcriptTurns: [[String: Any]] = meeting.transcriptChunks.map { chunk in
-                let unixTimeMs = chunk.timestamp.timeIntervalSince1970 * 1000
+                let relativeMs = chunk.timestamp.timeIntervalSince(recordingStartTime) * 1000
                 return [
                     "speaker": chunk.source == .mic ? "S1" : "S2",
                     "text": chunk.text,
-                    "startTime": unixTimeMs,  // Unix timestamp in milliseconds
-                    "endTime": unixTimeMs      // Same as start (TranscriptChunk has no duration field)
+                    "startTime": relativeMs,  // Relative milliseconds from recording start
+                    "endTime": relativeMs      // Same as start (TranscriptChunk has no duration field)
                 ]
             }
             
