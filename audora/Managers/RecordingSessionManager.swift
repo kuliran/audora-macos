@@ -1,8 +1,11 @@
+// RecordingSessionManager.swift
+// Manages recording sessions with backend integration
+
 import Foundation
 import SwiftUI
 import Combine
 
-/// Manages recording sessions at the app level to persist across navigation
+/// Manages recording sessions at the app level, coordinates audio recording with Convex backend
 @MainActor
 class RecordingSessionManager: ObservableObject {
     static let shared = RecordingSessionManager()
@@ -73,34 +76,25 @@ class RecordingSessionManager: ObservableObject {
         // Load the meeting to get existing transcript chunks
         if let existingMeeting = LocalStorageManager.shared.loadMeetings().first(where: { $0.id == meetingId }) {
             activeRecordingTranscriptChunks = existingMeeting.transcriptChunks
-            // Seed the audio manager with existing chunks
             audioManager.transcriptChunks = existingMeeting.transcriptChunks
         }
         
-        // Start audio recording immediately (don't block UX)
         AudioRecordingManager.shared.startRecording(for: meetingId)
         audioManager.startRecording()
         
-        // Create backend conversation in background
+        // Create backend conversation asynchronously
         Task {
             do {
-                print("🌐 Starting conversation creation task...")
                 let convexId = try await ConvexService.shared.createConversation(
                     title: title,
                     calendarEventId: calendarEventId
                 )
-                print("🌐 Conversation creation succeeded with ID: \(convexId)")
                 await MainActor.run {
                     self.currentConversationId = convexId
-                    print("🌐 Set currentConversationId to: \(convexId)")
-                    // ⚠️ CRITICAL: Save conversation ID to meeting record immediately
                     self.saveMeetingConversationId(meetingId: meetingId, conversationId: convexId)
                 }
             } catch {
                 print("❌ Failed to create conversation: \(error)")
-                print("   - Error type: \(type(of: error))")
-                print("   - Error description: \(error.localizedDescription)")
-                // Continue anyway - will save locally
             }
         }
     }
@@ -113,12 +107,10 @@ class RecordingSessionManager: ObservableObject {
         isRecording = false
         audioManager.stopRecording()
         
-        // Capture values before resetting (to avoid race condition with Task below)
         let capturedMeetingId = activeMeetingId
         let capturedConversationId = currentConversationId
         let capturedTranscriptChunks = activeRecordingTranscriptChunks
         
-        // Save audio file and update meeting
         var audioFileURL: String? = nil
         if let activeMeetingId = capturedMeetingId {
             // Stop recording and get the audio file URL
@@ -127,45 +119,33 @@ class RecordingSessionManager: ObservableObject {
                 print("✅ Audio file saved: \(savedAudioURL.path)")
             }
             
-            // Update meeting with transcript and audio file URL
             updateActiveMeeting(meetingId: activeMeetingId, chunks: capturedTranscriptChunks, audioFileURL: audioFileURL)
             
-            // Process with backend if we have a conversation ID
+            // Process transcript with backend
             Task {
                 var conversationId = capturedConversationId
                 
-                // ⚠️ TIMING FIX: Wait for conversation ID if still being created
+                // Wait for conversation ID if still being created (up to 3 seconds)
                 if conversationId == nil {
                     print("⏳ Waiting for conversation creation...")
-                    // Wait up to 3 seconds in 0.5s increments
                     for attempt in 1...6 {
-                        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+                        try? await Task.sleep(nanoseconds: 500_000_000)
                         conversationId = await MainActor.run { self.currentConversationId }
                         if conversationId != nil {
-                            print("✅ Conversation ID became available after \(attempt * 500)ms")
+                            print("✅ Conversation ready after \(attempt * 500)ms")
                             break
-                        }
-                        if attempt < 6 {
-                            print("   Still waiting... (\(attempt * 500)ms)")
                         }
                     }
                 }
                 
-                if let conversationId = conversationId {
-                    print("🎯 Processing backend with conversation ID: \(conversationId)")
-                    // Load meeting with latest transcript
-                    if let meeting = LocalStorageManager.shared.loadMeetings().first(where: { $0.id == activeMeetingId }) {
-                        await processTranscriptWithBackend(
-                            conversationId: conversationId,
-                            meeting: meeting
-                        )
-                    }
-                } else {
-                    print("⚠️ No conversation ID available after 3s wait - skipping backend processing")
-                    print("   This usually means:")
-                    print("   1. Not authenticated with Clerk")
-                    print("   2. Backend conversation creation failed")
-                    print("   3. Check Xcode console for auth/API errors")
+                if let conversationId = conversationId,
+                   let meeting = LocalStorageManager.shared.loadMeetings().first(where: { $0.id == activeMeetingId }) {
+                    await processTranscriptWithBackend(
+                        conversationId: conversationId,
+                        meeting: meeting
+                    )
+                } else if conversationId == nil {
+                    print("⚠️ No conversation ID after 3s - skipping backend processing (check auth)")
                 }
             }
         }
@@ -227,23 +207,21 @@ class RecordingSessionManager: ObservableObject {
     // MARK: - Backend Processing
     
     /// Processes transcript with backend after recording completes
+    /// Extracts facts with GPT-4 and updates knowledge graph
     private func processTranscriptWithBackend(
         conversationId: String,
         meeting: Meeting
     ) async {
         do {
-            // Format transcript turns for backend
-            // Get recording start time (first chunk timestamp) to calculate relative timestamps
             let recordingStartTime = meeting.transcriptChunks.first?.timestamp ?? Date()
             
-            // Format turns with RELATIVE timestamps in milliseconds (from recording start)
             let transcriptTurns: [[String: Any]] = meeting.transcriptChunks.map { chunk in
                 let relativeMs = chunk.timestamp.timeIntervalSince(recordingStartTime) * 1000
                 return [
                     "speaker": chunk.source == .mic ? "S1" : "S2",
                     "text": chunk.text,
-                    "startTime": relativeMs,  // Relative milliseconds from recording start
-                    "endTime": relativeMs      // Same as start (TranscriptChunk has no duration field)
+                    "startTime": relativeMs,
+                    "endTime": relativeMs
                 ]
             }
             
@@ -252,31 +230,21 @@ class RecordingSessionManager: ObservableObject {
                 return
             }
             
-            // Get user name from settings
             let userName = UserDefaultsManager.shared.userBlurb.isEmpty 
                 ? "Me" 
                 : UserDefaultsManager.shared.userBlurb
             
             print("📤 Processing transcript with backend...")
-            let result = try await ConvexService.shared.processRealtimeTranscript(
+            let _ = try await ConvexService.shared.processRealtimeTranscript(
                 conversationId: conversationId,
                 transcriptTurns: transcriptTurns,
                 initiatorName: userName
             )
             
             print("✅ Backend processing complete")
-            print("   - Transcript saved to database")
-            print("   - Facts extracted with GPT-4")
-            print("   - Knowledge graph updated")
-            
-            // Optionally parse and display facts
-            if let s1Facts = result["S1_facts"] as? [String] {
-                print("   - Extracted \(s1Facts.count) facts")
-            }
             
         } catch {
             print("❌ Backend processing failed: \(error)")
-            print("   - Meeting still saved locally")
         }
     }
     

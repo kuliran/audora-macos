@@ -14,7 +14,8 @@ enum AuthState: Equatable {
     case unauthenticated
 }
 
-/// Service for interacting with Convex backend
+/// Service for interacting with Convex backend with Clerk authentication
+/// Manages conversations, transcript processing, and user session state
 @MainActor
 class ConvexService: ObservableObject {
     static let shared = ConvexService()
@@ -150,26 +151,23 @@ class ConvexService: ObservableObject {
     }
     
     /// Ensures the user record exists in Convex database
+    /// CRITICAL: Must be called after authentication before creating conversations
+    /// Backend's createMacConversation throws error if user doesn't exist
     private func ensureUserExists() async throws {
         guard let client = client else { return }
         
         do {
-            print("👤 Ensuring user record exists in database...")
-            
-            // Define minimal response structure - we only care about success
             struct UserResponse: Decodable {
                 let _id: String
             }
             
-            // Call upsertUser mutation to create/update user record
             let _: UserResponse = try await client.mutation(
                 "users:upsertUser",
                 with: [:]
             )
-            print("   ✅ User record ensured")
+            print("✅ User record created/updated")
         } catch {
-            print("   ⚠️ Failed to upsert user: \(error)")
-            // Don't throw - this is not critical for basic functionality
+            print("⚠️ Failed to create user record: \(error)")
         }
     }
 
@@ -209,6 +207,10 @@ class ConvexService: ObservableObject {
     // MARK: - Conversation Management
 
     /// Creates a new conversation for Mac app recording
+    /// - Parameters:
+    ///   - title: Optional conversation title (typically meeting name)
+    ///   - calendarEventId: Optional calendar event ID for linking
+    /// - Returns: The conversation ID from Convex database
     func createConversation(title: String?, calendarEventId: String?) async throws -> String {
         guard let client = client else {
             print("❌ Cannot create conversation: Client not initialized")
@@ -230,9 +232,7 @@ class ConvexService: ObservableObject {
             args["calendarEventId"] = calendarEventId as (any ConvexEncodable)?
         }
         
-        print("📝 Creating conversation in backend...")
-        print("   - Auth state: \(authState)")
-        print("   - Title: \(title ?? "nil")")
+        print("📝 Creating conversation: \(title ?? "Untitled")")
         
         do {
             // Define response structure - backend returns { id: conversationId }
@@ -248,14 +248,18 @@ class ConvexService: ObservableObject {
             print("   ✅ Conversation created: \(result.id)")
             return result.id
         } catch {
-            print("❌ Conversation creation error: \(error)")
-            print("   - Error type: \(type(of: error))")
-            print("   - Error details: \(error.localizedDescription)")
+            print("❌ Conversation creation failed: \(error)")
             throw error
         }
     }
 
     /// Processes transcript with backend after recording completes
+    /// Uses JSON string serialization to bypass Swift's ConvexEncodable type system limitations
+    /// - Parameters:
+    ///   - conversationId: The conversation ID to associate the transcript with
+    ///   - transcriptTurns: Array of transcript turns with speaker, text, and timestamps
+    ///   - initiatorName: Name of the user/initiator (defaults to "Me")
+    /// - Returns: Dictionary containing processed transcript and extracted facts
     func processRealtimeTranscript(
         conversationId: String,
         transcriptTurns: [[String: Any]],
@@ -280,7 +284,7 @@ class ConvexService: ObservableObject {
         args["initiatorName"] = initiatorName ?? "Me"
         args["scannerName"] = "System"
         
-        print("📤 Processing transcript (\(transcriptTurns.count) turns) as JSON string")
+        print("📤 Processing transcript (\(transcriptTurns.count) turns)")
         // Backend returns: { transcript: [...], S1_facts: [...], S2_facts: [...] }
         struct ProcessTranscriptResponse: Decodable {
             let transcript: [[String: String]]?
