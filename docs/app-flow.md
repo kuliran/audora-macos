@@ -89,6 +89,8 @@ graph TD
     A[MeetingAppDetector] -->|Mic + App Detected| B(User Promoted to Record)
     B -->|User Clicks Record| C[RecordingSessionManager]
     C -->|Start| D[AudioManager]
+    C -->|Create Conversation| CS[ConvexService]
+    CS -->|Authenticate| CB[Convex Backend]
 
     subgraph Audio Capture
         D -->|Install Tap| E[Mic Input]
@@ -109,7 +111,9 @@ graph TD
     subgraph Post-Processing
         C -->|Stop| M[AudioRecordingManager]
         M -->|Combine| N[Final .m4a]
+        C -->|Process Transcript| CB
+        CB -->|GPT-4 Facts| ZEP[Zep Knowledge Graph]
         K -->|Trigger| O[NotesGenerator]
-        O -->|GPT-4| P[Enhanced Notes]
+        O -->|GPT-4 via Backend| P[Enhanced Notes]
     end
 ```
