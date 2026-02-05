@@ -31,7 +31,7 @@ class ConvexService: ObservableObject {
             // Create Clerk auth provider using ConvexClerk package
             // jwtTemplate must match the template name in Clerk Dashboard (default: "convex")
             let authProvider = ClerkAuthProvider(jwtTemplate: "convex")
-            
+
             // Initialize authenticated client
             client = ConvexClientWithAuth(
                 deploymentUrl: deploymentURL,
@@ -75,13 +75,13 @@ class ConvexService: ObservableObject {
         if let key = envKey, !key.isEmpty {
             return key
         }
-        
+
         // Check Info.plist
         let plistKey = Bundle.main.object(forInfoDictionaryKey: "CLERK_PUBLISHABLE_KEY") as? String
         if let key = plistKey, !key.isEmpty, key != "$(CLERK_PUBLISHABLE_KEY)" {
             return key
         }
-        
+
         return nil
     }
 
@@ -106,10 +106,10 @@ class ConvexService: ObservableObject {
             print("   ✅ Session found: \(session.id)")
             if let user = Clerk.shared.user {
                 print("   ✅ User found: \(user.id)")
-                
+
                 // Authenticate the Convex client with Clerk session
                 await authenticateConvexClient()
-                
+
                 authState = .authenticated(userId: user.id)
                 return true
             }
@@ -124,44 +124,47 @@ class ConvexService: ObservableObject {
     func onSignInComplete() {
         if let user = Clerk.shared.user {
             authState = .authenticated(userId: user.id)
-            
+
             // Authenticate the Convex client with new session
             Task {
                 await authenticateConvexClient()
             }
         }
     }
-    
+
     /// Authenticates the Convex client using current Clerk session
     private func authenticateConvexClient() async {
         guard let client = client else { return }
-        
+
         do {
             // The ClerkAuthProvider should handle fetching the JWT automatically
             // If it requires manual login, call:
             try await client.login()
             print("✅ Convex client authenticated with Clerk")
-            
+
             // CRITICAL: Create/update user record in Convex database
             // This must be done after authentication so the backend has a user record
-            try await ensureUserExists()
+            // We run this in the background so it doesn't block the UI/loading state
+            Task {
+                try? await ensureUserExists()
+            }
         } catch {
             print("❌ Failed to authenticate Convex client: \(error)")
         }
     }
-    
+
     /// Ensures the user record exists in Convex database
     /// CRITICAL: Must be called after authentication before creating conversations
     /// Backend's createMacConversation throws error if user doesn't exist
     private func ensureUserExists() async throws {
         guard let client = client else { return }
-        
+
         do {
             struct UserResponse: Decodable {
                 let _id: String
             }
-            
-            let _: UserResponse = try await client.mutation(
+
+            let _: UserResponse? = try await client.mutation(
                 "users:upsertUser",
                 with: [:]
             )
@@ -178,7 +181,7 @@ class ConvexService: ObservableObject {
             if let client = client {
                 try await client.logout()
             }
-            
+
             // Then logout from Clerk
             try await Clerk.shared.signOut()
             authState = .unauthenticated
@@ -216,13 +219,13 @@ class ConvexService: ObservableObject {
             print("❌ Cannot create conversation: Client not initialized")
             throw ConvexError.clientNotInitialized
         }
-        
+
         // Check if user is authenticated
         guard case .authenticated = authState else {
             print("❌ Cannot create conversation: Not authenticated (authState: \(authState))")
             throw ConvexError.authenticationRequired
         }
-        
+
         // Build args dictionary with ConvexEncodable types
         var args: [String: (any ConvexEncodable)?] = [:]
         if let title = title {
@@ -231,22 +234,27 @@ class ConvexService: ObservableObject {
         if let calendarEventId = calendarEventId {
             args["calendarEventId"] = calendarEventId as (any ConvexEncodable)?
         }
-        
+
         print("📝 Creating conversation: \(title ?? "Untitled")")
-        
+
         do {
             // Define response structure - backend returns { id: conversationId }
             struct CreateConversationResponse: Decodable {
                 let id: String
             }
-            
-            let result: CreateConversationResponse = try await client.mutation(
+
+            let result: CreateConversationResponse? = try await client.mutation(
                 "conversations:createMacConversation",
                 with: args
             )
-            
-            print("   ✅ Conversation created: \(result.id)")
-            return result.id
+
+            if let id = result?.id {
+                print("   ✅ Conversation created: \(id)")
+                return id
+            } else {
+                 print("⚠️ Conversation creation returned null response")
+                 throw ConvexError.netError("Backend returned null conversation ID")
+            }
         } catch {
             print("❌ Conversation creation failed: \(error)")
             throw error
@@ -268,7 +276,7 @@ class ConvexService: ObservableObject {
         guard let client = client else {
             throw ConvexError.clientNotInitialized
         }
-        
+
         // Serialize transcript to JSON string to bypass Swift's ConvexEncodable type system limitations
         // This avoids the issue where [[String: (any ConvexEncodable)?]] cannot be cast to (any ConvexEncodable)
         guard let jsonData = try? JSONSerialization.data(withJSONObject: transcriptTurns, options: []),
@@ -276,46 +284,46 @@ class ConvexService: ObservableObject {
             print("❌ Failed to serialize transcript to JSON")
             throw ConvexError.netError("Failed to serialize transcript")
         }
-        
+
         // Build args with JSON string (backend will parse it)
         var args: [String: (any ConvexEncodable)?] = [:]
         args["conversationId"] = conversationId
         args["transcriptTurnsJson"] = jsonString  // Send as JSON string
         args["initiatorName"] = initiatorName ?? "Me"
         args["scannerName"] = "System"
-        
+
         print("📤 Processing transcript (\(transcriptTurns.count) turns)")
         // Backend returns: { transcript: [...], S1_facts: [...], S2_facts: [...] }
         struct ProcessTranscriptResponse: Decodable {
             let transcript: [[String: String]]?
             let S1_facts: [String]?
             let S2_facts: [String]?
-            
+
             enum CodingKeys: String, CodingKey {
                 case transcript
                 case S1_facts = "S1_facts"
                 case S2_facts = "S2_facts"
             }
         }
-        
+
         // Try without explicit type on args to see if Swift infers correct overload
         let response = try await client.action(
             "realtimeTranscription:processRealtimeTranscript",
             with: args
-        ) as ProcessTranscriptResponse
-        
+        ) as ProcessTranscriptResponse?
+
         // Convert to [String: Any] dictionary
         var resultDict: [String: Any] = [:]
-        if let transcript = response.transcript {
+        if let transcript = response?.transcript {
             resultDict["transcript"] = transcript
         }
-        if let s1Facts = response.S1_facts {
+        if let s1Facts = response?.S1_facts {
             resultDict["S1_facts"] = s1Facts
         }
-        if let s2Facts = response.S2_facts {
+        if let s2Facts = response?.S2_facts {
             resultDict["S2_facts"] = s2Facts
         }
-        
+
         print("   ✅ Transcript processed successfully")
         return resultDict
     }
