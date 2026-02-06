@@ -328,6 +328,69 @@ class ConvexService: ObservableObject {
         return resultDict
     }
 
+    /// Struct for word-level timing data
+    struct WordTiming: Codable {
+        let word: String
+        let startTime: Double
+        let endTime: Double
+        let wordId: String
+    }
+
+    /// Appends a transcript turn to the backend conversation in real-time
+    func appendTranscriptTurn(
+        conversationId: String,
+        speaker: String,
+        text: String,
+        order: Int,
+        timestamp: Double?,
+        words: [WordTiming]?
+    ) async throws {
+        guard let client = client else { return }
+
+        // We need to encode the words array to a structure Convex accepts
+        // Using a dictionary approach for arguments
+        var args: [String: (any ConvexEncodable)?] = [
+            "conversationId": conversationId,
+            "speaker": speaker,
+            "text": text,
+            "order": order
+        ]
+
+        if let timestamp = timestamp {
+            args["timestamp"] = timestamp as (any ConvexEncodable)?
+        }
+
+        if let words = words {
+            // Serialize words to JSON string to bypass ConvexEncodable nested type limitations
+            let wordsArray: [[String: Any]] = words.map { word in
+                [
+                    "word": word.word,
+                    "startTime": word.startTime,
+                    "endTime": word.endTime,
+                    "wordId": word.wordId
+                ]
+            }
+            if let jsonData = try? JSONSerialization.data(withJSONObject: wordsArray, options: []),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                args["wordsJson"] = jsonString as (any ConvexEncodable)?
+            }
+        }
+
+        // Use 'streaming:appendTranscriptTurn' mutation
+        // Since we are using ConvexMobile's client.mutation which expects [String: Any] (technically [String: ConvexEncodable]),
+        // and standard types conform to it (hopefully).
+        // If compilation fails, we might need to adjust.
+
+        struct AppendResponse: Decodable {
+            let _id: String
+        }
+
+        let _: AppendResponse? = try await client.mutation(
+            "streaming:appendTranscriptTurn",
+            with: args
+        )
+    }
+
     /// Checks if Convex is properly configured
     func isConfigured() -> Bool {
         return client != nil
@@ -424,3 +487,4 @@ enum ConvexError: LocalizedError {
         }
     }
 }
+

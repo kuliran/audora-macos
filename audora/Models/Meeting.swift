@@ -66,19 +66,28 @@ enum TranscriptionSource: String, Codable {
     }
 }
 
+struct WordTiming: Codable, Hashable {
+    let word: String
+    let startTime: Double
+    let endTime: Double
+    let wordId: String
+}
+
 struct TranscriptChunk: Codable, Identifiable, Hashable {
     let id: UUID
     let timestamp: Date
     let source: AudioSource
     let text: String
     let isFinal: Bool
+    let words: [WordTiming]?
 
-    init(id: UUID = UUID(), timestamp: Date = Date(), source: AudioSource, text: String, isFinal: Bool = false) {
+    init(id: UUID = UUID(), timestamp: Date = Date(), source: AudioSource, text: String, isFinal: Bool = false, words: [WordTiming]? = nil) {
         self.id = id
         self.timestamp = timestamp
         self.source = source
         self.text = text
         self.isFinal = isFinal
+        self.words = words
     }
 }
 
@@ -114,7 +123,7 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
     var dataVersion: Int
     /// Current app data version. Increment whenever you make a breaking change to `TranscriptionSession` that requires migration.
     static let currentDataVersion = 5  // Incremented for convexConversationId support
-    
+
     init(id: UUID = UUID(),
          date: Date = Date(),
          title: String = "",
