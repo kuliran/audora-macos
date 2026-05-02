@@ -4,7 +4,6 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     case general = "General"
     case calendar = "Calendar"
     case notifications = "Notifications"
-    case ai = "AI Settings"
 
     var id: String { rawValue }
 
@@ -13,14 +12,12 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: return "gear"
         case .calendar: return "calendar"
         case .notifications: return "bell"
-        case .ai: return "sparkles"
         }
     }
 }
 
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
-    @Binding var navigationPath: NavigationPath
     @State private var selectedTab: SettingsTab = .general
     @EnvironmentObject var convexService: ConvexService
     @Environment(\.dismiss) private var dismiss
@@ -87,8 +84,6 @@ struct SettingsView: View {
                         CalendarSettingsView(viewModel: viewModel)
                     case .notifications:
                         NotificationSettingsView(viewModel: viewModel)
-                    case .ai:
-                        AISettingsView(viewModel: viewModel, navigationPath: $navigationPath)
                     }
                 }
                 .padding(24)
@@ -432,137 +427,6 @@ struct NotificationSettingsView: View {
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(Color(NSColor.separatorColor), lineWidth: 1)
             )
-        }
-    }
-}
-
-struct AISettingsView: View {
-    @ObservedObject var viewModel: SettingsViewModel
-    @Binding var navigationPath: NavigationPath
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Text("AI Settings")
-                .font(.title2)
-                .fontWeight(.semibold)
-
-            // API Key
-            VStack(alignment: .leading, spacing: 16) {
-                Text("OpenAI Configuration")
-                    .font(.headline)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    SecureField("OpenAI API Key", text: $viewModel.settings.openAIKey)
-                        .textFieldStyle(.roundedBorder)
-
-                    Text("Stored locally and encrypted in Keychain.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-            )
-
-            // Templates
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Note Templates")
-                            .font(.headline)
-                        Text("Customize how your meeting notes are generated.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    Button("Manage Templates") {
-                        navigationPath.append("templates")
-                    }
-                }
-            }
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-            )
-
-            // User Info
-            VStack(alignment: .leading, spacing: 16) {
-                Text("User Context")
-                    .font(.headline)
-
-                Text("Audora works best when it knows a bit about you. Add your name, role, company, etc.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                TextEditor(text: $viewModel.settings.userBlurb)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .background(Color(NSColor.textBackgroundColor))
-                    .cornerRadius(8)
-                    .frame(minHeight: 100)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-                    )
-            }
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-            )
-
-            // System Prompt
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    Text("System Prompt")
-                        .font(.headline)
-                    Spacer()
-                    Button("Reset to Default") {
-                        viewModel.resetToDefaults()
-                    }
-                    .font(.caption)
-                }
-
-                TextEditor(text: $viewModel.settings.systemPrompt)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .background(Color(NSColor.textBackgroundColor))
-                    .cornerRadius(8)
-                    .frame(minHeight: 150)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-                    )
-            }
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-            )
-
-            // Save Button
-            Button {
-                viewModel.saveSettings()
-            } label: {
-                Text("Save AI Settings")
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(Color.accentColor)
-                    .foregroundColor(.white)
-                    .cornerRadius(8)
-            }
-            .buttonStyle(.plain)
         }
     }
 }

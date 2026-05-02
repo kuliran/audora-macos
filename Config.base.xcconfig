@@ -1,0 +1,7 @@
+// Shared Audora build configuration.
+// Keep real local values in ignored Config.xcconfig.
+
+CLERK_PUBLISHABLE_KEY =
+CONVEX_DEPLOYMENT_URL =
+
+#include? "Config.xcconfig"

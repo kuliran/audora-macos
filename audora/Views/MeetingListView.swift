@@ -169,11 +169,6 @@ struct MeetingListView: View {
                     .help(recordingSessionManager.isRecording ? "Cannot create new meeting while recording is active" : "New Meeting")
                 }
             }
-            .navigationDestination(for: String.self) { path in
-                if path == "templates" {
-                    TemplateListView()
-                }
-            }
         }
     }
 
@@ -243,8 +238,6 @@ struct MeetingRowView: View {
 
 struct CollapsedTranscriptChunkView: View {
     let chunk: CollapsedTranscriptChunk
-    let analytics: SpeechAnalytics?
-    let activeSubtab: AnalyticsSubtab?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -261,184 +254,12 @@ struct CollapsedTranscriptChunkView: View {
             }
             .frame(width: 50, alignment: .leading)
 
-            // Highlighted transcript text
-            if let analytics = analytics, activeSubtab == .wordChoice {
-                HighlightedText(text: chunk.combinedText, analytics: analytics)
-                    .font(.body)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Text(chunk.combinedText)
-                    .font(.body)
-                    .foregroundColor(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            Text(chunk.combinedText)
+                .font(.body)
+                .foregroundColor(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 2)
-    }
-}
-
-// MARK: - Highlighted Text View
-
-struct HighlightedText: View {
-    let text: String
-    let analytics: SpeechAnalytics
-
-    var body: some View {
-        buildHighlightedText()
-    }
-
-    private func buildHighlightedText() -> some View {
-        // Split text into words
-        let words = text.split(separator: " ").map { String($0) }
-
-        // Create sets for quick lookup (use the actual words from analytics)
-        let fillerWordsSet = Set(analytics.fillerWords.instances.map { $0.word.lowercased() })
-        let repeatedWordsSet = Set(analytics.repetitions.repeatedWords.map { $0.word.lowercased() })
-        let weakStartersSet = Set(analytics.sentenceStarters.weak.map { $0.word.lowercased() })
-
-        return WrappingHStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(words.enumerated()), id: \.offset) { index, word in
-                let cleanWord = word.lowercased().trimmingCharacters(in: .punctuationCharacters)
-                let highlightType = determineHighlightType(
-                    word: cleanWord,
-                    index: index,
-                    words: words,
-                    fillerWordsSet: fillerWordsSet,
-                    repeatedWordsSet: repeatedWordsSet,
-                    weakStartersSet: weakStartersSet
-                )
-
-                HStack(spacing: 0) {
-                    if index > 0 {
-                        Text(" ")
-                    }
-
-                    if let type = highlightType {
-                        Text(word)
-                            .background(type.color.opacity(0.3))
-                    } else {
-                        Text(word)
-                    }
-                }
-            }
-        }
-    }
-
-    private func determineHighlightType(
-        word: String,
-        index: Int,
-        words: [String],
-        fillerWordsSet: Set<String>,
-        repeatedWordsSet: Set<String>,
-        weakStartersSet: Set<String>
-    ) -> HighlightType? {
-        // Check for filler words (highest priority)
-        if fillerWordsSet.contains(word) {
-            return .fillerWord
-        }
-        // Check for repeated words
-        else if repeatedWordsSet.contains(word) {
-            return .repeatedWord
-        }
-        // Check for weak sentence starters
-        else if index == 0 || (index > 0 && (words[index-1].hasSuffix(".") || words[index-1].hasSuffix("!") || words[index-1].hasSuffix("?"))) {
-            if weakStartersSet.contains(word) {
-                return .weakStarter
-            }
-        }
-
-        return nil
-    }
-
-    enum HighlightType {
-        case fillerWord
-        case repeatedWord
-        case weakStarter
-
-        var color: Color {
-            switch self {
-            case .fillerWord:
-                return .blue
-            case .repeatedWord:
-                return .orange
-            case .weakStarter:
-                return .yellow
-            }
-        }
-    }
-}
-
-// MARK: - Wrapping HStack
-
-struct WrappingHStack: Layout {
-    var alignment: Alignment = .leading
-    var spacing: CGFloat = 8
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let result = arrangeViews(proposal: proposal, subviews: subviews)
-        return result.size
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let arrangement = arrangeViews(proposal: proposal, subviews: subviews)
-
-        for (index, position) in arrangement.positions.enumerated() {
-            subviews[index].place(
-                at: CGPoint(x: bounds.minX + position.x, y: bounds.minY + position.y),
-                proposal: ProposedViewSize(arrangement.sizes[index])
-            )
-        }
-    }
-
-    private func arrangeViews(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, positions: [CGPoint], sizes: [CGSize]) {
-        var positions: [CGPoint] = []
-        var sizes: [CGSize] = []
-        var currentX: CGFloat = 0
-        var currentY: CGFloat = 0
-        var lineHeight: CGFloat = 0
-        var totalWidth: CGFloat = 0
-
-        let maxWidth = proposal.width ?? .infinity
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-
-            // Check if we need to wrap to next line
-            if currentX + size.width > maxWidth && currentX > 0 {
-                currentX = 0
-                currentY += lineHeight + spacing
-                lineHeight = 0
-            }
-
-            positions.append(CGPoint(x: currentX, y: currentY))
-            sizes.append(size)
-
-            currentX += size.width
-            lineHeight = max(lineHeight, size.height)
-            totalWidth = max(totalWidth, currentX)
-        }
-
-        let totalHeight = currentY + lineHeight
-        return (CGSize(width: totalWidth, height: totalHeight), positions, sizes)
-    }
-}
-
-// MARK: - Legend Item
-
-struct LegendItem: View {
-    let color: Color
-    let label: String
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Rectangle()
-                .fill(color.opacity(0.3))
-                .frame(width: 12, height: 12)
-                .cornerRadius(2)
-
-            Text(label)
-                .foregroundColor(.secondary)
-        }
     }
 }
 
@@ -460,15 +281,7 @@ struct MeetingDetailContentView: View {
     }
 
     var body: some View {
-        HSplitView {
-            // Middle Column: Audio Player + Transcript
-            middleColumn
-                .frame(minWidth: 400, idealWidth: 500)
-
-            // Right Column: Analytics Panel
-            rightColumn
-                .frame(minWidth: 350, idealWidth: 400)
-        }
+        middleColumn
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
         .alert("Error", isPresented: .constant(viewModel.errorMessage != nil)) {
@@ -499,6 +312,7 @@ struct MeetingDetailContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             // Header with title and controls
             headerSection
+            backendConversationSection
 
             // Audio Player (fixed at top)
             if let audioFileURLString = viewModel.meeting.audioFileURL {
@@ -560,44 +374,8 @@ struct MeetingDetailContentView: View {
                 .frame(width: 20, height: 20)
             }
 
-            // Controls: Generate and Recording Buttons
+            // Recording controls
             HStack(spacing: 8) {
-                // Generate Button (Dropdown)
-                Menu {
-                    ForEach(viewModel.templates) { template in
-                        Button(template.title) {
-                            viewModel.selectedTemplateId = template.id
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        if viewModel.isGeneratingNotes {
-                            ProgressView()
-                                .scaleEffect(0.4)
-                                .frame(width: 12, height: 12)
-                        } else {
-                            Image(systemName: "sparkles")
-                                .font(.caption)
-                        }
-                        Text("Generate")
-                    }
-                    .frame(minWidth: 110, minHeight: 36)
-                    .background(Color.green.opacity(0.1))
-                    .cornerRadius(8)
-                    .overlay(
-                        Group {
-                            if viewModel.shouldAnimateGenerateButton {
-                                ShimmerOverlay(color: .green)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                            }
-                        }
-                    )
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.meeting.transcript.isEmpty || viewModel.isGeneratingNotes || viewModel.isRecording || viewModel.isStartingRecording)
-                .help("Generate enhanced notes using a template")
-
-                // Recording Button
                 Button(action: {
                     viewModel.toggleRecording()
                 }) {
@@ -627,6 +405,66 @@ struct MeetingDetailContentView: View {
         }
     }
 
+    private var backendConversationSection: some View {
+        Group {
+            if let conversationId = viewModel.meeting.convexConversationId {
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Web conversation")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+
+                        Text(conversationId)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        viewModel.copyConversationId()
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .help("Copy conversation ID")
+
+                    Button {
+                        viewModel.openConversationInWeb()
+                    } label: {
+                        Label("Open", systemImage: "arrow.up.right")
+                    }
+                    .disabled(viewModel.conversationURL == nil)
+                    .help("Open conversation in Audora web")
+                }
+                .padding(12)
+                .background(Color.green.opacity(0.08))
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.green.opacity(0.18), lineWidth: 1)
+                )
+            } else if viewModel.isRecording {
+                HStack(spacing: 12) {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 16, height: 16)
+                    Text("Web conversation will be created when recording stops")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(12)
+                .background(Color.accentColor.opacity(0.08))
+                .cornerRadius(8)
+            }
+        }
+    }
+
     private var transcriptSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Transcript Header
@@ -640,17 +478,6 @@ struct MeetingDetailContentView: View {
 
             // Transcript Content
             VStack(alignment: .leading, spacing: 8) {
-                // Color legend (only show when Word Choice subtab is active)
-                if activeAnalyticsSubtab == .wordChoice, viewModel.meeting.analytics != nil {
-                    HStack(spacing: 12) {
-                        LegendItem(color: .blue, label: "Filler Words")
-                        LegendItem(color: .orange, label: "Repeated Words")
-                        LegendItem(color: .yellow, label: "Weak Starters")
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 4)
-                }
-
                 ScrollView {
                     if viewModel.meeting.collapsedTranscriptChunks.isEmpty {
                         Text("Transcript will appear here...")
@@ -660,11 +487,7 @@ struct MeetingDetailContentView: View {
                     } else {
                         LazyVStack(alignment: .leading, spacing: 4) {
                             ForEach(viewModel.meeting.collapsedTranscriptChunks) { chunk in
-                                CollapsedTranscriptChunkView(
-                                    chunk: chunk,
-                                    analytics: viewModel.meeting.analytics,
-                                    activeSubtab: activeAnalyticsSubtab
-                                )
+                                CollapsedTranscriptChunkView(chunk: chunk)
                             }
                         }
                         .padding()
@@ -674,26 +497,6 @@ struct MeetingDetailContentView: View {
             }
             .background(Color.gray.opacity(0.05))
             .cornerRadius(8)
-        }
-    }
-
-    // MARK: - Right Column
-
-    @State private var activeAnalyticsSubtab: AnalyticsSubtab? = nil
-
-    private var rightColumn: some View {
-        AnalyticsPanelView(
-            analytics: viewModel.meeting.analytics,
-            onSubtabChange: { subtab in
-                activeAnalyticsSubtab = subtab
-            }
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear {
-            // Initialize with Word Choice subtab when analytics are available
-            if viewModel.meeting.analytics != nil {
-                activeAnalyticsSubtab = .wordChoice
-            }
         }
     }
 }

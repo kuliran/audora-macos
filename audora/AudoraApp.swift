@@ -103,7 +103,7 @@ struct AudoraApp: App {
 
                     if let session = Clerk.shared.session {
                         print("🔗 [OAuth] ✅ Session established: \(session.id)")
-                        ConvexService.shared.onSignInComplete()
+                        await ConvexService.shared.onSignInComplete()
                     } else {
                         print("🔗 [OAuth] ⚠️ No session after URL callback")
                         print("   - Clerk.shared.user: \(Clerk.shared.user != nil ? "exists" : "nil")")

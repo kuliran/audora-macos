@@ -1,10 +1,19 @@
 // ConvexService.swift
-// Handles interactions with Convex backend with Clerk authentication
+// Handles interactions with Convex backend
 
 import Foundation
 import ConvexMobile
+import ConvexClerk
 import Clerk
 import Combine
+
+private struct RawConvexJSON: ConvexEncodable {
+    let json: String
+
+    func convexEncode() throws -> String {
+        json
+    }
+}
 
 /// Authentication state for the app
 enum AuthState: Equatable {
@@ -14,20 +23,31 @@ enum AuthState: Equatable {
 }
 
 /// Service for interacting with Convex backend with Clerk authentication
+/// Manages conversations, transcription, and user session state
 @MainActor
 class ConvexService: ObservableObject {
     static let shared = ConvexService()
 
-    private var client: ConvexClient?
+    private var client: ConvexClientWithAuth<ClerkCredentials>?
+    private var hasAuthenticatedConvexClient = false
+    private var hasEnsuredUserRecord = false
 
     @Published var authState: AuthState = .loading
     @Published var errorMessage: String?
 
     private init() {
-        // Initialize Convex client with deployment URL
+        // Initialize Convex client with Clerk authentication
         if let deploymentURL = getConvexDeploymentURL() {
-            client = ConvexClient(deploymentUrl: deploymentURL)
-            print("✅ Convex client initialized with URL: \(deploymentURL)")
+            // Create Clerk auth provider using ConvexClerk package
+            // jwtTemplate must match the template name in Clerk Dashboard (default: "convex")
+            let authProvider = ClerkAuthProvider(jwtTemplate: "convex")
+
+            // Initialize authenticated client
+            client = ConvexClientWithAuth(
+                deploymentUrl: deploymentURL,
+                authProvider: authProvider
+            )
+            print("✅ Convex client initialized with Clerk authentication")
         } else {
             print("⚠️ Convex deployment URL not configured")
         }
@@ -58,6 +78,23 @@ class ConvexService: ObservableObject {
         return nil
     }
 
+    /// Gets the Clerk publishable key from environment or configuration
+    private func getClerkPublishableKey() -> String? {
+        // Check environment variable
+        let envKey = ProcessInfo.processInfo.environment["CLERK_PUBLISHABLE_KEY"]
+        if let key = envKey, !key.isEmpty {
+            return key
+        }
+
+        // Check Info.plist
+        let plistKey = Bundle.main.object(forInfoDictionaryKey: "CLERK_PUBLISHABLE_KEY") as? String
+        if let key = plistKey, !key.isEmpty, key != "$(CLERK_PUBLISHABLE_KEY)" {
+            return key
+        }
+
+        return nil
+    }
+
     // MARK: - Authentication
 
     /// Attempts to restore session from Clerk on app launch
@@ -79,6 +116,14 @@ class ConvexService: ObservableObject {
             print("   ✅ Session found: \(session.id)")
             if let user = Clerk.shared.user {
                 print("   ✅ User found: \(user.id)")
+
+                do {
+                    try await prepareAuthenticatedBackend()
+                } catch {
+                    print("❌ Failed to prepare Convex backend: \(error)")
+                    errorMessage = error.localizedDescription
+                }
+
                 authState = .authenticated(userId: user.id)
                 return true
             }
@@ -90,15 +135,79 @@ class ConvexService: ObservableObject {
     }
 
     /// Called after Clerk sign-in completes
-    func onSignInComplete() {
+    func onSignInComplete() async {
         if let user = Clerk.shared.user {
+            do {
+                try await prepareAuthenticatedBackend()
+            } catch {
+                print("❌ Failed to prepare Convex backend after sign-in: \(error)")
+                errorMessage = error.localizedDescription
+            }
+
             authState = .authenticated(userId: user.id)
         }
+    }
+
+    /// Ensures authenticated backend calls can rely on Convex auth and a user row.
+    private func prepareAuthenticatedBackend() async throws {
+        guard let client = client else {
+            throw ConvexError.clientNotInitialized
+        }
+
+        if !hasAuthenticatedConvexClient {
+            switch await client.login() {
+            case .success(_):
+                hasAuthenticatedConvexClient = true
+                print("✅ Convex client authenticated with Clerk")
+            case .failure(let error):
+                throw error
+            }
+        }
+
+        if !hasEnsuredUserRecord {
+            try await ensureUserExists()
+            hasEnsuredUserRecord = true
+        }
+    }
+
+    private func ensureAuthenticatedBackendReady() async throws {
+        guard case .authenticated = authState else {
+            print("❌ Backend call requires authentication (authState: \(authState))")
+            throw ConvexError.authenticationRequired
+        }
+
+        try await prepareAuthenticatedBackend()
+    }
+
+    /// Ensures the user record exists in Convex database
+    /// CRITICAL: Must be called after authentication before creating conversations
+    private func ensureUserExists() async throws {
+        guard let client = client else {
+            throw ConvexError.clientNotInitialized
+        }
+
+        struct UserResponse: Decodable {
+            let _id: String
+        }
+
+        let _: UserResponse? = try await client.mutation(
+            "users:upsertUser",
+            with: [:]
+        )
+        print("✅ User record created/updated")
     }
 
     /// Signs out the current user
     func logout() async {
         do {
+            // Logout from Convex client first
+            if let client = client {
+                await client.logout()
+            }
+            hasAuthenticatedConvexClient = false
+            hasEnsuredUserRecord = false
+
+            // Then logout from Clerk
             try await Clerk.shared.signOut()
             authState = .unauthenticated
         } catch {
@@ -112,6 +221,8 @@ class ConvexService: ObservableObject {
 
     /// Fetches a JWT for Speechmatics real-time transcription from the backend
     func getSpeechmaticsJWT() async throws -> String {
+        try await ensureAuthenticatedBackendReady()
+
         guard let client = client else {
             throw ConvexError.clientNotInitialized
         }
@@ -121,6 +232,89 @@ class ConvexService: ObservableObject {
 
         print("   ✅ JWT fetched successfully")
         return jwt
+    }
+
+    // MARK: - Conversation Management
+
+    /// Creates a new conversation for Mac app recording
+    /// - Parameters:
+    ///   - title: Optional conversation title (typically meeting name)
+    ///   - calendarEventId: Optional calendar event ID for linking
+    /// - Returns: The conversation ID from Convex database
+    func createConversation(title: String?, calendarEventId: String?) async throws -> String {
+        try await ensureAuthenticatedBackendReady()
+
+        guard let client = client else {
+            print("❌ Cannot create conversation: Client not initialized")
+            throw ConvexError.clientNotInitialized
+        }
+
+        var args: [String: (any ConvexEncodable)?] = [:]
+        if let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            args["location"] = title
+        }
+        args["participantMode"] = "anonymous"
+        args["reusePending"] = false
+
+        print("📝 Creating conversation: \(title ?? "Untitled")")
+
+        do {
+            struct CreateConversationResponse: Decodable {
+                let id: String
+                let inviteCode: String
+            }
+
+            let result: CreateConversationResponse? = try await client.mutation(
+                "conversations:create",
+                with: args
+            )
+
+            if let id = result?.id {
+                print("   ✅ Conversation created: \(id)")
+                return id
+            } else {
+                 print("⚠️ Conversation creation returned null response")
+                 throw ConvexError.netError("Backend returned null conversation ID")
+            }
+        } catch {
+            print("❌ Conversation creation failed: \(error)")
+            throw error
+        }
+    }
+
+    /// Saves a finished Mac transcript to an existing backend conversation without running analysis.
+    func saveTranscriptData(
+        conversationId: String,
+        transcriptTurns: [[String: Any]],
+        summary: String
+    ) async throws {
+        try await ensureAuthenticatedBackendReady()
+
+        guard let client = client else {
+            throw ConvexError.clientNotInitialized
+        }
+
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: transcriptTurns, options: []),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            print("❌ Failed to serialize transcript to JSON")
+            throw ConvexError.netError("Failed to serialize transcript")
+        }
+
+        let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        var args: [String: (any ConvexEncodable)?] = [:]
+        args["conversationId"] = conversationId
+        args["transcript"] = RawConvexJSON(json: jsonString)
+        args["S1_facts"] = RawConvexJSON(json: "[]")
+        args["S2_facts"] = RawConvexJSON(json: "[]")
+        args["summary"] = trimmedSummary.isEmpty ? "Mac recording" : trimmedSummary
+
+        print("📤 Saving transcript (\(transcriptTurns.count) turns)")
+        let _: String? = try await client.mutation(
+            "conversations:saveTranscriptData",
+            with: args
+        )
+
+        print("   ✅ Transcript saved successfully")
     }
 
     /// Checks if Convex is properly configured
