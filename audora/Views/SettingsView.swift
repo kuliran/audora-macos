@@ -22,9 +22,8 @@ struct SettingsView: View {
     @EnvironmentObject var convexService: ConvexService
     @Environment(\.dismiss) private var dismiss
 
-    init(viewModel: SettingsViewModel, navigationPath: Binding<NavigationPath> = .constant(NavigationPath())) {
+    init(viewModel: SettingsViewModel) {
         self.viewModel = viewModel
-        self._navigationPath = navigationPath
     }
 
     var body: some View {

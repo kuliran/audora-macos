@@ -127,7 +127,8 @@ class RecordingSessionManager: ObservableObject {
                     existingConversationId: capturedConversationId,
                     title: capturedTitle,
                     calendarEventId: capturedCalendarEventId,
-                    chunks: capturedTranscriptChunks
+                    chunks: capturedTranscriptChunks,
+                    audioFileURL: audioFileURL
                 )
             }
         }
@@ -214,7 +215,8 @@ class RecordingSessionManager: ObservableObject {
         existingConversationId: String?,
         title: String?,
         calendarEventId: String?,
-        chunks: [TranscriptChunk]
+        chunks: [TranscriptChunk],
+        audioFileURL: String?
     ) async {
         do {
             let transcriptTurns = backendTranscriptTurns(from: chunks)
@@ -235,6 +237,19 @@ class RecordingSessionManager: ObservableObject {
                 await MainActor.run {
                     self.saveMeetingConversationId(meetingId: meetingId, conversationId: conversationId)
                 }
+            }
+
+            if let audioFileURL {
+                do {
+                    try await ConvexService.shared.uploadAudioFile(
+                        audioFileURL: URL(fileURLWithPath: audioFileURL),
+                        conversationId: conversationId
+                    )
+                } catch {
+                    print("❌ Backend audio upload failed: \(error)")
+                }
+            } else {
+                print("⚠️ No audio file available to upload")
             }
 
             print("📤 Saving transcript to backend conversation...")

@@ -350,33 +350,53 @@ class ConvexService: ObservableObject {
     }
     // MARK: - Audio Upload
 
-    /// Uploads an audio file to Convex storage
-    func uploadAudioFile(audioFileURL: URL, meetingId: UUID) async throws -> String? {
-        guard let client = client else { return nil }
+    /// Uploads an audio file to Convex storage and links it to an existing conversation.
+    func uploadAudioFile(audioFileURL: URL, conversationId: String) async throws -> String {
+        try await ensureAuthenticatedBackendReady()
 
-        // 1. Get upload URL
-        // Standard Convex action for getting upload URL
-        let uploadUrl: String = try await client.action("storage:generateUploadUrl", with: [:])
-        guard let url = URL(string: uploadUrl) else { return nil }
-
-        // 2. Upload file
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("audio/m4a", forHTTPHeaderField: "Content-Type")
-
-        let data = try Data(contentsOf: audioFileURL)
-        let (responseData, response) = try await URLSession.shared.upload(for: request, from: data)
-
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            return nil
+        guard let client = client else {
+            throw ConvexError.clientNotInitialized
         }
 
-        // 3. Parse response to get storageId
+        guard FileManager.default.fileExists(atPath: audioFileURL.path) else {
+            throw ConvexError.fileReadFailed
+        }
+
+        print("📤 Uploading audio file to backend conversation...")
+
+        let uploadUrl: String = try await client.mutation("conversations:generateUploadUrl", with: [:])
+        guard let url = URL(string: uploadUrl) else {
+            throw ConvexError.uploadFailed("Backend returned an invalid upload URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("audio/mp4", forHTTPHeaderField: "Content-Type")
+
+        let (responseData, response) = try await URLSession.shared.upload(for: request, fromFile: audioFileURL)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ConvexError.uploadFailed("Upload did not return an HTTP response")
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let message = String(data: responseData, encoding: .utf8) ?? "HTTP \(httpResponse.statusCode)"
+            throw ConvexError.uploadFailed(message)
+        }
+
         struct UploadResponse: Decodable {
             let storageId: String
         }
 
         let uploadResponse = try JSONDecoder().decode(UploadResponse.self, from: responseData)
+
+        var args: [String: (any ConvexEncodable)?] = [:]
+        args["conversationId"] = conversationId
+        args["storageId"] = uploadResponse.storageId
+
+        try await client.mutation("conversations:saveAudioStorageId", with: args)
+
+        print("   ✅ Audio uploaded and linked: \(uploadResponse.storageId)")
         return uploadResponse.storageId
     }
 }
