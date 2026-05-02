@@ -23,6 +23,7 @@ class AudioManager: NSObject, ObservableObject {
     private var micSocketTask: URLSessionWebSocketTask?
     private var systemSocketTask: URLSessionWebSocketTask?
     private let speechmaticsURL = URL(string: "wss://eu2.rt.speechmatics.com/v2/en")!
+    private let speechmaticsMaxDelay = 0.7
 
 
     // Unique identifier for the current recording session
@@ -46,6 +47,7 @@ class AudioManager: NSObject, ObservableObject {
 
     // Add ping timers to keep WebSocket connections alive
     private var pingTimers: [AudioSource: Timer] = [:]
+    private var speechmaticsConnectionIDs: [AudioSource: UUID] = [:]
     private var cancellables = Set<AnyCancellable>()
 
     // Session refresh timers to prevent 30-minute expiry
@@ -210,19 +212,7 @@ class AudioManager: NSObject, ObservableObject {
         // Stop microphone capture
         cleanupAudioEngine()
 
-        // Close WebSocket
-        micSocketTask?.cancel(with: .normalClosure, reason: nil)
-        micSocketTask = nil
-        systemSocketTask?.cancel(with: .normalClosure, reason: nil)
-        systemSocketTask = nil
-
-        // Invalidate ping timers
-        pingTimers.values.forEach { $0.invalidate() }
-        pingTimers.removeAll()
-
-        // Invalidate session refresh timers
-        sessionRefreshTimers.values.forEach { $0.invalidate() }
-        sessionRefreshTimers.removeAll()
+        AudioSource.allCases.forEach { closeSpeechmaticsConnection(source: $0) }
 
         // Reset state
         // (isRecording already cleared in stopRecording)
@@ -567,19 +557,7 @@ class AudioManager: NSObject, ObservableObject {
         cleanupAudioEngine()
         micRetryCount = 0
 
-        // Close WebSocket
-        micSocketTask?.cancel(with: .normalClosure, reason: nil)
-        micSocketTask = nil
-        systemSocketTask?.cancel(with: .normalClosure, reason: nil)
-        systemSocketTask = nil
-
-        // Invalidate ping timers
-        pingTimers.values.forEach { $0.invalidate() }
-        pingTimers.removeAll()
-
-        // Invalidate session refresh timers
-        sessionRefreshTimers.values.forEach { $0.invalidate() }
-        sessionRefreshTimers.removeAll()
+        AudioSource.allCases.forEach { closeSpeechmaticsConnection(source: $0) }
 
 
 
@@ -646,7 +624,12 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     private func establishConnection(request: URLRequest, session: URLSession, source: AudioSource) async {
+        closeSpeechmaticsConnection(source: source)
+
+        let connectionID = UUID()
         let task = session.webSocketTask(with: request)
+        setSpeechmaticsSocket(task, source: source)
+        speechmaticsConnectionIDs[source] = connectionID
 
         // Add connection monitoring
         task.resume()
@@ -672,14 +655,17 @@ class AudioManager: NSObject, ObservableObject {
         let sessionRefreshTimer = Timer.scheduledTimer(withTimeInterval: 28 * 60.0, repeats: false) { [weak self] _ in
             guard let self = self, self.isRecording else { return }
             print("📝 Proactively refreshing session for \(source) to prevent expiry...")
-                self.connectToSpeechmatics(source: source)
+            self.connectToSpeechmatics(source: source)
         }
         sessionRefreshTimers[source] = sessionRefreshTimer
 
         let thisSession = sessionID
         // Monitor connection state (ignore if session changed or recording stopped)
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self, weak task] in
-            guard let self = self, self.sessionID == thisSession, self.isRecording else { return }
+            guard let self = self,
+                  self.sessionID == thisSession,
+                  self.speechmaticsConnectionIDs[source] == connectionID,
+                  self.isRecording else { return }
             guard let task = task, task.state != .running else { return }
             let errorMsg = ErrorMessage.connectionTimeout
             print("❌ \(errorMsg)")
@@ -699,7 +685,7 @@ class AudioManager: NSObject, ObservableObject {
             "transcription_config": [
                 "language": "en",
                 "enable_partials": true,
-                "max_delay": 0.1
+                "max_delay": speechmaticsMaxDelay
             ]
         ]
 
@@ -708,7 +694,9 @@ class AudioManager: NSObject, ObservableObject {
             if let jsonStr = String(data: jsonData, encoding: .utf8) {
                 task.send(.string(jsonStr)) { [weak self] error in
                     if let error = error {
-                        guard let self = self, self.sessionID == thisSession else { return }
+                        guard let self = self,
+                              self.sessionID == thisSession,
+                              self.speechmaticsConnectionIDs[source] == connectionID else { return }
 
                         // Ignore cancellation errors, which are expected when stopping a session.
                         if (error as? URLError)?.code == .cancelled {
@@ -731,40 +719,39 @@ class AudioManager: NSObject, ObservableObject {
             }
         }
 
-        switch source {
-        case .mic:
-            micSocketTask = task
-        case .system:
-            systemSocketTask = task
-        }
-
-        receiveMessage(for: source, sessionID: thisSession)
+        receiveMessage(for: source, sessionID: thisSession, connectionID: connectionID)
         print("🌐 Connected to Speechmatics (\(source))")
     }
 
-    private func receiveMessage(for source: AudioSource, sessionID: UUID) {
+    private func receiveMessage(for source: AudioSource, sessionID: UUID, connectionID: UUID) {
+        guard speechmaticsConnectionIDs[source] == connectionID else { return }
+
         let task: URLSessionWebSocketTask? = (source == .mic) ? micSocketTask : systemSocketTask
         task?.receive { [weak self] result in
             switch result {
             case .success(let message):
                 switch message {
                 case .string(let text):
-                    self?.parseRealtimeEvent(text, source: source)
+                    self?.parseRealtimeEvent(text, source: source, connectionID: connectionID)
                 case .data:
                     break
                 @unknown default:
                     break
                 }
                 // Continue loop for this session
-                if let self = self, self.sessionID == sessionID {
-                    self.receiveMessage(for: source, sessionID: sessionID)
+                if let self = self,
+                   self.sessionID == sessionID,
+                   self.speechmaticsConnectionIDs[source] == connectionID {
+                    self.receiveMessage(for: source, sessionID: sessionID, connectionID: connectionID)
                 }
             case .failure(let error):
-                guard let self = self, self.sessionID == sessionID else { return } // Stale callback
+                guard let self = self,
+                      self.sessionID == sessionID,
+                      self.speechmaticsConnectionIDs[source] == connectionID else { return } // Stale callback
                 // Ignore errors caused by intentional socket closure after recording stops
                 if self.isRecording == false { return }
 
-                let errorMsg = self.handleWebSocketError(error, source: source)
+                let errorMsg = self.handleWebSocketError(error, source: source, connectionID: connectionID)
                 print("❌ Receive error (\(source)): \(error)")
 
                 // Check if this is a session expiry - if so, don't show as persistent error
@@ -789,7 +776,10 @@ class AudioManager: NSObject, ObservableObject {
                     // Only attempt reconnect for network errors, not API errors
                     if ErrorHandler.shared.shouldRetry(error) {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                            guard let self = self, self.isRecording, self.sessionID == sessionID else { return }
+                            guard let self = self,
+                                  self.isRecording,
+                                  self.sessionID == sessionID,
+                                  self.speechmaticsConnectionIDs[source] == connectionID else { return }
                             self.connectToSpeechmatics(source: source)
                         }
                     }
@@ -798,7 +788,7 @@ class AudioManager: NSObject, ObservableObject {
         }
     }
 
-    private func handleWebSocketError(_ error: Error, source: AudioSource) -> String {
+    private func handleWebSocketError(_ error: Error, source: AudioSource, connectionID: UUID) -> String {
         // Check for session expiry in error description first
         let errorDescription = error.localizedDescription.lowercased()
         if errorDescription.contains("session hit the maximum duration") ||
@@ -806,7 +796,9 @@ class AudioManager: NSObject, ObservableObject {
             // Handle session expiry by automatically restarting the connection
             print("📝 Session expired for \(source) (WebSocket error), attempting to restart connection...")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self = self, self.isRecording else { return }
+                guard let self = self,
+                      self.isRecording,
+                      self.speechmaticsConnectionIDs[source] == connectionID else { return }
                 self.connectToSpeechmatics(source: source)
             }
             // Return session expired message but don't stop recording
@@ -822,11 +814,36 @@ class AudioManager: NSObject, ObservableObject {
         return ErrorHandler.shared.handleError(error)
     }
 
+    private func closeSpeechmaticsConnection(source: AudioSource, connectionID: UUID? = nil) {
+        if let connectionID, speechmaticsConnectionIDs[source] != connectionID {
+            return
+        }
+
+        pingTimers[source]?.invalidate()
+        pingTimers[source] = nil
+        sessionRefreshTimers[source]?.invalidate()
+        sessionRefreshTimers[source] = nil
+
+        let task = source == .mic ? micSocketTask : systemSocketTask
+        task?.cancel(with: .normalClosure, reason: nil)
+        setSpeechmaticsSocket(nil, source: source)
+        speechmaticsConnectionIDs[source] = nil
+    }
+
+    private func setSpeechmaticsSocket(_ task: URLSessionWebSocketTask?, source: AudioSource) {
+        switch source {
+        case .mic:
+            micSocketTask = task
+        case .system:
+            systemSocketTask = task
+        }
+    }
 
 
 
 
-    private func parseRealtimeEvent(_ text: String, source: AudioSource) {
+
+    private func parseRealtimeEvent(_ text: String, source: AudioSource, connectionID: UUID) {
         // Parse JSON message
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
@@ -928,6 +945,7 @@ class AudioManager: NSObject, ObservableObject {
              if let type = json["type"] as? String, let reason = json["reason"] as? String {
                  print("❌ Speechmatics Error: \(type) - \(reason)")
                  let errorMessage = "Transcription Error: \(reason)"
+                 closeSpeechmaticsConnection(source: source, connectionID: connectionID)
                  DispatchQueue.main.async {
                      self.errorMessage = errorMessage
                  }

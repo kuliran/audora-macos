@@ -192,7 +192,7 @@ struct SignInView: View {
                 }
                 
                 logClerkState()
-                ConvexService.shared.onSignInComplete()
+                await ConvexService.shared.onSignInComplete()
             } catch {
                 let fullError = formatDetailedError(error)
                 print("📧 [Email Sign-In] ❌ Error: \(fullError)")
@@ -221,7 +221,7 @@ struct SignInView: View {
                 let signIn = try await SignIn.create(strategy: .oauth(provider: .apple))
                 print("🍎 [Apple Sign-In] ✅ Success! SignIn ID: \(signIn.id)")
                 logClerkState()
-                ConvexService.shared.onSignInComplete()
+                await ConvexService.shared.onSignInComplete()
             } catch {
                 let fullError = formatDetailedError(error)
                 print("🍎 [Apple Sign-In] ❌ Clerk OAuth error: \(fullError)")
@@ -266,7 +266,7 @@ struct SignInView: View {
                 
                 if Clerk.shared.session != nil {
                     print("🔵 [Google Sign-In] Session established!")
-                    ConvexService.shared.onSignInComplete()
+                    await ConvexService.shared.onSignInComplete()
                 } else {
                     print("🔵 [Google Sign-In] ⚠️ No session after authentication")
                     errorMessage = "Authentication completed but no session was created"

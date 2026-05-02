@@ -7,6 +7,14 @@ import ConvexClerk
 import Clerk
 import Combine
 
+private struct RawConvexJSON: ConvexEncodable {
+    let json: String
+
+    func convexEncode() throws -> String {
+        json
+    }
+}
+
 /// Authentication state for the app
 enum AuthState: Equatable {
     case loading
@@ -15,12 +23,14 @@ enum AuthState: Equatable {
 }
 
 /// Service for interacting with Convex backend with Clerk authentication
-/// Manages conversations, transcript processing, and user session state
+/// Manages conversations, transcription, and user session state
 @MainActor
 class ConvexService: ObservableObject {
     static let shared = ConvexService()
 
     private var client: ConvexClientWithAuth<ClerkCredentials>?
+    private var hasAuthenticatedConvexClient = false
+    private var hasEnsuredUserRecord = false
 
     @Published var authState: AuthState = .loading
     @Published var errorMessage: String?
@@ -107,8 +117,12 @@ class ConvexService: ObservableObject {
             if let user = Clerk.shared.user {
                 print("   ✅ User found: \(user.id)")
 
-                // Authenticate the Convex client with Clerk session
-                await authenticateConvexClient()
+                do {
+                    try await prepareAuthenticatedBackend()
+                } catch {
+                    print("❌ Failed to prepare Convex backend: \(error)")
+                    errorMessage = error.localizedDescription
+                }
 
                 authState = .authenticated(userId: user.id)
                 return true
@@ -121,57 +135,66 @@ class ConvexService: ObservableObject {
     }
 
     /// Called after Clerk sign-in completes
-    func onSignInComplete() {
+    func onSignInComplete() async {
         if let user = Clerk.shared.user {
-            authState = .authenticated(userId: user.id)
-
-            // Authenticate the Convex client with new session
-            Task {
-                await authenticateConvexClient()
+            do {
+                try await prepareAuthenticatedBackend()
+            } catch {
+                print("❌ Failed to prepare Convex backend after sign-in: \(error)")
+                errorMessage = error.localizedDescription
             }
+
+            authState = .authenticated(userId: user.id)
         }
     }
 
-    /// Authenticates the Convex client using current Clerk session
-    private func authenticateConvexClient() async {
-        guard let client = client else { return }
-
-        do {
-            // The ClerkAuthProvider should handle fetching the JWT automatically
-            // If it requires manual login, call:
-            try await client.login()
-            print("✅ Convex client authenticated with Clerk")
-
-            // CRITICAL: Create/update user record in Convex database
-            // This must be done after authentication so the backend has a user record
-            // We run this in the background so it doesn't block the UI/loading state
-            Task {
-                try? await ensureUserExists()
-            }
-        } catch {
-            print("❌ Failed to authenticate Convex client: \(error)")
+    /// Ensures authenticated backend calls can rely on Convex auth and a user row.
+    private func prepareAuthenticatedBackend() async throws {
+        guard let client = client else {
+            throw ConvexError.clientNotInitialized
         }
+
+        if !hasAuthenticatedConvexClient {
+            switch await client.login() {
+            case .success(_):
+                hasAuthenticatedConvexClient = true
+                print("✅ Convex client authenticated with Clerk")
+            case .failure(let error):
+                throw error
+            }
+        }
+
+        if !hasEnsuredUserRecord {
+            try await ensureUserExists()
+            hasEnsuredUserRecord = true
+        }
+    }
+
+    private func ensureAuthenticatedBackendReady() async throws {
+        guard case .authenticated = authState else {
+            print("❌ Backend call requires authentication (authState: \(authState))")
+            throw ConvexError.authenticationRequired
+        }
+
+        try await prepareAuthenticatedBackend()
     }
 
     /// Ensures the user record exists in Convex database
     /// CRITICAL: Must be called after authentication before creating conversations
-    /// Backend's createMacConversation throws error if user doesn't exist
     private func ensureUserExists() async throws {
-        guard let client = client else { return }
-
-        do {
-            struct UserResponse: Decodable {
-                let _id: String
-            }
-
-            let _: UserResponse? = try await client.mutation(
-                "users:upsertUser",
-                with: [:]
-            )
-            print("✅ User record created/updated")
-        } catch {
-            print("⚠️ Failed to create user record: \(error)")
+        guard let client = client else {
+            throw ConvexError.clientNotInitialized
         }
+
+        struct UserResponse: Decodable {
+            let _id: String
+        }
+
+        let _: UserResponse? = try await client.mutation(
+            "users:upsertUser",
+            with: [:]
+        )
+        print("✅ User record created/updated")
     }
 
     /// Signs out the current user
@@ -179,8 +202,10 @@ class ConvexService: ObservableObject {
         do {
             // Logout from Convex client first
             if let client = client {
-                try await client.logout()
+                await client.logout()
             }
+            hasAuthenticatedConvexClient = false
+            hasEnsuredUserRecord = false
 
             // Then logout from Clerk
             try await Clerk.shared.signOut()
@@ -196,6 +221,8 @@ class ConvexService: ObservableObject {
 
     /// Fetches a JWT for Speechmatics real-time transcription from the backend
     func getSpeechmaticsJWT() async throws -> String {
+        try await ensureAuthenticatedBackendReady()
+
         guard let client = client else {
             throw ConvexError.clientNotInitialized
         }
@@ -215,36 +242,30 @@ class ConvexService: ObservableObject {
     ///   - calendarEventId: Optional calendar event ID for linking
     /// - Returns: The conversation ID from Convex database
     func createConversation(title: String?, calendarEventId: String?) async throws -> String {
+        try await ensureAuthenticatedBackendReady()
+
         guard let client = client else {
             print("❌ Cannot create conversation: Client not initialized")
             throw ConvexError.clientNotInitialized
         }
 
-        // Check if user is authenticated
-        guard case .authenticated = authState else {
-            print("❌ Cannot create conversation: Not authenticated (authState: \(authState))")
-            throw ConvexError.authenticationRequired
-        }
-
-        // Build args dictionary with ConvexEncodable types
         var args: [String: (any ConvexEncodable)?] = [:]
-        if let title = title {
-            args["title"] = title as (any ConvexEncodable)?
+        if let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            args["location"] = title
         }
-        if let calendarEventId = calendarEventId {
-            args["calendarEventId"] = calendarEventId as (any ConvexEncodable)?
-        }
+        args["participantMode"] = "anonymous"
+        args["reusePending"] = false
 
         print("📝 Creating conversation: \(title ?? "Untitled")")
 
         do {
-            // Define response structure - backend returns { id: conversationId }
             struct CreateConversationResponse: Decodable {
                 let id: String
+                let inviteCode: String
             }
 
             let result: CreateConversationResponse? = try await client.mutation(
-                "conversations:createMacConversation",
+                "conversations:create",
                 with: args
             )
 
@@ -261,134 +282,39 @@ class ConvexService: ObservableObject {
         }
     }
 
-    /// Processes transcript with backend after recording completes
-    /// Uses JSON string serialization to bypass Swift's ConvexEncodable type system limitations
-    /// - Parameters:
-    ///   - conversationId: The conversation ID to associate the transcript with
-    ///   - transcriptTurns: Array of transcript turns with speaker, text, and timestamps
-    ///   - initiatorName: Name of the user/initiator (defaults to "Me")
-    /// - Returns: Dictionary containing processed transcript and extracted facts
-    func processRealtimeTranscript(
+    /// Saves a finished Mac transcript to an existing backend conversation without running analysis.
+    func saveTranscriptData(
         conversationId: String,
         transcriptTurns: [[String: Any]],
-        initiatorName: String?
-    ) async throws -> [String: Any] {
+        summary: String
+    ) async throws {
+        try await ensureAuthenticatedBackendReady()
+
         guard let client = client else {
             throw ConvexError.clientNotInitialized
         }
 
-        // Serialize transcript to JSON string to bypass Swift's ConvexEncodable type system limitations
-        // This avoids the issue where [[String: (any ConvexEncodable)?]] cannot be cast to (any ConvexEncodable)
         guard let jsonData = try? JSONSerialization.data(withJSONObject: transcriptTurns, options: []),
               let jsonString = String(data: jsonData, encoding: .utf8) else {
             print("❌ Failed to serialize transcript to JSON")
             throw ConvexError.netError("Failed to serialize transcript")
         }
 
-        // Build args with JSON string (backend will parse it)
+        let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         var args: [String: (any ConvexEncodable)?] = [:]
         args["conversationId"] = conversationId
-        args["transcriptTurnsJson"] = jsonString  // Send as JSON string
-        args["initiatorName"] = initiatorName ?? "Me"
-        args["scannerName"] = "System"
+        args["transcript"] = RawConvexJSON(json: jsonString)
+        args["S1_facts"] = RawConvexJSON(json: "[]")
+        args["S2_facts"] = RawConvexJSON(json: "[]")
+        args["summary"] = trimmedSummary.isEmpty ? "Mac recording" : trimmedSummary
 
-        print("📤 Processing transcript (\(transcriptTurns.count) turns)")
-        // Backend returns: { transcript: [...], S1_facts: [...], S2_facts: [...] }
-        struct ProcessTranscriptResponse: Decodable {
-            let transcript: [[String: String]]?
-            let S1_facts: [String]?
-            let S2_facts: [String]?
-
-            enum CodingKeys: String, CodingKey {
-                case transcript
-                case S1_facts = "S1_facts"
-                case S2_facts = "S2_facts"
-            }
-        }
-
-        // Try without explicit type on args to see if Swift infers correct overload
-        let response = try await client.action(
-            "realtimeTranscription:processRealtimeTranscript",
-            with: args
-        ) as ProcessTranscriptResponse?
-
-        // Convert to [String: Any] dictionary
-        var resultDict: [String: Any] = [:]
-        if let transcript = response?.transcript {
-            resultDict["transcript"] = transcript
-        }
-        if let s1Facts = response?.S1_facts {
-            resultDict["S1_facts"] = s1Facts
-        }
-        if let s2Facts = response?.S2_facts {
-            resultDict["S2_facts"] = s2Facts
-        }
-
-        print("   ✅ Transcript processed successfully")
-        return resultDict
-    }
-
-    /// Struct for word-level timing data
-    struct WordTiming: Codable {
-        let word: String
-        let startTime: Double
-        let endTime: Double
-        let wordId: String
-    }
-
-    /// Appends a transcript turn to the backend conversation in real-time
-    func appendTranscriptTurn(
-        conversationId: String,
-        speaker: String,
-        text: String,
-        order: Int,
-        timestamp: Double?,
-        words: [WordTiming]?
-    ) async throws {
-        guard let client = client else { return }
-
-        // We need to encode the words array to a structure Convex accepts
-        // Using a dictionary approach for arguments
-        var args: [String: (any ConvexEncodable)?] = [
-            "conversationId": conversationId,
-            "speaker": speaker,
-            "text": text,
-            "order": order
-        ]
-
-        if let timestamp = timestamp {
-            args["timestamp"] = timestamp as (any ConvexEncodable)?
-        }
-
-        if let words = words {
-            // Serialize words to JSON string to bypass ConvexEncodable nested type limitations
-            let wordsArray: [[String: Any]] = words.map { word in
-                [
-                    "word": word.word,
-                    "startTime": word.startTime,
-                    "endTime": word.endTime,
-                    "wordId": word.wordId
-                ]
-            }
-            if let jsonData = try? JSONSerialization.data(withJSONObject: wordsArray, options: []),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
-                args["wordsJson"] = jsonString as (any ConvexEncodable)?
-            }
-        }
-
-        // Use 'streaming:appendTranscriptTurn' mutation
-        // Since we are using ConvexMobile's client.mutation which expects [String: Any] (technically [String: ConvexEncodable]),
-        // and standard types conform to it (hopefully).
-        // If compilation fails, we might need to adjust.
-
-        struct AppendResponse: Decodable {
-            let _id: String
-        }
-
-        let _: AppendResponse? = try await client.mutation(
-            "streaming:appendTranscriptTurn",
+        print("📤 Saving transcript (\(transcriptTurns.count) turns)")
+        let _: String? = try await client.mutation(
+            "conversations:saveTranscriptData",
             with: args
         )
+
+        print("   ✅ Transcript saved successfully")
     }
 
     /// Checks if Convex is properly configured
@@ -487,4 +413,3 @@ enum ConvexError: LocalizedError {
         }
     }
 }
-

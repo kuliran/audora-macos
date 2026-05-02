@@ -23,9 +23,6 @@ class RecordingSessionManager: ObservableObject {
     // Store transcript chunks for the active recording session
     private var activeRecordingTranscriptChunks: [TranscriptChunk] = []
 
-    // Track last sent state to avoid redundant network calls
-    private var lastSentChunks: [TranscriptChunk] = []
-
     private init() {
         setupAudioManagerBindings()
         setupDebouncedSaving()
@@ -36,9 +33,6 @@ class RecordingSessionManager: ObservableObject {
         audioManager.$isRecording
             .sink { [weak self] isRecording in
                 self?.isRecording = isRecording
-                if !isRecording {
-                    self?.lastSentChunks = [] // Reset on stop
-                }
             }
             .store(in: &cancellables)
 
@@ -57,8 +51,6 @@ class RecordingSessionManager: ObservableObject {
 
                 self.transcriptUpdateSubject.send(newChunks)
 
-                // Stream updates to backend
-                self.streamToBackend(chunks: newChunks)
             }
             .store(in: &cancellables)
     }
@@ -74,54 +66,6 @@ class RecordingSessionManager: ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// Streams changed transcript chunks to backend
-    private func streamToBackend(chunks: [TranscriptChunk]) {
-        guard let conversationId = currentConversationId else { return }
-
-        // Compare with lastSentChunks and send updates
-        for (index, chunk) in chunks.enumerated() {
-            // Check if this index exists in lastSent and matches (hashable check should suffice)
-            if index < lastSentChunks.count && lastSentChunks[index] == chunk {
-                continue // No change
-            }
-
-            // Send update
-            Task {
-                do {
-                    // Map generic WordTiming to ConvexService.WordTiming
-                    let serviceWords = chunk.words?.map { word in
-                        ConvexService.WordTiming(
-                            word: word.word,
-                            startTime: word.startTime,
-                            endTime: word.endTime,
-                            wordId: word.wordId
-                        )
-                    }
-
-                    try await ConvexService.shared.appendTranscriptTurn(
-                        conversationId: conversationId,
-                        speaker: chunk.source == .mic ? "S1" : "S2",
-                        text: chunk.text,
-                        order: index,
-                        timestamp: chunk.timestamp.timeIntervalSince1970, // Or relative? Backend expects number. Timestamp usually absolute or relative. Schema says 'timestamp: v.optional(v.number())'.
-                        // Let's us absolute for now, or relative to start?
-                        // Schema comment: "Timestamp in seconds from start of conversation"
-                        // But here I'm passing TimeInterval (Double).
-                        // I should ideally pass relative time if I know start time.
-                        // But for now passing raw timestamp Double is okay if backend handles it or I fix it.
-                        // Actually schema.ts says: `timestamp: v.optional(v.number())`.
-                        // Re-reading schema: `timestamp` comment says "seconds from start".
-                        words: serviceWords
-                    )
-                } catch {
-                    print("⚠️ Failed to stream transcript turn: \(error)")
-                }
-            }
-        }
-
-        lastSentChunks = chunks
-    }
-
     func startRecording(for meetingId: UUID, title: String? = nil, calendarEventId: String? = nil) {
         guard !isRecording else { return }
 
@@ -129,31 +73,17 @@ class RecordingSessionManager: ObservableObject {
 
         isRecording = true
         activeMeetingId = meetingId
+        currentConversationId = nil
 
         // Load the meeting to get existing transcript chunks
         if let existingMeeting = LocalStorageManager.shared.loadMeetings().first(where: { $0.id == meetingId }) {
             activeRecordingTranscriptChunks = existingMeeting.transcriptChunks
             audioManager.transcriptChunks = existingMeeting.transcriptChunks
+            currentConversationId = existingMeeting.convexConversationId
         }
 
         AudioRecordingManager.shared.startRecording(for: meetingId)
         audioManager.startRecording()
-
-        // Create backend conversation asynchronously
-        Task {
-            do {
-                let convexId = try await ConvexService.shared.createConversation(
-                    title: title,
-                    calendarEventId: calendarEventId
-                )
-                await MainActor.run {
-                    self.currentConversationId = convexId
-                    self.saveMeetingConversationId(meetingId: meetingId, conversationId: convexId)
-                }
-            } catch {
-                print("❌ Failed to create conversation: \(error)")
-            }
-        }
     }
 
     func stopRecording() {
@@ -161,12 +91,25 @@ class RecordingSessionManager: ObservableObject {
 
         print("🛑 Stopping recording for meeting: \(activeMeetingId?.uuidString ?? "unknown")")
 
+        let transcriptSnapshot = audioManager.transcriptChunks.isEmpty
+            ? activeRecordingTranscriptChunks
+            : audioManager.transcriptChunks
+        let finalTranscriptChunks = finalizedTranscriptChunks(transcriptSnapshot)
+        if finalTranscriptChunks != activeRecordingTranscriptChunks {
+            activeRecordingTranscriptChunks = finalTranscriptChunks
+            activeRecordingTranscriptChunksUpdated = finalTranscriptChunks
+            audioManager.transcriptChunks = finalTranscriptChunks
+            transcriptUpdateSubject.send(finalTranscriptChunks)
+        }
+
         isRecording = false
         audioManager.stopRecording()
 
         let capturedMeetingId = activeMeetingId
         let capturedConversationId = currentConversationId
-        let capturedTranscriptChunks = activeRecordingTranscriptChunks
+        let capturedTranscriptChunks = finalTranscriptChunks
+        let capturedTitle = titleForBackend(meetingId: capturedMeetingId)
+        let capturedCalendarEventId = calendarEventIdForBackend(meetingId: capturedMeetingId)
 
         var audioFileURL: String? = nil
         if let activeMeetingId = capturedMeetingId {
@@ -178,32 +121,14 @@ class RecordingSessionManager: ObservableObject {
 
             updateActiveMeeting(meetingId: activeMeetingId, chunks: capturedTranscriptChunks, audioFileURL: audioFileURL)
 
-            // Process transcript with backend
             Task {
-                var conversationId = capturedConversationId
-
-                // Wait for conversation ID if still being created (up to 3 seconds)
-                if conversationId == nil {
-                    print("⏳ Waiting for conversation creation...")
-                    for attempt in 1...6 {
-                        try? await Task.sleep(nanoseconds: 500_000_000)
-                        conversationId = await MainActor.run { self.currentConversationId }
-                        if conversationId != nil {
-                            print("✅ Conversation ready after \(attempt * 500)ms")
-                            break
-                        }
-                    }
-                }
-
-                if let conversationId = conversationId,
-                   let meeting = LocalStorageManager.shared.loadMeetings().first(where: { $0.id == activeMeetingId }) {
-                    await processTranscriptWithBackend(
-                        conversationId: conversationId,
-                        meeting: meeting
-                    )
-                } else if conversationId == nil {
-                    print("⚠️ No conversation ID after 3s - skipping backend processing (check auth)")
-                }
+                await saveFinishedRecordingToBackend(
+                    meetingId: activeMeetingId,
+                    existingConversationId: capturedConversationId,
+                    title: capturedTitle,
+                    calendarEventId: capturedCalendarEventId,
+                    chunks: capturedTranscriptChunks
+                )
             }
         }
 
@@ -211,6 +136,27 @@ class RecordingSessionManager: ObservableObject {
         activeMeetingId = nil
         currentConversationId = nil
         activeRecordingTranscriptChunks = []
+    }
+
+    private func finalizedTranscriptChunks(_ chunks: [TranscriptChunk]) -> [TranscriptChunk] {
+        chunks.compactMap { chunk in
+            guard !chunk.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+
+            guard !chunk.isFinal else {
+                return chunk
+            }
+
+            return TranscriptChunk(
+                id: chunk.id,
+                timestamp: chunk.timestamp,
+                source: chunk.source,
+                text: chunk.text,
+                isFinal: true,
+                words: chunk.words
+            )
+        }
     }
 
     func isRecordingMeeting(_ meetingId: UUID) -> Bool {
@@ -261,48 +207,106 @@ class RecordingSessionManager: ObservableObject {
         }
     }
 
-    // MARK: - Backend Processing
+    // MARK: - Backend Sync
 
-    /// Processes transcript with backend after recording completes
-    /// Extracts facts with GPT-4 and updates knowledge graph
-    private func processTranscriptWithBackend(
-        conversationId: String,
-        meeting: Meeting
+    private func saveFinishedRecordingToBackend(
+        meetingId: UUID,
+        existingConversationId: String?,
+        title: String?,
+        calendarEventId: String?,
+        chunks: [TranscriptChunk]
     ) async {
         do {
-            let recordingStartTime = meeting.transcriptChunks.first?.timestamp ?? Date()
-
-            let transcriptTurns: [[String: Any]] = meeting.transcriptChunks.map { chunk in
-                let relativeMs = chunk.timestamp.timeIntervalSince(recordingStartTime) * 1000
-                return [
-                    "speaker": chunk.source == .mic ? "S1" : "S2",
-                    "text": chunk.text,
-                    "startTime": relativeMs,
-                    "endTime": relativeMs
-                ]
-            }
+            let transcriptTurns = backendTranscriptTurns(from: chunks)
 
             guard !transcriptTurns.isEmpty else {
-                print("⚠️ No transcript to process")
+                print("⚠️ No transcript to sync")
                 return
             }
 
-            let userName = UserDefaultsManager.shared.userBlurb.isEmpty
-                ? "Me"
-                : UserDefaultsManager.shared.userBlurb
+            let conversationId: String
+            if let existingConversationId {
+                conversationId = existingConversationId
+            } else {
+                conversationId = try await ConvexService.shared.createConversation(
+                    title: title,
+                    calendarEventId: calendarEventId
+                )
+                await MainActor.run {
+                    self.saveMeetingConversationId(meetingId: meetingId, conversationId: conversationId)
+                }
+            }
 
-            print("📤 Processing transcript with backend...")
-            let _ = try await ConvexService.shared.processRealtimeTranscript(
+            print("📤 Saving transcript to backend conversation...")
+            try await ConvexService.shared.saveTranscriptData(
                 conversationId: conversationId,
                 transcriptTurns: transcriptTurns,
-                initiatorName: userName
+                summary: backendSummary(title: title, turnCount: transcriptTurns.count)
             )
 
-            print("✅ Backend processing complete")
-
+            print("✅ Backend conversation saved: \(conversationId)")
         } catch {
-            print("❌ Backend processing failed: \(error)")
+            print("❌ Backend transcript sync failed: \(error)")
         }
+    }
+
+    private func backendTranscriptTurns(from chunks: [TranscriptChunk]) -> [[String: Any]] {
+        let finalChunks = chunks.filter(\.isFinal)
+        let recordingStartTime = finalChunks.first?.timestamp ?? chunks.first?.timestamp ?? Date()
+
+        return finalChunks.enumerated().compactMap { _, chunk in
+            let text = chunk.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+
+            let fallbackStartTime = max(0, chunk.timestamp.timeIntervalSince(recordingStartTime))
+            let words = chunk.words?.map { word in
+                [
+                    "word": word.word,
+                    "startTime": word.startTime,
+                    "endTime": word.endTime,
+                    "wordId": word.wordId
+                ] as [String: Any]
+            }
+
+            var turn: [String: Any] = [
+                "speaker": chunk.source == .mic ? "S1" : "S2",
+                "text": text,
+                "startTime": fallbackStartTime
+            ]
+
+            if let words, !words.isEmpty {
+                turn["words"] = words
+            }
+
+            return turn
+        }
+    }
+
+    private func backendSummary(title: String?, turnCount: Int) -> String {
+        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedTitle.isEmpty {
+            return trimmedTitle
+        }
+        return "Mac recording with \(turnCount) transcript turns"
+    }
+
+    private func titleForBackend(meetingId: UUID?) -> String? {
+        guard let meetingId,
+              let meeting = LocalStorageManager.shared.loadMeetings().first(where: { $0.id == meetingId }) else {
+            return nil
+        }
+
+        let trimmedTitle = meeting.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedTitle.isEmpty ? nil : trimmedTitle
+    }
+
+    private func calendarEventIdForBackend(meetingId: UUID?) -> String? {
+        guard let meetingId,
+              let meeting = LocalStorageManager.shared.loadMeetings().first(where: { $0.id == meetingId }) else {
+            return nil
+        }
+
+        return meeting.calendarEventId
     }
 
     /// Helper method to save conversation ID to meeting record
@@ -313,6 +317,7 @@ class RecordingSessionManager: ObservableObject {
             let success = LocalStorageManager.shared.saveMeeting(meetings[index])
             if success {
                 print("✅ Saved conversation ID to meeting: \(meetingId)")
+                NotificationCenter.default.post(name: .meetingSaved, object: meetings[index])
             } else {
                 print("❌ Failed to save conversation ID to meeting: \(meetingId)")
             }
