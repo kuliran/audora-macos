@@ -253,7 +253,7 @@ class AudioManager: NSObject, ObservableObject {
                 }
             },
             onFinal: { [weak self] source, text in
-                Task { @MainActor in
+                await MainActor.run {
                     guard let self, self.sessionID == sessionID else { return }
                     self.appendLocalTranscript(text, source: source)
                 }
@@ -292,6 +292,20 @@ class AudioManager: NSObject, ObservableObject {
     private func stopLocalTranscriptionSession() {
         localTranscriptionSession?.stop()
         localTranscriptionSession = nil
+        transcriptionStatus = "Ready"
+        parakeetDownloadProgress = nil
+    }
+
+    private func finishLocalTranscriptionSession() async {
+        guard let localTranscriptionSession else {
+            transcriptionStatus = "Ready"
+            parakeetDownloadProgress = nil
+            return
+        }
+
+        transcriptionStatus = "Finalizing Local Parakeet..."
+        await localTranscriptionSession.finish()
+        self.localTranscriptionSession = nil
         transcriptionStatus = "Ready"
         parakeetDownloadProgress = nil
     }
@@ -669,6 +683,29 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     func stopRecording() {
+        stopRecordingWithoutLocalFinalization()
+    }
+
+    func stopRecordingAndFinalizeTranscription() async -> [TranscriptChunk] {
+        stopCaptureAndSpeechmaticsConnections()
+
+        if activeTranscriptionProvider == .parakeet {
+            await finishLocalTranscriptionSession()
+        } else {
+            stopLocalTranscriptionSession()
+        }
+
+        print("Recording stopped")
+        return transcriptChunks
+    }
+
+    private func stopRecordingWithoutLocalFinalization() {
+        stopCaptureAndSpeechmaticsConnections()
+        stopLocalTranscriptionSession()
+        print("Recording stopped")
+    }
+
+    private func stopCaptureAndSpeechmaticsConnections() {
         // Immediately mark as not recording to prevent stale callbacks
         self.isRecording = false
         AudioLevelManager.shared.updateRecordingState(false)
@@ -693,9 +730,6 @@ class AudioManager: NSObject, ObservableObject {
         micRetryCount = 0
 
         AudioSource.allCases.forEach { closeSpeechmaticsConnection(source: $0) }
-        stopLocalTranscriptionSession()
-
-        print("Recording stopped")
     }
 
     private func processAudioBuffer(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter, targetFormat: AVAudioFormat, source: AudioSource) {
