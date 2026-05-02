@@ -134,14 +134,16 @@ class RecordingSessionManager: ObservableObject {
 
             updateActiveMeeting(meetingId: activeMeetingId, chunks: capturedTranscriptChunks, audioFileURL: audioFileURL)
 
-            await saveFinishedRecordingToBackend(
-                meetingId: activeMeetingId,
-                existingConversationId: capturedConversationId,
-                title: capturedTitle,
-                calendarEventId: capturedCalendarEventId,
-                chunks: capturedTranscriptChunks,
-                audioFileURL: audioFileURL
-            )
+            Task {
+                await saveFinishedRecordingToBackend(
+                    meetingId: activeMeetingId,
+                    existingConversationId: capturedConversationId,
+                    title: capturedTitle,
+                    calendarEventId: capturedCalendarEventId,
+                    chunks: capturedTranscriptChunks,
+                    audioFileURL: audioFileURL
+                )
+            }
         }
 
         // Reset state after capturing values for the Task

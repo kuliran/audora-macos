@@ -238,18 +238,25 @@ final class LocalTranscriptionSession: @unchecked Sendable {
         let systemProvider = ParakeetTranscriptionProvider()
 
         do {
+            print("🔧 [Parakeet] Step 1/3: Preparing mic ASR provider...")
             try await micProvider.prepare(onStatus: onStatus, onProgress: onProgress)
+            print("✅ [Parakeet] Mic ASR provider ready")
+
+            print("🔧 [Parakeet] Step 2/3: Preparing system ASR provider...")
             try await systemProvider.prepare(
                 onStatus: { status in
                     onStatus(status.replacingOccurrences(of: "Initializing", with: "Initializing system"))
                 },
                 onProgress: { _ in }
             )
+            print("✅ [Parakeet] System ASR provider ready")
 
+            print("🔧 [Parakeet] Step 3/3: Loading VAD model...")
             onStatus("Loading VAD model...")
             let vadManager = try await VadManager { progress in
                 onProgress(progress.fractionCompleted)
             }
+            print("✅ [Parakeet] VAD model loaded")
 
             let micTranscriber = LocalStreamingTranscriber(
                 provider: micProvider,
@@ -264,11 +271,13 @@ final class LocalTranscriptionSession: @unchecked Sendable {
                 onFinal: onFinal
             )
 
+            print("✅ [Parakeet] All models loaded, session ready")
             return LocalTranscriptionSession(
                 micTranscriber: micTranscriber,
                 systemTranscriber: systemTranscriber
             )
         } catch {
+            print("❌ [Parakeet] Session creation failed: \(error)")
             micProvider.clearModelCache()
             systemProvider.clearModelCache()
             throw error
@@ -276,6 +285,7 @@ final class LocalTranscriptionSession: @unchecked Sendable {
     }
 
     func start() {
+        print("🎙️ [Parakeet] Starting mic and system transcribers...")
         micTranscriber.start()
         systemTranscriber.start()
     }
@@ -295,10 +305,12 @@ final class LocalTranscriptionSession: @unchecked Sendable {
     }
 
     func finish() async {
+        print("🎙️ [Parakeet] Finishing transcription session (flushing remaining audio)...")
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.micTranscriber.finish() }
             group.addTask { await self.systemTranscriber.finish() }
         }
+        print("✅ [Parakeet] Transcription session finished")
     }
 }
 
@@ -324,6 +336,12 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
     private var rateTrackingStartDate: Date?
     private var rateTrackingTotalFrames: Int64 = 0
     private var effectiveSampleRate: Double?
+
+    // VAD fallback tracking
+    private var vadFailureCount = 0
+    private var bufferCount = 0
+    private static let maxVadFailuresBeforeFallback = 5
+    private static let fallbackFlushInterval = 3 * 16_000 // 3s at 16kHz
 
     private static let vadChunkSize = 4096
     private static let minimumSpeechSamples = 16_000
@@ -355,7 +373,18 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
     }
 
     func submit(_ buffer: AVAudioPCMBuffer) {
-        guard let copy = Self.copyPCMBuffer(buffer) else { return }
+        guard let copy = Self.copyPCMBuffer(buffer) else {
+            if bufferCount < 5 {
+                print("⚠️ [\(source)] copyPCMBuffer returned nil, buffer dropped")
+            }
+            return
+        }
+        if continuation == nil {
+            if bufferCount < 5 {
+                print("⚠️ [\(source)] continuation is nil, buffer dropped (stream not started?)")
+            }
+            return
+        }
         continuation?.yield(copy)
     }
 
@@ -380,13 +409,53 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
         var vadReadIndex = 0
         var recentChunks: [[Float]] = []
         var isSpeaking = false
+        var useVadFallback = false
+        var fallbackAccumulator: [Float] = []
+        var extractFailCount = 0
+
+        print("🎙️ [\(source)] Transcriber run loop started, waiting for audio buffers...")
 
         for await buffer in stream {
             guard !Task.isCancelled else { break }
 
-            updateRateTracking(buffer)
-            guard let samples = extractSamples(buffer) else { continue }
+            bufferCount += 1
+            if bufferCount == 1 {
+                print("🎙️ [\(source)] ✅ First buffer received (format: \(buffer.format.sampleRate)Hz, ch:\(buffer.format.channelCount), frames:\(buffer.frameLength))")
+            }
+            if bufferCount % 500 == 0 {
+                print("🎙️ [\(source)] Processed \(bufferCount) buffers, vadFailures: \(vadFailureCount), fallback: \(useVadFallback)")
+            }
 
+            updateRateTracking(buffer)
+            guard let samples = extractSamples(buffer) else {
+                extractFailCount += 1
+                if extractFailCount <= 3 {
+                    print("⚠️ [\(source)] extractSamples returned nil (buffer #\(bufferCount), format: \(buffer.format))")
+                }
+                continue
+            }
+
+            if bufferCount == 1 {
+                let maxAmp = samples.map { abs($0) }.max() ?? 0
+                print("🎙️ [\(source)] First samples extracted: count=\(samples.count), maxAmplitude=\(String(format: "%.6f", maxAmp))")
+            }
+
+            // ── VAD fallback path: time-based chunking when VAD is broken ──
+            if useVadFallback {
+                fallbackAccumulator.append(contentsOf: samples)
+                if fallbackAccumulator.count >= Self.fallbackFlushInterval {
+                    let segment = fallbackAccumulator
+                    fallbackAccumulator.removeAll(keepingCapacity: true)
+                    let maxAmp = segment.map { abs($0) }.max() ?? 0
+                    if maxAmp > 0.001 {
+                        print("🔄 [\(source)] Fallback transcribing \(segment.count) samples (\(String(format: "%.1f", Double(segment.count) / 16000.0))s, peak: \(String(format: "%.4f", maxAmp)))")
+                        await transcribeSegment(segment)
+                    }
+                }
+                continue
+            }
+
+            // ── Normal VAD path ──
             vadBuffer.append(contentsOf: samples)
 
             while vadBuffer.count - vadReadIndex >= Self.vadChunkSize {
@@ -412,6 +481,12 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                     )
                     vadState = result.state
 
+                    // Reset failure count on success
+                    if vadFailureCount > 0 {
+                        print("✅ [\(source)] VAD recovered after \(vadFailureCount) failures")
+                        vadFailureCount = 0
+                    }
+
                     if let event = result.event {
                         switch event.kind {
                         case .speechStart:
@@ -419,9 +494,11 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                                 isSpeaking = true
                                 startedSpeech = true
                                 speechSamples = recentChunks.suffix(Self.prerollChunkCount).flatMap { $0 }
+                                print("🗣️ [\(source)] Speech started")
                             }
                         case .speechEnd:
                             endedSpeech = wasSpeaking || isSpeaking
+                            print("🤫 [\(source)] Speech ended (\(speechSamples.count + chunk.count) samples)")
                         }
                     }
 
@@ -442,6 +519,7 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                             speechSamples.removeAll(keepingCapacity: true)
                             await transcribeSegment(segment)
                         } else {
+                            print("⚠️ [\(source)] Speech too short (\(speechSamples.count) < \(Self.minimumSpeechSamples)), discarding")
                             speechSamples.removeAll(keepingCapacity: true)
                         }
                     } else if isSpeaking, speechSamples.count >= flushInterval {
@@ -450,30 +528,56 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                         await transcribeSegment(segment)
                     }
                 } catch {
+                    vadFailureCount += 1
                     localTranscriptionLogger.error("VAD error for \(self.source.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    print("❌ [\(source)] VAD error #\(vadFailureCount): \(error)")
+
+                    if vadFailureCount >= Self.maxVadFailuresBeforeFallback {
+                        print("⚠️ [\(source)] VAD failed \(vadFailureCount) times — switching to time-based fallback (no VAD)")
+                        useVadFallback = true
+                        // Move accumulated speech to fallback
+                        fallbackAccumulator = speechSamples + chunk
+                        speechSamples.removeAll()
+                        break // exit the while loop to enter fallback path
+                    }
                 }
             }
         }
 
+        print("🎙️ [\(source)] Run loop ended — buffers: \(bufferCount), vadFailures: \(vadFailureCount), fallback: \(useVadFallback)")
+
+        // Flush remaining speech from VAD path
         if isSpeaking, vadReadIndex < vadBuffer.count {
             speechSamples.append(contentsOf: vadBuffer[vadReadIndex..<vadBuffer.count])
         }
-
         if speechSamples.count >= Self.minimumSpeechSamples {
             await transcribeSegment(speechSamples)
+        }
+
+        // Flush remaining fallback accumulator
+        if !fallbackAccumulator.isEmpty, fallbackAccumulator.count >= Self.minimumSpeechSamples {
+            print("🔄 [\(source)] Flushing final fallback: \(fallbackAccumulator.count) samples")
+            await transcribeSegment(fallbackAccumulator)
         }
     }
 
     private func transcribeSegment(_ samples: [Float]) async {
+        let duration = String(format: "%.1f", Double(samples.count) / 16000.0)
+        print("📝 [\(source)] Transcribing \(samples.count) samples (\(duration)s)...")
         do {
             try Task.checkCancellation()
             let text = try await provider.transcribe(samples, previousContext: previousContext)
-            guard !text.isEmpty, !Task.isCancelled else { return }
+            guard !text.isEmpty, !Task.isCancelled else {
+                print("📝 [\(source)] Transcription returned empty or was cancelled")
+                return
+            }
 
             let words = text.split(separator: " ")
             previousContext = words.suffix(Self.contextWordCount).joined(separator: " ")
+            print("📝 [\(source)] ✅ Transcribed: \"\(text.prefix(120))\"")
             await onFinal(source, text)
         } catch {
+            print("❌ [\(source)] ASR transcription failed: \(error)")
             localTranscriptionLogger.error("ASR error for \(self.source.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }

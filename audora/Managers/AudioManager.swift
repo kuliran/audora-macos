@@ -59,6 +59,10 @@ class AudioManager: NSObject, ObservableObject {
     private let maxPendingAudioBytes = 96_000
     private var cancellables = Set<AnyCancellable>()
 
+    // Local transcription buffer tracking
+    private var localMicBufferCount = 0
+    private var localSystemBufferCount = 0
+
     // Session refresh timers to prevent 30-minute expiry
     private var sessionRefreshTimers: [AudioSource: Timer] = [:]
 
@@ -269,6 +273,9 @@ class AudioManager: NSObject, ObservableObject {
         localTranscriptionSession?.start()
         transcriptionStatus = "Local Parakeet ready"
         parakeetDownloadProgress = nil
+        localMicBufferCount = 0
+        localSystemBufferCount = 0
+        print("✅ Local Parakeet session created and started")
     }
 
     private func appendLocalTranscript(_ text: String, source: AudioSource) {
@@ -414,6 +421,18 @@ class AudioManager: NSObject, ObservableObject {
                    let targetFormat {
                     self.processAudioBuffer(buffer, converter: converter, targetFormat: targetFormat, source: .mic)
                 } else {
+                    self.localMicBufferCount += 1
+                    if self.localMicBufferCount == 1 {
+                        print("🎤 [Parakeet] First mic buffer submitted to local transcription (format: \(recordingFormat))")
+                    }
+                    if self.localMicBufferCount % 500 == 0 {
+                        print("🎤 [Parakeet] Submitted \(self.localMicBufferCount) mic buffers so far")
+                    }
+                    if self.localTranscriptionSession == nil {
+                        if self.localMicBufferCount <= 3 {
+                            print("⚠️ [Parakeet] localTranscriptionSession is nil when trying to submit mic buffer #\(self.localMicBufferCount)!")
+                        }
+                    }
                     self.localTranscriptionSession?.submit(buffer, source: .mic)
                 }
             }
@@ -658,6 +677,13 @@ class AudioManager: NSObject, ObservableObject {
 
                 self.processAudioBuffer(buffer, converter: converter, targetFormat: targetFormat, source: .system)
             } else {
+                self.localSystemBufferCount += 1
+                if self.localSystemBufferCount == 1 {
+                    print("🔊 [Parakeet] First system buffer submitted to local transcription (format: \(format))")
+                }
+                if self.localSystemBufferCount % 500 == 0 {
+                    print("🔊 [Parakeet] Submitted \(self.localSystemBufferCount) system buffers so far")
+                }
                 self.localTranscriptionSession?.submit(buffer, source: .system)
             }
 
@@ -687,6 +713,7 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     func stopRecordingAndFinalizeTranscription() async -> [TranscriptChunk] {
+        print("🛑 [Parakeet] Finalizing — mic buffers sent: \(localMicBufferCount), system buffers sent: \(localSystemBufferCount)")
         stopCaptureAndSpeechmaticsConnections()
 
         if activeTranscriptionProvider == .parakeet {
