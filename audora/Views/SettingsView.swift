@@ -22,6 +22,11 @@ struct SettingsView: View {
     @EnvironmentObject var convexService: ConvexService
     @Environment(\.dismiss) private var dismiss
 
+    init(viewModel: SettingsViewModel, navigationPath: Binding<NavigationPath> = .constant(NavigationPath())) {
+        self.viewModel = viewModel
+        self._navigationPath = navigationPath
+    }
+
     var body: some View {
         HSplitView {
             // Sidebar
@@ -92,6 +97,10 @@ struct SettingsView: View {
                 // Use dismiss to close only this settings window
                 dismiss()
             }
+        }
+        .onAppear {
+            viewModel.loadTemplates()
+            viewModel.loadAPIKey()
         }
         .onDisappear {
             DispatchQueue.main.async {
