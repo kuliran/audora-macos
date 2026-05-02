@@ -87,7 +87,7 @@ struct OnboardingView: View {
                             HStack {
                                 Button(action: { hasAcceptedTerms.toggle() }) {
                                     Image(systemName: hasAcceptedTerms ? "checkmark.square.fill" : "square")
-                                        .foregroundColor(hasAcceptedTerms ? .blue : .secondary)
+                                        .foregroundColor(hasAcceptedTerms ? .accentColor : .secondary)
                                 }
                                 .buttonStyle(.plain)
 

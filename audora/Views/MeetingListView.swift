@@ -245,12 +245,12 @@ struct CollapsedTranscriptChunkView: View {
             HStack(spacing: 4) {
                 Image(systemName: chunk.source.icon)
                     .font(.caption)
-                    .foregroundColor(chunk.source == .mic ? .blue : .orange)
+                    .foregroundColor(chunk.source == .mic ? .accentColor : .orange)
 
                 Text(chunk.source.displayName)
                     .font(.caption)
                     .fontWeight(.medium)
-                    .foregroundColor(chunk.source == .mic ? .blue : .orange)
+                    .foregroundColor(chunk.source == .mic ? .accentColor : .orange)
             }
             .frame(width: 50, alignment: .leading)
 

@@ -16,7 +16,7 @@ struct DancingAudioBars: View {
             HStack(spacing: -2) {
                 // Bar 1: Microphone (blue)
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.blue.opacity(0.6))
+                    .fill(Color.accentColor.opacity(0.6))
                     .frame(width: 6, height: getDancingBarHeight(index: 0, level: micLevel))
                     .animation(.easeInOut(duration: 0.1), value: micLevel)
 
@@ -28,7 +28,7 @@ struct DancingAudioBars: View {
 
                 // Bar 3: Microphone (blue)
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.blue.opacity(0.6))
+                    .fill(Color.accentColor.opacity(0.6))
                     .frame(width: 6, height: getDancingBarHeight(index: 2, level: micLevel))
                     .animation(.easeInOut(duration: 0.1).delay(0.06), value: micLevel)
 
@@ -40,7 +40,7 @@ struct DancingAudioBars: View {
 
                 // Bar 5: Microphone (blue)
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.blue.opacity(0.6))
+                    .fill(Color.accentColor.opacity(0.6))
                     .frame(width: 6, height: getDancingBarHeight(index: 1, level: micLevel))
                     .animation(.easeInOut(duration: 0.1).delay(0.12), value: micLevel)
 

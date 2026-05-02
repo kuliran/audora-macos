@@ -65,7 +65,7 @@ struct AnalyticsPanelView: View {
                             .foregroundColor(selectedMainTab == tab ? .primary : .secondary)
                         
                         Rectangle()
-                            .fill(selectedMainTab == tab ? Color.blue : Color.clear)
+                            .fill(selectedMainTab == tab ? Color.accentColor : Color.clear)
                             .frame(height: 2)
                     }
                     .frame(maxWidth: .infinity)
@@ -113,10 +113,10 @@ struct AnalyticsPanelView: View {
                     Text(subtab.rawValue)
                         .font(.caption)
                         .fontWeight(selectedSubtab == subtab ? .semibold : .regular)
-                        .foregroundColor(selectedSubtab == subtab ? .blue : .secondary)
+                        .foregroundColor(selectedSubtab == subtab ? .accentColor : .secondary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
-                        .background(selectedSubtab == subtab ? Color.blue.opacity(0.1) : Color.clear)
+                        .background(selectedSubtab == subtab ? Color.accentColor.opacity(0.1) : Color.clear)
                         .cornerRadius(6)
                 }
                 .buttonStyle(.plain)
@@ -153,7 +153,7 @@ struct AnalyticsPanelView: View {
             MetricCard(
                 icon: "bubble.left.fill",
                 title: "Filler Words",
-                color: .blue
+                color: .accentColor
             ) {
                 VStack(alignment: .leading, spacing: 8) {
                     MetricRow(
@@ -179,7 +179,7 @@ struct AnalyticsPanelView: View {
                                     .font(.caption)
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 4)
-                                    .background(Color.blue.opacity(0.2))
+                                    .background(Color.accentColor.opacity(0.2))
                                     .cornerRadius(4)
                             }
                         }

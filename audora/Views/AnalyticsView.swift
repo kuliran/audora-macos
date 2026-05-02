@@ -38,7 +38,7 @@ struct AnalyticsView: View {
                     MetricCard(
                         icon: "bubble.left.fill",
                         title: "Filler Words",
-                        color: .blue
+                        color: .accentColor
                     ) {
                         VStack(alignment: .leading, spacing: 8) {
                             MetricRow(
@@ -315,7 +315,7 @@ struct WeakWordCard: View {
                     
                     Text("\"\(suggestion)\"")
                         .font(.caption)
-                        .foregroundColor(.blue)
+                        .foregroundColor(.accentColor)
                         .fontWeight(.medium)
                 }
             }

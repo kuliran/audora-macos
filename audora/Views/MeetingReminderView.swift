@@ -183,5 +183,5 @@ Image(systemName: "xmark")
         onDismiss: {}
     )
     .padding()
-    .background(Color.blue)
+    .background(Color.accentColor)
 }
