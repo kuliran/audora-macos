@@ -22,6 +22,7 @@ class RecordingSessionManager: ObservableObject {
 
     // Store transcript chunks for the active recording session
     private var activeRecordingTranscriptChunks: [TranscriptChunk] = []
+    private var isStoppingRecording = false
 
     private init() {
         setupAudioManagerBindings()
@@ -87,13 +88,31 @@ class RecordingSessionManager: ObservableObject {
     }
 
     func stopRecording() {
-        guard isRecording else { return }
+        guard isRecording, !isStoppingRecording else { return }
+
+        isStoppingRecording = true
+
+        Task {
+            await stopRecordingAndSave()
+        }
+    }
+
+    private func stopRecordingAndSave() async {
+        defer {
+            isStoppingRecording = false
+        }
 
         print("🛑 Stopping recording for meeting: \(activeMeetingId?.uuidString ?? "unknown")")
 
-        let transcriptSnapshot = audioManager.transcriptChunks.isEmpty
+        let capturedMeetingId = activeMeetingId
+        let capturedConversationId = currentConversationId
+        let capturedTitle = titleForBackend(meetingId: capturedMeetingId)
+        let capturedCalendarEventId = calendarEventIdForBackend(meetingId: capturedMeetingId)
+
+        let finalizedAudioManagerChunks = await audioManager.stopRecordingAndFinalizeTranscription()
+        let transcriptSnapshot = finalizedAudioManagerChunks.isEmpty
             ? activeRecordingTranscriptChunks
-            : audioManager.transcriptChunks
+            : finalizedAudioManagerChunks
         let finalTranscriptChunks = finalizedTranscriptChunks(transcriptSnapshot)
         if finalTranscriptChunks != activeRecordingTranscriptChunks {
             activeRecordingTranscriptChunks = finalTranscriptChunks
@@ -103,13 +122,7 @@ class RecordingSessionManager: ObservableObject {
         }
 
         isRecording = false
-        audioManager.stopRecording()
-
-        let capturedMeetingId = activeMeetingId
-        let capturedConversationId = currentConversationId
         let capturedTranscriptChunks = finalTranscriptChunks
-        let capturedTitle = titleForBackend(meetingId: capturedMeetingId)
-        let capturedCalendarEventId = calendarEventIdForBackend(meetingId: capturedMeetingId)
 
         var audioFileURL: String? = nil
         if let activeMeetingId = capturedMeetingId {
@@ -121,16 +134,14 @@ class RecordingSessionManager: ObservableObject {
 
             updateActiveMeeting(meetingId: activeMeetingId, chunks: capturedTranscriptChunks, audioFileURL: audioFileURL)
 
-            Task {
-                await saveFinishedRecordingToBackend(
-                    meetingId: activeMeetingId,
-                    existingConversationId: capturedConversationId,
-                    title: capturedTitle,
-                    calendarEventId: capturedCalendarEventId,
-                    chunks: capturedTranscriptChunks,
-                    audioFileURL: audioFileURL
-                )
-            }
+            await saveFinishedRecordingToBackend(
+                meetingId: activeMeetingId,
+                existingConversationId: capturedConversationId,
+                title: capturedTitle,
+                calendarEventId: capturedCalendarEventId,
+                chunks: capturedTranscriptChunks,
+                audioFileURL: audioFileURL
+            )
         }
 
         // Reset state after capturing values for the Task

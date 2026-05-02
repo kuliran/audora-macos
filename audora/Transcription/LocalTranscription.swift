@@ -232,7 +232,7 @@ final class LocalTranscriptionSession: @unchecked Sendable {
     static func make(
         onStatus: @escaping @Sendable (String) -> Void,
         onProgress: @escaping @Sendable (Double) -> Void,
-        onFinal: @escaping @Sendable (AudioSource, String) -> Void
+        onFinal: @escaping @Sendable (AudioSource, String) async -> Void
     ) async throws -> LocalTranscriptionSession {
         let micProvider = ParakeetTranscriptionProvider()
         let systemProvider = ParakeetTranscriptionProvider()
@@ -293,13 +293,20 @@ final class LocalTranscriptionSession: @unchecked Sendable {
         micTranscriber.stop()
         systemTranscriber.stop()
     }
+
+    func finish() async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.micTranscriber.finish() }
+            group.addTask { await self.systemTranscriber.finish() }
+        }
+    }
 }
 
 final class LocalStreamingTranscriber: @unchecked Sendable {
     private let provider: any TranscriptionProvider
     private let vadManager: VadManager
     private let source: AudioSource
-    private let onFinal: @Sendable (AudioSource, String) -> Void
+    private let onFinal: @Sendable (AudioSource, String) async -> Void
     private let flushInterval = 5 * 16_000
 
     private var continuation: AsyncStream<AVAudioPCMBuffer>.Continuation?
@@ -329,7 +336,7 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
         provider: any TranscriptionProvider,
         vadManager: VadManager,
         source: AudioSource,
-        onFinal: @escaping @Sendable (AudioSource, String) -> Void
+        onFinal: @escaping @Sendable (AudioSource, String) async -> Void
     ) {
         self.provider = provider
         self.vadManager = vadManager
@@ -356,6 +363,13 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
         continuation?.finish()
         continuation = nil
         task?.cancel()
+        task = nil
+    }
+
+    func finish() async {
+        continuation?.finish()
+        continuation = nil
+        await task?.value
         task = nil
     }
 
@@ -423,7 +437,7 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
 
                     if endedSpeech {
                         isSpeaking = false
-                        if speechSamples.count > Self.minimumSpeechSamples {
+                        if speechSamples.count >= Self.minimumSpeechSamples {
                             let segment = speechSamples
                             speechSamples.removeAll(keepingCapacity: true)
                             await transcribeSegment(segment)
@@ -441,7 +455,11 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
             }
         }
 
-        if speechSamples.count > Self.minimumSpeechSamples {
+        if isSpeaking, vadReadIndex < vadBuffer.count {
+            speechSamples.append(contentsOf: vadBuffer[vadReadIndex..<vadBuffer.count])
+        }
+
+        if speechSamples.count >= Self.minimumSpeechSamples {
             await transcribeSegment(speechSamples)
         }
     }
@@ -454,7 +472,7 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
 
             let words = text.split(separator: " ")
             previousContext = words.suffix(Self.contextWordCount).joined(separator: " ")
-            onFinal(source, text)
+            await onFinal(source, text)
         } catch {
             localTranscriptionLogger.error("ASR error for \(self.source.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
