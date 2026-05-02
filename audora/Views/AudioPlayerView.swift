@@ -50,7 +50,7 @@ struct AudioPlayerView: View {
                     
                     // Progress track
                     Rectangle()
-                        .fill(Color.blue)
+                        .fill(Color.accentColor)
                         .frame(width: geometry.size.width * playerManager.progress, height: 4)
                         .cornerRadius(2)
                     
@@ -73,7 +73,7 @@ struct AudioPlayerView: View {
                     
                     // Draggable thumb (on top, gets priority)
                     Circle()
-                        .fill(Color.blue)
+                        .fill(Color.accentColor)
                         .frame(width: 12, height: 12)
                         .offset(x: geometry.size.width * playerManager.progress - 6)
                         .highPriorityGesture(
@@ -139,9 +139,9 @@ struct AudioPlayerView: View {
                 }) {
                     Image(systemName: playerManager.isPlaying ? "pause.circle.fill" : "play.circle.fill")
                         .font(.system(size: 32))
-                        .foregroundColor(.blue)
+                        .foregroundColor(.accentColor)
                         .frame(width: 40, height: 40)
-                        .background(Color.blue.opacity(hoveredButton == "playPause" ? 0.1 : 0.05))
+                        .background(Color.accentColor.opacity(hoveredButton == "playPause" ? 0.1 : 0.05))
                         .cornerRadius(8)
                 }
                 .buttonStyle(.plain)

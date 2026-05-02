@@ -22,6 +22,7 @@
 	<array>
 		<string>io.audora-spks</string>
 		<string>io.audora-spki</string>
+		<string>com.apple.audioanalyticsd</string>
 	</array>
 </dict>
 </plist>

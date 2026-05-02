@@ -22,6 +22,8 @@ class AudioManager: NSObject, ObservableObject {
     @Published var parakeetDownloadProgress: Double?
 
     private var audioEngine = AVAudioEngine()
+    private weak var microphoneInputNode: AVAudioInputNode?
+    private var isMicrophoneTapInstalled = false
     private var micSocketTask: URLSessionWebSocketTask?
     private var systemSocketTask: URLSessionWebSocketTask?
     private let speechmaticsURL = URL(string: "wss://eu2.rt.speechmatics.com/v2/en")!
@@ -338,6 +340,7 @@ class AudioManager: NSObject, ObservableObject {
 
         do {
             let inputNode = audioEngine.inputNode
+            microphoneInputNode = inputNode
             let recordingFormat = inputNode.outputFormat(forBus: 0)
 
             let targetFormat: AVAudioFormat?
@@ -400,6 +403,7 @@ class AudioManager: NSObject, ObservableObject {
                     self.localTranscriptionSession?.submit(buffer, source: .mic)
                 }
             }
+            isMicrophoneTapInstalled = true
 
             audioEngine.prepare()
             try audioEngine.start()
@@ -424,10 +428,17 @@ class AudioManager: NSObject, ObservableObject {
             print("⏹️ Audio engine stopped")
         }
 
-        // Remove any existing taps on the input node
-        let inputNode = audioEngine.inputNode
-        inputNode.removeTap(onBus: 0)
-        print("🔇 Input tap removed")
+        // Remove the mic tap only if we installed one. Accessing inputNode during
+        // no-op cleanup can block while Core Audio initializes the input device.
+        if isMicrophoneTapInstalled {
+            microphoneInputNode?.removeTap(onBus: 0)
+            isMicrophoneTapInstalled = false
+            microphoneInputNode = nil
+            print("🔇 Input tap removed")
+        } else {
+            microphoneInputNode = nil
+            print("🔇 No input tap to remove")
+        }
 
         // Reset the audio engine - this removes all connections and taps
         audioEngine.reset()

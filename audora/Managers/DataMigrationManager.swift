@@ -19,13 +19,19 @@ class DataMigrationManager {
             return nil
         }
 
-        // Future migrations can be added here as `switch` cases.
-        if meeting.dataVersion < Meeting.currentDataVersion {
-            print("⚠️ No migration path for versions \(meeting.dataVersion + 1)...\(Meeting.currentDataVersion)")
-            return nil
+        var migratedMeeting = meeting
+
+        // Run sequential migrations if needed
+        while migratedMeeting.dataVersion < Meeting.currentDataVersion {
+            let nextVersion = migratedMeeting.dataVersion + 1
+            print("🔄 Migrating meeting \(migratedMeeting.id) to version \(nextVersion)")
+            
+            // Future migrations can be added here as `if nextVersion == X` blocks
+            
+            migratedMeeting.dataVersion = nextVersion
         }
 
-        return meeting
+        return migratedMeeting
     }
     
     // Future migrateXToVersionY helpers will go here as needed
@@ -40,7 +46,11 @@ class DataMigrationManager {
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         let timestamp = formatter.string(from: Date())
         
-        let backupDirectory = documentsDirectory.appendingPathComponent("Meetings_Backup_\(timestamp)")
+        var backupDirectory = documentsDirectory.appendingPathComponent("Meetings_Backup_\(timestamp)")
+        
+        if FileManager.default.fileExists(atPath: backupDirectory.path) {
+            backupDirectory = documentsDirectory.appendingPathComponent("Meetings_Backup_\(timestamp)_\(UUID().uuidString)")
+        }
         
         do {
             try FileManager.default.copyItem(at: meetingsDirectory, to: backupDirectory)

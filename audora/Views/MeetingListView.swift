@@ -263,10 +263,27 @@ struct CollapsedTranscriptChunkView: View {
     }
 }
 
+private enum MeetingDetailPane: String, CaseIterable, Identifiable {
+    case transcript = "Transcript"
+    case preMeetingNotes = "Pre-meeting notes"
+
+    var id: Self { self }
+
+    var systemImage: String {
+        switch self {
+        case .transcript:
+            return "text.bubble"
+        case .preMeetingNotes:
+            return "note.text"
+        }
+    }
+}
+
 struct MeetingDetailContentView: View {
     @StateObject private var viewModel: MeetingViewModel
     @StateObject private var recordingSessionManager = RecordingSessionManager.shared
     @State private var showDeleteAlert = false
+    @State private var selectedDetailPane: MeetingDetailPane = .transcript
     let onDelete: () -> Void
 
     init(meeting: Meeting, onDelete: @escaping () -> Void) {
@@ -312,7 +329,6 @@ struct MeetingDetailContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             // Header with title and controls
             headerSection
-            backendConversationSection
 
             // Audio Player (fixed at top)
             if let audioFileURLString = viewModel.meeting.audioFileURL {
@@ -339,8 +355,15 @@ struct MeetingDetailContentView: View {
                     .cornerRadius(12)
                 }
             }
-            // Transcript Section
-            transcriptSection
+
+            detailPaneToggle
+
+            switch selectedDetailPane {
+            case .transcript:
+                transcriptSection
+            case .preMeetingNotes:
+                preMeetingNotesSection
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -400,69 +423,41 @@ struct MeetingDetailContentView: View {
                 .disabled(cannotStartRecording || viewModel.isValidatingKey || viewModel.isStartingRecording)
                 .help(cannotStartRecording ? "Another meeting is currently being recorded" : "Start or stop recording for this meeting")
 
+                if viewModel.meeting.convexConversationId != nil {
+                    Button(action: {
+                        viewModel.openConversationInWeb()
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.up.right")
+                                .foregroundColor(.accentColor)
+                            Text("Web")
+                        }
+                        .frame(minWidth: 80, minHeight: 36)
+                        .padding(.horizontal, 8)
+                        .background(Color.accentColor.opacity(0.1))
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.conversationURL == nil)
+                    .help("Open conversation in Audora web")
+                }
+
                 Spacer()
             }
         }
     }
 
-    private var backendConversationSection: some View {
-        Group {
-            if let conversationId = viewModel.meeting.convexConversationId {
-                HStack(spacing: 12) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Web conversation")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
 
-                        Text(conversationId)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .textSelection(.enabled)
-                    }
-
-                    Spacer()
-
-                    Button {
-                        viewModel.copyConversationId()
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .help("Copy conversation ID")
-
-                    Button {
-                        viewModel.openConversationInWeb()
-                    } label: {
-                        Label("Open", systemImage: "arrow.up.right")
-                    }
-                    .disabled(viewModel.conversationURL == nil)
-                    .help("Open conversation in Audora web")
-                }
-                .padding(12)
-                .background(Color.green.opacity(0.08))
-                .cornerRadius(8)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.green.opacity(0.18), lineWidth: 1)
-                )
-            } else if viewModel.isRecording {
-                HStack(spacing: 12) {
-                    ProgressView()
-                        .scaleEffect(0.6)
-                        .frame(width: 16, height: 16)
-                    Text("Web conversation will be created when recording stops")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                }
-                .padding(12)
-                .background(Color.accentColor.opacity(0.08))
-                .cornerRadius(8)
+    private var detailPaneToggle: some View {
+        Picker("Meeting detail", selection: $selectedDetailPane) {
+            ForEach(MeetingDetailPane.allCases) { pane in
+                Label(pane.rawValue, systemImage: pane.systemImage)
+                    .tag(pane)
             }
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
     }
 
     private var transcriptSection: some View {
@@ -495,6 +490,40 @@ struct MeetingDetailContentView: View {
                 }
                 .frame(maxHeight: .infinity)
             }
+            .background(Color.gray.opacity(0.05))
+            .cornerRadius(8)
+        }
+    }
+
+    private var preMeetingNotesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Pre-meeting notes")
+                    .font(.headline)
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Text("Saved locally")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $viewModel.meeting.userNotes)
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if viewModel.meeting.userNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Jot down agenda items, questions, names, reminders, or anything you want top of mind before the call.")
+                        .foregroundColor(.secondary)
+                        .padding(EdgeInsets(top: 16, leading: 14, bottom: 0, trailing: 14))
+                        .allowsHitTesting(false)
+                }
+            }
+            .frame(maxHeight: .infinity)
             .background(Color.gray.opacity(0.05))
             .cornerRadius(8)
         }
