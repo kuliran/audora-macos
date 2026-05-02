@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		25E42AB42F12423000067344 /* ConvexClerk in Frameworks */ = {isa = PBXBuildFile; productRef = 25E42AB32F12423000067344 /* ConvexClerk */; };
+		25E42AC02F12550000067344 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 25E42ABF2F12550000067344 /* FluidAudio */; };
 		C56DE0BE2EF38F5E00AB086D /* ConvexMobile in Frameworks */ = {isa = PBXBuildFile; productRef = C56DE0BD2EF38F5E00AB086D /* ConvexMobile */; };
 		CC5718382E2020490042BA88 /* OpenAI in Frameworks */ = {isa = PBXBuildFile; productRef = CC5718372E2020490042BA88 /* OpenAI */; };
 		CCBA53E72E212F1C00469D84 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = CCBA53E62E212F1C00469D84 /* Sparkle */; };
@@ -15,13 +16,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		25E42AB72F1249FC00067344 /* Config.base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.base.xcconfig; sourceTree = "<group>"; };
 		25E42AB52F1249FB00067344 /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
+		25E42AB72F1249FC00067344 /* Config.base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.base.xcconfig; sourceTree = "<group>"; };
 		CC5718182E201D8D0042BA88 /* audora.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = audora.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		25E42AB82F1249FC00067344 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+		25E42AB82F1249FC00067344 /* Exceptions for "audora" folder in "audora" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
@@ -34,11 +35,7 @@
 		CC57181A2E201D8D0042BA88 /* audora */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				25E42AB82F1249FC00067344 /* PBXFileSystemSynchronizedBuildFileExceptionSet */,
-			);
-			explicitFileTypes = {
-			};
-			explicitFolders = (
+				25E42AB82F1249FC00067344 /* Exceptions for "audora" folder in "audora" target */,
 			);
 			path = audora;
 			sourceTree = "<group>";
@@ -53,6 +50,7 @@
 				CCC33F812E236B6F00EDE382 /* PostHog in Frameworks */,
 				CC5718382E2020490042BA88 /* OpenAI in Frameworks */,
 				CCBA53E72E212F1C00469D84 /* Sparkle in Frameworks */,
+				25E42AC02F12550000067344 /* FluidAudio in Frameworks */,
 				C56DE0BE2EF38F5E00AB086D /* ConvexMobile in Frameworks */,
 				25E42AB42F12423000067344 /* ConvexClerk in Frameworks */,
 			);
@@ -112,6 +110,7 @@
 				CCC33F802E236B6F00EDE382 /* PostHog */,
 				C56DE0BD2EF38F5E00AB086D /* ConvexMobile */,
 				25E42AB32F12423000067344 /* ConvexClerk */,
+				25E42ABF2F12550000067344 /* FluidAudio */,
 			);
 			productName = audora;
 			productReference = CC5718182E201D8D0042BA88 /* audora.app */;
@@ -147,6 +146,7 @@
 				CCC33F7F2E236B6F00EDE382 /* XCRemoteSwiftPackageReference "posthog-ios" */,
 				C56DE0BC2EF38F5E00AB086D /* XCRemoteSwiftPackageReference "convex-swift" */,
 				25E42AB22F12423000067344 /* XCRemoteSwiftPackageReference "convex-swift-clerk" */,
+				25E42ABE2F12550000067344 /* XCRemoteSwiftPackageReference "FluidAudio" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CC5718192E201D8D0042BA88 /* Products */;
@@ -406,6 +406,14 @@
 				kind = branch;
 			};
 		};
+		25E42ABE2F12550000067344 /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.13.5;
+			};
+		};
 		C56DE0BC2EF38F5E00AB086D /* XCRemoteSwiftPackageReference "convex-swift" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/get-convex/convex-swift";
@@ -445,6 +453,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 25E42AB22F12423000067344 /* XCRemoteSwiftPackageReference "convex-swift-clerk" */;
 			productName = ConvexClerk;
+		};
+		25E42ABF2F12550000067344 /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 25E42ABE2F12550000067344 /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
 		};
 		C56DE0BD2EF38F5E00AB086D /* ConvexMobile */ = {
 			isa = XCSwiftPackageProductDependency;

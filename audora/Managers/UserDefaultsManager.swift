@@ -30,6 +30,7 @@ class UserDefaultsManager {
         static let launchAtLogin = "launchAtLogin"
         static let notifyScheduledMeetings = "notifyScheduledMeetings"
         static let realtimeFeedbackEnabled = "realtimeFeedbackEnabled"
+        static let transcriptionProvider = "transcriptionProvider"
     }
 
     // MARK: - User Blurb
@@ -139,5 +140,16 @@ class UserDefaultsManager {
     var realtimeFeedbackEnabled: Bool {
         get { userDefaults.object(forKey: Keys.realtimeFeedbackEnabled) as? Bool ?? false }
         set { userDefaults.set(newValue, forKey: Keys.realtimeFeedbackEnabled) }
+    }
+
+    var transcriptionProvider: TranscriptionProviderOption {
+        get {
+            guard let rawValue = userDefaults.string(forKey: Keys.transcriptionProvider),
+                  let provider = TranscriptionProviderOption(rawValue: rawValue) else {
+                return .speechmatics
+            }
+            return provider
+        }
+        set { userDefaults.set(newValue.rawValue, forKey: Keys.transcriptionProvider) }
     }
 }

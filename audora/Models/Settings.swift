@@ -79,6 +79,11 @@ struct Settings: Codable {
         set { UserDefaultsManager.shared.realtimeFeedbackEnabled = newValue }
     }
 
+    var transcriptionProvider: TranscriptionProviderOption {
+        get { UserDefaultsManager.shared.transcriptionProvider }
+        set { UserDefaultsManager.shared.transcriptionProvider = newValue }
+    }
+
 
     // System prompt default loading
     static func defaultSystemPrompt() -> String {

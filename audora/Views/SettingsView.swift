@@ -2,6 +2,7 @@ import SwiftUI
 
 enum SettingsTab: String, CaseIterable, Identifiable {
     case general = "General"
+    case transcription = "Transcription"
     case calendar = "Calendar"
     case notifications = "Notifications"
 
@@ -10,6 +11,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .general: return "gear"
+        case .transcription: return "waveform"
         case .calendar: return "calendar"
         case .notifications: return "bell"
         }
@@ -79,6 +81,8 @@ struct SettingsView: View {
                     switch selectedTab {
                     case .general:
                         GeneralSettingsView(viewModel: viewModel)
+                    case .transcription:
+                        TranscriptionSettingsView(viewModel: viewModel)
                     case .calendar:
                         CalendarSettingsView(viewModel: viewModel)
                     case .notifications:
@@ -248,6 +252,86 @@ struct GeneralSettingsView: View {
                         .stroke(Color(NSColor.separatorColor), lineWidth: 1)
                 )
             }
+        }
+    }
+}
+
+struct TranscriptionSettingsView: View {
+    @ObservedObject var viewModel: SettingsViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("Transcription")
+                .font(.title2)
+                .fontWeight(.semibold)
+
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .center, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Provider")
+                            .font(.body)
+                            .fontWeight(.medium)
+                        Text(viewModel.settings.transcriptionProvider.detailText)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    Spacer()
+
+                    Picker("", selection: $viewModel.settings.transcriptionProvider) {
+                        ForEach(TranscriptionProviderOption.allCases) { provider in
+                            Text(provider.displayName).tag(provider)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 280)
+                }
+                .padding(16)
+
+                Divider()
+                    .padding(.leading, 16)
+
+                HStack(alignment: .center, spacing: 12) {
+                    Image(systemName: "cpu")
+                        .foregroundColor(.secondary)
+                        .frame(width: 20)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Local Parakeet")
+                            .font(.body)
+                            .fontWeight(.medium)
+                        Text(ParakeetTranscriptionProvider.modelReadinessText)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    Spacer()
+                }
+                .padding(16)
+
+                Divider()
+                    .padding(.leading, 16)
+
+                HStack(alignment: .center, spacing: 12) {
+                    Image(systemName: "info.circle")
+                        .foregroundColor(.secondary)
+                        .frame(width: 20)
+
+                    Text("Provider changes apply to the next recording.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Spacer()
+                }
+                .padding(16)
+            }
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
+            )
         }
     }
 }

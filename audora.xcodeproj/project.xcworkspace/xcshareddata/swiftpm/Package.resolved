@@ -1,5 +1,5 @@
 {
-  "originHash" : "6f27f5866f966a30f6558a24af46fed8e2d7c57d93b813ff19d3dded7f5221c8",
+  "originHash" : "65109080d998676cf9e82ce400af08ba8c560375265b1f0b3da504cde3006c9f",
   "pins" : [
     {
       "identity" : "clerk-ios",
@@ -35,6 +35,15 @@
       "state" : {
         "revision" : "ccc898f21992ebc130bc04cc197460a5ae230bcf",
         "version" : "2.5.3"
+      }
+    },
+    {
+      "identity" : "fluidaudio",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/FluidInference/FluidAudio.git",
+      "state" : {
+        "revision" : "6c40eca4310efffe80e723f1e628f6cf76d3feaf",
+        "version" : "0.13.5"
       }
     },
     {
