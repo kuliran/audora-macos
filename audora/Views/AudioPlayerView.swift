@@ -274,8 +274,10 @@ struct AudioPlayerView: View {
     private var placeholderContent: some View {
         VStack(spacing: 12) {
             HStack {
-                Image(systemName: "waveform")
-                    .foregroundColor(.secondary)
+                Image("Icon32")
+                    .resizable()
+                    .frame(width: 16, height: 16)
+                    .opacity(0.6)
                 Text("No audio file available")
                     .font(.caption)
                     .foregroundColor(.secondary)

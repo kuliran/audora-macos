@@ -18,6 +18,8 @@ class AudioRecordingManager: ObservableObject {
     
     // Track segments for each meeting to combine them later
     private var meetingSegments: [UUID: [URL]] = [:]
+    private var micWriteCount = 0
+    private var systemWriteCount = 0
     
     private let documentsDirectory: URL
     private let recordingsDirectory: URL
@@ -43,6 +45,10 @@ class AudioRecordingManager: ObservableObject {
     func startRecording(for meetingId: UUID) {
         print("🎙️ Starting audio recording for meeting: \(meetingId)")
         
+        // Reset write counters
+        micWriteCount = 0
+        systemWriteCount = 0
+        
         // Create meeting-specific folder
         let meetingFolder = getMeetingFolder(for: meetingId)
         try? FileManager.default.createDirectory(at: meetingFolder, withIntermediateDirectories: true)
@@ -51,6 +57,9 @@ class AudioRecordingManager: ObservableObject {
         let timestamp = Int(Date().timeIntervalSince1970)
         micFileURL = meetingFolder.appendingPathComponent("mic_\(timestamp).caf")
         systemFileURL = meetingFolder.appendingPathComponent("system_\(timestamp).caf")
+        
+        print("📁 Mic file URL: \(micFileURL?.lastPathComponent ?? "nil")")
+        print("📁 System file URL: \(systemFileURL?.lastPathComponent ?? "nil")")
         
         // Initialize segments array for this meeting if needed
         if meetingSegments[meetingId] == nil {
@@ -95,6 +104,10 @@ class AudioRecordingManager: ObservableObject {
                     print("⚠️ Buffer channel count (\(buffer.format.channelCount)) doesn't match file format (\(file.processingFormat.channelCount)). This may cause errors.")
                 }
                 try file.write(from: buffer)
+                micWriteCount += 1
+                if micWriteCount == 1 {
+                    print("✅ First mic buffer written to file")
+                }
             } catch {
                 print("❌ Failed to write mic audio buffer: \(error)")
             }
@@ -138,6 +151,10 @@ class AudioRecordingManager: ObservableObject {
                     print("⚠️ Buffer channel count (\(buffer.format.channelCount)) doesn't match file format (\(file.processingFormat.channelCount)). This may cause errors.")
                 }
                 try file.write(from: buffer)
+                systemWriteCount += 1
+                if systemWriteCount == 1 {
+                    print("✅ First system buffer written to file")
+                }
             } catch {
                 print("❌ Failed to write system audio buffer: \(error)")
             }
@@ -150,6 +167,9 @@ class AudioRecordingManager: ObservableObject {
     @MainActor
     func stopRecordingAndSave(for meetingId: UUID) -> URL? {
         print("🛑 Stopping audio recording for meeting: \(meetingId)")
+        print("📊 Audio writes — mic: \(micWriteCount), system: \(systemWriteCount)")
+        print("📊 micAudioFile: \(micAudioFile != nil ? "exists" : "nil"), systemAudioFile: \(systemAudioFile != nil ? "exists" : "nil")")
+        print("📊 micFileURL: \(micFileURL?.lastPathComponent ?? "nil"), systemFileURL: \(systemFileURL?.lastPathComponent ?? "nil")")
         
         // Close audio files
         micAudioFile = nil

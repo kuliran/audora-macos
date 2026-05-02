@@ -190,45 +190,49 @@ class AudioManager: NSObject, ObservableObject {
                 UserDefaultsManager.shared.transcriptionProvider
             }
 
+            // Set provider immediately so taps know what to configure
+            await MainActor.run {
+                self.activeTranscriptionProvider = selectedProvider
+                self.transcriptionStatus = selectedProvider == .speechmatics ? "Speechmatics ready" : "Loading Local Parakeet..."
+            }
+
+            // Start taps IMMEDIATELY to get permissions and start recording to disk
+            print("🎙️ Starting audio taps (session: \(thisSession))")
+            await MainActor.run {
+                guard self.sessionID == thisSession else {
+                    print("⚠️ Session ID changed before tap start — aborting")
+                    return
+                }
+
+                print("🎙️ Starting microphone tap now...")
+                // Always start microphone - user prioritizes voice transcription
+                self.startMicrophoneTap()
+
+                // Check audio output device
+                let usingHeadphones = self.isUsingHeadphones()
+                if usingHeadphones {
+                    print("🎧 Headphones detected - optimal recording setup")
+                } else {
+                    print("🔊 Speakers detected - may have some echo/duplicates")
+                }
+
+                // Always start system audio capture (this triggers permission prompt)
+                Task {
+                    await self.startSystemAudioTap()
+                }
+            }
+
+            // Prepare the provider (load models for Parakeet, etc.)
             do {
                 try await self.prepareTranscriptionProvider(selectedProvider, sessionID: thisSession)
+                print("✅ Transcription provider ready (\(selectedProvider.displayName))")
             } catch {
                 let errorMsg = "Failed to start \(selectedProvider.displayName): \(ErrorHandler.shared.handleError(error))"
                 print("❌ \(errorMsg)")
                 await MainActor.run {
                     guard self.sessionID == thisSession else { return }
                     self.errorMessage = errorMsg
-                    self.transcriptionStatus = "Ready"
-                    self.parakeetDownloadProgress = nil
-                }
-                return
-            }
-
-            // Proceed with taps after auth check
-            await MainActor.run {
-                guard self.sessionID == thisSession else { return }
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    guard self.sessionID == thisSession else { return }
-
-                    // Always start microphone - user prioritizes voice transcription
-                    self.startMicrophoneTap()
-
-                    // Check audio output device
-                    let usingHeadphones = self.isUsingHeadphones()
-
-                    if usingHeadphones {
-                        print("🎧 Headphones detected - optimal recording setup")
-                    } else {
-                        // Using speakers - warn about potential duplicates but still record
-                        print("🔊 Speakers detected - may have some echo/duplicates")
-                        print("💡 Connect headphones for best results (prevents echo)")
-                    }
-
-                    // Always start system audio capture
-                    Task {
-                        await self.startSystemAudioTap()
-                    }
+                    // We don't stop the recording because audio is still being saved to disk
                 }
             }
         }
