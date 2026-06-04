@@ -169,10 +169,10 @@ struct GeneralSettingsView: View {
                     .fontWeight(.semibold)
 
                 VStack(alignment: .leading, spacing: 12) {
-                    LinkRow(title: "GitHub Repository", url: "https://github.com/psycho-baller/audora")
-                    LinkRow(title: "Landing Page", url: "https://audora.psycho-baller.com")
-                    LinkRow(title: "Privacy Policy", url: "https://audora.psycho-baller.com/privacy")
-                    LinkRow(title: "Terms of Service", url: "https://audora.psycho-baller.com/terms")
+                    LinkRow(title: "GitHub Repository", url: "https://github.com/rami-maalouf/audora")
+                    LinkRow(title: "Landing Page", url: "https://audora.rami-maalouf.com")
+                    LinkRow(title: "Privacy Policy", url: "https://audora.rami-maalouf.com/privacy")
+                    LinkRow(title: "Terms of Service", url: "https://audora.rami-maalouf.com/terms")
                 }
                 .padding()
                 .background(Color(NSColor.controlBackgroundColor))

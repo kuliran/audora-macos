@@ -327,7 +327,7 @@ for item in root.findall('.//item'):
                     # Extract just the filename
                     filename = url.split('/')[-1]
                     # Set the correct URL with version folder
-                    new_url = f'https://github.com/psycho-baller/audora/releases/download/v{version}/{filename}'
+                    new_url = f'https://github.com/rami-maalouf/audora/releases/download/v{version}/{filename}'
                     enclosure.set('url', new_url)
 
         # Fix the main enclosure URL (ZIP/DMG) to point to the GitHub release asset
@@ -336,7 +336,7 @@ for item in root.findall('.//item'):
             url = main_enclosure.get('url')
             if url:
                 filename = url.split('/')[-1]
-                new_url = f'https://github.com/psycho-baller/audora/releases/download/v{version}/{filename}'
+                new_url = f'https://github.com/rami-maalouf/audora/releases/download/v{version}/{filename}'
                 main_enclosure.set('url', new_url)
 
 # Write the fixed appcast

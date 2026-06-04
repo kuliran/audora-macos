@@ -144,10 +144,10 @@ struct SignInView: View {
                     .foregroundColor(.secondary)
 
                 HStack(spacing: 4) {
-                    Link("Terms of Service", destination: URL(string: "https://audora.psycho-baller.com/terms")!)
+                    Link("Terms of Service", destination: URL(string: "https://audora.rami-maalouf.com/terms")!)
                     Text("and")
                         .foregroundColor(.secondary)
-                    Link("Privacy Policy", destination: URL(string: "https://audora.psycho-baller.com/privacy")!)
+                    Link("Privacy Policy", destination: URL(string: "https://audora.rami-maalouf.com/privacy")!)
                 }
                 .font(.caption)
             }

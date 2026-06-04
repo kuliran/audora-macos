@@ -6,7 +6,7 @@
   <p align="center">
     The Free, Open-Source AI Communication Coach for Busy Professionals
     <br />
-     <a href="https://github.com/psycho-baller/audora/releases/latest/download/audora.dmg">Download for MacOS 14+</a>
+     <a href="https://github.com/rami-maalouf/audora/releases/latest/download/audora.dmg">Download for MacOS 14+</a>
   </p>
 </div>
 
@@ -51,7 +51,7 @@ Follow these steps to create a new release with auto-updates:
 
 3. **Create GitHub Release:**
 
-   - Go to [GitHub Releases](https://github.com/psycho-baller/audora/releases)
+   - Go to [GitHub Releases](https://github.com/rami-maalouf/audora/releases)
    - Click "Create a new release"
    - Tag: `v1.0.1` (match the version number)
    - Title: `audora v1.0.1`

@@ -147,11 +147,11 @@ struct AudoraApp: App {
 
             Divider()
 
-            Link("Documentation", destination: URL(string: "https://audora.psycho-baller.com/docs")!)
+            Link("Documentation", destination: URL(string: "https://audora.rami-maalouf.com/docs")!)
 
-            Link("Report an Issue", destination: URL(string: "https://github.com/psycho-baller/audora/issues")!)
+            Link("Report an Issue", destination: URL(string: "https://github.com/rami-maalouf/audora/issues")!)
 
-            Link("Privacy Policy", destination: URL(string: "https://audora.psycho-baller.com/privacy")!)
+            Link("Privacy Policy", destination: URL(string: "https://audora.rami-maalouf.com/privacy")!)
 
             Button("Quit Audora") {
                 NSApp.terminate(nil)

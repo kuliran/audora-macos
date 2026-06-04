@@ -65,7 +65,7 @@ struct OnboardingView: View {
 
                             HStack {
                                 Button("Privacy Policy") {
-                                    if let url = URL(string: "https://audora.psycho-baller.com/privacy") {
+                                    if let url = URL(string: "https://audora.rami-maalouf.com/privacy") {
                                         NSWorkspace.shared.open(url)
                                     }
                                 }
@@ -75,7 +75,7 @@ struct OnboardingView: View {
                                     .foregroundColor(.secondary)
 
                                 Button("Terms of Service") {
-                                    if let url = URL(string: "https://audora.psycho-baller.com/terms") {
+                                    if let url = URL(string: "https://audora.rami-maalouf.com/terms") {
                                         NSWorkspace.shared.open(url)
                                     }
                                 }
