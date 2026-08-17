@@ -67,6 +67,7 @@ class ConvexService: ObservableObject {
     #endif
     private var hasAuthenticatedConvexClient = false
     private var hasEnsuredUserRecord = false
+    private var loginTask: Task<Bool, Never>?
     #if AUDORA_LOCAL_SETUP
     private var localCredentialsExpiresAt: Date?
     #endif
@@ -166,6 +167,21 @@ class ConvexService: ObservableObject {
 
     /// Restores either the loopback JWT session or the cached Clerk session.
     func loginFromCache() async -> Bool {
+        if let loginTask {
+            return await loginTask.value
+        }
+
+        let task = Task { [weak self] in
+            guard let self else { return false }
+            return await self.performLoginFromCache()
+        }
+        loginTask = task
+        let result = await task.value
+        loginTask = nil
+        return result
+    }
+
+    private func performLoginFromCache() async -> Bool {
         print("🔐 [ConvexService] loginFromCache() called")
 
         #if AUDORA_LOCAL_SETUP

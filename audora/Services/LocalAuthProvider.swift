@@ -39,12 +39,15 @@ private final class LocalTokenSessionDelegate: NSObject, URLSessionTaskDelegate 
 }
 
 enum LocalAuthError: LocalizedError {
+    case connectionUnavailable
     case invalidEndpoint
     case invalidResponse
     case serverUnavailable(Int)
 
     var errorDescription: String? {
         switch self {
+        case .connectionUnavailable:
+            return "The local JWT service at 127.0.0.1:5173 is not reachable. Start the Audora web server, then retry."
         case .invalidEndpoint:
             return "The local JWT endpoint is invalid."
         case .invalidResponse:
@@ -103,7 +106,17 @@ struct LocalAuthProvider: AuthProvider {
         )
         defer { session.finishTasksAndInvalidate() }
 
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            let networkError = error as NSError
+            if networkError.domain == NSURLErrorDomain {
+                throw LocalAuthError.connectionUnavailable
+            }
+            throw error
+        }
         guard let httpResponse = response as? HTTPURLResponse,
               isExactLocalTokenURL(httpResponse.url) else {
             throw LocalAuthError.invalidResponse
