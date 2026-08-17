@@ -204,7 +204,7 @@ class MeetingViewModel: ObservableObject {
     var conversationURL: URL? {
         guard let conversationId = meeting.convexConversationId else { return nil }
         #if AUDORA_LOCAL_SETUP
-        return URL(string: "http://127.0.0.1:5173/dashboard/view/\(conversationId)")
+        return URL(string: "http://127.0.0.1:5173/dashboard/conversations/\(conversationId)")
         #else
         return URL(string: "https://getaudora.app/dashboard/conversations/\(conversationId)")
         #endif
