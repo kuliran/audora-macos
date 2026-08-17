@@ -353,6 +353,10 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
 
     private static let vadChunkSize = 4096
     private static let minimumSpeechSamples = 16_000
+    // Normal live segments stay conservative, but Stop must preserve a short
+    // final word as well. At 16 kHz this is 250 ms of audio.
+    private static let minimumFinalSpeechSamples = 4_000
+    private static let minimumFinalPeakAmplitude: Float = 0.0005
     private static let flushOverlapSamples = 16_000
     private static let prerollChunkCount = 2
     private static let contextWordCount = 5
@@ -576,16 +580,26 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
 
         print("🎙️ [\(source)] Run loop ended — buffers: \(bufferCount), vadFailures: \(vadFailureCount), fallback: \(useVadFallback)")
 
-        // Flush remaining speech from VAD path
-        if isSpeaking, vadReadIndex < vadBuffer.count {
-            speechSamples.append(contentsOf: vadBuffer[vadReadIndex..<vadBuffer.count])
+        // Flush the final VAD tail. A user can press Stop before Silero has
+        // emitted speechStart, so in that case include the short preroll and
+        // the not-yet-processed VAD remainder too. Requiring a small amount of
+        // signal keeps ordinary trailing silence away from Parakeet.
+        let unreadVadSamples = vadReadIndex < vadBuffer.count
+            ? Array(vadBuffer[vadReadIndex..<vadBuffer.count])
+            : []
+        let finalVadSamples: [Float]
+        if isSpeaking || !speechSamples.isEmpty {
+            finalVadSamples = speechSamples + unreadVadSamples
+        } else {
+            finalVadSamples = recentChunks.flatMap { $0 } + unreadVadSamples
         }
-        if speechSamples.count >= Self.minimumSpeechSamples {
-            await transcribeSegment(speechSamples)
+        if Self.shouldTranscribeFinalTail(finalVadSamples) {
+            print("📝 [\(source)] Flushing final VAD tail: \(finalVadSamples.count) samples")
+            await transcribeSegment(finalVadSamples)
         }
 
         // Flush remaining fallback accumulator
-        if !fallbackAccumulator.isEmpty, fallbackAccumulator.count >= Self.minimumSpeechSamples {
+        if Self.shouldTranscribeFinalTail(fallbackAccumulator) {
             print("🔄 [\(source)] Flushing final fallback: \(fallbackAccumulator.count) samples")
             await transcribeSegment(fallbackAccumulator)
         }
@@ -655,6 +669,11 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
         }
 
         return currentText
+    }
+
+    private static func shouldTranscribeFinalTail(_ samples: [Float]) -> Bool {
+        guard samples.count >= minimumFinalSpeechSamples else { return false }
+        return samples.lazy.map { abs($0) }.max() ?? 0 >= minimumFinalPeakAmplitude
     }
 
     private func updateRateTracking(_ buffer: AVAudioPCMBuffer) {
