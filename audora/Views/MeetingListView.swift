@@ -282,6 +282,7 @@ private enum MeetingDetailPane: String, CaseIterable, Identifiable {
 struct MeetingDetailContentView: View {
     @StateObject private var viewModel: MeetingViewModel
     @StateObject private var recordingSessionManager = RecordingSessionManager.shared
+    @StateObject private var audioManager = AudioManager.shared
     @State private var showDeleteAlert = false
     @State private var selectedDetailPane: MeetingDetailPane = .transcript
     let onDelete: () -> Void
@@ -293,8 +294,7 @@ struct MeetingDetailContentView: View {
 
     // Computed property to determine if recording button should be disabled
     private var cannotStartRecording: Bool {
-        // Disable if another meeting is recording (not this one)
-        return recordingSessionManager.isRecording && !recordingSessionManager.isRecordingMeeting(viewModel.meeting.id)
+        recordingSessionManager.isBusy(withOtherMeeting: viewModel.meeting.id)
     }
 
     var body: some View {
@@ -318,6 +318,11 @@ struct MeetingDetailContentView: View {
             Text("Are you sure you want to delete this meeting? This action cannot be undone.")
         }
         .onDisappear {
+            // Do not let a model download finish later and start invisible capture
+            // after the user has navigated away from this meeting.
+            if recordingSessionManager.isPreparingMeeting(viewModel.meeting.id) {
+                viewModel.cancelPendingStart()
+            }
             // Auto-delete empty meetings when leaving, otherwise save
             viewModel.deleteIfEmpty()
         }
@@ -420,7 +425,11 @@ struct MeetingDetailContentView: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .disabled(cannotStartRecording || viewModel.isValidatingKey || viewModel.isStartingRecording)
+                .disabled(
+                    cannotStartRecording
+                    || viewModel.isValidatingKey
+                    || recordingSessionManager.isStoppingMeeting(viewModel.meeting.id)
+                )
                 .help(cannotStartRecording ? "Another meeting is currently being recorded" : "Start or stop recording for this meeting")
 
                 if viewModel.meeting.convexConversationId != nil {
@@ -443,6 +452,24 @@ struct MeetingDetailContentView: View {
                 }
 
                 Spacer()
+            }
+
+            if viewModel.isStartingRecording {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(audioManager.transcriptionStatus)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if let progress = audioManager.parakeetDownloadProgress {
+                        ProgressView(value: progress)
+                            .progressViewStyle(.linear)
+                            .accessibilityLabel("Parakeet model download")
+                    }
+                }
             }
         }
     }

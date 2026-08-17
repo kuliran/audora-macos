@@ -144,12 +144,22 @@ class UserDefaultsManager {
 
     var transcriptionProvider: TranscriptionProviderOption {
         get {
+            #if AUDORA_LOCAL_SETUP
+            return .parakeet
+            #else
             guard let rawValue = userDefaults.string(forKey: Keys.transcriptionProvider),
                   let provider = TranscriptionProviderOption(rawValue: rawValue) else {
                 return .speechmatics
             }
             return provider
+            #endif
         }
-        set { userDefaults.set(newValue.rawValue, forKey: Keys.transcriptionProvider) }
+        set {
+            #if AUDORA_LOCAL_SETUP
+            userDefaults.set(TranscriptionProviderOption.parakeet.rawValue, forKey: Keys.transcriptionProvider)
+            #else
+            userDefaults.set(newValue.rawValue, forKey: Keys.transcriptionProvider)
+            #endif
+        }
     }
 }

@@ -1,67 +1,38 @@
-<div align="center">
-    <!-- <img src="https://github.com/user-attachments/assets/309577e8-94db-431f-b8df-a53a763b4c87" alt="Logo" width="80" height="80"> -->
+# Audora macOS — local setup
 
-<h1 align="center">audora</h3>
+This fork builds the macOS recorder in local-only mode:
 
-  <p align="center">
-    The Free, Open-Source AI Communication Coach for Busy Professionals
-    <br />
-     <a href="https://github.com/psycho-baller/audora/releases/latest/download/audora.dmg">Download for MacOS 14+</a>
-  </p>
-</div>
+- authentication uses the loopback JWT issuer at `127.0.0.1:5173`;
+- data syncs only to the loopback Convex backend at `127.0.0.1:3210`;
+- transcription is forced to FluidAudio's local Parakeet TDT v3 provider;
+- Clerk, Speechmatics, PostHog, Sparkle, and the unused OpenAI Swift package are absent from the target.
 
-## Releasing a New Version
+The web coaching bridge is separate. It invokes the locally installed Codex CLI using your existing ChatGPT login. Transcript text sent to that bridge is processed by OpenAI and consumes your Codex subscription allowance; recordings are not sent by the bridge.
 
-Follow these steps to create a new release with auto-updates:
+## Requirements
 
-### Prerequisites
+- Apple Silicon Mac
+- macOS 15 or newer
+- Full Xcode (Command Line Tools alone are insufficient)
+- The parent Audora local web and Convex services running first
 
-- Homebrew packages: `brew install create-dmg sparkle`
-- Make scripts executable: `chmod +x scripts/update_version.sh scripts/build_release.sh`
+See `docs/LOCAL_CODEX_SETUP.md` in the parent repository for the complete backend and Codex setup.
 
-### Release Process
+## Build and run
 
-1. **Update the version number:**
+1. Open `audora.xcodeproj` in Xcode.
+2. Let Xcode resolve the pinned Convex Swift and FluidAudio packages.
+3. In **Signing & Capabilities**, select your Personal Team or choose **Sign to Run Locally**.
+4. The fork defaults to `com.audora.local`. If that identifier is unavailable to your team, set `AUDORA_PRODUCT_BUNDLE_IDENTIFIER` in the ignored `Config.xcconfig`.
+5. Select **My Mac** and run the `audora` scheme.
 
-   ```bash
-   # For bug fixes (1.0 → 1.0.1):
-   ./scripts/update_version.sh patch
+The app requests microphone and system-audio permissions. On the first recording it downloads and initializes the Parakeet v3 and Silero VAD assets from Hugging Face before audio capture begins; progress is shown beside the recording controls. Later recordings transcribe locally from the cached models.
 
-   # For new features (1.0 → 1.1):
-   ./scripts/update_version.sh minor
+## Network expectations
 
-   # For major changes (1.0 → 2.0):
-   ./scripts/update_version.sh major
+- First source build: GitHub traffic for Swift packages.
+- First model setup: Hugging Face/CDN traffic for Parakeet and Silero VAD.
+- Warm recording and local Convex sync: loopback traffic only.
+- Coaching in the web UI: transcript text is sent through the Codex CLI to OpenAI.
 
-   # For custom version:
-   ./scripts/update_version.sh custom 1.2.0
-   ```
-
-2. **Build the release:**
-
-   ```bash
-   ./scripts/build_release.sh
-   ```
-
-   This will:
-
-   - Clean build the app in Release mode
-   - Create a signed DMG file
-   - Generate the appcast.xml for auto-updates
-
-3. **Create GitHub Release:**
-
-   - Go to [GitHub Releases](https://github.com/psycho-baller/audora/releases)
-   - Click "Create a new release"
-   - Tag: `v1.0.1` (match the version number)
-   - Title: `audora v1.0.1`
-   - Upload the DMG and zip files from `releases/` folder
-   - Generate release notes
-
-4. **Update appcast:**
-
-   ```bash
-   git add appcast.xml
-   git commit -m "Update appcast for v1.0.1"
-   git push
-   ```
+Local meeting JSON and speech-optimized WAV audio files are stored in the app sandbox without additional at-rest encryption. The final recording is a time-aligned mix of microphone and system audio at 16 kHz mono Int16 PCM (roughly 115 MB per recorded hour). Lossless per-source CAF files are retained until that WAV is installed atomically, so allow additional temporary disk space while long recordings are finalized. Treat this fork as a single-user development setup and stop the local services when testing is complete.

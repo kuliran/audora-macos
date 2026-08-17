@@ -1,7 +1,9 @@
 import Foundation
 import SwiftUI
 import Combine
+#if !AUDORA_LOCAL_SETUP
 import PostHog
+#endif
 import AppKit
 import EventKit
 
@@ -103,14 +105,14 @@ class MeetingListViewModel: ObservableObject {
         // Check if a meeting already exists for this calendar event
         // Search in both the current meetings list and storage to be thorough
         if let existingMeeting = meetings.first(where: { $0.calendarEventId == event.eventIdentifier }) {
-            print("✅ Found existing meeting for calendar event: \(event.eventIdentifier)")
+            print("✅ Found existing meeting for calendar event")
             return existingMeeting
         }
         
         // Also check in storage in case it wasn't loaded yet
         let allMeetings = LocalStorageManager.shared.loadMeetings()
         if let existingMeeting = allMeetings.first(where: { $0.calendarEventId == event.eventIdentifier }) {
-            print("✅ Found existing meeting in storage for calendar event: \(event.eventIdentifier)")
+            print("✅ Found existing meeting in storage for calendar event")
             // Add to current list if not already there
             if !meetings.contains(where: { $0.id == existingMeeting.id }) {
                 meetings.insert(existingMeeting, at: 0)
@@ -127,7 +129,9 @@ class MeetingListViewModel: ObservableObject {
         _ = LocalStorageManager.shared.saveMeeting(newMeeting)
 
         NSApp.activate(ignoringOtherApps: true)
+        #if !AUDORA_LOCAL_SETUP
         PostHogSDK.shared.capture("meeting_created_from_calendar")
+        #endif
 
         return newMeeting
     }
@@ -157,6 +161,8 @@ class MeetingListViewModel: ObservableObject {
     }
 
     func deleteMeeting(_ meeting: Meeting) {
+        let recordingManager = RecordingSessionManager.shared
+        recordingManager.cancelActiveRecording(for: meeting.id)
         meetings.removeAll { $0.id == meeting.id }
         _ = LocalStorageManager.shared.deleteMeeting(meeting)
     }
@@ -168,7 +174,7 @@ class MeetingListViewModel: ObservableObject {
         let formattedDate = dateFormatter.string(from: Date())
 
         // Create meeting immediately with placeholder title
-        var newMeeting = Meeting(title: "Recording - \(formattedDate)")
+        let newMeeting = Meeting(title: "Recording - \(formattedDate)")
         let meetingId = newMeeting.id // Capture ID for background task
         meetings.insert(newMeeting, at: 0)
         // _ = LocalStorageManager.shared.saveMeeting(newMeeting)
@@ -176,12 +182,11 @@ class MeetingListViewModel: ObservableObject {
         // Get browser context asynchronously and update title later
         Task.detached(priority: .background) {
             if let context = BrowserURLHelper.getCurrentContext() {
-                print("📱 Browser context: \(context)")
                 await MainActor.run {
                     // Find and update the meeting in the array by ID
                     if let index = self.meetings.firstIndex(where: { $0.id == meetingId }) {
                         self.meetings[index].title = "\(context) - \(formattedDate)"
-                        print("✅ Updated title to: \(self.meetings[index].title)")
+                        print("✅ Updated meeting title")
                         let success = LocalStorageManager.shared.saveMeeting(self.meetings[index])
                         if success {
                             // Post notification so MeetingViewModel can update
@@ -196,13 +201,15 @@ class MeetingListViewModel: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
 
         // Track meeting creation event
+        #if !AUDORA_LOCAL_SETUP
         PostHogSDK.shared.capture("meeting_created")
+        #endif
         return newMeeting
     }
 
     /// Save a transcription session (e.g., from mic following mode)
     func saveTranscriptionSession(_ session: TranscriptionSession) {
-        print("💾 Saving transcription session: \(session.title)")
+        print("💾 Saving transcription session: \(session.id)")
 
         // Add to the list
         meetings.insert(session, at: 0)
@@ -211,10 +218,12 @@ class MeetingListViewModel: ObservableObject {
         _ = LocalStorageManager.shared.saveMeeting(session)
 
         // Track the event
+        #if !AUDORA_LOCAL_SETUP
         PostHogSDK.shared.capture("transcription_session_saved", properties: [
             "source": session.source.rawValue,
             "chunk_count": session.transcriptChunks.count
         ])
+        #endif
 
         print("✅ Transcription session saved successfully")
     }

@@ -1,7 +1,6 @@
 import Foundation
 import SwiftUI
 import Combine
-import PostHog
 import AppKit
 
 // Add notification name for meeting saved events
@@ -50,7 +49,6 @@ class MeetingViewModel: ObservableObject {
         // Load the latest version of the meeting from storage if it exists
         if let savedMeeting = LocalStorageManager.shared.loadMeetings().first(where: { $0.id == meeting.id }) {
             print("🔄 Loading latest version of meeting: \(meeting.id)")
-            print("   audioFileURL: \(savedMeeting.audioFileURL ?? "nil")")
             if let audioPath = savedMeeting.audioFileURL {
                 let fileExists = FileManager.default.fileExists(atPath: audioPath)
                 print("   File exists: \(fileExists)")
@@ -65,17 +63,13 @@ class MeetingViewModel: ObservableObject {
 
         // Detect if this is a new meeting based on content, not storage existence
         isNewMeeting = isEmpty
+        isStartingRecording = recordingSessionManager.isPreparingMeeting(self.meeting.id)
 
-        // Trigger SwiftUI updates when recording state changes
-        Publishers.CombineLatest(recordingSessionManager.$isRecording, recordingSessionManager.$activeMeetingId)
-            .sink { [weak self] (isRecording, activeMeetingId) in
+        // Mirror the manager's explicit lifecycle for this meeting.
+        recordingSessionManager.$lifecycle
+            .sink { [weak self] lifecycle in
                 guard let self = self else { return }
-
-                // If recording started for this meeting, end starting state
-                if isRecording && activeMeetingId == self.meeting.id {
-                    self.isStartingRecording = false
-                }
-                // Toggle the dummy property to trigger SwiftUI re-render
+                self.isStartingRecording = lifecycle == .preparing(self.meeting.id)
                 self.recordingStateChanged.toggle()
             }
             .store(in: &cancellables)
@@ -90,6 +84,7 @@ class MeetingViewModel: ObservableObject {
                     print("ℹ️ Suppressed non-critical error: \(errorMessage)")
                     return
                 }
+                self?.isStartingRecording = false
                 self?.errorMessage = errorMessage
                 print("🚨 Recording Session Manager Error: \(errorMessage)")
             }
@@ -128,8 +123,6 @@ class MeetingViewModel: ObservableObject {
 
                 if savedMeeting.audioFileURL != self.meeting.audioFileURL {
                     print("🔄 Updating audioFileURL in MeetingViewModel")
-                    print("   Old: \(self.meeting.audioFileURL ?? "nil")")
-                    print("   New: \(savedMeeting.audioFileURL ?? "nil")")
 
                     if let newPath = savedMeeting.audioFileURL {
                         let fileExists = FileManager.default.fileExists(atPath: newPath)
@@ -150,7 +143,7 @@ class MeetingViewModel: ObservableObject {
         $meeting
             .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
             .sink { [weak self] meeting in
-                print("🔄 Auto-saving meeting: \(meeting.id) - title: '\(meeting.title)', notes: '\(meeting.userNotes.prefix(50))...'")
+                print("🔄 Auto-saving meeting: \(meeting.id)")
                 self?.saveMeeting()
             }
             .store(in: &cancellables)
@@ -160,7 +153,9 @@ class MeetingViewModel: ObservableObject {
 
 
     var recordingButtonText: String {
-        // Use the same computed isRecording property for perfect consistency
+        if isStartingRecording {
+            return "Cancel"
+        }
         if isRecording {
             return "Stop"
         } else {
@@ -170,9 +165,11 @@ class MeetingViewModel: ObservableObject {
     }
 
     func toggleRecording() {
-        // Prevent duplicate actions while validating API key or starting recording
-        if isValidatingKey || isStartingRecording { return }
-        // Use the same computed isRecording property for perfect consistency
+        if isValidatingKey { return }
+        if isStartingRecording {
+            cancelPendingStart()
+            return
+        }
         if isRecording {
             stopRecording()
         } else {
@@ -187,12 +184,16 @@ class MeetingViewModel: ObservableObject {
             return
         }
 
-        isStartingRecording = true
-        recordingSessionManager.startRecording(
+        isStartingRecording = recordingSessionManager.startRecording(
             for: meeting.id,
             title: meeting.title.isEmpty ? nil : meeting.title,
             calendarEventId: meeting.calendarEventId
         )
+    }
+
+    func cancelPendingStart() {
+        recordingSessionManager.cancelPendingStart(for: meeting.id)
+        isStartingRecording = false
     }
 
     func stopRecording() {
@@ -202,7 +203,11 @@ class MeetingViewModel: ObservableObject {
 
     var conversationURL: URL? {
         guard let conversationId = meeting.convexConversationId else { return nil }
+        #if AUDORA_LOCAL_SETUP
+        return URL(string: "http://127.0.0.1:5173/dashboard/view/\(conversationId)")
+        #else
         return URL(string: "https://getaudora.app/dashboard/conversations/\(conversationId)")
+        #endif
     }
 
     func openConversationInWeb() {
@@ -227,11 +232,12 @@ class MeetingViewModel: ObservableObject {
     }
 
     func deleteMeeting() {
-        // If this meeting is currently being recorded, stop the recording first
+        // Deletion discards the active take. A normal stop finalizes and saves,
+        // which could otherwise recreate this meeting after it was deleted.
         if recordingSessionManager.isRecordingMeeting(meeting.id) {
-            print("🛑 Stopping recording for meeting being deleted: \(meeting.id)")
-            recordingSessionManager.stopRecording()
+            print("🛑 Discarding active recording for meeting being deleted")
         }
+        recordingSessionManager.cancelActiveRecording(for: meeting.id)
 
         let success = LocalStorageManager.shared.deleteMeeting(meeting)
         if success {
@@ -241,7 +247,9 @@ class MeetingViewModel: ObservableObject {
     }
 
     func deleteIfEmpty() {
-        if isEmpty && !isRecording {
+        if recordingSessionManager.isPreparingMeeting(meeting.id) {
+            saveMeeting()
+        } else if isEmpty && !isRecording {
             print("🗑️ Auto-deleting empty meeting")
             deleteMeeting()
         } else {

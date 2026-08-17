@@ -9,7 +9,7 @@ final class FrontmostAppMonitor: ObservableObject {
 
     init() {
         frontmostApp = NSWorkspace.shared.frontmostApplication
-        print("📱 FrontmostAppMonitor: Initial app: \(frontmostApp?.localizedName ?? "nil")")
+        print("📱 FrontmostAppMonitor initialized")
 
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -20,7 +20,7 @@ final class FrontmostAppMonitor: ObservableObject {
                 let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             else { return }
 
-            print("📱 FrontmostAppMonitor: App activated: \(app.localizedName ?? "unknown") (\(app.bundleIdentifier ?? "no-bundle"))")
+            print("📱 FrontmostAppMonitor observed an app activation")
             self?.frontmostApp = app
         }
     }

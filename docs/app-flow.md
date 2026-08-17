@@ -73,11 +73,11 @@ This document outlines the technical flow of the application, tracing the path f
 *   **User View:** The user sees the transcript appear in real-time, separated by "Me" (Mic) and "Them" (System).
 
 ## 6. Post-Meeting Processing (After Stop)
-*   **Audio Save:** `AudioRecordingManager` combines the `.caf` segments into a final `.m4a` file.
+*   **Audio Save:** `AudioRecordingManager` time-aligns and mixes the microphone and system `.caf` segments into a 16 kHz mono Int16 PCM `recording.wav` file.
 *   **Analytics:** `MeetingViewModel.calculateAnalytics()` analyzes the full transcript for Clarity, Conciseness, and Confidence scores.
 *   **Audio Storage (Convex):**
     *   **Trigger:** Happens inside `generateNotes()` in `MeetingViewModel`.
-    *   **Action:** `ConvexService.shared.uploadAudioFile` uploads the final `.m4a` recording to Convex's Object Storage.
+    *   **Action:** `ConvexService.shared.uploadAudioFile` uploads the final WAV recording with `Content-Type: audio/wav` to Convex Object Storage.
     *   **Purpose:** Secure cloud backup of the audio for future reference or potentially advanced processing later.
 *   **Enhanced Notes:** User can manually trigger "Pro Notes" generation (or auto-trigger), which uses `NotesGenerator.swift`.
     *   **Upload:** Audio file acts as a backup/reference (uploaded via `ConvexService.swift`).
@@ -110,7 +110,7 @@ graph TD
 
     subgraph Post-Processing
         C -->|Stop| M[AudioRecordingManager]
-        M -->|Combine| N[Final .m4a]
+        M -->|Time-align + mix| N[Final 16 kHz mono WAV]
         C -->|Process Transcript| CB
         CB -->|GPT-4 Facts| ZEP[Zep Knowledge Graph]
         K -->|Trigger| O[NotesGenerator]

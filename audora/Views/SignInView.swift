@@ -2,6 +2,7 @@
 // Authentication view for Clerk sign-in
 
 import SwiftUI
+#if !AUDORA_LOCAL_SETUP
 import AuthenticationServices
 import Clerk
 
@@ -314,3 +315,4 @@ struct SignInView: View {
 #Preview {
     SignInView()
 }
+#endif

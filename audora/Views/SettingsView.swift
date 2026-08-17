@@ -190,6 +190,7 @@ struct GeneralSettingsView: View {
                     .fontWeight(.semibold)
 
                 VStack(alignment: .leading, spacing: 12) {
+                    #if !AUDORA_LOCAL_SETUP
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Sign Out")
@@ -208,6 +209,23 @@ struct GeneralSettingsView: View {
                     }
                     
                     Divider()
+                    #else
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Local identity")
+                                .font(.body)
+                                .fontWeight(.medium)
+                            Text("Authenticated by the loopback JWT issuer; no Clerk account is used.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Text("Active")
+                            .foregroundColor(.green)
+                    }
+
+                    Divider()
+                    #endif
                     
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
@@ -278,6 +296,10 @@ struct TranscriptionSettingsView: View {
 
                     Spacer()
 
+                    #if AUDORA_LOCAL_SETUP
+                    Text("Local Parakeet")
+                        .fontWeight(.medium)
+                    #else
                     Picker("", selection: $viewModel.settings.transcriptionProvider) {
                         ForEach(TranscriptionProviderOption.allCases) { provider in
                             Text(provider.displayName).tag(provider)
@@ -286,6 +308,7 @@ struct TranscriptionSettingsView: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(width: 280)
+                    #endif
                 }
                 .padding(16)
 

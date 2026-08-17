@@ -39,7 +39,7 @@ export const generateUploadUrl = mutation({
 
 1. **Mac app calls mutation:** `client.mutation("audio:generateUploadUrl", with: [:])`
 2. **Convex returns upload URL:** A temporary URL for uploading the file
-3. **Mac app uploads file:** HTTP POST request to the upload URL with the audio file data
+3. **Mac app uploads file:** HTTP POST request with `Content-Type: audio/wav`
 4. **Convex returns storage ID:** The response contains a `storageId` that can be used to reference the file later
 
 ## Response Format
@@ -89,5 +89,5 @@ Set this in your Xcode scheme or environment configuration.
 
 - The upload happens asynchronously before note generation
 - If the upload fails, note generation still proceeds (non-blocking)
-- Audio files are typically `.m4a` format
-- File sizes can vary significantly depending on meeting length
+- Local recordings are 16 kHz mono Int16 PCM `.wav` files (about 115 MB/hour)
+- Microphone and system audio are mixed onto one time-aligned track before upload

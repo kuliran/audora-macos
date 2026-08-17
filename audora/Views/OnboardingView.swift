@@ -58,9 +58,15 @@ struct OnboardingView: View {
                                     .font(.title2)
                                     .fontWeight(.semibold)
 
+                                #if AUDORA_LOCAL_SETUP
+                                Text("This local setup disables Audora telemetry, cloud authentication, cloud transcription, and automatic updates. Recordings are transcribed with Local Parakeet and synchronized only to the loopback Convex backend on this Mac.")
+                                    .font(.body)
+                                    .foregroundColor(.secondary)
+                                #else
                                 Text("Of note, I am tracking a few basic anonymous metrics (installs, opens, meetings created) using PostHog, because I'm trying to gauge interest in the app. Everything is completely anonymous (feel free to check the source code). If you have any concerns, please reach out and we can find a solution.")
                                     .font(.body)
                                     .foregroundColor(.secondary)
+                                #endif
                             }
 
                             HStack {

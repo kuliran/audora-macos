@@ -66,7 +66,7 @@ class MeetingAppDetector: ObservableObject {
     }
 
     private func handleStateChange(isMicActive: Bool, frontmostApp: NSRunningApplication?) {
-        print("🔄 State update - Mic: \(isMicActive), App: \(frontmostApp?.localizedName ?? "nil")")
+        print("🔄 Meeting detection state updated (mic active: \(isMicActive))")
 
         guard isMicActive, let app = frontmostApp, let bundleID = app.bundleIdentifier else {
             // If mic is off or no app, clear detected apps and stop monitoring
@@ -79,7 +79,7 @@ class MeetingAppDetector: ObservableObject {
 
         // Check if the frontmost app is a meeting app
         if knownMeetingApps.contains(bundleID) {
-            print("🎯 Meeting app active with mic: \(bundleID)")
+            print("🎯 A configured meeting app is active with the microphone")
 
             // If this is a new detection, check and notify
             if !detectedMeetingApps.contains(bundleID) {
@@ -97,7 +97,7 @@ class MeetingAppDetector: ObservableObject {
 
     private func checkAndNotify(app: NSRunningApplication) {
         let bundleID = app.bundleIdentifier ?? "unknown"
-        print("🧐 Checking notification for: \(bundleID)")
+        print("🧐 Checking whether to show a meeting notification")
 
         // 1. Check if global setting is enabled
         guard UserDefaultsManager.shared.meetingReminderEnabled else {
@@ -125,7 +125,7 @@ class MeetingAppDetector: ObservableObject {
         let appName = app.localizedName ?? "Unknown App"
         let bundleID = app.bundleIdentifier ?? ""
 
-        print("🎨 Showing overlay for: \(appName) (\(bundleID))")
+        print("🎨 Showing meeting overlay")
 
         DispatchQueue.main.async {
             self.windowController.show(
@@ -136,12 +136,12 @@ class MeetingAppDetector: ObservableObject {
                     NotificationCenter.default.post(name: .createNewRecording, object: nil)
                 },
                 onIgnore: {
-                    print("🚫 User clicked Ignore from overlay for: \(bundleID)")
+                    print("🚫 User ignored a meeting app")
                     Task { @MainActor in
                         var ignoredApps = UserDefaultsManager.shared.ignoredAppBundleIDs
                         ignoredApps.insert(bundleID)
                         UserDefaultsManager.shared.ignoredAppBundleIDs = ignoredApps
-                        print("✅ Added \(bundleID) to ignored apps. Current ignored: \(ignoredApps)")
+                        print("✅ Added meeting app to ignored list")
                     }
                 },
                 onSettings: {

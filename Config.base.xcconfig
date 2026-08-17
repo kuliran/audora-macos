@@ -1,7 +1,11 @@
 // Shared Audora build configuration.
 // Keep real local values in ignored Config.xcconfig.
 
+// This fork is local-first: Convex and JWT issuance are both loopback-only.
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) AUDORA_LOCAL_SETUP
+
 CLERK_PUBLISHABLE_KEY =
-CONVEX_DEPLOYMENT_URL =
+CONVEX_DEPLOYMENT_URL = http:/$()/127.0.0.1:3210
+AUDORA_PRODUCT_BUNDLE_IDENTIFIER = com.audora.local
 
 #include? "Config.xcconfig"

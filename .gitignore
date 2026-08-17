@@ -139,3 +139,7 @@ convex.json
 # Node.js (for Convex CLI)
 node_modules/
 package-lock.json
+
+# Generated logs and local recording fixtures
+build.log
+audora/audio_recordings/

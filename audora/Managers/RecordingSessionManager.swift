@@ -5,16 +5,33 @@ import Foundation
 import SwiftUI
 import Combine
 
+enum RecordingLifecycle: Equatable {
+    case idle
+    case preparing(UUID)
+    case recording(UUID)
+    case stopping(UUID)
+
+    var meetingId: UUID? {
+        switch self {
+        case .idle:
+            return nil
+        case .preparing(let id), .recording(let id), .stopping(let id):
+            return id
+        }
+    }
+}
+
 /// Manages recording sessions at the app level, coordinates audio recording with Convex backend
 @MainActor
 class RecordingSessionManager: ObservableObject {
     static let shared = RecordingSessionManager()
 
-    @Published var isRecording = false
-    @Published var activeMeetingId: UUID?
+    @Published private(set) var lifecycle: RecordingLifecycle = .idle
+    @Published private(set) var isRecording = false
+    @Published private(set) var activeMeetingId: UUID?
     @Published var errorMessage: String?
     @Published var activeRecordingTranscriptChunksUpdated: [TranscriptChunk] = []
-    @Published var currentConversationId: String?
+    @Published private(set) var currentConversationId: String?
 
     private let audioManager = AudioManager.shared
     private var cancellables = Set<AnyCancellable>()
@@ -22,7 +39,10 @@ class RecordingSessionManager: ObservableObject {
 
     // Store transcript chunks for the active recording session
     private var activeRecordingTranscriptChunks: [TranscriptChunk] = []
-    private var isStoppingRecording = false
+    private var preparationTask: Task<Void, Never>?
+    private var preparationID: UUID?
+    private var finalizationTask: Task<Void, Never>?
+    private var finalizationID: UUID?
 
     private init() {
         setupAudioManagerBindings()
@@ -30,10 +50,15 @@ class RecordingSessionManager: ObservableObject {
     }
 
     private func setupAudioManagerBindings() {
-        // Bind to audio manager state
+        // AudioManager owns capture mechanics; this manager owns the user-visible
+        // lifecycle. A capture that dies unexpectedly is finalized through the
+        // same path as an explicit stop.
         audioManager.$isRecording
-            .sink { [weak self] isRecording in
-                self?.isRecording = isRecording
+            .dropFirst()
+            .sink { [weak self] audioIsRecording in
+                guard let self, !audioIsRecording else { return }
+                guard case .recording = self.lifecycle else { return }
+                self.stopRecording()
             }
             .store(in: &cancellables)
 
@@ -67,14 +92,17 @@ class RecordingSessionManager: ObservableObject {
             .store(in: &cancellables)
     }
 
-    func startRecording(for meetingId: UUID, title: String? = nil, calendarEventId: String? = nil) {
-        guard !isRecording else { return }
+    @discardableResult
+    func startRecording(for meetingId: UUID, title: String? = nil, calendarEventId: String? = nil) -> Bool {
+        guard lifecycle == .idle else { return false }
 
         print("🎙️ Starting recording for meeting: \(meetingId)")
 
-        isRecording = true
-        activeMeetingId = meetingId
+        errorMessage = nil
+        setLifecycle(.preparing(meetingId))
         currentConversationId = nil
+        let thisPreparationID = UUID()
+        preparationID = thisPreparationID
 
         // Load the meeting to get existing transcript chunks
         if let existingMeeting = LocalStorageManager.shared.loadMeetings().first(where: { $0.id == meetingId }) {
@@ -83,33 +111,114 @@ class RecordingSessionManager: ObservableObject {
             currentConversationId = existingMeeting.convexConversationId
         }
 
-        AudioRecordingManager.shared.startRecording(for: meetingId)
-        audioManager.startRecording()
+        preparationTask = Task { [weak self] in
+            guard let self else { return }
+
+            do {
+                try await self.audioManager.startRecording(
+                    onCaptureWillStart: {
+                        AudioRecordingManager.shared.startRecording(for: meetingId)
+                    }
+                )
+                try Task.checkCancellation()
+
+                guard self.preparationID == thisPreparationID,
+                      self.lifecycle == .preparing(meetingId) else {
+                    return
+                }
+
+                self.preparationID = nil
+                self.preparationTask = nil
+                self.setLifecycle(.recording(meetingId))
+            } catch {
+                self.finishFailedStart(
+                    for: meetingId,
+                    preparationID: thisPreparationID,
+                    error: error
+                )
+            }
+        }
+
+        return true
+    }
+
+    func cancelPendingStart(for meetingId: UUID) {
+        guard lifecycle == .preparing(meetingId) else { return }
+
+        let taskToCancel = preparationTask
+        preparationID = nil
+        preparationTask = nil
+        taskToCancel?.cancel()
+        audioManager.cancelPendingStart()
+        AudioRecordingManager.shared.cancelRecording(for: meetingId)
+        activeRecordingTranscriptChunks = []
+        currentConversationId = nil
+        setLifecycle(.idle)
     }
 
     func stopRecording() {
-        guard isRecording, !isStoppingRecording else { return }
+        if case .preparing(let meetingId) = lifecycle {
+            cancelPendingStart(for: meetingId)
+            return
+        }
+        guard case .recording(let meetingId) = lifecycle else { return }
+        setLifecycle(.stopping(meetingId))
 
-        isStoppingRecording = true
-
-        Task {
-            await stopRecordingAndSave()
+        let thisFinalizationID = UUID()
+        finalizationID = thisFinalizationID
+        finalizationTask = Task { [weak self] in
+            await self?.stopRecordingAndSave(
+                for: meetingId,
+                finalizationID: thisFinalizationID
+            )
         }
     }
 
-    private func stopRecordingAndSave() async {
-        defer {
-            isStoppingRecording = false
+    /// Discards any in-progress take for a meeting. This is used by deletion:
+    /// finalizing and then deleting can otherwise let a stale finalizer recreate
+    /// the meeting JSON after the user has removed it.
+    func cancelActiveRecording(for meetingId: UUID) {
+        if case .preparing = lifecycle {
+            cancelPendingStart(for: meetingId)
+            return
         }
 
-        print("🛑 Stopping recording for meeting: \(activeMeetingId?.uuidString ?? "unknown")")
+        guard lifecycle == .recording(meetingId)
+                || lifecycle == .stopping(meetingId) else { return }
 
-        let capturedMeetingId = activeMeetingId
+        finalizationID = nil
+        let taskToCancel = finalizationTask
+        finalizationTask = nil
+
+        // Move to idle before stopping AudioManager so its published false state
+        // cannot start a second finalization through the lifecycle binding.
+        setLifecycle(.idle)
+        taskToCancel?.cancel()
+        audioManager.stopRecording()
+        AudioRecordingManager.shared.cancelRecording(for: meetingId)
+        activeRecordingTranscriptChunks = []
+        currentConversationId = nil
+    }
+
+    private func stopRecordingAndSave(
+        for meetingId: UUID,
+        finalizationID expectedFinalizationID: UUID
+    ) async {
+        print("🛑 Stopping recording for meeting: \(meetingId.uuidString)")
+
+        let capturedMeetingId: UUID? = meetingId
         let capturedConversationId = currentConversationId
         let capturedTitle = titleForBackend(meetingId: capturedMeetingId)
         let capturedCalendarEventId = calendarEventIdForBackend(meetingId: capturedMeetingId)
 
         let finalizedAudioManagerChunks = await audioManager.stopRecordingAndFinalizeTranscription()
+
+        // A deletion can cancel this generation while the local transcriber is
+        // flushing. Never let that stale task render audio or recreate storage.
+        guard finalizationID == expectedFinalizationID,
+              lifecycle == .stopping(meetingId),
+              !Task.isCancelled else { return }
+
         let transcriptSnapshot = finalizedAudioManagerChunks.isEmpty
             ? activeRecordingTranscriptChunks
             : finalizedAudioManagerChunks
@@ -121,7 +230,6 @@ class RecordingSessionManager: ObservableObject {
             transcriptUpdateSubject.send(finalTranscriptChunks)
         }
 
-        isRecording = false
         let capturedTranscriptChunks = finalTranscriptChunks
 
         var audioFileURL: String? = nil
@@ -129,7 +237,7 @@ class RecordingSessionManager: ObservableObject {
             // Stop recording and get the audio file URL
             if let savedAudioURL = AudioRecordingManager.shared.stopRecordingAndSave(for: activeMeetingId) {
                 audioFileURL = savedAudioURL.path
-                print("✅ Audio file saved: \(savedAudioURL.path)")
+                print("✅ Audio file saved locally")
             }
 
             updateActiveMeeting(meetingId: activeMeetingId, chunks: capturedTranscriptChunks, audioFileURL: audioFileURL)
@@ -146,10 +254,47 @@ class RecordingSessionManager: ObservableObject {
             }
         }
 
-        // Reset state after capturing values for the Task
-        activeMeetingId = nil
+        // Reset state after capturing values for the backend task.
+        finalizationID = nil
+        finalizationTask = nil
         currentConversationId = nil
         activeRecordingTranscriptChunks = []
+        setLifecycle(.idle)
+    }
+
+    private func finishFailedStart(
+        for meetingId: UUID,
+        preparationID failedPreparationID: UUID,
+        error: Error
+    ) {
+        // A cancelled model load can finish after the user has already started
+        // another take for the same meeting. Never let that stale task cancel or
+        // transition the newer take.
+        guard preparationID == failedPreparationID,
+              lifecycle == .preparing(meetingId) else { return }
+
+        preparationID = nil
+        AudioRecordingManager.shared.cancelRecording(for: meetingId)
+        audioManager.cancelPendingStart()
+        preparationTask = nil
+        activeRecordingTranscriptChunks = []
+        currentConversationId = nil
+        setLifecycle(.idle)
+
+        if !(error is CancellationError) {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func setLifecycle(_ newLifecycle: RecordingLifecycle) {
+        lifecycle = newLifecycle
+        activeMeetingId = newLifecycle.meetingId
+        switch newLifecycle {
+        case .recording, .stopping:
+            isRecording = true
+        case .idle, .preparing:
+            isRecording = false
+        }
     }
 
     private func finalizedTranscriptChunks(_ chunks: [TranscriptChunk]) -> [TranscriptChunk] {
@@ -175,6 +320,19 @@ class RecordingSessionManager: ObservableObject {
 
     func isRecordingMeeting(_ meetingId: UUID) -> Bool {
         return isRecording && activeMeetingId == meetingId
+    }
+
+    func isPreparingMeeting(_ meetingId: UUID) -> Bool {
+        lifecycle == .preparing(meetingId)
+    }
+
+    func isStoppingMeeting(_ meetingId: UUID) -> Bool {
+        lifecycle == .stopping(meetingId)
+    }
+
+    func isBusy(withOtherMeeting meetingId: UUID) -> Bool {
+        guard let activeMeetingId else { return false }
+        return activeMeetingId != meetingId
     }
 
     private func updateActiveMeetingTranscript(meetingId: UUID, chunks: [TranscriptChunk]) {
@@ -254,7 +412,7 @@ class RecordingSessionManager: ObservableObject {
 
             if let audioFileURL {
                 do {
-                    try await ConvexService.shared.uploadAudioFile(
+                    _ = try await ConvexService.shared.uploadAudioFile(
                         audioFileURL: URL(fileURLWithPath: audioFileURL),
                         conversationId: conversationId
                     )

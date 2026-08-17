@@ -1,6 +1,8 @@
 import Foundation
 import SwiftUI
+#if !AUDORA_LOCAL_SETUP
 import PostHog
+#endif
 import EventKit
 
 class SettingsViewModel: ObservableObject {
@@ -87,7 +89,9 @@ class SettingsViewModel: ObservableObject {
         settings.hasCompletedOnboarding = true
         settings.hasAcceptedTerms = true
         saveSettings(showMessage: false)
+        #if !AUDORA_LOCAL_SETUP
         PostHogSDK.shared.capture("onboarding_completed")
+        #endif
     }
 
     func resetToDefaults() {

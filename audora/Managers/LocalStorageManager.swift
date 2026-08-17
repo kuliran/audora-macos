@@ -47,7 +47,7 @@ class LocalStorageManager {
             // Write atomically using a temp file then replace
             let tmpURL = fileURL.appendingPathExtension("tmp")
             try data.write(to: tmpURL, options: .atomic)
-            try FileManager.default.replaceItem(at: fileURL, withItemAt: tmpURL, backupItemName: nil, options: [], resultingItemURL: nil)
+            try installTemporaryFile(tmpURL, at: fileURL)
 
             print("✅ Saved meeting: \(meeting.id)")
             return true
@@ -120,11 +120,14 @@ class LocalStorageManager {
         let fileURL = meetingsDirectory.appendingPathComponent("\(meeting.id.uuidString).json")
 
         do {
-            try FileManager.default.removeItem(at: fileURL)
-            
-            // Also delete associated audio file
+            // A newly-created meeting may not have been persisted yet. Deletion
+            // is still successful and must always clear any active/orphaned audio.
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+
             AudioRecordingManager.shared.deleteAudioFiles(for: meeting.id)
-            
+
             print("✅ Deleted meeting: \(meeting.id)")
             return true
         } catch {
@@ -179,13 +182,28 @@ class LocalStorageManager {
             // Write atomically using a temp file then replace
             let tmpURL = fileURL.appendingPathExtension("tmp")
             try data.write(to: tmpURL, options: .atomic)
-            try FileManager.default.replaceItem(at: fileURL, withItemAt: tmpURL, backupItemName: nil, options: [], resultingItemURL: nil)
+            try installTemporaryFile(tmpURL, at: fileURL)
 
             print("✅ Saved template: \(template.id)")
             return true
         } catch {
             print("❌ Failed to save template: \(error)")
             return false
+        }
+    }
+
+    private func installTemporaryFile(_ temporaryURL: URL, at destinationURL: URL) throws {
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.replaceItem(
+                at: destinationURL,
+                withItemAt: temporaryURL,
+                backupItemName: nil,
+                options: [],
+                resultingItemURL: nil
+            )
+        } else {
+            try fileManager.moveItem(at: temporaryURL, to: destinationURL)
         }
     }
 
@@ -226,7 +244,7 @@ class LocalStorageManager {
             if !existingTitles.contains(defaultTemplate.title) {
                 _ = saveTemplate(defaultTemplate)
                 templates.append(defaultTemplate)
-                print("✅ Added missing default template: \(defaultTemplate.title)")
+                print("✅ Added missing default template")
             }
         }
 

@@ -43,9 +43,6 @@ final class MicActivityMonitor: ObservableObject {
                 // Add listener for this device
                 Self.addRunningListener(deviceID: deviceID, listenerBlock: listenerBlock)
 
-                // Log initial state
-                let isRunning = Self.readIsRunning(deviceID: deviceID)
-                print("   - Device \(device.name) (\(deviceID)): RunningSomewhere=\(isRunning)")
             }
 
             checkAllDevices()

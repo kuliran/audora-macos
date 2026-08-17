@@ -240,6 +240,7 @@ final class LocalTranscriptionSession: @unchecked Sendable {
         do {
             print("🔧 [Parakeet] Step 1/3: Preparing mic ASR provider...")
             try await micProvider.prepare(onStatus: onStatus, onProgress: onProgress)
+            try Task.checkCancellation()
             print("✅ [Parakeet] Mic ASR provider ready")
 
             print("🔧 [Parakeet] Step 2/3: Preparing system ASR provider...")
@@ -249,6 +250,7 @@ final class LocalTranscriptionSession: @unchecked Sendable {
                 },
                 onProgress: { _ in }
             )
+            try Task.checkCancellation()
             print("✅ [Parakeet] System ASR provider ready")
 
             print("🔧 [Parakeet] Step 3/3: Loading VAD model...")
@@ -256,6 +258,7 @@ final class LocalTranscriptionSession: @unchecked Sendable {
             let vadManager = try await VadManager { progress in
                 onProgress(progress.fractionCompleted)
             }
+            try Task.checkCancellation()
             print("✅ [Parakeet] VAD model loaded")
 
             let micTranscriber = LocalStreamingTranscriber(
@@ -278,8 +281,6 @@ final class LocalTranscriptionSession: @unchecked Sendable {
             )
         } catch {
             print("❌ [Parakeet] Session creation failed: \(error)")
-            micProvider.clearModelCache()
-            systemProvider.clearModelCache()
             throw error
         }
     }
@@ -574,7 +575,7 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
 
             let words = text.split(separator: " ")
             previousContext = words.suffix(Self.contextWordCount).joined(separator: " ")
-            print("📝 [\(source)] ✅ Transcribed: \"\(text.prefix(120))\"")
+            print("📝 [\(source)] ✅ Transcribed \(text.split(separator: " ").count) word(s)")
             await onFinal(source, text)
         } catch {
             print("❌ [\(source)] ASR transcription failed: \(error)")

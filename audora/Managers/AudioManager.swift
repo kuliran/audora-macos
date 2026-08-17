@@ -8,6 +8,29 @@ import OSLog
 import Combine
 import AppKit
 
+private enum AudioCaptureStartError: LocalizedError {
+    case authenticationRequired
+    case cancelled
+    case recordingStorage
+    case microphone(String)
+    case systemAudio(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .authenticationRequired:
+            return "The local backend is not authenticated. Start the local services and retry."
+        case .cancelled:
+            return "Recording preparation was cancelled."
+        case .recordingStorage:
+            return "The local recording folder could not be prepared."
+        case .microphone(let message):
+            return "Microphone capture could not start: \(message)"
+        case .systemAudio(let message):
+            return "System audio capture could not start: \(message)"
+        }
+    }
+}
+
 /// Manages audio capture from microphone and system audio and handles real-time transcription via OpenAI
 @MainActor
 class AudioManager: NSObject, ObservableObject {
@@ -26,14 +49,21 @@ class AudioManager: NSObject, ObservableObject {
     private var isMicrophoneTapInstalled = false
     private var micSocketTask: URLSessionWebSocketTask?
     private var systemSocketTask: URLSessionWebSocketTask?
+    #if !AUDORA_LOCAL_SETUP
     private let speechmaticsURL = URL(string: "wss://eu2.rt.speechmatics.com/v2/en")!
+    #endif
     private let speechmaticsMaxDelay = 0.7
+    #if AUDORA_LOCAL_SETUP
+    private var activeTranscriptionProvider: TranscriptionProviderOption = .parakeet
+    #else
     private var activeTranscriptionProvider: TranscriptionProviderOption = .speechmatics
+    #endif
     private var localTranscriptionSession: LocalTranscriptionSession?
 
 
     // Unique identifier for the current recording session
     private var sessionID = UUID()
+    private var isCaptureStarting = false
 
     // ProcessTap properties
     private var processTap: ProcessTap?
@@ -46,6 +76,7 @@ class AudioManager: NSObject, ObservableObject {
     // Add properties near the top, after existing private vars
     private var micRetryCount = 0
     private let maxMicRetries = 3
+    private var isMicRestartScheduled = false
 
     // Add current interim transcripts per source
     private var currentInterim: [AudioSource: String] = [.mic: "", .system: ""]
@@ -75,7 +106,9 @@ class AudioManager: NSObject, ObservableObject {
         NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange,
                                                object: audioEngine,
                                                queue: .main) { [weak self] _ in
-            self?.handleAudioEngineConfigurationChange()
+            Task { @MainActor [weak self] in
+                self?.handleAudioEngineConfigurationChange()
+            }
         }
 
         // Activate the process controller to start monitoring audio-producing apps
@@ -144,7 +177,7 @@ class AudioManager: NSObject, ObservableObject {
                        name.contains("beats") ||
                        name.contains("earbuds") ||
                        name.contains("earpods") {
-                        print("🎧 Detected headphones via device name: \(deviceName)")
+                        print("🎧 Detected headphones via output-device category")
                         return true
                     }
                 }
@@ -158,84 +191,102 @@ class AudioManager: NSObject, ObservableObject {
         }
     }
 
-    func startRecording() {
+    func startRecording(onCaptureWillStart: () -> Bool = { true }) async throws {
         print("Starting recording...")
 
-        // Bump session ID so any old async callbacks can be ignored
+        // Bump the ID before cleanup so any older async model load cannot start taps.
         sessionID = UUID()
         let thisSession = sessionID
-
-        // Clear any previous errors
-        DispatchQueue.main.async {
-            self.errorMessage = nil
-        }
-
-        // Stop any in-progress recording
         stopRecordingInternal()
+        isRecording = false
+        isCaptureStarting = false
+        errorMessage = nil
+        AudioLevelManager.shared.updateRecordingState(false)
 
-        // Validate authentication before connecting
-        Task {
-            // Check auth state
-            let authState = await MainActor.run { ConvexService.shared.authState }
-            guard case .authenticated = authState else {
-                let errorMsg = "Please sign in to start recording."
-                print("❌ Authentication required: \(errorMsg)")
-                DispatchQueue.main.async {
-                    self.errorMessage = errorMsg
-                }
-                return
-            }
-
-            let selectedProvider = await MainActor.run {
-                UserDefaultsManager.shared.transcriptionProvider
-            }
-
-            // Set provider immediately so taps know what to configure
-            await MainActor.run {
-                self.activeTranscriptionProvider = selectedProvider
-                self.transcriptionStatus = selectedProvider == .speechmatics ? "Speechmatics ready" : "Loading Local Parakeet..."
-            }
-
-            // Start taps IMMEDIATELY to get permissions and start recording to disk
-            print("🎙️ Starting audio taps (session: \(thisSession))")
-            await MainActor.run {
-                guard self.sessionID == thisSession else {
-                    print("⚠️ Session ID changed before tap start — aborting")
-                    return
-                }
-
-                print("🎙️ Starting microphone tap now...")
-                // Always start microphone - user prioritizes voice transcription
-                self.startMicrophoneTap()
-
-                // Check audio output device
-                let usingHeadphones = self.isUsingHeadphones()
-                if usingHeadphones {
-                    print("🎧 Headphones detected - optimal recording setup")
-                } else {
-                    print("🔊 Speakers detected - may have some echo/duplicates")
-                }
-
-                // Always start system audio capture (this triggers permission prompt)
-                Task {
-                    await self.startSystemAudioTap()
-                }
-            }
-
-            // Prepare the provider (load models for Parakeet, etc.)
-            do {
-                try await self.prepareTranscriptionProvider(selectedProvider, sessionID: thisSession)
-                print("✅ Transcription provider ready (\(selectedProvider.displayName))")
-            } catch {
-                let errorMsg = "Failed to start \(selectedProvider.displayName): \(ErrorHandler.shared.handleError(error))"
-                print("❌ \(errorMsg)")
-                await MainActor.run {
-                    guard self.sessionID == thisSession else { return }
-                    self.errorMessage = errorMsg
-                    // We don't stop the recording because audio is still being saved to disk
-                }
-            }
+        guard case .authenticated = ConvexService.shared.authState else {
+            throw AudioCaptureStartError.authenticationRequired
         }
+
+        let selectedProvider = UserDefaultsManager.shared.transcriptionProvider
+        activeTranscriptionProvider = selectedProvider
+        transcriptionStatus = selectedProvider == .speechmatics
+            ? "Speechmatics ready"
+            : "Loading Local Parakeet..."
+
+        do {
+            try Task.checkCancellation()
+            try await prepareTranscriptionProvider(selectedProvider, sessionID: thisSession)
+            try Task.checkCancellation()
+        } catch {
+            guard sessionID == thisSession, !Task.isCancelled else {
+                throw AudioCaptureStartError.cancelled
+            }
+            let message = "Failed to start \(selectedProvider.displayName): \(ErrorHandler.shared.handleError(error))"
+            errorMessage = message
+            throw error
+        }
+
+        guard sessionID == thisSession else {
+            throw AudioCaptureStartError.cancelled
+        }
+
+        print("✅ Transcription provider ready (\(selectedProvider.displayName))")
+        print("🎙️ Starting audio taps (session: \(thisSession))")
+        isCaptureStarting = true
+
+        do {
+            guard onCaptureWillStart() else {
+                throw AudioCaptureStartError.recordingStorage
+            }
+            print("🎙️ Starting microphone tap now...")
+            try startMicrophoneTap()
+
+            if isUsingHeadphones() {
+                print("🎧 Headphones detected - optimal recording setup")
+            } else {
+                print("🔊 Speakers detected - may have some echo/duplicates")
+            }
+
+            try await startSystemAudioTap(expectedSessionID: thisSession)
+            try Task.checkCancellation()
+            guard sessionID == thisSession else {
+                throw AudioCaptureStartError.cancelled
+            }
+
+            isCaptureStarting = false
+            isRecording = true
+            AudioLevelManager.shared.updateRecordingState(true)
+        } catch {
+            if sessionID == thisSession {
+                let message = error.localizedDescription
+                cancelPendingStart()
+                let wasCancelled: Bool
+                switch error {
+                case is CancellationError, AudioCaptureStartError.cancelled:
+                    wasCancelled = true
+                default:
+                    wasCancelled = false
+                }
+                if !wasCancelled {
+                    errorMessage = message
+                }
+            }
+            throw error
+        }
+    }
+
+    func cancelPendingStart() {
+        sessionID = UUID()
+        isCaptureStarting = false
+        isRecording = false
+        stopRecordingInternal()
+        micRetryCount = 0
+        isMicRestartScheduled = false
+        micAudioLevel = 0
+        systemAudioLevel = 0
+        AudioLevelManager.shared.updateMicLevel(0)
+        AudioLevelManager.shared.updateSystemLevel(0)
+        AudioLevelManager.shared.updateRecordingState(false)
     }
 
     private func prepareTranscriptionProvider(_ provider: TranscriptionProviderOption, sessionID: UUID) async throws {
@@ -270,7 +321,7 @@ class AudioManager: NSObject, ObservableObject {
 
         guard self.sessionID == sessionID else {
             session.stop()
-            return
+            throw AudioCaptureStartError.cancelled
         }
 
         localTranscriptionSession = session
@@ -347,113 +398,139 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     private func restartMicrophone() {
-        guard isRecording, micRetryCount < maxMicRetries else { return }
+        guard isRecording || isCaptureStarting else { return }
+        guard !isMicRestartScheduled else { return }
+        guard micRetryCount < maxMicRetries else {
+            failCapture("Microphone capture stopped after \(maxMicRetries) restart attempts.")
+            return
+        }
 
         print("🔄 Restarting microphone capture (attempt \(micRetryCount + 1))")
         micRetryCount += 1
+        isMicRestartScheduled = true
+        let restartSessionID = sessionID
 
         cleanupAudioEngine()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.startMicrophoneTap()
+            guard self.sessionID == restartSessionID,
+                  self.isRecording || self.isCaptureStarting else {
+                self.isMicRestartScheduled = false
+                return
+            }
+            do {
+                try self.startMicrophoneTap()
+                self.isMicRestartScheduled = false
+            } catch {
+                self.errorMessage = AudioCaptureStartError.microphone(error.localizedDescription).localizedDescription
+                self.isMicRestartScheduled = false
+                self.restartMicrophone()
+            }
+        }
+    }
+
+    private func failCapture(_ message: String) {
+        errorMessage = message
+        if isCaptureStarting {
+            cancelPendingStart()
+        } else {
+            // Preserve the local transcription session until the session manager
+            // asks it to flush final words, but stop all live capture immediately.
+            stopCaptureAndSpeechmaticsConnections()
         }
     }
 
     /// Starts a microphone tap without creating a new OpenAI connection (used when also capturing system audio)
-    private func startMicrophoneTap() {
+    private func startMicrophoneTap() throws {
         print("🎤 Starting microphone tap...")
 
-        do {
-            let inputNode = audioEngine.inputNode
-            microphoneInputNode = inputNode
-            let recordingFormat = inputNode.outputFormat(forBus: 0)
+        let inputNode = audioEngine.inputNode
+        microphoneInputNode = inputNode
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
 
-            let targetFormat: AVAudioFormat?
-            let converter: AVAudioConverter?
+        let targetFormat: AVAudioFormat?
+        let converter: AVAudioConverter?
 
-            if activeTranscriptionProvider == .speechmatics {
-                guard let speechmaticsTargetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
-                                                             sampleRate: 24000,
-                                                             channels: 1,
-                                                             interleaved: false) else {
-                    print("❌ Failed to create target audio format for mic tap")
-                    self.restartMicrophone()
-                    return
-                }
-
-                guard let speechmaticsConverter = AVAudioConverter(from: recordingFormat, to: speechmaticsTargetFormat) else {
-                    print("❌ Failed to create audio converter for mic tap")
-                    self.restartMicrophone()
-                    return
-                }
-
-                targetFormat = speechmaticsTargetFormat
-                converter = speechmaticsConverter
-            } else {
-                targetFormat = nil
-                converter = nil
+        if activeTranscriptionProvider == .speechmatics {
+            guard let speechmaticsTargetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                                         sampleRate: 24000,
+                                                         channels: 1,
+                                                         interleaved: false) else {
+                throw AudioCaptureStartError.microphone("Failed to create the target audio format.")
             }
 
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
-                guard let self = self else { return }
-
-                // Check for invalid buffer
-                guard buffer.frameLength > 0, buffer.floatChannelData != nil else {
-                    print("❌ Invalid mic buffer detected - restarting")
-                    self.restartMicrophone()
-                    return
-                }
-
-                // Calculate audio level for visual indicator
-                if let ch = buffer.floatChannelData?[0] {
-                    let frameCount = Int(buffer.frameLength)
-                    let samples = UnsafeBufferPointer(start: ch, count: frameCount)
-                    let rms = sqrt(samples.map { $0 * $0 }.reduce(0, +) / Float(frameCount))
-
-                    // Update the published audio level on main thread
-                    DispatchQueue.main.async {
-                        self.micAudioLevel = rms
-                        AudioLevelManager.shared.updateMicLevel(rms)
-                    }
-                }
-
-                // Record audio buffer
-                AudioRecordingManager.shared.recordMicBuffer(buffer, format: recordingFormat)
-
-                if self.activeTranscriptionProvider == .speechmatics,
-                   let converter,
-                   let targetFormat {
-                    self.processAudioBuffer(buffer, converter: converter, targetFormat: targetFormat, source: .mic)
-                } else {
-                    self.localMicBufferCount += 1
-                    if self.localMicBufferCount == 1 {
-                        print("🎤 [Parakeet] First mic buffer submitted to local transcription (format: \(recordingFormat))")
-                    }
-                    if self.localMicBufferCount % 500 == 0 {
-                        print("🎤 [Parakeet] Submitted \(self.localMicBufferCount) mic buffers so far")
-                    }
-                    if self.localTranscriptionSession == nil {
-                        if self.localMicBufferCount <= 3 {
-                            print("⚠️ [Parakeet] localTranscriptionSession is nil when trying to submit mic buffer #\(self.localMicBufferCount)!")
-                        }
-                    }
-                    self.localTranscriptionSession?.submit(buffer, source: .mic)
-                }
+            guard let speechmaticsConverter = AVAudioConverter(from: recordingFormat, to: speechmaticsTargetFormat) else {
+                throw AudioCaptureStartError.microphone("Failed to create the audio converter.")
             }
-            isMicrophoneTapInstalled = true
 
-            audioEngine.prepare()
-            try audioEngine.start()
-            if activeTranscriptionProvider == .speechmatics {
-                connectToSpeechmatics(source: .mic)
-            }
-            print("✅ Microphone tap started successfully")
-            micRetryCount = 0  // Reset on success
-
-        } catch {
-            print("❌ Failed to start microphone tap: \(error)")
-            self.restartMicrophone()
+            targetFormat = speechmaticsTargetFormat
+            converter = speechmaticsConverter
+        } else {
+            targetFormat = nil
+            converter = nil
         }
+
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
+            guard let self = self else { return }
+
+            // Check for invalid buffer
+            guard buffer.frameLength > 0, buffer.floatChannelData != nil else {
+                print("❌ Invalid mic buffer detected - restarting")
+                Task { @MainActor in
+                    self.restartMicrophone()
+                }
+                return
+            }
+
+            // Calculate audio level for visual indicator
+            if let ch = buffer.floatChannelData?[0] {
+                let frameCount = Int(buffer.frameLength)
+                let samples = UnsafeBufferPointer(start: ch, count: frameCount)
+                let rms = sqrt(samples.map { $0 * $0 }.reduce(0, +) / Float(frameCount))
+
+                // Update the published audio level on main thread
+                DispatchQueue.main.async {
+                    self.micAudioLevel = rms
+                    AudioLevelManager.shared.updateMicLevel(rms)
+                }
+            }
+
+            // Record audio buffer
+            AudioRecordingManager.shared.recordMicBuffer(buffer, format: recordingFormat)
+
+            if self.activeTranscriptionProvider == .speechmatics,
+               let converter,
+               let targetFormat {
+                self.processAudioBuffer(buffer, converter: converter, targetFormat: targetFormat, source: .mic)
+            } else {
+                self.localMicBufferCount += 1
+                if self.localMicBufferCount == 1 {
+                    print("🎤 [Parakeet] First mic buffer submitted to local transcription (format: \(recordingFormat))")
+                }
+                if self.localMicBufferCount % 500 == 0 {
+                    print("🎤 [Parakeet] Submitted \(self.localMicBufferCount) mic buffers so far")
+                }
+                if self.localTranscriptionSession == nil {
+                    if self.localMicBufferCount <= 3 {
+                        print("⚠️ [Parakeet] localTranscriptionSession is nil when trying to submit mic buffer #\(self.localMicBufferCount)!")
+                    }
+                }
+                self.localTranscriptionSession?.submit(buffer, source: .mic)
+            }
+        }
+        isMicrophoneTapInstalled = true
+
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+        } catch {
+            throw AudioCaptureStartError.microphone(error.localizedDescription)
+        }
+        if activeTranscriptionProvider == .speechmatics {
+            connectToSpeechmatics(source: .mic)
+        }
+        print("✅ Microphone tap started successfully")
+        micRetryCount = 0
     }
 
     private func cleanupAudioEngine() {
@@ -486,17 +563,27 @@ class AudioManager: NSObject, ObservableObject {
         print("✨ Fresh audio engine created")
     }
 
-    private func startSystemAudioTap(isRestart: Bool = false) async {
+    private func startSystemAudioTap(
+        isRestart: Bool = false,
+        expectedSessionID: UUID
+    ) async throws {
         print(isRestart ? "🎧 Restarting system audio tap logic..." : "🎧 Starting system audio tap for the first time...")
 
+        guard sessionID == expectedSessionID else {
+            throw AudioCaptureStartError.cancelled
+        }
+        try Task.checkCancellation()
+
         if !isRestart {
-            guard await checkSystemAudioPermissions() else {
-                let errorMsg = "System audio recording permission denied."
-                print("❌ \(errorMsg)")
-                self.errorMessage = errorMsg
-                return
+            guard try await checkSystemAudioPermissions() else {
+                throw AudioCaptureStartError.systemAudio("Permission was denied.")
             }
         }
+
+        guard sessionID == expectedSessionID else {
+            throw AudioCaptureStartError.cancelled
+        }
+        try Task.checkCancellation()
 
         // Get all running processes that are producing audio
         let allProcessObjectIDs = audioProcessController.processes.map { $0.objectID }
@@ -506,15 +593,23 @@ class AudioManager: NSObject, ObservableObject {
         if allProcessObjectIDs.isEmpty {
             print("⚠️ No audio-producing processes found. System audio tap might not capture anything.")
             print("   💡 Make sure an app is playing audio (Zoom, Teams, etc.)")
-        } else {
-            let processNames = audioProcessController.processes.prefix(3).map { $0.name }
-            print("   Processes: \(processNames.joined(separator: ", "))\(audioProcessController.processes.count > 3 ? "..." : "")")
         }
 
         // Configure the tap for system-wide audio
         let target = TapTarget.systemAudio(processObjectIDs: allProcessObjectIDs)
         let newTap = ProcessTap(target: target)
         newTap.activate()
+
+        guard sessionID == expectedSessionID else {
+            newTap.invalidate()
+            throw AudioCaptureStartError.cancelled
+        }
+        do {
+            try Task.checkCancellation()
+        } catch {
+            newTap.invalidate()
+            throw error
+        }
 
         // Check for activation errors
         if let tapError = newTap.errorMessage {
@@ -532,9 +627,8 @@ class AudioManager: NSObject, ObservableObject {
             }
 
             print("❌ \(errorMsg)")
-            self.errorMessage = errorMsg
-            if !isRestart { stopRecording() }
-            return
+            newTap.invalidate()
+            throw AudioCaptureStartError.systemAudio(errorMsg)
         }
 
         self.processTap = newTap
@@ -544,22 +638,20 @@ class AudioManager: NSObject, ObservableObject {
         do {
             try startTapIO(newTap)
 
-            if !isRestart {
-                if activeTranscriptionProvider == .speechmatics {
-                    connectToSpeechmatics(source: .system)
-                }
-                self.isRecording = true
-                AudioLevelManager.shared.updateRecordingState(true)
+            if !isRestart, activeTranscriptionProvider == .speechmatics {
+                connectToSpeechmatics(source: .system)
             }
             print("✅ System audio tap started successfully (isRestart: \(isRestart))")
 
         } catch {
             let errorMsg = "Failed to start system audio tap IO: \(error.localizedDescription)"
             print("❌ \(errorMsg)")
-            self.errorMessage = errorMsg
             newTap.invalidate()
             self.isTapActive = false
-            if !isRestart { stopRecording() }
+            if self.processTap === newTap {
+                self.processTap = nil
+            }
+            throw AudioCaptureStartError.systemAudio(errorMsg)
         }
     }
 
@@ -591,6 +683,7 @@ class AudioManager: NSObject, ObservableObject {
 
         isRestartingSystemTap = true
         defer { isRestartingSystemTap = false }
+        let restartSessionID = sessionID
 
         // 1. Invalidate existing tap
         if isTapActive {
@@ -603,17 +696,25 @@ class AudioManager: NSObject, ObservableObject {
         // A small delay to let things settle.
         try? await Task.sleep(for: .milliseconds(250))
 
-        guard self.isRecording else {
+        guard self.isRecording, self.sessionID == restartSessionID else {
             print("Recording was stopped during tap restart. Aborting.")
             return
         }
 
-        // 2. Start a new one, but don't re-connect to OpenAI or change recording state
-        await startSystemAudioTap(isRestart: true)
+        // 2. Start a new one without changing the recording lifecycle.
+        do {
+            try await startSystemAudioTap(
+                isRestart: true,
+                expectedSessionID: restartSessionID
+            )
+        } catch {
+            guard self.sessionID == restartSessionID else { return }
+            failCapture(error.localizedDescription)
+        }
     }
 
     @MainActor
-    private func checkSystemAudioPermissions() async -> Bool {
+    private func checkSystemAudioPermissions() async throws -> Bool {
         if permission.status == .authorized {
             return true
         }
@@ -622,10 +723,11 @@ class AudioManager: NSObject, ObservableObject {
 
         // Poll for a short time to see if permission is granted
         for _ in 0..<10 {
+            try Task.checkCancellation()
             if permission.status == .authorized {
                 return true
             }
-            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+            try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
         }
 
         return permission.status == .authorized
@@ -695,7 +797,12 @@ class AudioManager: NSObject, ObservableObject {
             guard let self else { return }
             print("Audio tap was invalidated.")
 
+            // An old tap may report invalidation after a replacement has already
+            // been installed. It must not mark that replacement inactive.
+            guard self.processTap === invalidatedTap else { return }
+
             // Mark tap as inactive immediately to prevent further processing
+            self.processTap = nil
             self.isTapActive = false
 
             // Only restart if this was unexpected and we're still recording
@@ -739,6 +846,8 @@ class AudioManager: NSObject, ObservableObject {
     private func stopCaptureAndSpeechmaticsConnections() {
         // Immediately mark as not recording to prevent stale callbacks
         self.isRecording = false
+        self.isCaptureStarting = false
+        self.isMicRestartScheduled = false
         AudioLevelManager.shared.updateRecordingState(false)
         print("Stopping recording...")
 
@@ -794,6 +903,10 @@ class AudioManager: NSObject, ObservableObject {
     }
 
     private func connectToSpeechmatics(source: AudioSource) {
+        #if AUDORA_LOCAL_SETUP
+        errorMessage = "Speechmatics is disabled in the local setup."
+        return
+        #else
         guard activeTranscriptionProvider == .speechmatics else { return }
 
         // Use Convex Service to fetch JWT
@@ -822,6 +935,7 @@ class AudioManager: NSObject, ObservableObject {
                 }
             }
         }
+        #endif
     }
 
     private func establishConnection(request: URLRequest, session: URLSession, source: AudioSource) async {
@@ -1240,7 +1354,7 @@ class AudioManager: NSObject, ObservableObject {
     // MARK: - Helper Methods
 
     private func handleAudioEngineConfigurationChange() {
-        print("� Audio engine configuration changed - restarting mic")
+        print("🎤 Audio engine configuration changed - restarting mic")
         restartMicrophone()
     }
 }

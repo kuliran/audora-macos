@@ -6,20 +6,25 @@
 //
 
 import SwiftUI
+#if !AUDORA_LOCAL_SETUP
 import Sparkle
 import PostHog
+import Clerk
+#endif
 import EventKit
 import Combine
-import Clerk
 
 @main
 struct AudoraApp: App {
+    #if !AUDORA_LOCAL_SETUP
     private let updaterController: SPUStandardUpdaterController
+    #endif
     @StateObject private var settingsViewModel = SettingsViewModel()
     @StateObject private var menuBarViewModel = MenuBarViewModel()
     @StateObject private var convexService = ConvexService.shared
 
     init() {
+        #if !AUDORA_LOCAL_SETUP
         updaterController = SPUStandardUpdaterController(updaterDelegate: nil, userDriverDelegate: nil)
 
         // Configure Clerk
@@ -57,6 +62,9 @@ struct AudoraApp: App {
         #else
         PostHogSDK.shared.register(["environment": "prod"])
         #endif
+        #else
+        print("🏠 Audora local setup enabled: Clerk, PostHog, Sparkle, and Speechmatics are disabled")
+        #endif
 
         // Start meeting app detection
         MeetingAppDetector.shared.startMonitoring()
@@ -89,9 +97,25 @@ struct AudoraApp: App {
                         .environmentObject(convexService)
                         .background(OpenSettingsInstaller())
                 case .unauthenticated:
+                    #if AUDORA_LOCAL_SETUP
+                    VStack(spacing: 12) {
+                        Text("Local services are not ready")
+                            .font(.headline)
+                        Text(convexService.errorMessage ?? "Start the local web and Convex servers, then retry.")
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("Retry") {
+                            Task { _ = await convexService.loginFromCache() }
+                        }
+                    }
+                    .padding(32)
+                    .frame(minWidth: 460, minHeight: 260)
+                    #else
                     SignInView()
+                    #endif
                 }
             }
+            #if !AUDORA_LOCAL_SETUP
             .onOpenURL { url in
                 print("🔗 [OAuth] Received URL: \(url)")
                 print("🔗 [OAuth] URL scheme: \(url.scheme ?? "none")")
@@ -110,6 +134,7 @@ struct AudoraApp: App {
                     }
                 }
             }
+            #endif
         }
         .handlesExternalEvents(matching: ["main-window"])
         .windowResizability(.contentSize)
@@ -143,9 +168,10 @@ struct AudoraApp: App {
 
             Divider()
 
+            #if !AUDORA_LOCAL_SETUP
             CheckForUpdatesView(updater: updaterController.updater)
-
             Divider()
+            #endif
 
             Link("Documentation", destination: URL(string: "https://audora.psycho-baller.com/docs")!)
 
@@ -208,6 +234,7 @@ extension NSApplication {
     }
 }
 
+#if !AUDORA_LOCAL_SETUP
 struct CheckForUpdatesView: View {
     let updater: SPUUpdater
 
@@ -218,6 +245,7 @@ struct CheckForUpdatesView: View {
         .keyboardShortcut("u", modifiers: .command)
     }
 }
+#endif
 
 private struct OpenSettingsInstaller: View {
     @Environment(\.openSettings) private var openSettings

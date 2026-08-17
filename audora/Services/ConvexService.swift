@@ -3,8 +3,10 @@
 
 import Foundation
 import ConvexMobile
+#if !AUDORA_LOCAL_SETUP
 import ConvexClerk
 import Clerk
+#endif
 import Combine
 
 private struct RawConvexJSON: ConvexEncodable {
@@ -15,6 +17,36 @@ private struct RawConvexJSON: ConvexEncodable {
     }
 }
 
+private func isAllowedLocalConvexUploadURL(_ url: URL?) -> Bool {
+    guard let url,
+          url.scheme == "http",
+          url.host == "127.0.0.1",
+          url.port == 3210,
+          url.path == "/api/storage/upload",
+          url.user == nil,
+          url.password == nil,
+          url.fragment == nil,
+          let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+          queryItems.count == 1,
+          queryItems[0].name == "token",
+          !(queryItems[0].value ?? "").isEmpty else {
+        return false
+    }
+    return true
+}
+
+private final class LoopbackUploadSessionDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(isAllowedLocalConvexUploadURL(request.url) ? request : nil)
+    }
+}
+
 /// Authentication state for the app
 enum AuthState: Equatable {
     case loading
@@ -22,22 +54,35 @@ enum AuthState: Equatable {
     case unauthenticated
 }
 
-/// Service for interacting with Convex backend with Clerk authentication
+/// Service for interacting with Convex using either local JWT or Clerk authentication.
 /// Manages conversations, transcription, and user session state
 @MainActor
 class ConvexService: ObservableObject {
     static let shared = ConvexService()
 
+    #if AUDORA_LOCAL_SETUP
+    private var client: ConvexClientWithAuth<LocalCredentials>?
+    #else
     private var client: ConvexClientWithAuth<ClerkCredentials>?
+    #endif
     private var hasAuthenticatedConvexClient = false
     private var hasEnsuredUserRecord = false
+    #if AUDORA_LOCAL_SETUP
+    private var localCredentialsExpiresAt: Date?
+    #endif
 
     @Published var authState: AuthState = .loading
     @Published var errorMessage: String?
 
     private init() {
-        // Initialize Convex client with Clerk authentication
         if let deploymentURL = getConvexDeploymentURL() {
+            #if AUDORA_LOCAL_SETUP
+            client = ConvexClientWithAuth(
+                deploymentUrl: deploymentURL,
+                authProvider: LocalAuthProvider()
+            )
+            print("✅ Convex client initialized with loopback JWT authentication")
+            #else
             // Create Clerk auth provider using ConvexClerk package
             // jwtTemplate must match the template name in Clerk Dashboard (default: "convex")
             let authProvider = ClerkAuthProvider(jwtTemplate: "convex")
@@ -48,6 +93,7 @@ class ConvexService: ObservableObject {
                 authProvider: authProvider
             )
             print("✅ Convex client initialized with Clerk authentication")
+            #endif
         } else {
             print("⚠️ Convex deployment URL not configured")
         }
@@ -56,6 +102,24 @@ class ConvexService: ObservableObject {
 
     /// Gets the Convex deployment URL from environment or configuration
     private func getConvexDeploymentURL() -> String? {
+        #if AUDORA_LOCAL_SETUP
+        let environmentValue = ProcessInfo.processInfo.environment["CONVEX_DEPLOYMENT_URL"]
+        let plistValue = Bundle.main.object(forInfoDictionaryKey: "CONVEX_DEPLOYMENT_URL") as? String
+        let candidate = [environmentValue, plistValue]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty && $0 != "$(CONVEX_DEPLOYMENT_URL)" }
+            ?? AppMode.localConvexURL
+
+        guard let url = URL(string: candidate),
+              url.scheme == "http",
+              url.host == "127.0.0.1",
+              url.port == 3210,
+              url.path.isEmpty || url.path == "/" else {
+            print("❌ Local setup rejected non-loopback Convex URL: \(candidate)")
+            return nil
+        }
+        return candidate
+        #else
         print("🔍 [ConvexService] Looking for CONVEX_DEPLOYMENT_URL...")
 
         // Check environment variable
@@ -76,8 +140,10 @@ class ConvexService: ObservableObject {
 
         print("   ⚠️ CONVEX_DEPLOYMENT_URL not found!")
         return nil
+        #endif
     }
 
+    #if !AUDORA_LOCAL_SETUP
     /// Gets the Clerk publishable key from environment or configuration
     private func getClerkPublishableKey() -> String? {
         // Check environment variable
@@ -94,13 +160,32 @@ class ConvexService: ObservableObject {
 
         return nil
     }
+    #endif
 
     // MARK: - Authentication
 
-    /// Attempts to restore session from Clerk on app launch
+    /// Restores either the loopback JWT session or the cached Clerk session.
     func loginFromCache() async -> Bool {
         print("🔐 [ConvexService] loginFromCache() called")
 
+        #if AUDORA_LOCAL_SETUP
+        // Retry is a fresh attempt. Clear both the old error and all cached
+        // authentication bookkeeping before contacting the loopback issuer.
+        authState = .loading
+        errorMessage = nil
+        resetLocalAuthenticationState(updatePublishedState: false)
+        do {
+            try await prepareAuthenticatedBackend(forceRefresh: true)
+            authState = .authenticated(userId: AppMode.localUserID)
+            errorMessage = nil
+            return true
+        } catch {
+            print("❌ Local backend authentication failed: \(error)")
+            resetLocalAuthenticationState()
+            errorMessage = error.localizedDescription
+            return false
+        }
+        #else
         // First, ensure Clerk has loaded its saved session
         print("   - Calling Clerk.shared.load()...")
         do {
@@ -132,10 +217,14 @@ class ConvexService: ObservableObject {
         print("   ⚠️ No session found")
         authState = .unauthenticated
         return false
+        #endif
     }
 
     /// Called after Clerk sign-in completes
     func onSignInComplete() async {
+        #if AUDORA_LOCAL_SETUP
+        _ = await loginFromCache()
+        #else
         if let user = Clerk.shared.user {
             do {
                 try await prepareAuthenticatedBackend()
@@ -146,20 +235,38 @@ class ConvexService: ObservableObject {
 
             authState = .authenticated(userId: user.id)
         }
+        #endif
     }
 
     /// Ensures authenticated backend calls can rely on Convex auth and a user row.
-    private func prepareAuthenticatedBackend() async throws {
+    private func prepareAuthenticatedBackend(forceRefresh: Bool = false) async throws {
         guard let client = client else {
             throw ConvexError.clientNotInitialized
         }
 
-        if !hasAuthenticatedConvexClient {
+        #if AUDORA_LOCAL_SETUP
+        // The local issuer keeps its signing key only for the lifetime of Vite.
+        // Refresh on every backend operation so a Vite restart or an expired JWT
+        // cannot leave the native client wedged with a stale token.
+        let credentialsNeedRefresh = forceRefresh
+            || !hasAuthenticatedConvexClient
+            || localCredentialsExpiresAt.map { $0.timeIntervalSinceNow < 5 * 60 } != false
+        #else
+        let credentialsNeedRefresh = !hasAuthenticatedConvexClient
+        #endif
+
+        if credentialsNeedRefresh {
             switch await client.login() {
-            case .success(_):
+            case .success(let credentials):
                 hasAuthenticatedConvexClient = true
-                print("✅ Convex client authenticated with Clerk")
+                #if AUDORA_LOCAL_SETUP
+                localCredentialsExpiresAt = credentials.expiresAt
+                // The self-hosted backend may have been restarted with fresh state.
+                hasEnsuredUserRecord = false
+                #endif
+                print("✅ Convex client authenticated")
             case .failure(let error):
+                resetLocalAuthenticationState()
                 throw error
             }
         }
@@ -176,7 +283,22 @@ class ConvexService: ObservableObject {
             throw ConvexError.authenticationRequired
         }
 
+        #if AUDORA_LOCAL_SETUP
+        try await prepareAuthenticatedBackend(forceRefresh: true)
+        #else
         try await prepareAuthenticatedBackend()
+        #endif
+    }
+
+    private func resetLocalAuthenticationState(updatePublishedState: Bool = true) {
+        hasAuthenticatedConvexClient = false
+        hasEnsuredUserRecord = false
+        #if AUDORA_LOCAL_SETUP
+        localCredentialsExpiresAt = nil
+        if updatePublishedState {
+            authState = .unauthenticated
+        }
+        #endif
     }
 
     /// Ensures the user record exists in Convex database
@@ -199,6 +321,11 @@ class ConvexService: ObservableObject {
 
     /// Signs out the current user
     func logout() async {
+        #if AUDORA_LOCAL_SETUP
+        resetLocalAuthenticationState()
+        errorMessage = "Local setup uses an automatic loopback identity and has no account session."
+        return
+        #else
         do {
             // Logout from Convex client first
             if let client = client {
@@ -213,6 +340,7 @@ class ConvexService: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+        #endif
     }
 
     // MARK: - Transcription
@@ -221,6 +349,9 @@ class ConvexService: ObservableObject {
 
     /// Fetches a JWT for Speechmatics real-time transcription from the backend
     func getSpeechmaticsJWT() async throws -> String {
+        #if AUDORA_LOCAL_SETUP
+        throw ConvexError.speechmaticsDisabled
+        #else
         try await ensureAuthenticatedBackendReady()
 
         guard let client = client else {
@@ -232,6 +363,7 @@ class ConvexService: ObservableObject {
 
         print("   ✅ JWT fetched successfully")
         return jwt
+        #endif
     }
 
     // MARK: - Conversation Management
@@ -256,7 +388,7 @@ class ConvexService: ObservableObject {
         args["participantMode"] = "anonymous"
         args["reusePending"] = false
 
-        print("📝 Creating conversation: \(title ?? "Untitled")")
+        print("📝 Creating conversation")
 
         do {
             struct CreateConversationResponse: Decodable {
@@ -328,6 +460,7 @@ class ConvexService: ObservableObject {
         return AsyncThrowingStream { continuation in
             Task {
                 do {
+                    try await self.ensureAuthenticatedBackendReady()
                     guard let client = client else {
                         throw ConvexError.clientNotInitialized
                     }
@@ -365,17 +498,32 @@ class ConvexService: ObservableObject {
         print("📤 Uploading audio file to backend conversation...")
 
         let uploadUrl: String = try await client.mutation("conversations:generateUploadUrl", with: [:])
-        guard let url = URL(string: uploadUrl) else {
-            throw ConvexError.uploadFailed("Backend returned an invalid upload URL")
+        guard let url = URL(string: uploadUrl), isAllowedLocalConvexUploadURL(url) else {
+            throw ConvexError.uploadFailed("Backend returned a non-loopback upload URL")
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("audio/mp4", forHTTPHeaderField: "Content-Type")
+        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
 
-        let (responseData, response) = try await URLSession.shared.upload(for: request, fromFile: audioFileURL)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.connectionProxyDictionary = [:]
+        let delegate = LoopbackUploadSessionDelegate()
+        let uploadSession = URLSession(
+            configuration: configuration,
+            delegate: delegate,
+            delegateQueue: nil
+        )
+        defer { uploadSession.finishTasksAndInvalidate() }
 
-        guard let httpResponse = response as? HTTPURLResponse else {
+        let (responseData, response) = try await uploadSession.upload(for: request, fromFile: audioFileURL)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              isAllowedLocalConvexUploadURL(httpResponse.url) else {
             throw ConvexError.uploadFailed("Upload did not return an HTTP response")
         }
 
@@ -417,6 +565,7 @@ enum ConvexError: LocalizedError {
     case uploadFailed(String)
     case netError(String)
     case authenticationRequired
+    case speechmaticsDisabled
 
     var errorDescription: String? {
         switch self {
@@ -430,6 +579,8 @@ enum ConvexError: LocalizedError {
             return "Network error: \(message)"
         case .authenticationRequired:
             return "Please sign in to continue."
+        case .speechmaticsDisabled:
+            return "Speechmatics is disabled in the local setup."
         }
     }
 }
