@@ -24,7 +24,7 @@ See `docs/LOCAL_CODEX_SETUP.md` in the parent repository for the complete backen
 2. Let Xcode resolve the pinned Convex Swift and FluidAudio packages.
 3. In **Signing & Capabilities**, select your Personal Team or choose **Sign to Run Locally**.
 4. The fork defaults to `com.audora.local`. If that identifier is unavailable to your team, set `AUDORA_PRODUCT_BUNDLE_IDENTIFIER` in the ignored `Config.xcconfig`.
-5. Select **My Mac** and run the `audora` scheme.
+5. Select **My Mac** and run the `Audora` scheme. Its Run action uses the optimized Release configuration while retaining `AUDORA_LOCAL_SETUP`.
 
 The app requests microphone and system-audio permissions. On the first recording it downloads and initializes the Parakeet v3 and Silero VAD assets from Hugging Face before audio capture begins; progress is shown beside the recording controls. Later recordings transcribe locally from the cached models.
 
