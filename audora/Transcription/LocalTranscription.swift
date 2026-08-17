@@ -255,7 +255,13 @@ final class LocalTranscriptionSession: @unchecked Sendable {
 
             print("🔧 [Parakeet] Step 3/3: Loading VAD model...")
             onStatus("Loading VAD model...")
-            let vadManager = try await VadManager { progress in
+            // FluidAudio's default 0.85 threshold is conservative enough to
+            // miss quiet syllables in ordinary laptop-microphone speech.
+            // Silero's usual operating point is around 0.5; 0.55 keeps a
+            // little noise rejection while preserving softer words.
+            let vadManager = try await VadManager(
+                config: VadConfig(defaultThreshold: 0.55)
+            ) { progress in
                 onProgress(progress.fractionCompleted)
             }
             try Task.checkCancellation()
@@ -320,11 +326,12 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
     private let vadManager: VadManager
     private let source: AudioSource
     private let onFinal: @Sendable (AudioSource, String) async -> Void
-    private let flushInterval = 5 * 16_000
+    private let flushInterval = 12 * 16_000
 
     private var continuation: AsyncStream<AVAudioPCMBuffer>.Continuation?
     private var task: Task<Void, Never>?
     private var previousContext: String?
+    private var previousEmittedText: String?
 
     private var converter: AVAudioConverter?
     private let targetFormat = AVAudioFormat(
@@ -346,10 +353,28 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
 
     private static let vadChunkSize = 4096
     private static let minimumSpeechSamples = 16_000
+    private static let flushOverlapSamples = 16_000
     private static let prerollChunkCount = 2
     private static let contextWordCount = 5
+    private static let maximumDeduplicationWords = 12
     private static let rateWarmupSeconds: Double = 3.0
     private static let rateDivergenceThreshold: Double = 0.05
+    private static let vadSegmentationConfig = VadSegmentationConfig(
+        minSpeechDuration: 0.15,
+        minSilenceDuration: 1.25,
+        maxSpeechDuration: 14.0,
+        speechPadding: 0.15,
+        silenceThresholdForSplit: 0.3,
+        negativeThreshold: nil,
+        negativeThresholdOffset: 0.2,
+        minSilenceAtMaxSpeech: 0.098,
+        useMaxPossibleSilenceAtMaxSpeech: true
+    )
+
+    private enum SegmentBoundary {
+        case natural
+        case continuation
+    }
 
     init(
         provider: any TranscriptionProvider,
@@ -476,7 +501,7 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                     let result = try await vadManager.processStreamingChunk(
                         chunk,
                         state: vadState,
-                        config: .default,
+                        config: Self.vadSegmentationConfig,
                         returnSeconds: true,
                         timeResolution: 2
                     )
@@ -525,8 +550,12 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                         }
                     } else if isSpeaking, speechSamples.count >= flushInterval {
                         let segment = speechSamples
-                        speechSamples.removeAll(keepingCapacity: true)
-                        await transcribeSegment(segment)
+                        // Preserve one second on both sides of an artificial
+                        // model-window boundary. Without overlap, a word split
+                        // exactly at the old five-second cut vanished from
+                        // both independent Parakeet calls.
+                        speechSamples = Array(segment.suffix(Self.flushOverlapSamples))
+                        await transcribeSegment(segment, boundary: .continuation)
                     }
                 } catch {
                     vadFailureCount += 1
@@ -562,25 +591,70 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
         }
     }
 
-    private func transcribeSegment(_ samples: [Float]) async {
+    private func transcribeSegment(
+        _ samples: [Float],
+        boundary: SegmentBoundary = .natural
+    ) async {
         let duration = String(format: "%.1f", Double(samples.count) / 16000.0)
         print("📝 [\(source)] Transcribing \(samples.count) samples (\(duration)s)...")
         do {
             try Task.checkCancellation()
             let text = try await provider.transcribe(samples, previousContext: previousContext)
-            guard !text.isEmpty, !Task.isCancelled else {
+            var emittedText = Self.removingRepeatedPrefix(
+                from: text,
+                previousText: previousEmittedText
+            )
+            if boundary == .continuation {
+                emittedText = emittedText.trimmingCharacters(
+                    in: CharacterSet(charactersIn: ".…")
+                )
+            }
+            emittedText = emittedText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard !emittedText.isEmpty, !Task.isCancelled else {
                 print("📝 [\(source)] Transcription returned empty or was cancelled")
                 return
             }
 
-            let words = text.split(separator: " ")
+            previousEmittedText = emittedText
+            let words = emittedText.split(separator: " ")
             previousContext = words.suffix(Self.contextWordCount).joined(separator: " ")
-            print("📝 [\(source)] ✅ Transcribed \(text.split(separator: " ").count) word(s)")
-            await onFinal(source, text)
+            print("📝 [\(source)] ✅ Transcribed \(words.count) word(s)")
+            await onFinal(source, emittedText)
         } catch {
             print("❌ [\(source)] ASR transcription failed: \(error)")
             localTranscriptionLogger.error("ASR error for \(self.source.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    private static func removingRepeatedPrefix(
+        from currentText: String,
+        previousText: String?
+    ) -> String {
+        guard let previousText, !previousText.isEmpty else { return currentText }
+
+        let previousWords = previousText.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let currentWords = currentText.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let maximumOverlap = min(
+            maximumDeduplicationWords,
+            previousWords.count,
+            currentWords.count
+        )
+        guard maximumOverlap > 0 else { return currentText }
+
+        func normalized(_ word: String) -> String {
+            word.lowercased().trimmingCharacters(in: .punctuationCharacters)
+        }
+
+        for overlap in stride(from: maximumOverlap, through: 1, by: -1) {
+            let previousSuffix = previousWords.suffix(overlap).map(normalized)
+            let currentPrefix = currentWords.prefix(overlap).map(normalized)
+            if previousSuffix == currentPrefix {
+                return currentWords.dropFirst(overlap).joined(separator: " ")
+            }
+        }
+
+        return currentText
     }
 
     private func updateRateTracking(_ buffer: AVAudioPCMBuffer) {
