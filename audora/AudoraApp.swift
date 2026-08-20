@@ -26,6 +26,9 @@ struct AudoraApp: App {
     @StateObject private var settingsViewModel = SettingsViewModel()
     @StateObject private var menuBarViewModel = MenuBarViewModel()
     @StateObject private var convexService = ConvexService.shared
+    #if AUDORA_LOCAL_SETUP
+    @StateObject private var localDeepLinkCoordinator = LocalConversationDeepLinkCoordinator.shared
+    #endif
 
     init() {
         #if AUDORA_LOCAL_SETUP
@@ -98,7 +101,37 @@ struct AudoraApp: App {
                 mainWindowContent
                 #endif
             }
-            #if !AUDORA_LOCAL_SETUP
+            #if AUDORA_LOCAL_SETUP
+            .onOpenURL { url in
+                localDeepLinkCoordinator.receive(url)
+            }
+            .onAppear {
+                localDeepLinkCoordinator.resumeIfReady()
+            }
+            .onChange(of: convexService.authState) { _, _ in
+                localDeepLinkCoordinator.resumeIfReady()
+            }
+            .onReceive(settingsViewModel.$settings) { _ in
+                localDeepLinkCoordinator.resumeIfReady()
+            }
+            .alert(
+                "Unable to Open Conversation",
+                isPresented: Binding(
+                    get: { localDeepLinkCoordinator.errorMessage != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            localDeepLinkCoordinator.dismissError()
+                        }
+                    }
+                )
+            ) {
+                Button("OK") {
+                    localDeepLinkCoordinator.dismissError()
+                }
+            } message: {
+                Text(localDeepLinkCoordinator.errorMessage ?? "The conversation could not be opened.")
+            }
+            #else
             .onOpenURL { url in
                 print("🔗 [OAuth] Received URL: \(url)")
                 print("🔗 [OAuth] URL scheme: \(url.scheme ?? "none")")
@@ -119,7 +152,11 @@ struct AudoraApp: App {
             }
             #endif
         }
+        #if AUDORA_LOCAL_SETUP
+        .handlesExternalEvents(matching: ["main-window", LocalConversationDeepLink.host])
+        #else
         .handlesExternalEvents(matching: ["main-window"])
+        #endif
         .windowResizability(.contentSize)
         .defaultSize(width: 1000, height: 600)
 

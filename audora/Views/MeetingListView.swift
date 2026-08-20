@@ -9,6 +9,9 @@ struct MeetingListView: View {
     @Binding var triggerNewRecording: Bool
     @Binding var triggerOpenSettings: Bool
     @Environment(\.openSettings) private var openSettings
+    #if AUDORA_LOCAL_SETUP
+    @ObservedObject private var localDeepLinkCoordinator = LocalConversationDeepLinkCoordinator.shared
+    #endif
 
     // Default initializer for use without bindings
     init(settingsViewModel: SettingsViewModel,
@@ -44,7 +47,24 @@ struct MeetingListView: View {
             // Open settings window when triggered from menu bar
             openSettings()
         }
+        #if AUDORA_LOCAL_SETUP
+        .onAppear {
+            selectDeepLinkedMeeting()
+        }
+        .onChange(of: localDeepLinkCoordinator.meetingToOpen?.id) { _, _ in
+            selectDeepLinkedMeeting()
+        }
+        #endif
     }
+
+    #if AUDORA_LOCAL_SETUP
+    private func selectDeepLinkedMeeting() {
+        if let meeting = localDeepLinkCoordinator.meetingToOpen {
+            selectedMeeting = meeting
+            localDeepLinkCoordinator.acknowledgeMeetingSelection(meeting.id)
+        }
+    }
+    #endif
 
     private var sidebarContent: some View {
         VStack(spacing: 0) {

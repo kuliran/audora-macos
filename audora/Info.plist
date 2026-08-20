@@ -2,6 +2,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+#if AUDORA_LOCAL_SETUP
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>com.audora.local.conversation</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>audora-local</string>
+			</array>
+		</dict>
+	</array>
+#endif
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Audora captures audio for transcription. The mic following feature records only when other apps are using the microphone.</string>
 	<key>NSAppTransportSecurity</key>

@@ -54,6 +54,32 @@ enum AuthState: Equatable {
     case unauthenticated
 }
 
+#if AUDORA_LOCAL_SETUP
+struct LocalConversationReference: Equatable {
+    enum Status: String, Decodable {
+        case pending
+        case active
+        case ended
+    }
+
+    let id: String
+    let status: Status
+    let location: String?
+}
+
+private struct LocalConversationAccessResponse: Decodable {
+    let id: String
+    let status: LocalConversationReference.Status
+    let location: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id = "_id"
+        case status
+        case location
+    }
+}
+#endif
+
 /// Service for interacting with Convex using either local JWT or Clerk authentication.
 /// Manages conversations, transcription, and user session state
 @MainActor
@@ -383,6 +409,45 @@ class ConvexService: ObservableObject {
     }
 
     // MARK: - Conversation Management
+
+    #if AUDORA_LOCAL_SETUP
+    /// Resolves a deep-linked conversation through an authenticated query.
+    /// The backend query enforces that the current local identity owns or is a
+    /// participant in the conversation; parsing an ID from a URL is never
+    /// treated as authorization.
+    func verifyLocalConversationAccess(
+        conversationID: String
+    ) async throws -> LocalConversationReference {
+        guard LocalConversationDeepLink.isValidConversationID(conversationID) else {
+            throw ConvexError.netError("Invalid local conversation identifier.")
+        }
+
+        try await ensureAuthenticatedBackendReady()
+
+        guard let client else {
+            throw ConvexError.clientNotInitialized
+        }
+
+        let subscription = client.subscribe(
+            to: "conversations:get",
+            with: ["id": conversationID],
+            yielding: LocalConversationAccessResponse?.self
+        )
+
+        for try await response in subscription.first().values {
+            guard let response, response.id == conversationID else {
+                throw ConvexError.netError("Conversation could not be verified.")
+            }
+            return LocalConversationReference(
+                id: response.id,
+                status: response.status,
+                location: response.location
+            )
+        }
+
+        throw ConvexError.netError("Conversation could not be verified.")
+    }
+    #endif
 
     /// Creates a new conversation for Mac app recording
     /// - Parameters:
