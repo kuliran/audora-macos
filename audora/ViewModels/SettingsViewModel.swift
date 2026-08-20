@@ -87,7 +87,9 @@ class SettingsViewModel: ObservableObject {
 
     func completeOnboarding() {
         settings.hasCompletedOnboarding = true
+        #if !AUDORA_LOCAL_SETUP
         settings.hasAcceptedTerms = true
+        #endif
         saveSettings(showMessage: false)
         #if !AUDORA_LOCAL_SETUP
         PostHogSDK.shared.capture("onboarding_completed")

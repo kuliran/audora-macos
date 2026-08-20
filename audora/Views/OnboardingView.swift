@@ -4,7 +4,9 @@ import AVFoundation
 struct OnboardingView: View {
     @ObservedObject var settingsViewModel: SettingsViewModel
     @ObservedObject private var convexService = ConvexService.shared
+    #if !AUDORA_LOCAL_SETUP
     @State private var hasAcceptedTerms = false
+    #endif
     @State private var micPermissionGranted = false
     @State private var systemAudioPermissionGranted = false
     @State private var calendarPermissionGranted = false
@@ -51,6 +53,18 @@ struct OnboardingView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 
+                        #if AUDORA_LOCAL_SETUP
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Local Data and Privacy")
+                                .font(.title2)
+                                .fontWeight(.semibold)
+
+                            Text("This local setup disables Audora telemetry, cloud authentication, cloud transcription, and automatic updates. Recordings are transcribed with Local Parakeet and synchronized only to the loopback Convex backend on this Mac.")
+                                .font(.body)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        #else
                         // Terms Section
                         VStack(alignment: .leading, spacing: 8) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -58,15 +72,9 @@ struct OnboardingView: View {
                                     .font(.title2)
                                     .fontWeight(.semibold)
 
-                                #if AUDORA_LOCAL_SETUP
-                                Text("This local setup disables Audora telemetry, cloud authentication, cloud transcription, and automatic updates. Recordings are transcribed with Local Parakeet and synchronized only to the loopback Convex backend on this Mac.")
-                                    .font(.body)
-                                    .foregroundColor(.secondary)
-                                #else
                                 Text("Of note, I am tracking a few basic anonymous metrics (installs, opens, meetings created) using PostHog, because I'm trying to gauge interest in the app. Everything is completely anonymous (feel free to check the source code). If you have any concerns, please reach out and we can find a solution.")
                                     .font(.body)
                                     .foregroundColor(.secondary)
-                                #endif
                             }
 
                             HStack {
@@ -106,6 +114,7 @@ struct OnboardingView: View {
 
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        #endif
 
                         HStack {
                             Spacer()
@@ -134,7 +143,9 @@ struct OnboardingView: View {
         }
         .onAppear {
             checkPermissions()
+            #if !AUDORA_LOCAL_SETUP
             hasAcceptedTerms = settingsViewModel.settings.hasAcceptedTerms
+            #endif
         }
         .onChange(of: audioRecordingPermission.status) { oldValue, newValue in
             // Update permission status when it changes
@@ -154,10 +165,16 @@ struct OnboardingView: View {
             isAuthenticated = false
         }
         
+        #if AUDORA_LOCAL_SETUP
+        return micPermissionGranted &&
+               systemAudioPermissionGranted &&
+               isAuthenticated
+        #else
         return micPermissionGranted &&
                systemAudioPermissionGranted &&
                hasAcceptedTerms &&
                isAuthenticated
+        #endif
     }
 
     private func checkPermissions() {
