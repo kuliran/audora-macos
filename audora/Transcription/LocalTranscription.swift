@@ -32,8 +32,30 @@ protocol TranscriptionProvider: Sendable {
         onStatus: @escaping @Sendable (String) -> Void,
         onProgress: @escaping @Sendable (Double) -> Void
     ) async throws
-    func transcribe(_ samples: [Float], previousContext: String?) async throws -> String
+    func transcribe(_ samples: [Float], previousContext: String?) async throws -> LocalASRResult
     func clearModelCache()
+}
+
+struct LocalASRTokenTiming: Sendable {
+    let token: String
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+    let confidence: Float
+}
+
+struct LocalASRResult: Sendable {
+    let text: String
+    let confidence: Float
+    let duration: TimeInterval
+    let tokenTimings: [LocalASRTokenTiming]
+}
+
+struct LocalTranscriptSegment: Sendable {
+    let text: String
+    let confidence: Float
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+    let words: [WordTiming]
 }
 
 final class ParakeetTranscriptionProvider: TranscriptionProvider, @unchecked Sendable {
@@ -85,13 +107,25 @@ final class ParakeetTranscriptionProvider: TranscriptionProvider, @unchecked Sen
         self.asrManager = asr
     }
 
-    func transcribe(_ samples: [Float], previousContext: String? = nil) async throws -> String {
+    func transcribe(_ samples: [Float], previousContext: String? = nil) async throws -> LocalASRResult {
         guard let asrManager else {
             throw TranscriptionProviderError.notPrepared
         }
 
         let result = try await asrManager.transcribe(samples)
-        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return LocalASRResult(
+            text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            confidence: result.confidence,
+            duration: result.duration,
+            tokenTimings: (result.tokenTimings ?? []).map {
+                LocalASRTokenTiming(
+                    token: $0.token,
+                    startTime: $0.startTime,
+                    endTime: $0.endTime,
+                    confidence: $0.confidence
+                )
+            }
+        )
     }
 }
 
@@ -232,7 +266,7 @@ final class LocalTranscriptionSession: @unchecked Sendable {
     static func make(
         onStatus: @escaping @Sendable (String) -> Void,
         onProgress: @escaping @Sendable (Double) -> Void,
-        onFinal: @escaping @Sendable (AudioSource, String) async -> Void
+        onFinal: @escaping @Sendable (AudioSource, LocalTranscriptSegment) async -> Void
     ) async throws -> LocalTranscriptionSession {
         let micProvider = ParakeetTranscriptionProvider()
         let systemProvider = ParakeetTranscriptionProvider()
@@ -297,12 +331,16 @@ final class LocalTranscriptionSession: @unchecked Sendable {
         systemTranscriber.start()
     }
 
-    func submit(_ buffer: AVAudioPCMBuffer, source: AudioSource) {
+    func submit(
+        _ buffer: AVAudioPCMBuffer,
+        source: AudioSource,
+        sessionTime: TimeInterval
+    ) {
         switch source {
         case .mic:
-            micTranscriber.submit(buffer)
+            micTranscriber.submit(buffer, sessionTime: sessionTime)
         case .system:
-            systemTranscriber.submit(buffer)
+            systemTranscriber.submit(buffer, sessionTime: sessionTime)
         }
     }
 
@@ -311,27 +349,42 @@ final class LocalTranscriptionSession: @unchecked Sendable {
         systemTranscriber.stop()
     }
 
-    func finish() async {
+    func finish() async -> LocalAcousticMetrics {
         print("🎙️ [Parakeet] Finishing transcription session (flushing remaining audio)...")
-        await withTaskGroup(of: Void.self) { group in
+        let sources = await withTaskGroup(of: LocalAcousticSourceMetrics.self) { group in
             group.addTask { await self.micTranscriber.finish() }
             group.addTask { await self.systemTranscriber.finish() }
+
+            var values: [LocalAcousticSourceMetrics] = []
+            for await value in group {
+                if !value.phrases.isEmpty {
+                    values.append(value)
+                }
+            }
+            return values.sorted { $0.source.rawValue < $1.source.rawValue }
         }
         print("✅ [Parakeet] Transcription session finished")
+        return LocalAcousticMetrics(sources: sources)
     }
 }
 
 final class LocalStreamingTranscriber: @unchecked Sendable {
+    private struct TimestampedAudioBuffer: @unchecked Sendable {
+        let buffer: AVAudioPCMBuffer
+        let sessionTime: TimeInterval
+    }
+
     private let provider: any TranscriptionProvider
     private let vadManager: VadManager
     private let source: AudioSource
-    private let onFinal: @Sendable (AudioSource, String) async -> Void
+    private let onFinal: @Sendable (AudioSource, LocalTranscriptSegment) async -> Void
     private let flushInterval = 12 * 16_000
 
-    private var continuation: AsyncStream<AVAudioPCMBuffer>.Continuation?
+    private var continuation: AsyncStream<TimestampedAudioBuffer>.Continuation?
     private var task: Task<Void, Never>?
     private var previousContext: String?
     private var previousEmittedText: String?
+    private var acousticPhrases: [LocalAcousticPhraseMetrics] = []
 
     private var converter: AVAudioConverter?
     private let targetFormat = AVAudioFormat(
@@ -380,11 +433,16 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
         case continuation
     }
 
+    private struct BufferedSampleChunk: Sendable {
+        let startSample: Int64
+        let samples: [Float]
+    }
+
     init(
         provider: any TranscriptionProvider,
         vadManager: VadManager,
         source: AudioSource,
-        onFinal: @escaping @Sendable (AudioSource, String) async -> Void
+        onFinal: @escaping @Sendable (AudioSource, LocalTranscriptSegment) async -> Void
     ) {
         self.provider = provider
         self.vadManager = vadManager
@@ -393,7 +451,7 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
     }
 
     func start() {
-        let stream = AsyncStream(AVAudioPCMBuffer.self) { continuation in
+        let stream = AsyncStream(TimestampedAudioBuffer.self) { continuation in
             self.continuation = continuation
         }
 
@@ -402,7 +460,7 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
         }
     }
 
-    func submit(_ buffer: AVAudioPCMBuffer) {
+    func submit(_ buffer: AVAudioPCMBuffer, sessionTime: TimeInterval) {
         guard let copy = Self.copyPCMBuffer(buffer) else {
             if bufferCount < 5 {
                 print("⚠️ [\(source)] copyPCMBuffer returned nil, buffer dropped")
@@ -415,7 +473,9 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
             }
             return
         }
-        continuation?.yield(copy)
+        continuation?.yield(
+            TimestampedAudioBuffer(buffer: copy, sessionTime: sessionTime)
+        )
     }
 
     func stop() {
@@ -425,28 +485,40 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
         task = nil
     }
 
-    func finish() async {
+    func finish() async -> LocalAcousticSourceMetrics {
         continuation?.finish()
         continuation = nil
         await task?.value
         task = nil
+        return AcousticMetricsCalculator().aggregate(
+            source: source == .mic ? .mic : .system,
+            scope: source == .mic ? .singleSpeaker : .mixedChannel,
+            speaker: source == .mic ? source.displayName : nil,
+            phrases: acousticPhrases
+        )
     }
 
-    private func run(stream: AsyncStream<AVAudioPCMBuffer>) async {
+    private func run(stream: AsyncStream<TimestampedAudioBuffer>) async {
         var vadState = await vadManager.makeStreamState()
         var speechSamples: [Float] = []
+        var speechStartSample: Int64?
         var vadBuffer: [Float] = []
         var vadReadIndex = 0
-        var recentChunks: [[Float]] = []
+        var vadBufferStartSample: Int64 = 0
+        var nextSampleIndex: Int64 = 0
+        var didSetTimelineOrigin = false
+        var recentChunks: [BufferedSampleChunk] = []
         var isSpeaking = false
         var useVadFallback = false
         var fallbackAccumulator: [Float] = []
+        var fallbackStartSample: Int64?
         var extractFailCount = 0
 
         print("🎙️ [\(source)] Transcriber run loop started, waiting for audio buffers...")
 
-        for await buffer in stream {
+        for await timestampedBuffer in stream {
             guard !Task.isCancelled else { break }
+            let buffer = timestampedBuffer.buffer
 
             bufferCount += 1
             if bufferCount == 1 {
@@ -464,6 +536,72 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                 }
                 continue
             }
+            let safeSessionTime = timestampedBuffer.sessionTime.isFinite
+                ? max(0, timestampedBuffer.sessionTime)
+                : TimeInterval(nextSampleIndex) / 16_000
+            let reportedStartSample = Int64((safeSessionTime * 16_000).rounded())
+            if !didSetTimelineOrigin {
+                nextSampleIndex = reportedStartSample
+                vadBufferStartSample = nextSampleIndex
+                didSetTimelineOrigin = true
+            } else if AudioTimelineGapReconciler.missingFrames(
+                reportedStartTime: safeSessionTime,
+                expectedStartTime: TimeInterval(nextSampleIndex) / 16_000,
+                sampleRate: 16_000
+            ) > 0 {
+                let gapSamples = max(0, reportedStartSample - nextSampleIndex)
+                localTranscriptionLogger.notice(
+                    "Timeline gap for \(self.source.rawValue, privacy: .public): \(Double(gapSamples) / 16_000, privacy: .public)s"
+                )
+
+                // Finish any pending phrase on the old side of the gap. Resetting
+                // VAD avoids treating speech before and after a capture restart as
+                // one contiguous acoustic window.
+                if useVadFallback {
+                    if Self.shouldTranscribeFinalTail(fallbackAccumulator) {
+                        await transcribeSegment(
+                            fallbackAccumulator,
+                            startSample: fallbackStartSample
+                                ?? nextSampleIndex - Int64(fallbackAccumulator.count)
+                        )
+                    }
+                } else {
+                    let unreadSamples = vadReadIndex < vadBuffer.count
+                        ? Array(vadBuffer[vadReadIndex..<vadBuffer.count])
+                        : []
+                    let unreadStart = vadBufferStartSample + Int64(vadReadIndex)
+                    let pendingSamples: [Float]
+                    let pendingStart: Int64
+                    if isSpeaking || !speechSamples.isEmpty {
+                        pendingSamples = speechSamples + unreadSamples
+                        pendingStart = speechStartSample ?? unreadStart
+                    } else {
+                        pendingSamples = recentChunks.flatMap(\.samples) + unreadSamples
+                        pendingStart = recentChunks.first?.startSample ?? unreadStart
+                    }
+                    if Self.shouldTranscribeFinalTail(pendingSamples) {
+                        await transcribeSegment(pendingSamples, startSample: pendingStart)
+                    }
+                }
+
+                vadState = await vadManager.makeStreamState()
+                speechSamples.removeAll(keepingCapacity: true)
+                speechStartSample = nil
+                vadBuffer.removeAll(keepingCapacity: true)
+                vadReadIndex = 0
+                vadBufferStartSample = reportedStartSample
+                recentChunks.removeAll(keepingCapacity: true)
+                isSpeaking = false
+                useVadFallback = false
+                fallbackAccumulator.removeAll(keepingCapacity: true)
+                fallbackStartSample = nil
+                vadFailureCount = 0
+                previousContext = nil
+                previousEmittedText = nil
+                nextSampleIndex = reportedStartSample
+            }
+            let samplesStart = nextSampleIndex
+            nextSampleIndex += Int64(samples.count)
 
             if bufferCount == 1 {
                 let maxAmp = samples.map { abs($0) }.max() ?? 0
@@ -472,14 +610,19 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
 
             // ── VAD fallback path: time-based chunking when VAD is broken ──
             if useVadFallback {
+                if fallbackStartSample == nil {
+                    fallbackStartSample = samplesStart
+                }
                 fallbackAccumulator.append(contentsOf: samples)
                 if fallbackAccumulator.count >= Self.fallbackFlushInterval {
                     let segment = fallbackAccumulator
+                    let segmentStart = fallbackStartSample ?? samplesStart
                     fallbackAccumulator.removeAll(keepingCapacity: true)
+                    fallbackStartSample = segmentStart + Int64(segment.count)
                     let maxAmp = segment.map { abs($0) }.max() ?? 0
                     if maxAmp > 0.001 {
                         print("🔄 [\(source)] Fallback transcribing \(segment.count) samples (\(String(format: "%.1f", Double(segment.count) / 16000.0))s, peak: \(String(format: "%.4f", maxAmp)))")
-                        await transcribeSegment(segment)
+                        await transcribeSegment(segment, startSample: segmentStart)
                     }
                 }
                 continue
@@ -489,10 +632,12 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
             vadBuffer.append(contentsOf: samples)
 
             while vadBuffer.count - vadReadIndex >= Self.vadChunkSize {
+                let chunkStartSample = vadBufferStartSample + Int64(vadReadIndex)
                 let chunk = Array(vadBuffer[vadReadIndex..<(vadReadIndex + Self.vadChunkSize)])
                 vadReadIndex += Self.vadChunkSize
 
                 if vadReadIndex > vadBuffer.count / 2 {
+                    vadBufferStartSample += Int64(vadReadIndex)
                     vadBuffer.removeFirst(vadReadIndex)
                     vadReadIndex = 0
                 }
@@ -523,7 +668,9 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                             if !wasSpeaking {
                                 isSpeaking = true
                                 startedSpeech = true
-                                speechSamples = recentChunks.suffix(Self.prerollChunkCount).flatMap { $0 }
+                                let preroll = recentChunks.suffix(Self.prerollChunkCount)
+                                speechSamples = preroll.flatMap(\.samples)
+                                speechStartSample = preroll.first?.startSample ?? chunkStartSample
                                 print("🗣️ [\(source)] Speech started")
                             }
                         case .speechEnd:
@@ -533,10 +680,15 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                     }
 
                     if wasSpeaking || startedSpeech || endedSpeech {
+                        if speechStartSample == nil {
+                            speechStartSample = chunkStartSample
+                        }
                         speechSamples.append(contentsOf: chunk)
                         recentChunks.removeAll(keepingCapacity: true)
                     } else {
-                        recentChunks.append(chunk)
+                        recentChunks.append(
+                            BufferedSampleChunk(startSample: chunkStartSample, samples: chunk)
+                        )
                         if recentChunks.count > Self.prerollChunkCount {
                             recentChunks.removeFirst(recentChunks.count - Self.prerollChunkCount)
                         }
@@ -546,20 +698,29 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                         isSpeaking = false
                         if speechSamples.count >= Self.minimumSpeechSamples {
                             let segment = speechSamples
+                            let segmentStart = speechStartSample ?? chunkStartSample
                             speechSamples.removeAll(keepingCapacity: true)
-                            await transcribeSegment(segment)
+                            speechStartSample = nil
+                            await transcribeSegment(segment, startSample: segmentStart)
                         } else {
                             print("⚠️ [\(source)] Speech too short (\(speechSamples.count) < \(Self.minimumSpeechSamples)), discarding")
                             speechSamples.removeAll(keepingCapacity: true)
+                            speechStartSample = nil
                         }
                     } else if isSpeaking, speechSamples.count >= flushInterval {
                         let segment = speechSamples
+                        let segmentStart = speechStartSample ?? chunkStartSample
                         // Preserve one second on both sides of an artificial
                         // model-window boundary. Without overlap, a word split
                         // exactly at the old five-second cut vanished from
                         // both independent Parakeet calls.
                         speechSamples = Array(segment.suffix(Self.flushOverlapSamples))
-                        await transcribeSegment(segment, boundary: .continuation)
+                        speechStartSample = segmentStart + Int64(segment.count - speechSamples.count)
+                        await transcribeSegment(
+                            segment,
+                            startSample: segmentStart,
+                            boundary: .continuation
+                        )
                     }
                 } catch {
                     vadFailureCount += 1
@@ -571,7 +732,9 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
                         useVadFallback = true
                         // Move accumulated speech to fallback
                         fallbackAccumulator = speechSamples + chunk
+                        fallbackStartSample = speechStartSample ?? chunkStartSample
                         speechSamples.removeAll()
+                        speechStartSample = nil
                         break // exit the while loop to enter fallback path
                     }
                 }
@@ -587,37 +750,46 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
         let unreadVadSamples = vadReadIndex < vadBuffer.count
             ? Array(vadBuffer[vadReadIndex..<vadBuffer.count])
             : []
+        let unreadVadStartSample = vadBufferStartSample + Int64(vadReadIndex)
         let finalVadSamples: [Float]
+        let finalVadStartSample: Int64
         if isSpeaking || !speechSamples.isEmpty {
             finalVadSamples = speechSamples + unreadVadSamples
+            finalVadStartSample = speechStartSample ?? unreadVadStartSample
         } else {
-            finalVadSamples = recentChunks.flatMap { $0 } + unreadVadSamples
+            finalVadSamples = recentChunks.flatMap(\.samples) + unreadVadSamples
+            finalVadStartSample = recentChunks.first?.startSample ?? unreadVadStartSample
         }
         if Self.shouldTranscribeFinalTail(finalVadSamples) {
             print("📝 [\(source)] Flushing final VAD tail: \(finalVadSamples.count) samples")
-            await transcribeSegment(finalVadSamples)
+            await transcribeSegment(finalVadSamples, startSample: finalVadStartSample)
         }
 
         // Flush remaining fallback accumulator
         if Self.shouldTranscribeFinalTail(fallbackAccumulator) {
             print("🔄 [\(source)] Flushing final fallback: \(fallbackAccumulator.count) samples")
-            await transcribeSegment(fallbackAccumulator)
+            await transcribeSegment(
+                fallbackAccumulator,
+                startSample: fallbackStartSample ?? nextSampleIndex - Int64(fallbackAccumulator.count)
+            )
         }
     }
 
     private func transcribeSegment(
         _ samples: [Float],
+        startSample: Int64,
         boundary: SegmentBoundary = .natural
     ) async {
         let duration = String(format: "%.1f", Double(samples.count) / 16000.0)
         print("📝 [\(source)] Transcribing \(samples.count) samples (\(duration)s)...")
         do {
             try Task.checkCancellation()
-            let text = try await provider.transcribe(samples, previousContext: previousContext)
-            var emittedText = Self.removingRepeatedPrefix(
-                from: text,
+            let result = try await provider.transcribe(samples, previousContext: previousContext)
+            let deduplicated = Self.removingRepeatedPrefix(
+                from: result.text,
                 previousText: previousEmittedText
             )
+            var emittedText = deduplicated.text
             if boundary == .continuation {
                 emittedText = emittedText.trimmingCharacters(
                     in: CharacterSet(charactersIn: ".…")
@@ -631,21 +803,84 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
             }
 
             previousEmittedText = emittedText
-            let words = emittedText.split(separator: " ")
-            previousContext = words.suffix(Self.contextWordCount).joined(separator: " ")
-            print("📝 [\(source)] ✅ Transcribed \(words.count) word(s)")
-            await onFinal(source, emittedText)
+            let contextWords = emittedText.split(separator: " ")
+            previousContext = contextWords.suffix(Self.contextWordCount).joined(separator: " ")
+
+            let segmentStartTime = TimeInterval(startSample) / 16_000
+            let segmentEndTime = segmentStartTime + TimeInterval(samples.count) / 16_000
+            let timedWords = Array(
+                Self.wordTimings(
+                    from: result.tokenTimings,
+                    segmentStartTime: segmentStartTime
+                ).dropFirst(deduplicated.removedWordCount)
+            )
+            let phraseStartTime = timedWords.first?.startTime ?? segmentStartTime
+            let phraseEndTime = max(
+                phraseStartTime,
+                timedWords.last?.endTime ?? segmentEndTime
+            )
+
+            let lowerSample = max(
+                0,
+                min(samples.count, Int(((phraseStartTime - segmentStartTime) * 16_000).rounded(.down)))
+            )
+            let upperSample = max(
+                lowerSample,
+                min(samples.count, Int(((phraseEndTime - segmentStartTime) * 16_000).rounded(.up)))
+            )
+            let phraseSamples = Array(samples[lowerSample..<upperSample])
+            let acousticWords = timedWords.map {
+                AcousticTimedWord(
+                    word: $0.word,
+                    startTime: $0.startTime,
+                    endTime: $0.endTime,
+                    confidence: $0.confidence
+                )
+            }
+
+            do {
+                let phraseMetrics = try AcousticMetricsCalculator().analyzePhrase(
+                    samples: phraseSamples,
+                    startTime: phraseStartTime,
+                    endTime: phraseEndTime,
+                    text: emittedText,
+                    words: acousticWords
+                )
+                acousticPhrases.append(phraseMetrics)
+            } catch {
+                localTranscriptionLogger.error(
+                    "Acoustic analysis error for \(self.source.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+
+            let segment = LocalTranscriptSegment(
+                text: emittedText,
+                confidence: result.confidence,
+                startTime: phraseStartTime,
+                endTime: phraseEndTime,
+                words: timedWords
+            )
+
+            print("📝 [\(source)] ✅ Transcribed \(contextWords.count) word(s)")
+            await onFinal(source, segment)
         } catch {
             print("❌ [\(source)] ASR transcription failed: \(error)")
             localTranscriptionLogger.error("ASR error for \(self.source.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 
+    private struct DeduplicationResult {
+        let text: String
+        let removedWordCount: Int
+    }
+
     private static func removingRepeatedPrefix(
         from currentText: String,
         previousText: String?
-    ) -> String {
-        guard let previousText, !previousText.isEmpty else { return currentText }
+    ) -> DeduplicationResult {
+        guard let previousText, !previousText.isEmpty else {
+            return DeduplicationResult(text: currentText, removedWordCount: 0)
+        }
 
         let previousWords = previousText.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         let currentWords = currentText.split(whereSeparator: { $0.isWhitespace }).map(String.init)
@@ -654,7 +889,9 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
             previousWords.count,
             currentWords.count
         )
-        guard maximumOverlap > 0 else { return currentText }
+        guard maximumOverlap > 0 else {
+            return DeduplicationResult(text: currentText, removedWordCount: 0)
+        }
 
         func normalized(_ word: String) -> String {
             word.lowercased().trimmingCharacters(in: .punctuationCharacters)
@@ -664,11 +901,90 @@ final class LocalStreamingTranscriber: @unchecked Sendable {
             let previousSuffix = previousWords.suffix(overlap).map(normalized)
             let currentPrefix = currentWords.prefix(overlap).map(normalized)
             if previousSuffix == currentPrefix {
-                return currentWords.dropFirst(overlap).joined(separator: " ")
+                return DeduplicationResult(
+                    text: currentWords.dropFirst(overlap).joined(separator: " "),
+                    removedWordCount: overlap
+                )
             }
         }
 
-        return currentText
+        return DeduplicationResult(text: currentText, removedWordCount: 0)
+    }
+
+    private struct PendingWord {
+        var text: String
+        var startTime: TimeInterval
+        var endTime: TimeInterval
+        var weightedConfidence: Double
+        var confidenceWeight: Double
+    }
+
+    private static func wordTimings(
+        from tokens: [LocalASRTokenTiming],
+        segmentStartTime: TimeInterval
+    ) -> [WordTiming] {
+        var result: [WordTiming] = []
+        var pending: PendingWord?
+
+        func isPunctuation(_ value: String) -> Bool {
+            !value.isEmpty && value.unicodeScalars.allSatisfy {
+                CharacterSet.punctuationCharacters.contains($0)
+            }
+        }
+
+        func appendPending() {
+            guard let word = pending else { return }
+            let trimmed = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                pending = nil
+                return
+            }
+            let confidence = word.confidenceWeight > 0
+                ? word.weightedConfidence / word.confidenceWeight
+                : nil
+            result.append(
+                WordTiming(
+                    word: trimmed,
+                    startTime: segmentStartTime + word.startTime,
+                    endTime: segmentStartTime + word.endTime,
+                    wordId: UUID().uuidString,
+                    confidence: confidence
+                )
+            )
+            pending = nil
+        }
+
+        for token in tokens {
+            let hasWordBoundary = token.token.first?.isWhitespace == true
+            let text = token.token.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+
+            let duration = max(0.001, token.endTime - token.startTime)
+            let weightedConfidence = Double(token.confidence) * duration
+
+            if hasWordBoundary, pending != nil, !isPunctuation(text) {
+                appendPending()
+            }
+
+            if pending == nil {
+                pending = PendingWord(
+                    text: text,
+                    startTime: token.startTime,
+                    endTime: token.endTime,
+                    weightedConfidence: weightedConfidence,
+                    confidenceWeight: duration
+                )
+            } else if var word = pending {
+                word.text += text
+                word.endTime = max(word.endTime, token.endTime)
+                word.weightedConfidence += weightedConfidence
+                word.confidenceWeight += duration
+                pending = word
+            }
+        }
+
+        appendPending()
+        return result
     }
 
     private static func shouldTranscribeFinalTail(_ samples: [Float]) -> Bool {

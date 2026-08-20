@@ -4,13 +4,18 @@ import AppKit
 import Combine
 
 struct AudioPlayerView: View {
-    @StateObject private var playerManager = AudioPlayerManager()
+    @ObservedObject var playerManager: AudioPlayerManager
     let audioURL: URL?
     @State private var hoveredButton: String? = nil
     @State private var isHoveringProgressBar = false
     @State private var dragStartProgress: Double = 0
     @State private var fileModificationDate: Date?
     @State private var cancellables = Set<AnyCancellable>()
+
+    init(audioURL: URL?, playerManager: AudioPlayerManager) {
+        self.audioURL = audioURL
+        self.playerManager = playerManager
+    }
     
     var body: some View {
         Group {
@@ -404,6 +409,12 @@ class AudioPlayerManager: ObservableObject {
         player.currentTime = newTime
         updateProgress()
     }
+
+    func seek(toTime time: TimeInterval) {
+        guard let player = audioPlayer else { return }
+        player.currentTime = min(max(0, time), duration)
+        updateProgress()
+    }
     
     func setPlaybackRate(_ rate: Double) {
         playbackRate = rate
@@ -459,15 +470,14 @@ class AudioPlayerManager: ObservableObject {
 // MARK: - Preview
 
 #Preview {
-    AudioPlayerView(audioURL: nil)
+    AudioPlayerView(audioURL: nil, playerManager: AudioPlayerManager())
         .frame(width: 600)
         .padding()
 }
 
 #Preview("With Audio") {
     // For preview, you can use a sample audio file path
-    AudioPlayerView(audioURL: nil)
+    AudioPlayerView(audioURL: nil, playerManager: AudioPlayerManager())
         .frame(width: 600)
         .padding()
 }
-

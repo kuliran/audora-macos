@@ -28,6 +28,8 @@ See `docs/LOCAL_CODEX_SETUP.md` in the parent repository for the complete backen
 
 The app requests microphone and system-audio permissions. On the first recording it downloads and initializes the Parakeet v3 and Silero VAD assets from Hugging Face before audio capture begins; progress is shown beside the recording controls. Later recordings transcribe locally from the cached models.
 
+Parakeet word timings and confidence are preserved. A dependency-free Swift analyzer calculates per-source phrase and overall pace, articulation, pitch range/direction, relative volume, volume variation, steadiness, voiced coverage, and quality flags away from the realtime audio callback. It creates no voice embedding or pitch contour. Detailed metrics stay in the local meeting JSON; the loopback backend receives a rounded, capped projection, and absolute median pitch is removed before Codex coaching. Transcript and metric phrase rows seek directly to their saved-audio timestamps.
+
 ## Network expectations
 
 - First source build: GitHub traffic for Swift packages.

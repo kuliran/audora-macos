@@ -238,6 +238,7 @@ struct MeetingRowView: View {
 
 struct CollapsedTranscriptChunkView: View {
     let chunk: CollapsedTranscriptChunk
+    let onSeek: (TimeInterval) -> Void
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -260,11 +261,19 @@ struct CollapsedTranscriptChunkView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if let startTime = chunk.startTime {
+                onSeek(startTime)
+            }
+        }
+        .help(chunk.startTime == nil ? "Timestamp unavailable" : "Jump to this transcript in the recording")
     }
 }
 
 private enum MeetingDetailPane: String, CaseIterable, Identifiable {
     case transcript = "Transcript"
+    case voiceCadence = "Voice & cadence"
     case preMeetingNotes = "Pre-meeting notes"
 
     var id: Self { self }
@@ -273,6 +282,8 @@ private enum MeetingDetailPane: String, CaseIterable, Identifiable {
         switch self {
         case .transcript:
             return "text.bubble"
+        case .voiceCadence:
+            return "waveform.path.ecg"
         case .preMeetingNotes:
             return "note.text"
         }
@@ -283,6 +294,7 @@ struct MeetingDetailContentView: View {
     @StateObject private var viewModel: MeetingViewModel
     @StateObject private var recordingSessionManager = RecordingSessionManager.shared
     @StateObject private var audioManager = AudioManager.shared
+    @StateObject private var audioPlayerManager = AudioPlayerManager()
     @State private var showDeleteAlert = false
     @State private var selectedDetailPane: MeetingDetailPane = .transcript
     let onDelete: () -> Void
@@ -340,7 +352,10 @@ struct MeetingDetailContentView: View {
                 let audioURL = URL(fileURLWithPath: audioFileURLString)
                 // Verify file exists before showing player
                 if FileManager.default.fileExists(atPath: audioURL.path) {
-                    AudioPlayerView(audioURL: audioURL)
+                    AudioPlayerView(
+                        audioURL: audioURL,
+                        playerManager: audioPlayerManager
+                    )
                 } else {
                     // File path exists in meeting but file not found - might be deleted or path is wrong
                     VStack(spacing: 8) {
@@ -366,6 +381,8 @@ struct MeetingDetailContentView: View {
             switch selectedDetailPane {
             case .transcript:
                 transcriptSection
+            case .voiceCadence:
+                voiceCadenceSection
             case .preMeetingNotes:
                 preMeetingNotesSection
             }
@@ -501,15 +518,17 @@ struct MeetingDetailContentView: View {
             // Transcript Content
             VStack(alignment: .leading, spacing: 8) {
                 ScrollView {
-                    if viewModel.meeting.collapsedTranscriptChunks.isEmpty {
+                    if viewModel.meeting.timestampedTranscriptChunks.isEmpty {
                         Text("Transcript will appear here...")
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding()
                             .foregroundColor(.secondary)
                     } else {
                         LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(viewModel.meeting.collapsedTranscriptChunks) { chunk in
-                                CollapsedTranscriptChunkView(chunk: chunk)
+                            ForEach(viewModel.meeting.timestampedTranscriptChunks) { chunk in
+                                CollapsedTranscriptChunkView(chunk: chunk) { startTime in
+                                    audioPlayerManager.seek(toTime: startTime)
+                                }
                             }
                         }
                         .padding()
@@ -520,6 +539,24 @@ struct MeetingDetailContentView: View {
             .background(Color.gray.opacity(0.05))
             .cornerRadius(8)
         }
+    }
+
+    private var voiceCadenceSection: some View {
+        Group {
+            if let metrics = viewModel.meeting.localAcousticMetrics,
+               !metrics.sources.isEmpty {
+                VoiceCadenceMetricsView(metrics: metrics) { startTime in
+                    audioPlayerManager.seek(toTime: startTime)
+                }
+            } else {
+                ContentUnavailableView(
+                    "No voice metrics yet",
+                    systemImage: "waveform.path.ecg",
+                    description: Text("Record with Local Parakeet to calculate voice and cadence locally.")
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var preMeetingNotesSection: some View {
@@ -555,6 +592,201 @@ struct MeetingDetailContentView: View {
             .cornerRadius(8)
         }
     }
+}
+
+private struct VoiceCadenceMetricsView: View {
+    let metrics: LocalAcousticMetrics
+    let onSeek: (TimeInterval) -> Void
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                Text("Calculated on this Mac. No waveform, pitch contour, voice embedding, or emotion inference is stored. Absolute pitch is excluded from AI coaching context.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ForEach(metrics.sources, id: \.source) { source in
+                    sourceCard(source)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func sourceCard(_ source: LocalAcousticSourceMetrics) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(
+                    source.source == .mic ? "Microphone" : "System audio",
+                    systemImage: source.source == .mic ? "mic.fill" : "speaker.wave.2.fill"
+                )
+                .font(.headline)
+
+                if source.scope == .mixedChannel {
+                    Text("Mixed channel")
+                        .font(.caption2.weight(.medium))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color.orange.opacity(0.12), in: Capsule())
+                        .help("System audio may contain multiple people; these measurements are not attributed to one speaker.")
+                }
+
+                Spacer()
+            }
+
+            if let overall = source.overall {
+                metricGrid(overall, includeRelativeVolume: false)
+
+                if !overall.qualityFlags.isEmpty {
+                    qualityFlags(overall.qualityFlags)
+                }
+            }
+
+            if !source.phrases.isEmpty {
+                Divider()
+                Text("Phrase windows")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                LazyVStack(spacing: 5) {
+                    ForEach(source.phrases.indices, id: \.self) { index in
+                        let phrase = source.phrases[index]
+                        Button {
+                            onSeek(phrase.startTime)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Image(systemName: "play.circle")
+                                        .foregroundStyle(.tint)
+                                    Text(Self.timestamp(phrase.startTime))
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                    Text(phrase.text?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Phrase \(index + 1)")
+                                        .lineLimit(1)
+                                        .foregroundStyle(.primary)
+                                    Spacer()
+                                }
+
+                                Text(Self.phraseSummary(phrase.metrics))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                                    .padding(.leading, 28)
+                            }
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
+                        .help("Jump to \(Self.timestamp(phrase.startTime)) in the recording")
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func metricGrid(
+        _ metrics: LocalAcousticWindowMetrics,
+        includeRelativeVolume: Bool
+    ) -> some View {
+        let values = Self.metricValues(metrics, includeRelativeVolume: includeRelativeVolume)
+        return LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 120), spacing: 8)],
+            alignment: .leading,
+            spacing: 8
+        ) {
+            ForEach(values) { value in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(value.label)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(value.value)
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+    }
+
+    private func qualityFlags(_ flags: [AcousticQualityFlag]) -> some View {
+        HStack(spacing: 6) {
+            ForEach(flags, id: \.self) { flag in
+                Text(Self.readable(flag.rawValue))
+                    .font(.caption2)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.secondary.opacity(0.1), in: Capsule())
+            }
+        }
+    }
+
+    private struct MetricValue: Identifiable {
+        let label: String
+        let value: String
+        var id: String { label }
+    }
+
+    private static func metricValues(
+        _ metrics: LocalAcousticWindowMetrics,
+        includeRelativeVolume: Bool
+    ) -> [MetricValue] {
+        var values: [MetricValue] = []
+        if let value = metrics.paceWpm {
+            values.append(MetricValue(label: "Pace", value: "\(Int(value.rounded())) WPM"))
+        }
+        if let value = metrics.articulationRateWpm {
+            values.append(MetricValue(label: "Articulation", value: "\(Int(value.rounded())) WPM"))
+        }
+        if let value = metrics.medianPitchHz {
+            values.append(MetricValue(label: "Median pitch", value: "\(Int(value.rounded())) Hz"))
+        }
+        if let value = metrics.pitchRangeSemitones {
+            values.append(MetricValue(label: "Pitch range", value: String(format: "%.1f st", value)))
+        }
+        if metrics.pitchDirection != .unavailable {
+            values.append(MetricValue(label: "Pitch direction", value: readable(metrics.pitchDirection.rawValue)))
+        }
+        if includeRelativeVolume, let value = metrics.relativeVolumeDb {
+            values.append(MetricValue(label: "Relative volume", value: String(format: "%+.1f dB", value)))
+        }
+        if let value = metrics.volumeVariabilityDb {
+            values.append(MetricValue(label: "Volume variation", value: String(format: "%.1f dB", value)))
+        }
+        if let value = metrics.steadiness {
+            values.append(MetricValue(label: "Cadence steadiness", value: "\(Int((value * 100).rounded()))%"))
+        }
+        values.append(MetricValue(label: "Voiced coverage", value: "\(Int((metrics.voicedRatio * 100).rounded()))%"))
+        return values
+    }
+
+    private static func phraseSummary(_ metrics: LocalAcousticWindowMetrics) -> String {
+        metricValues(metrics, includeRelativeVolume: true)
+            .filter { $0.label != "Median pitch" }
+            .prefix(5)
+            .map { "\($0.label): \($0.value)" }
+            .joined(separator: " · ")
+    }
+
+    private static func timestamp(_ seconds: TimeInterval) -> String {
+        let safe = max(0, seconds)
+        return String(format: "%d:%04.1f", Int(safe) / 60, safe.truncatingRemainder(dividingBy: 60))
+    }
+
+    private static func readable(_ value: String) -> String {
+        value.replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .capitalized
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 // MARK: - Shimmer Overlay

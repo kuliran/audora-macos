@@ -136,6 +136,10 @@ class MeetingViewModel: ObservableObject {
                     print("🔄 Updating backend conversation ID in MeetingViewModel")
                     self.meeting.convexConversationId = savedMeeting.convexConversationId
                 }
+
+                if savedMeeting.localAcousticMetrics != self.meeting.localAcousticMetrics {
+                    self.meeting.localAcousticMetrics = savedMeeting.localAcousticMetrics
+                }
             }
             .store(in: &cancellables)
 

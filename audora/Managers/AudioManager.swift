@@ -8,6 +8,11 @@ import OSLog
 import Combine
 import AppKit
 
+struct FinalizedTranscriptionResult {
+    let chunks: [TranscriptChunk]
+    let acousticMetrics: LocalAcousticMetrics?
+}
+
 private enum AudioCaptureStartError: LocalizedError {
     case authenticationRequired
     case cancelled
@@ -93,6 +98,9 @@ class AudioManager: NSObject, ObservableObject {
     // Local transcription buffer tracking
     private var localMicBufferCount = 0
     private var localSystemBufferCount = 0
+    private var recordingStartedAt: Date?
+    private var recordingStartedUptime: TimeInterval?
+    private var recordingTimelineOffset: TimeInterval = 0
 
     // Session refresh timers to prevent 30-minute expiry
     private var sessionRefreshTimers: [AudioSource: Timer] = [:]
@@ -191,7 +199,10 @@ class AudioManager: NSObject, ObservableObject {
         }
     }
 
-    func startRecording(onCaptureWillStart: () -> Bool = { true }) async throws {
+    func startRecording(
+        timelineOffset: TimeInterval = 0,
+        onCaptureWillStart: () -> Bool = { true }
+    ) async throws {
         print("Starting recording...")
 
         // Bump the ID before cleanup so any older async model load cannot start taps.
@@ -200,6 +211,9 @@ class AudioManager: NSObject, ObservableObject {
         stopRecordingInternal()
         isRecording = false
         isCaptureStarting = false
+        recordingStartedAt = nil
+        recordingStartedUptime = nil
+        recordingTimelineOffset = max(0, timelineOffset.isFinite ? timelineOffset : 0)
         errorMessage = nil
         AudioLevelManager.shared.updateRecordingState(false)
 
@@ -238,6 +252,8 @@ class AudioManager: NSObject, ObservableObject {
             guard onCaptureWillStart() else {
                 throw AudioCaptureStartError.recordingStorage
             }
+            recordingStartedAt = Date()
+            recordingStartedUptime = ProcessInfo.processInfo.systemUptime
             print("🎙️ Starting microphone tap now...")
             try startMicrophoneTap()
 
@@ -279,6 +295,9 @@ class AudioManager: NSObject, ObservableObject {
         sessionID = UUID()
         isCaptureStarting = false
         isRecording = false
+        recordingStartedAt = nil
+        recordingStartedUptime = nil
+        recordingTimelineOffset = 0
         stopRecordingInternal()
         micRetryCount = 0
         isMicRestartScheduled = false
@@ -311,10 +330,10 @@ class AudioManager: NSObject, ObservableObject {
                     self.parakeetDownloadProgress = progress
                 }
             },
-            onFinal: { [weak self] source, text in
+            onFinal: { [weak self] source, segment in
                 await MainActor.run {
                     guard let self, self.sessionID == sessionID else { return }
-                    self.appendLocalTranscript(text, source: source)
+                    self.appendLocalTranscript(segment, source: source)
                 }
             }
         )
@@ -333,22 +352,38 @@ class AudioManager: NSObject, ObservableObject {
         print("✅ Local Parakeet session created and started")
     }
 
-    private func appendLocalTranscript(_ text: String, source: AudioSource) {
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func appendLocalTranscript(_ segment: LocalTranscriptSegment, source: AudioSource) {
+        let trimmedText = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else { return }
 
         currentInterim[source] = ""
         currentWords[source] = []
         transcriptChunks.removeAll { !$0.isFinal && $0.source == source }
 
+        let takeRelativeStart = max(0, segment.startTime - recordingTimelineOffset)
+        let wallClockTimestamp = (recordingStartedAt ?? Date())
+            .addingTimeInterval(takeRelativeStart)
         let chunk = TranscriptChunk(
-            timestamp: Date(),
+            timestamp: wallClockTimestamp,
             source: source,
             text: trimmedText,
             isFinal: true,
-            words: nil
+            words: segment.words.isEmpty ? nil : segment.words,
+            startTime: segment.startTime
         )
         transcriptChunks.append(chunk)
+        transcriptChunks.sort {
+            let left = $0.words?.first?.startTime
+                ?? $0.startTime
+                ?? $0.timestamp.timeIntervalSince(recordingStartedAt ?? $0.timestamp)
+            let right = $1.words?.first?.startTime
+                ?? $1.startTime
+                ?? $1.timestamp.timeIntervalSince(recordingStartedAt ?? $1.timestamp)
+            if left == right {
+                return $0.source.rawValue < $1.source.rawValue
+            }
+            return left < right
+        }
     }
 
     private func stopLocalTranscriptionSession() {
@@ -358,18 +393,24 @@ class AudioManager: NSObject, ObservableObject {
         parakeetDownloadProgress = nil
     }
 
-    private func finishLocalTranscriptionSession() async {
+    private func finishLocalTranscriptionSession() async -> LocalAcousticMetrics? {
         guard let localTranscriptionSession else {
             transcriptionStatus = "Ready"
             parakeetDownloadProgress = nil
-            return
+            return nil
         }
 
         transcriptionStatus = "Finalizing Local Parakeet..."
-        await localTranscriptionSession.finish()
-        self.localTranscriptionSession = nil
-        transcriptionStatus = "Ready"
-        parakeetDownloadProgress = nil
+        let metrics = await localTranscriptionSession.finish()
+        // A cancelled finalizer can finish after the user has already started a
+        // new take. Only the exact session being finalized may clear UI/session
+        // state; otherwise it would tear down the newer recording.
+        if self.localTranscriptionSession === localTranscriptionSession {
+            self.localTranscriptionSession = nil
+            transcriptionStatus = "Ready"
+            parakeetDownloadProgress = nil
+        }
+        return metrics.sources.isEmpty ? nil : metrics
     }
 
 
@@ -515,7 +556,11 @@ class AudioManager: NSObject, ObservableObject {
                         print("⚠️ [Parakeet] localTranscriptionSession is nil when trying to submit mic buffer #\(self.localMicBufferCount)!")
                     }
                 }
-                self.localTranscriptionSession?.submit(buffer, source: .mic)
+                self.localTranscriptionSession?.submit(
+                    buffer,
+                    source: .mic,
+                    sessionTime: self.localSessionTime(for: buffer)
+                )
             }
         }
         isMicrophoneTapInstalled = true
@@ -790,7 +835,11 @@ class AudioManager: NSObject, ObservableObject {
                 if self.localSystemBufferCount % 500 == 0 {
                     print("🔊 [Parakeet] Submitted \(self.localSystemBufferCount) system buffers so far")
                 }
-                self.localTranscriptionSession?.submit(buffer, source: .system)
+                self.localTranscriptionSession?.submit(
+                    buffer,
+                    source: .system,
+                    sessionTime: self.localSessionTime(for: buffer)
+                )
             }
 
         } invalidationHandler: { [weak self] invalidatedTap in
@@ -823,24 +872,45 @@ class AudioManager: NSObject, ObservableObject {
         stopRecordingWithoutLocalFinalization()
     }
 
-    func stopRecordingAndFinalizeTranscription() async -> [TranscriptChunk] {
+    func stopRecordingAndFinalizeTranscription() async -> FinalizedTranscriptionResult {
+        let finalizingSessionID = sessionID
         print("🛑 [Parakeet] Finalizing — mic buffers sent: \(localMicBufferCount), system buffers sent: \(localSystemBufferCount)")
         stopCaptureAndSpeechmaticsConnections()
 
+        let acousticMetrics: LocalAcousticMetrics?
         if activeTranscriptionProvider == .parakeet {
-            await finishLocalTranscriptionSession()
+            acousticMetrics = await finishLocalTranscriptionSession()
         } else {
             stopLocalTranscriptionSession()
+            acousticMetrics = nil
         }
 
+        if sessionID == finalizingSessionID {
+            recordingStartedAt = nil
+            recordingStartedUptime = nil
+            recordingTimelineOffset = 0
+        }
         print("Recording stopped")
-        return transcriptChunks
+        return FinalizedTranscriptionResult(
+            chunks: transcriptChunks,
+            acousticMetrics: acousticMetrics
+        )
     }
 
     private func stopRecordingWithoutLocalFinalization() {
         stopCaptureAndSpeechmaticsConnections()
         stopLocalTranscriptionSession()
+        recordingStartedAt = nil
+        recordingStartedUptime = nil
+        recordingTimelineOffset = 0
         print("Recording stopped")
+    }
+
+    private func localSessionTime(for buffer: AVAudioPCMBuffer) -> TimeInterval {
+        guard let recordingStartedUptime else { return recordingTimelineOffset }
+        let callbackTime = ProcessInfo.processInfo.systemUptime - recordingStartedUptime
+        let duration = TimeInterval(buffer.frameLength) / max(1, buffer.format.sampleRate)
+        return recordingTimelineOffset + max(0, callbackTime - duration)
     }
 
     private func stopCaptureAndSpeechmaticsConnections() {

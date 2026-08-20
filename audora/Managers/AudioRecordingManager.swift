@@ -137,6 +137,38 @@ final class AudioRecordingManager: ObservableObject {
         return true
     }
 
+    /// Returns the position where the next take will be appended in the
+    /// meeting's rendered audio timeline. Pending lossless segments are included
+    /// so transcript timestamps stay aligned even after a prior render failed.
+    @MainActor
+    func nextRecordingTimelineOffset(for meetingId: UUID) -> TimeInterval {
+        stateLock.lock()
+        let retainedSegments = pendingSegments[meetingId] ?? []
+        stateLock.unlock()
+
+        var cursor: TimeInterval = 0
+        if let existingURL = existingRecordingURL(for: meetingId),
+           let existingDuration = try? duration(of: existingURL) {
+            cursor = max(0, existingDuration)
+        }
+
+        for segment in retainedSegments {
+            let sources: [(URL, TimeInterval)] = [
+                segment.micURL.map { ($0, segment.micOffset) },
+                segment.systemURL.map { ($0, segment.systemOffset) },
+            ].compactMap { $0 }
+            let segmentDuration = sources.reduce(0) { maximum, source in
+                guard let sourceDuration = try? duration(of: source.0) else {
+                    return maximum
+                }
+                return max(maximum, max(0, source.1) + max(0, sourceDuration))
+            }
+            cursor += segmentDuration
+        }
+
+        return cursor
+    }
+
     /// Records a microphone audio buffer.
     func recordMicBuffer(_ buffer: AVAudioPCMBuffer, format: AVAudioFormat) {
         stateLock.lock()
@@ -155,6 +187,18 @@ final class AudioRecordingManager: ObservableObject {
         }
 
         guard let file = micAudioFile else { return }
+
+        do {
+            try preserveTimelineGapIfNeeded(
+                in: file,
+                initialOffset: micStartOffset,
+                buffer: buffer,
+                captureFormat: format,
+                sourceName: "microphone"
+            )
+        } catch {
+            print("Failed to preserve microphone timeline gap: \(error.localizedDescription)")
+        }
 
         do {
             try file.write(from: buffer)
@@ -182,6 +226,18 @@ final class AudioRecordingManager: ObservableObject {
         }
 
         guard let file = systemAudioFile else { return }
+
+        do {
+            try preserveTimelineGapIfNeeded(
+                in: file,
+                initialOffset: systemStartOffset,
+                buffer: buffer,
+                captureFormat: format,
+                sourceName: "system audio"
+            )
+        } catch {
+            print("Failed to preserve system-audio timeline gap: \(error.localizedDescription)")
+        }
 
         do {
             try file.write(from: buffer)
@@ -338,6 +394,61 @@ final class AudioRecordingManager: ObservableObject {
             0,
             ProcessInfo.processInfo.systemUptime - recordingStartedAt - bufferDuration
         )
+    }
+
+    /// Pads a source file when callback time advances beyond the duration already
+    /// written. This mirrors the local transcriber's gap reconciliation so the
+    /// rendered WAV and clickable timestamps remain on the same clock.
+    private func preserveTimelineGapIfNeeded(
+        in file: AVAudioFile,
+        initialOffset: TimeInterval?,
+        buffer: AVAudioPCMBuffer,
+        captureFormat: AVAudioFormat,
+        sourceName: String
+    ) throws {
+        guard let initialOffset else { return }
+        let fileSampleRate = file.processingFormat.sampleRate
+        guard fileSampleRate > 0 else { return }
+
+        let reportedStart = startOffsetLocked(for: buffer, format: captureFormat)
+        let expectedStart = initialOffset + Double(file.length) / fileSampleRate
+        let missingFrames = AudioTimelineGapReconciler.missingFrames(
+            reportedStartTime: reportedStart,
+            expectedStartTime: expectedStart,
+            sampleRate: fileSampleRate
+        )
+        guard missingFrames > 0 else { return }
+
+        print(
+            "Preserving \(String(format: "%.3f", Double(missingFrames) / fileSampleRate))s \(sourceName) timeline gap"
+        )
+        try writeSilence(frameCount: missingFrames, to: file)
+    }
+
+    private func writeSilence(frameCount: Int64, to file: AVAudioFile) throws {
+        guard frameCount > 0 else { return }
+        let chunkCapacity: AVAudioFrameCount = 4_096
+        guard let silence = AVAudioPCMBuffer(
+            pcmFormat: file.processingFormat,
+            frameCapacity: chunkCapacity
+        ) else {
+            throw RecordingError.renderFailed
+        }
+
+        silence.frameLength = chunkCapacity
+        let buffers = UnsafeMutableAudioBufferListPointer(silence.mutableAudioBufferList)
+        for audioBuffer in buffers {
+            guard let data = audioBuffer.mData else { continue }
+            memset(data, 0, Int(audioBuffer.mDataByteSize))
+        }
+
+        var remaining = frameCount
+        while remaining > 0 {
+            let frames = AVAudioFrameCount(min(Int64(chunkCapacity), remaining))
+            silence.frameLength = frames
+            try file.write(from: silence)
+            remaining -= Int64(frames)
+        }
     }
 
     private func makeCurrentSegmentLocked() -> RecordedSegment {

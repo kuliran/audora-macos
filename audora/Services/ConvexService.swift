@@ -434,7 +434,8 @@ class ConvexService: ObservableObject {
     func saveTranscriptData(
         conversationId: String,
         transcriptTurns: [[String: Any]],
-        summary: String
+        summary: String,
+        acousticMetrics: AcousticMetrics? = nil
     ) async throws {
         try await ensureAuthenticatedBackendReady()
 
@@ -455,6 +456,14 @@ class ConvexService: ObservableObject {
         args["S1_facts"] = RawConvexJSON(json: "[]")
         args["S2_facts"] = RawConvexJSON(json: "[]")
         args["summary"] = trimmedSummary.isEmpty ? "Mac recording" : trimmedSummary
+        if let acousticMetrics {
+            let encoder = JSONEncoder()
+            guard let metricsData = try? encoder.encode(acousticMetrics),
+                  let metricsJSON = String(data: metricsData, encoding: .utf8) else {
+                throw ConvexError.netError("Failed to serialize acoustic metrics")
+            }
+            args["acousticMetrics"] = RawConvexJSON(json: metricsJSON)
+        }
 
         print("📤 Saving transcript (\(transcriptTurns.count) turns)")
         let _: String? = try await client.mutation(

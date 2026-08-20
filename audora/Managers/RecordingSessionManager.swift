@@ -115,7 +115,10 @@ class RecordingSessionManager: ObservableObject {
             guard let self else { return }
 
             do {
+                let timelineOffset = AudioRecordingManager.shared
+                    .nextRecordingTimelineOffset(for: meetingId)
                 try await self.audioManager.startRecording(
+                    timelineOffset: timelineOffset,
                     onCaptureWillStart: {
                         AudioRecordingManager.shared.startRecording(for: meetingId)
                     }
@@ -211,7 +214,7 @@ class RecordingSessionManager: ObservableObject {
         let capturedTitle = titleForBackend(meetingId: capturedMeetingId)
         let capturedCalendarEventId = calendarEventIdForBackend(meetingId: capturedMeetingId)
 
-        let finalizedAudioManagerChunks = await audioManager.stopRecordingAndFinalizeTranscription()
+        let finalizedTranscription = await audioManager.stopRecordingAndFinalizeTranscription()
 
         // A deletion can cancel this generation while the local transcriber is
         // flushing. Never let that stale task render audio or recreate storage.
@@ -219,9 +222,9 @@ class RecordingSessionManager: ObservableObject {
               lifecycle == .stopping(meetingId),
               !Task.isCancelled else { return }
 
-        let transcriptSnapshot = finalizedAudioManagerChunks.isEmpty
+        let transcriptSnapshot = finalizedTranscription.chunks.isEmpty
             ? activeRecordingTranscriptChunks
-            : finalizedAudioManagerChunks
+            : finalizedTranscription.chunks
         let finalTranscriptChunks = finalizedTranscriptChunks(transcriptSnapshot)
         if finalTranscriptChunks != activeRecordingTranscriptChunks {
             activeRecordingTranscriptChunks = finalTranscriptChunks
@@ -231,6 +234,14 @@ class RecordingSessionManager: ObservableObject {
         }
 
         let capturedTranscriptChunks = finalTranscriptChunks
+        let existingAcousticMetrics = LocalStorageManager.shared
+            .loadMeetings()
+            .first(where: { $0.id == meetingId })?
+            .localAcousticMetrics
+        let mergedAcousticMetrics = AcousticMetricsCalculator().merging(
+            existing: existingAcousticMetrics,
+            appending: finalizedTranscription.acousticMetrics
+        )
 
         var audioFileURL: String? = nil
         if let activeMeetingId = capturedMeetingId {
@@ -240,7 +251,12 @@ class RecordingSessionManager: ObservableObject {
                 print("✅ Audio file saved locally")
             }
 
-            updateActiveMeeting(meetingId: activeMeetingId, chunks: capturedTranscriptChunks, audioFileURL: audioFileURL)
+            updateActiveMeeting(
+                meetingId: activeMeetingId,
+                chunks: capturedTranscriptChunks,
+                audioFileURL: audioFileURL,
+                acousticMetrics: mergedAcousticMetrics
+            )
 
             Task {
                 await saveFinishedRecordingToBackend(
@@ -249,7 +265,8 @@ class RecordingSessionManager: ObservableObject {
                     title: capturedTitle,
                     calendarEventId: capturedCalendarEventId,
                     chunks: capturedTranscriptChunks,
-                    audioFileURL: audioFileURL
+                    audioFileURL: audioFileURL,
+                    acousticMetrics: mergedAcousticMetrics?.storageProjection()
                 )
             }
         }
@@ -313,7 +330,8 @@ class RecordingSessionManager: ObservableObject {
                 source: chunk.source,
                 text: chunk.text,
                 isFinal: true,
-                words: chunk.words
+                words: chunk.words,
+                startTime: chunk.startTime
             )
         }
     }
@@ -336,10 +354,20 @@ class RecordingSessionManager: ObservableObject {
     }
 
     private func updateActiveMeetingTranscript(meetingId: UUID, chunks: [TranscriptChunk]) {
-        updateActiveMeeting(meetingId: meetingId, chunks: chunks, audioFileURL: nil)
+        updateActiveMeeting(
+            meetingId: meetingId,
+            chunks: chunks,
+            audioFileURL: nil,
+            acousticMetrics: nil
+        )
     }
 
-    private func updateActiveMeeting(meetingId: UUID, chunks: [TranscriptChunk], audioFileURL: String?) {
+    private func updateActiveMeeting(
+        meetingId: UUID,
+        chunks: [TranscriptChunk],
+        audioFileURL: String?,
+        acousticMetrics: LocalAcousticMetrics?
+    ) {
         // Load all meetings
         var meetings = LocalStorageManager.shared.loadMeetings()
 
@@ -348,6 +376,9 @@ class RecordingSessionManager: ObservableObject {
             meetings[index].transcriptChunks = chunks
             if let audioFileURL = audioFileURL {
                 meetings[index].audioFileURL = audioFileURL
+            }
+            if let acousticMetrics {
+                meetings[index].localAcousticMetrics = acousticMetrics
             }
 
             // Save the updated meeting
@@ -387,7 +418,8 @@ class RecordingSessionManager: ObservableObject {
         title: String?,
         calendarEventId: String?,
         chunks: [TranscriptChunk],
-        audioFileURL: String?
+        audioFileURL: String?,
+        acousticMetrics: AcousticMetrics?
     ) async {
         do {
             let transcriptTurns = backendTranscriptTurns(from: chunks)
@@ -427,7 +459,8 @@ class RecordingSessionManager: ObservableObject {
             try await ConvexService.shared.saveTranscriptData(
                 conversationId: conversationId,
                 transcriptTurns: transcriptTurns,
-                summary: backendSummary(title: title, turnCount: transcriptTurns.count)
+                summary: backendSummary(title: title, turnCount: transcriptTurns.count),
+                acousticMetrics: acousticMetrics
             )
 
             print("✅ Backend conversation saved: \(conversationId)")
@@ -445,19 +478,26 @@ class RecordingSessionManager: ObservableObject {
             guard !text.isEmpty else { return nil }
 
             let fallbackStartTime = max(0, chunk.timestamp.timeIntervalSince(recordingStartTime))
+            let turnStartTime = chunk.words?.first?.startTime
+                ?? chunk.startTime
+                ?? fallbackStartTime
             let words = chunk.words?.map { word in
-                [
+                var value = [
                     "word": word.word,
                     "startTime": word.startTime,
                     "endTime": word.endTime,
                     "wordId": word.wordId
                 ] as [String: Any]
+                if let confidence = word.confidence {
+                    value["confidence"] = min(max(confidence, 0), 1)
+                }
+                return value
             }
 
             var turn: [String: Any] = [
                 "speaker": chunk.source == .mic ? "S1" : "S2",
                 "text": text,
-                "startTime": fallbackStartTime
+                "startTime": turnStartTime
             ]
 
             if let words, !words.isEmpty {

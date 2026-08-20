@@ -6,7 +6,7 @@ typealias Meeting = TranscriptionSession
 
 // MARK: - Audio & Transcription Enums
 
-enum AudioSource: String, Codable, CaseIterable {
+enum AudioSource: String, Codable, CaseIterable, Sendable {
     case mic = "MIC"
     case system = "SYS"
 
@@ -66,11 +66,26 @@ enum TranscriptionSource: String, Codable {
     }
 }
 
-struct WordTiming: Codable, Hashable {
+struct WordTiming: Codable, Hashable, Sendable {
     let word: String
     let startTime: Double
     let endTime: Double
     let wordId: String
+    let confidence: Double?
+
+    init(
+        word: String,
+        startTime: Double,
+        endTime: Double,
+        wordId: String,
+        confidence: Double? = nil
+    ) {
+        self.word = word
+        self.startTime = startTime
+        self.endTime = endTime
+        self.wordId = wordId
+        self.confidence = confidence
+    }
 }
 
 struct TranscriptChunk: Codable, Identifiable, Hashable {
@@ -80,14 +95,24 @@ struct TranscriptChunk: Codable, Identifiable, Hashable {
     let text: String
     let isFinal: Bool
     let words: [WordTiming]?
+    let startTime: TimeInterval?
 
-    init(id: UUID = UUID(), timestamp: Date = Date(), source: AudioSource, text: String, isFinal: Bool = false, words: [WordTiming]? = nil) {
+    init(
+        id: UUID = UUID(),
+        timestamp: Date = Date(),
+        source: AudioSource,
+        text: String,
+        isFinal: Bool = false,
+        words: [WordTiming]? = nil,
+        startTime: TimeInterval? = nil
+    ) {
         self.id = id
         self.timestamp = timestamp
         self.source = source
         self.text = text
         self.isFinal = isFinal
         self.words = words
+        self.startTime = startTime
     }
 }
 
@@ -96,12 +121,20 @@ struct CollapsedTranscriptChunk: Identifiable {
     let timestamp: Date
     let source: AudioSource
     let combinedText: String
+    let startTime: TimeInterval?
 
-    init(id: UUID = UUID(), timestamp: Date, source: AudioSource, combinedText: String) {
+    init(
+        id: UUID = UUID(),
+        timestamp: Date,
+        source: AudioSource,
+        combinedText: String,
+        startTime: TimeInterval? = nil
+    ) {
         self.id = id
         self.timestamp = timestamp
         self.source = source
         self.combinedText = combinedText
+        self.startTime = startTime
     }
 }
 
@@ -118,11 +151,12 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
     var audioFileURL: String?  // Path to the saved audio recording file
     var calendarEventId: String?  // Link to source calendar event (if created from calendar)
     var convexConversationId: String?  // Backend conversation ID for transcript processing
+    var localAcousticMetrics: LocalAcousticMetrics?  // Detailed local voice/cadence analysis; no embeddings or contours
     // MARK: - Data versioning
     /// Version of this TranscriptionSession record on disk. Useful for migration.
     var dataVersion: Int
     /// Current app data version. Increment whenever you make a breaking change to `TranscriptionSession` that requires migration.
-    static let currentDataVersion = 5  // Incremented for convexConversationId support
+    static let currentDataVersion = 6  // Incremented for local acoustic metrics
 
     init(id: UUID = UUID(),
          date: Date = Date(),
@@ -136,6 +170,7 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
          audioFileURL: String? = nil,
          calendarEventId: String? = nil,
          convexConversationId: String? = nil,
+         localAcousticMetrics: LocalAcousticMetrics? = nil,
          dataVersion: Int = TranscriptionSession.currentDataVersion) {
         self.id = id
         self.date = date
@@ -149,6 +184,7 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
         self.audioFileURL = audioFileURL
         self.calendarEventId = calendarEventId
         self.convexConversationId = convexConversationId
+        self.localAcousticMetrics = localAcousticMetrics
         self.dataVersion = dataVersion
     }
 
@@ -206,6 +242,7 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
         var currentSource: AudioSource?
         var currentTexts: [String] = []
         var currentTimestamp: Date?
+        var currentStartTime: TimeInterval?
 
         for chunk in transcriptChunks {
             if chunk.source != currentSource {
@@ -215,7 +252,8 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
                     result.append(CollapsedTranscriptChunk(
                         timestamp: timestamp,
                         source: source,
-                        combinedText: combinedText
+                        combinedText: combinedText,
+                        startTime: currentStartTime
                     ))
                 }
 
@@ -223,6 +261,7 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
                 currentSource = chunk.source
                 currentTexts = [chunk.text]
                 currentTimestamp = chunk.timestamp
+                currentStartTime = chunk.words?.first?.startTime ?? chunk.startTime
             } else {
                 // Same source, add to current section
                 currentTexts.append(chunk.text)
@@ -235,11 +274,28 @@ struct TranscriptionSession: Codable, Identifiable, Hashable {
             result.append(CollapsedTranscriptChunk(
                 timestamp: timestamp,
                 source: source,
-                combinedText: combinedText
+                combinedText: combinedText,
+                startTime: currentStartTime
             ))
         }
 
         return result
+    }
+
+    /// Phrase-sized rows for timestamp seeking. Unlike the copy-oriented
+    /// collapsed view, consecutive phrases from the same source stay separate.
+    var timestampedTranscriptChunks: [CollapsedTranscriptChunk] {
+        transcriptChunks.compactMap { chunk in
+            let text = chunk.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return CollapsedTranscriptChunk(
+                id: chunk.id,
+                timestamp: chunk.timestamp,
+                source: chunk.source,
+                combinedText: text,
+                startTime: chunk.words?.first?.startTime ?? chunk.startTime
+            )
+        }
     }
 
     // Separate computed properties for mic and system transcripts
