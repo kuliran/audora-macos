@@ -24,6 +24,17 @@ enum TranscriptionProviderError: LocalizedError {
     }
 }
 
+enum LocalModelPreparationError: LocalizedError {
+    case parakeetCacheValidationFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .parakeetCacheValidationFailed:
+            return "Parakeet finished loading, but its on-disk model cache did not validate."
+        }
+    }
+}
+
 protocol TranscriptionProvider: Sendable {
     var displayName: String { get }
 
@@ -126,6 +137,48 @@ final class ParakeetTranscriptionProvider: TranscriptionProvider, @unchecked Sen
                 )
             }
         )
+    }
+}
+
+/// Downloads (when necessary) and loads every model used by local transcription.
+///
+/// This is deliberately app-owned rather than a setup-script download. Running it
+/// from the signed app keeps FluidAudio's cache paths and validation behavior inside
+/// the same App Sandbox container used for recordings.
+enum LocalTranscriptionModelPreparation {
+    static func prepare(
+        onStatus: @escaping @Sendable (String) -> Void,
+        onProgress: @escaping @Sendable (Double) -> Void
+    ) async throws {
+        onStatus("Checking Parakeet TDT v3 cache...")
+
+        let provider = ParakeetTranscriptionProvider()
+        try await provider.prepare(
+            onStatus: onStatus,
+            onProgress: { progress in
+                onProgress(max(0, min(1, progress)) * 0.85)
+            }
+        )
+        try Task.checkCancellation()
+
+        guard AsrModels.modelsExist(
+            at: AudoraLocalModelStore.parakeetDirectory(),
+            version: .v3
+        ) else {
+            throw LocalModelPreparationError.parakeetCacheValidationFailed
+        }
+
+        onProgress(0.85)
+        onStatus("Preparing Silero voice activity model...")
+        _ = try await VadManager(
+            config: VadConfig(defaultThreshold: 0.55)
+        ) { progress in
+            onProgress(0.85 + max(0, min(1, progress.fractionCompleted)) * 0.15)
+        }
+        try Task.checkCancellation()
+
+        onProgress(1)
+        onStatus("Local transcription models are ready.")
     }
 }
 

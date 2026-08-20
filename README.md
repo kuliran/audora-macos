@@ -20,20 +20,18 @@ See `docs/LOCAL_CODEX_SETUP.md` in the parent repository for the complete backen
 
 ## Build and run
 
-1. Open `audora.xcodeproj` in Xcode.
-2. Let Xcode resolve the pinned Convex Swift and FluidAudio packages.
-3. In **Signing & Capabilities**, select your Personal Team or choose **Sign to Run Locally**.
-4. The fork defaults to `com.audora.local`. If that identifier is unavailable to your team, set `AUDORA_PRODUCT_BUNDLE_IDENTIFIER` in the ignored `Config.xcconfig`.
-5. Select **My Mac** and run the `Audora` scheme. Its Run action uses the optimized Release configuration while retaining `AUDORA_LOCAL_SETUP`.
+The parent repository's `scripts/setup-local.mjs` command incrementally builds an optimized Release app with Xcode's ad-hoc **Sign to Run Locally** identity. It then launches a dedicated preparation mode which downloads and validates Parakeet TDT v3 and Silero VAD inside the signed app's actual sandbox container. A valid cache is reused on later setup runs.
 
-The app requests microphone and system-audio permissions. On the first recording it downloads and initializes the Parakeet v3 and Silero VAD assets from Hugging Face before audio capture begins; progress is shown beside the recording controls. Later recordings transcribe locally from the cached models.
+For development, open `audora.xcodeproj`, let Xcode resolve the pinned packages, select **Sign to Run Locally**, and run the shared `Audora` scheme for **My Mac**. Its Run action uses the optimized Release configuration while retaining `AUDORA_LOCAL_SETUP`. Keep the default `com.audora.local` bundle identifier so updates continue to use the prepared container.
+
+The app requests microphone and system-audio permissions. Starting a recording loads the already-cached Parakeet and VAD models into memory; it downloads only if setup was skipped or the model cache was removed or invalidated. Progress is shown beside the recording controls.
 
 Parakeet word timings and confidence are preserved. A dependency-free Swift analyzer calculates per-source phrase and overall pace, articulation, pitch range/direction, relative volume, volume variation, steadiness, voiced coverage, and quality flags away from the realtime audio callback. It creates no voice embedding or pitch contour. Detailed metrics stay in the local meeting JSON; the loopback backend receives a rounded, capped projection, and absolute median pitch is removed before Codex coaching. Transcript and metric phrase rows seek directly to their saved-audio timestamps.
 
 ## Network expectations
 
 - First source build: GitHub traffic for Swift packages.
-- First model setup: Hugging Face/CDN traffic for Parakeet and Silero VAD.
+- Model preparation during parent setup: traffic to FluidAudio's configured model hosts for Parakeet and Silero VAD.
 - Warm recording and local Convex sync: loopback traffic only.
 - Coaching in the web UI: transcript text is sent through the Codex CLI to OpenAI.
 

@@ -18,12 +18,23 @@ import Combine
 struct AudoraApp: App {
     #if !AUDORA_LOCAL_SETUP
     private let updaterController: SPUStandardUpdaterController
+    #else
+    private let preparesLocalModelsAndExits = ProcessInfo.processInfo.arguments.contains(
+        AudoraLocalLaunchArgument.prepareModelsAndExit
+    )
     #endif
     @StateObject private var settingsViewModel = SettingsViewModel()
     @StateObject private var menuBarViewModel = MenuBarViewModel()
     @StateObject private var convexService = ConvexService.shared
 
     init() {
+        #if AUDORA_LOCAL_SETUP
+        if preparesLocalModelsAndExits {
+            print("Audora local model preparation mode")
+            return
+        }
+        #endif
+
         #if !AUDORA_LOCAL_SETUP
         updaterController = SPUStandardUpdaterController(updaterDelegate: nil, userDriverDelegate: nil)
 
@@ -77,43 +88,15 @@ struct AudoraApp: App {
     var body: some Scene {
         WindowGroup {
             Group {
-                switch convexService.authState {
-                case .loading:
-                    VStack {
-                        ProgressView()
-                            .progressViewStyle(CircularProgressViewStyle())
-                        Text("Loading...")
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(minWidth: 400, minHeight: 300)
-                    .task {
-                        // Try to restore session from cache on launch
-                        _ = await convexService.loginFromCache()
-                    }
-                case .authenticated:
-                    ContentView()
-                        .frame(minWidth: 700, minHeight: 400)
-                        .environmentObject(settingsViewModel)
-                        .environmentObject(convexService)
-                        .background(OpenSettingsInstaller())
-                case .unauthenticated:
-                    #if AUDORA_LOCAL_SETUP
-                    VStack(spacing: 12) {
-                        Text("Local services are not ready")
-                            .font(.headline)
-                        Text(convexService.errorMessage ?? "Start the local web and Convex servers, then retry.")
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                        Button("Retry") {
-                            Task { _ = await convexService.loginFromCache() }
-                        }
-                    }
-                    .padding(32)
-                    .frame(minWidth: 460, minHeight: 260)
-                    #else
-                    SignInView()
-                    #endif
+                #if AUDORA_LOCAL_SETUP
+                if preparesLocalModelsAndExits {
+                    LocalModelPreparationView()
+                } else {
+                    mainWindowContent
                 }
+                #else
+                mainWindowContent
+                #endif
             }
             #if !AUDORA_LOCAL_SETUP
             .onOpenURL { url in
@@ -192,6 +175,47 @@ struct AudoraApp: App {
                 Image(systemName: "bolt.fill")
             }
         })
+    }
+
+    @ViewBuilder
+    private var mainWindowContent: some View {
+        switch convexService.authState {
+        case .loading:
+            VStack {
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle())
+                Text("Loading...")
+                    .foregroundColor(.secondary)
+            }
+            .frame(minWidth: 400, minHeight: 300)
+            .task {
+                // Try to restore session from cache on launch
+                _ = await convexService.loginFromCache()
+            }
+        case .authenticated:
+            ContentView()
+                .frame(minWidth: 700, minHeight: 400)
+                .environmentObject(settingsViewModel)
+                .environmentObject(convexService)
+                .background(OpenSettingsInstaller())
+        case .unauthenticated:
+            #if AUDORA_LOCAL_SETUP
+            VStack(spacing: 12) {
+                Text("Local services are not ready")
+                    .font(.headline)
+                Text(convexService.errorMessage ?? "Start the local web and Convex servers, then retry.")
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("Retry") {
+                    Task { _ = await convexService.loginFromCache() }
+                }
+            }
+            .padding(32)
+            .frame(minWidth: 460, minHeight: 260)
+            #else
+            SignInView()
+            #endif
+        }
     }
 }
 
