@@ -1,0 +1,22 @@
+flowchart LR
+    User[User] --> UI[Native macOS UI]
+    UI --> App[Application use cases]
+    App --> Audio[AVFoundation audio adapter]
+    App --> ASR[Crisper worker adapter]
+    App --> Evidence[Acoustic evidence adapter]
+    App --> Domain[Domain annotation and validation]
+    App --> Coach[Codex coach adapter]
+    App --> Store[Portable library repository]
+    Audio --> Stage[Capability-scoped job staging]
+    ASR --> Stage
+    Evidence --> Stage
+    ASR --> Worker[Python and PyTorch MPS worker]
+    Coach --> OpenAI[OpenAI via ChatGPT Codex login]
+    Worker --> ASR
+    Audio --> App
+    ASR --> App
+    Evidence --> App
+    Coach --> App
+    Domain --> App
+
+    %% Only Application can publish authoritative manifests through Store.

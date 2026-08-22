@@ -1,5 +1,9 @@
 # Audora macOS — local setup
 
+> The canonical specification for the simplified standalone product is
+> [`rfc/README.md`](rfc/README.md). The setup below describes the current legacy
+> local fork while that architecture is implemented.
+
 This fork builds the macOS recorder in local-only mode:
 
 - authentication uses the loopback JWT issuer at `127.0.0.1:5173`;

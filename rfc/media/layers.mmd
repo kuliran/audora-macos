@@ -1,0 +1,22 @@
+flowchart TB
+    Presentation[Presentation: SwiftUI and AppKit]
+    Application[Application: use cases, ports, state machines]
+    Domain[Domain: entities, values, deterministic rules]
+    Infrastructure[Infrastructure: macOS, files, workers, providers]
+    Contracts[Contracts resources: schemas, examples, scenarios]
+    ContractTests[Cross-layer conformance tests]
+    Composition[Composition root]
+
+    Presentation --> Application
+    Application --> Domain
+    Infrastructure --> Application
+    Infrastructure --> Domain
+    Composition --> Presentation
+    Composition --> Application
+    Composition --> Infrastructure
+    ContractTests --> Contracts
+    ContractTests --> Presentation
+    ContractTests --> Application
+    ContractTests --> Infrastructure
+
+    %% Contracts is a dependency-free resource package. Domain remains serialization-free.
