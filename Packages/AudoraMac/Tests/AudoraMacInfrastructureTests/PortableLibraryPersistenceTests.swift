@@ -445,24 +445,38 @@ final class PortableLibraryPersistenceTests: XCTestCase {
     }
 
     private func tree(at root: URL) throws -> [String] {
-        let canonicalRoot = root.resolvingSymlinksInPath()
-        let enumerator = try XCTUnwrap(
-            FileManager.default.enumerator(
-                at: canonicalRoot,
-                includingPropertiesForKeys: [.isDirectoryKey],
-                options: [],
-                errorHandler: nil
-            )
-        )
         var values: [String] = []
-        for case let url as URL in enumerator {
-            let relative = String(
-                url.path.dropFirst(canonicalRoot.path.count + 1)
-            )
-            let isDirectory = try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
-            values.append(relative + (isDirectory ? "/" : ""))
-        }
+        try appendTree(at: root, relativeToRoot: "", into: &values)
         return values.sorted()
+    }
+
+    private func appendTree(
+        at directory: URL,
+        relativeToRoot parent: String,
+        into values: inout [String]
+    ) throws {
+        let children = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: []
+        )
+        for child in children {
+            let relative = parent.isEmpty
+                ? child.lastPathComponent
+                : "\(parent)/\(child.lastPathComponent)"
+            let metadata = try child.resourceValues(
+                forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+            )
+            let isDirectory = metadata.isDirectory == true
+            values.append(relative + (isDirectory ? "/" : ""))
+            if isDirectory, metadata.isSymbolicLink != true {
+                try appendTree(
+                    at: child,
+                    relativeToRoot: relative,
+                    into: &values
+                )
+            }
+        }
     }
 
     private static let expectedInitialTree = [
