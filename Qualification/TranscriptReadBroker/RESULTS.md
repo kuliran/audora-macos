@@ -2,7 +2,7 @@
 
 Recorded 30 August 2026 on Apple Silicon macOS with Swift 6.
 
-- All 27 deterministic broker, MCP, schema, lifecycle, sanitization, concurrency,
+- All 29 deterministic broker, MCP, schema, lifecycle, sanitization, concurrency,
   and live loopback tests passed.
 - The loopback listener bound only `127.0.0.1` on an OS-selected ephemeral port,
   returned no redirect or CORS authority, and was closed on normal completion and
@@ -15,6 +15,8 @@ Recorded 30 August 2026 on Apple Silicon macOS with Swift 6.
 - Complete responses were canonical and byte-identical on the sole allowed replay;
   no second storage read occurred.
 - Unavailable, corrupt, and budget-failed batches returned no partial transcript.
+- Zero-length, reversed, negative, out-of-duration, and parent-escaping timed
+  evidence returned no transcript; explicitly untimed Words remained valid.
 - Provider-visible requests, responses, discovery, errors, and the public report
   contained no capability, Library path, Session ID, or Transcript Revision ID
   canary.

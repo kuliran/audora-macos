@@ -63,6 +63,7 @@ final class TranscriptReadBrokerTests: XCTestCase {
         XCTAssertFalse(providerText.contains("revision-"))
         XCTAssertFalse(providerText.contains("Synthetic A"))
         XCTAssertFalse(providerText.contains("Synthetic B"))
+        XCTAssertFalse(providerText.contains("durationMs"))
     }
 
     func testInvalidRequestShapesFailClosedBeforeStorageAndRevokeTheGrant() async throws {
@@ -203,6 +204,7 @@ final class TranscriptReadBrokerTests: XCTestCase {
 
     func testCorruptTranscriptAndStorageErrorAreSanitizedAsUnavailable() async throws {
         let corrupt = SessionTranscriptProjection(
+            durationMs: 1_000,
             lines: [
                 TranscriptLine(
                     timeRange: TranscriptTimeRange(startMs: 100, endMs: 10),
@@ -246,6 +248,235 @@ final class TranscriptReadBrokerTests: XCTestCase {
         XCTAssertFalse(throwingText.contains("private transcript"))
         XCTAssertFalse(throwingText.contains("Library"))
         XCTAssertFalse(throwingText.contains("token"))
+    }
+
+    func testStrictHalfOpenAndContainmentViolationsDiscloseNoTranscript() async throws {
+        let validLine = TranscriptTimeRange(startMs: 100, endMs: 900)
+        let validWord = TranscriptTimeRange(startMs: 200, endMs: 300)
+        let validEvent = TranscriptTimeRange(startMs: 400, endMs: 500)
+        let makeProjection: (
+            Int,
+            TranscriptTimeRange,
+            TranscriptTimeRange?,
+            TranscriptTimeRange
+        ) -> SessionTranscriptProjection = { duration, lineRange, wordRange, eventRange in
+            SessionTranscriptProjection(
+                durationMs: duration,
+                lines: [
+                    TranscriptLine(
+                        timeRange: lineRange,
+                        text: "private range transcript canary",
+                        words: [
+                            TranscriptWord(
+                                wordID: "range-word",
+                                text: "private",
+                                timeRange: wordRange
+                            ),
+                        ]
+                    ),
+                ],
+                audioEvents: [
+                    TranscriptAudioEvent(
+                        audioEventID: "range-event",
+                        category: .nonSpeech,
+                        timeRange: eventRange
+                    ),
+                ]
+            )
+        }
+        let cases: [(String, SessionTranscriptProjection)] = [
+            (
+                "zero session duration",
+                makeProjection(0, TranscriptTimeRange(startMs: 0, endMs: 1), nil, validEvent)
+            ),
+            (
+                "session duration beyond canonical int32",
+                makeProjection(
+                    Int(Int32.max) + 1,
+                    validLine,
+                    validWord,
+                    validEvent
+                )
+            ),
+            (
+                "zero-length line",
+                makeProjection(
+                    1_000,
+                    TranscriptTimeRange(startMs: 100, endMs: 100),
+                    nil,
+                    validEvent
+                )
+            ),
+            (
+                "reversed line",
+                makeProjection(
+                    1_000,
+                    TranscriptTimeRange(startMs: 200, endMs: 100),
+                    nil,
+                    validEvent
+                )
+            ),
+            (
+                "negative line start",
+                makeProjection(
+                    1_000,
+                    TranscriptTimeRange(startMs: -1, endMs: 100),
+                    nil,
+                    validEvent
+                )
+            ),
+            (
+                "line beyond duration",
+                makeProjection(
+                    1_000,
+                    TranscriptTimeRange(startMs: 100, endMs: 1_001),
+                    nil,
+                    validEvent
+                )
+            ),
+            (
+                "zero-length word",
+                makeProjection(
+                    1_000,
+                    validLine,
+                    TranscriptTimeRange(startMs: 200, endMs: 200),
+                    validEvent
+                )
+            ),
+            (
+                "reversed word",
+                makeProjection(
+                    1_000,
+                    validLine,
+                    TranscriptTimeRange(startMs: 300, endMs: 200),
+                    validEvent
+                )
+            ),
+            (
+                "word starts before parent line",
+                makeProjection(
+                    1_000,
+                    validLine,
+                    TranscriptTimeRange(startMs: 99, endMs: 200),
+                    validEvent
+                )
+            ),
+            (
+                "negative word start",
+                makeProjection(
+                    1_000,
+                    validLine,
+                    TranscriptTimeRange(startMs: -1, endMs: 200),
+                    validEvent
+                )
+            ),
+            (
+                "word ends after parent line",
+                makeProjection(
+                    1_000,
+                    validLine,
+                    TranscriptTimeRange(startMs: 800, endMs: 901),
+                    validEvent
+                )
+            ),
+            (
+                "zero-length audio event",
+                makeProjection(
+                    1_000,
+                    validLine,
+                    validWord,
+                    TranscriptTimeRange(startMs: 400, endMs: 400)
+                )
+            ),
+            (
+                "reversed audio event",
+                makeProjection(
+                    1_000,
+                    validLine,
+                    validWord,
+                    TranscriptTimeRange(startMs: 500, endMs: 400)
+                )
+            ),
+            (
+                "negative audio event start",
+                makeProjection(
+                    1_000,
+                    validLine,
+                    validWord,
+                    TranscriptTimeRange(startMs: -1, endMs: 400)
+                )
+            ),
+            (
+                "audio event beyond duration",
+                makeProjection(
+                    1_000,
+                    validLine,
+                    validWord,
+                    TranscriptTimeRange(startMs: 900, endMs: 1_001)
+                )
+            ),
+        ]
+
+        for (name, projection) in cases {
+            let grant = try makeGrant(firstResult: .available(projection))
+            let handles = grant.providerAttachments.map(\.sessionTranscriptHandle)
+            let result = await grant.broker.read(
+                capability: grant.capability,
+                requestBody: requestBody(handles: handles)
+            )
+            guard case let .delivered(delivery) = result else {
+                XCTFail("expected unavailable: \(name)")
+                continue
+            }
+            XCTAssertEqual(delivery.kind, .sessionUnavailable, name)
+            XCTAssertTrue(delivery.terminatesAttempt, name)
+            XCTAssertEqual(
+                String(decoding: delivery.responseBody, as: UTF8.self),
+                #"{"kind":"sessionUnavailable","unavailableSessionTranscriptHandles":["\#(handles[0])"]}"#,
+                name
+            )
+            let providerText = String(decoding: delivery.responseBody, as: UTF8.self)
+            XCTAssertFalse(providerText.contains("private range transcript canary"), name)
+            XCTAssertFalse(providerText.contains("Synthetic beta"), name)
+            XCTAssertFalse(providerText.contains("attachment-b"), name)
+            let status = await grant.broker.status()
+            XCTAssertEqual(status, .revoked, name)
+        }
+    }
+
+    func testUntimedWordRemainsValidAndOmitsOnlyItsOptionalRange() async throws {
+        let projection = SessionTranscriptProjection(
+            durationMs: 500,
+            lines: [
+                TranscriptLine(
+                    timeRange: TranscriptTimeRange(startMs: 0, endMs: 500),
+                    text: "Untimed word.",
+                    words: [
+                        TranscriptWord(wordID: "untimed-word", text: "Untimed", timeRange: nil),
+                    ]
+                ),
+            ],
+            audioEvents: []
+        )
+        let grant = try makeGrant(firstResult: .available(projection))
+        let handle = grant.providerAttachments[0].sessionTranscriptHandle
+        let result = await grant.broker.read(
+            capability: grant.capability,
+            requestBody: requestBody(handles: [handle])
+        )
+        guard case let .delivered(delivery) = result else {
+            return XCTFail("expected complete untimed-word projection")
+        }
+        XCTAssertEqual(delivery.kind, .complete)
+        let envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: delivery.responseBody) as? [String: Any]
+        )
+        let transcripts = try XCTUnwrap(envelope["transcripts"] as? [[String: Any]])
+        let transcript = try XCTUnwrap(transcripts.first?["transcript"] as? [String: Any])
+        let lines = try XCTUnwrap(transcript["lines"] as? [[String: Any]])
+        let words = try XCTUnwrap(lines.first?["words"] as? [[String: Any]])
+        XCTAssertNil(words.first?["timeRange"])
+        XCTAssertNil(transcript["durationMs"])
     }
 
     func testExactCompleteResponseBudgetFailureReturnsNoTranscriptAndRevokes() async throws {
@@ -1103,6 +1334,7 @@ final class TranscriptReadBrokerTests: XCTestCase {
         firstResult: FrozenTranscriptReadResult? = nil,
         secondResult: FrozenTranscriptReadResult = .available(
             SessionTranscriptProjection(
+                durationMs: 1_000,
                 lines: [
                     TranscriptLine(
                         timeRange: TranscriptTimeRange(startMs: 0, endMs: 500),
@@ -1168,6 +1400,7 @@ final class TranscriptReadBrokerTests: XCTestCase {
 
     private func fixtureTranscript(text: String) -> SessionTranscriptProjection {
         SessionTranscriptProjection(
+            durationMs: 1_000,
             lines: [
                 TranscriptLine(
                     timeRange: TranscriptTimeRange(startMs: 0, endMs: 500),

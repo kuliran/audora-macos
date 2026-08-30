@@ -179,6 +179,7 @@ public struct TranscriptReadQualificationRunner: Sendable {
     }
 
     private static let syntheticTranscript = SessionTranscriptProjection(
+        durationMs: 1_000,
         lines: [
             TranscriptLine(
                 timeRange: TranscriptTimeRange(startMs: 0, endMs: 300),
