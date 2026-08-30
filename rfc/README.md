@@ -119,6 +119,15 @@ margin must remain strictly below the context window. Every Attempt also caps
 provider output at or below that token reserve and tells the coach that its
 complete structured response must fit.
 
+The first isolated Codex CLI feasibility harness lives under
+[`Qualification/CodexCLI`](../Qualification/CodexCLI/README.md). Codex CLI 0.143.0
+is not a qualified Coach Provider: deterministic response, failure-mapping,
+cancellation, timeout, and reaping tests pass, but the authenticated structured
+response did not complete, the CLI exposes no documented provider-side output-token
+ceiling, and its core model-visible tool surface cannot be reduced to only Audora's
+future scoped transcript read. The application must not wire this candidate into
+its composition root until the exact shipping CLI/model pair passes every gate.
+
 Version one accepts exactly one transcribable mono source per Session. A possible
 later extension adds dual-track capture: the Speaker's microphone plus a
 separately retained, aligned system or application-audio source. Storage and

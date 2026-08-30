@@ -1,0 +1,17 @@
+{
+  "profile": {
+    "statements": []
+  },
+  "conversation": {
+    "history": [],
+    "memory": {
+      "generalNotes": "",
+      "sessionSummaries": []
+    },
+    "trigger": {
+      "kind": "userMessage",
+      "text": "Suggest one short rehearsal exercise for a synthetic presentation opening."
+    }
+  },
+  "sessionAttachments": []
+}

@@ -398,5 +398,10 @@ execution profile.
 
 Numeric quality, coverage, runtime, memory, thermal, token-estimator, and output-
 collector thresholds are published as versioned qualification fixtures during the
-feasibility phase. This document links those artifacts once they exist rather than
-inventing thresholds from a single benchmark.
+feasibility phase. The first Codex process, output, and failure fixtures plus their
+current failed qualification decision are published in
+[`Qualification/CodexCLI`](../../Qualification/CodexCLI/README.md). Its 4,096-byte
+response collector and 4,096-reported-output-token ceilings are spike bounds, not a
+qualified provider descriptor: Codex CLI 0.143.0 cannot configure the required
+provider-side token cap or reduce its model-visible tool surface to Audora's sole
+optional transcript read.
