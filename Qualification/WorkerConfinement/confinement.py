@@ -21,8 +21,9 @@ import stat
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 ALLOWED_ENVIRONMENT_KEYS = frozenset(
@@ -206,6 +207,26 @@ class _BoundedFailure(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+@contextmanager
+def _probe_listener() -> Iterator[int]:
+    listener: socket.socket | None = None
+    try:
+        try:
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            probe_port = int(listener.getsockname()[1])
+        except OSError:
+            raise _BoundedFailure("PROBE_SOCKET_UNAVAILABLE") from None
+        yield probe_port
+    finally:
+        if listener is not None:
+            try:
+                listener.close()
+            except OSError:
+                raise _BoundedFailure("PROBE_SOCKET_CLEANUP_FAILED") from None
 
 
 class _OutputCollector:
@@ -595,20 +616,40 @@ def run_synthetic_scenario(
 def qualify_synthetic_scenario(scenario: str) -> ScenarioResult:
     if scenario not in EXPECTED_SCENARIO_CODES:
         raise ValueError("unknown qualification scenario")
-    with tempfile.TemporaryDirectory(
-        prefix="audora-worker-confinement-", dir="/private/tmp"
-    ) as directory:
-        fixture = prepare_synthetic_fixture(Path(directory))
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        try:
-            return run_synthetic_scenario(
-                fixture, scenario, int(listener.getsockname()[1])
-            )
-        finally:
-            listener.close()
-            restore_fixture_permissions(fixture)
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="audora-worker-confinement-", dir="/private/tmp"
+        ) as directory:
+            fixture = prepare_synthetic_fixture(Path(directory))
+            try:
+                with _probe_listener() as probe_port:
+                    return run_synthetic_scenario(
+                        fixture, scenario, probe_port
+                    )
+            finally:
+                restore_fixture_permissions(fixture)
+    except _BoundedFailure as failure:
+        return ScenarioResult(
+            scenario=scenario,
+            status="blocked",
+            code=failure.code,
+            handshake={},
+            reaped=True,
+            process_group_reaped=True,
+            stdout_bytes=0,
+            stderr_bytes=0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ScenarioResult(
+            scenario=scenario,
+            status="blocked",
+            code="PRELAUNCH_PREPARATION_FAILED",
+            handshake={},
+            reaped=True,
+            process_group_reaped=True,
+            stdout_bytes=0,
+            stderr_bytes=0,
+        )
 
 
 def canonical_report_json(report: dict[str, Any]) -> str:
@@ -628,6 +669,29 @@ def _scenario_report(result: ScenarioResult) -> dict[str, Any]:
     }
 
 
+def _run_synthetic_matrix() -> tuple[list[ScenarioResult], str | None]:
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="audora-worker-confinement-", dir="/private/tmp"
+        ) as directory:
+            fixture = prepare_synthetic_fixture(Path(directory))
+            try:
+                with _probe_listener() as probe_port:
+                    results = [
+                        run_synthetic_scenario(
+                            fixture, scenario, probe_port
+                        )
+                        for scenario in SCENARIOS
+                    ]
+            finally:
+                restore_fixture_permissions(fixture)
+        return results, None
+    except _BoundedFailure as failure:
+        return [], failure.code
+    except (OSError, subprocess.SubprocessError):
+        return [], "PRELAUNCH_PREPARATION_FAILED"
+
+
 def build_qualification_report() -> dict[str, Any]:
     engine_lock_path = ROOT.parent / "CrisperBenchmark" / "engine-lock.v1.json"
     engine_lock_bytes = engine_lock_path.read_bytes()
@@ -636,25 +700,13 @@ def build_qualification_report() -> dict[str, Any]:
         engine_lock, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
 
-    with tempfile.TemporaryDirectory(
-        prefix="audora-worker-confinement-", dir="/private/tmp"
-    ) as directory:
-        fixture = prepare_synthetic_fixture(Path(directory))
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        try:
-            results = [
-                run_synthetic_scenario(
-                    fixture, scenario, int(listener.getsockname()[1])
-                )
-                for scenario in SCENARIOS
-            ]
-        finally:
-            listener.close()
-            restore_fixture_permissions(fixture)
+    results, synthetic_block_reason = _run_synthetic_matrix()
 
-    synthetic_passed = all(result.status == "passed" for result in results)
+    synthetic_passed = (
+        synthetic_block_reason is None
+        and bool(results)
+        and all(result.status == "passed" for result in results)
+    )
     patch_id = engine_lock.get("engine", {}).get("audoraCompatibilityPatchId")
     reason_codes = [
         "LOCKED_RUNTIME_NOT_PROVIDED",
@@ -699,14 +751,24 @@ def build_qualification_report() -> dict[str, Any]:
             },
         },
         "syntheticRestrictionProof": {
-            "status": "passed" if synthetic_passed else "failed",
+            "status": (
+                "blocked"
+                if synthetic_block_reason is not None
+                else "passed" if synthetic_passed else "failed"
+            ),
             "fixture": "ad-hoc-signed Hardened Runtime synthetic worker",
             "handshake": next(
-                result.handshake
+                (result.handshake
                 for result in results
-                if result.scenario == "cached-inference"
+                if result.scenario == "cached-inference"),
+                {},
             ),
             "scenarios": [_scenario_report(result) for result in results],
+            **(
+                {"reasonCodes": [synthetic_block_reason]}
+                if synthetic_block_reason is not None
+                else {}
+            ),
         },
         "productionCrisperQualification": {
             "status": "blocked",

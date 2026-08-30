@@ -16,7 +16,7 @@ cd Qualification/WorkerConfinement
 
 ## Recorded outcome
 
-The deterministic suite passed 8 tests with 0 failures. All 19 synthetic
+The deterministic suite passed 10 tests with 0 failures. All 19 synthetic
 restriction scenarios passed. The worker reported protocol 1,
 `synthetic-runtime-v1`, `synthetic-model-revision-v1`, and
 `synthetic-progress-patch-v1` before accepting the request.

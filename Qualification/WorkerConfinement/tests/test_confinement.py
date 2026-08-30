@@ -4,6 +4,7 @@ import platform
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -43,6 +44,60 @@ class LaunchProfileTests(unittest.TestCase):
 
 @unittest.skipUnless(platform.system() == "Darwin", "macOS confinement profile")
 class ConfinementIntegrationTests(unittest.TestCase):
+    def test_probe_bind_failure_is_closed_and_returned_as_a_bounded_result(self) -> None:
+        class FailingProbeSocket:
+            def __init__(self) -> None:
+                self.close_calls = 0
+
+            def bind(self, _address: object) -> None:
+                raise OSError("raw detail at /fixture-only/local-path")
+
+            def listen(self, _backlog: int) -> None:
+                raise AssertionError("listen must not run after bind failure")
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        probe = FailingProbeSocket()
+        with mock.patch.object(confinement.socket, "socket", return_value=probe):
+            result = confinement.qualify_synthetic_scenario("network")
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.code, "PROBE_SOCKET_UNAVAILABLE")
+        self.assertEqual(probe.close_calls, 1)
+        self.assertNotIn("raw detail", repr(result))
+        self.assertNotIn("/fixture-only/", repr(result))
+
+    def test_probe_bind_failure_returns_a_sanitized_blocked_report(self) -> None:
+        class FailingProbeSocket:
+            def __init__(self) -> None:
+                self.close_calls = 0
+
+            def bind(self, _address: object) -> None:
+                raise OSError("raw detail at /fixture-only/local-path")
+
+            def listen(self, _backlog: int) -> None:
+                raise AssertionError("listen must not run after bind failure")
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        probe = FailingProbeSocket()
+        with mock.patch.object(confinement.socket, "socket", return_value=probe):
+            report = confinement.build_qualification_report()
+        serialized = confinement.canonical_report_json(report)
+
+        self.assertEqual(probe.close_calls, 1)
+        self.assertEqual(report["qualificationStatus"], "blocked")
+        self.assertEqual(report["syntheticRestrictionProof"]["status"], "blocked")
+        self.assertEqual(
+            report["syntheticRestrictionProof"]["reasonCodes"],
+            ["PROBE_SOCKET_UNAVAILABLE"],
+        )
+        self.assertEqual(report["syntheticRestrictionProof"]["scenarios"], [])
+        self.assertNotIn("raw detail", serialized)
+        self.assertNotIn("/fixture-only/", serialized)
+
     def test_cached_inference_runs_offline_with_expected_handshake(self) -> None:
         result = confinement.qualify_synthetic_scenario("cached-inference")
 

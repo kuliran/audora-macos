@@ -59,7 +59,7 @@
   },
   "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
   "qualificationStatus": "blocked",
-  "recordedAt": "2026-08-30T14:37:05.292560Z",
+  "recordedAt": "2026-08-30T14:47:34.930911Z",
   "schemaVersion": 1,
   "syntheticRestrictionProof": {
     "fixture": "ad-hoc-signed Hardened Runtime synthetic worker",
