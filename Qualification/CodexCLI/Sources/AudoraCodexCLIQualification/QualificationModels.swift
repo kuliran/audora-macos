@@ -176,6 +176,7 @@ public struct QualificationSuiteReport: Codable, Equatable, Sendable {
         self.cases = cases
         externalLimitations = [
             "Codex CLI 0.143.0 does not expose a provider-side max-output-token setting; the spike verifies reported usage and enforces a local byte collector ceiling.",
+            "The shipping Codex CLI/model pair has no pinned exact tokenizer or documented complete model-framing count; the synthetic model-catalog context values are harness inputs, not a qualified context-window claim.",
             "Codex CLI 0.143.0 still advertises core plan and text-model-disabled view_image entries, so its model-facing tool list cannot yet be reduced to exactly Audora's optional transcript read.",
             "Authentication, quota, and transient mappings are covered with synthetic process fixtures; real account failures are not manufactured or inspected.",
         ]

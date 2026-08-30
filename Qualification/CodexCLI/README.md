@@ -115,12 +115,61 @@ Signals normalize to bounded reasons:
 Synthetic subprocess fixtures cover every mapping without manufacturing account
 or quota failures.
 
+## Exact context-estimation gate
+
+The package also contains the provider-independent context planner needed before a
+Coach process may launch. It serializes the contract JSON itself instead of
+estimating from Swift strings or object counts. Canonical serialization is compact
+UTF-8, preserves string contents without normalization, orders object keys by UTF-8
+bytes, and escapes JSON control characters before measurement.
+
+One provider estimation policy supplies its pinned tokenizer (or a documented
+conservative upper bound), complete visible framing, hidden framing-token counts,
+and response-collector byte ceiling. The planner measures the complete
+model-visible message sequence, tokenizing each full provider frame so tool-call
+boundaries cannot disappear, including:
+
+- the structured Profile and current structured Coach Memory;
+- every eligible successful history turn and the current trigger;
+- all inline attachment values;
+- every on-demand attachment descriptor plus one complete all-attachments atomic
+  transcript-read request and response;
+- provider instructions, adapter/tool framing, and hidden special tokens; and
+- the configured response reserve and safety margin.
+
+The whole-exchange token count is authoritative. Component costs are explanatory
+estimates and intentionally are not summed, because independently tokenized pieces
+can behave differently at tokenizer boundaries. Exact fit is accepted; one token
+over the usable input ceiling is rejected without trimming any component.
+
+Descriptor qualification performs the cross-field checks that JSON Schema cannot:
+reserve plus margin must be strictly below the context window, and a structural
+maximum-Memory fixture must measure exactly to `coachMemoryMaxTokens`. The fixture
+is then placed in the minimum Request and minimum Response. The Request must fit
+the usable input; the Response must fit the token reserve; and the response JSON's
+worst-case byte bound, derived from the tokenizer's qualified maximum UTF-8 bytes
+per token, must fit the collector.
+
+Deterministic fixtures cover exact fit, one-token overflow, JSON escaping,
+multiple large on-demand Sessions, maximum Memory, all descriptor inequalities,
+and independent response token/byte failures. The UTF-8-byte estimator is a
+conservative upper bound for byte-level tokenizers; provider special tokens must
+still be supplied explicitly as framing.
+
+No production `CoachProviderDescriptor` is claimed for Codex CLI 0.143.0. The
+`128,000`/`80%` values in the generated synthetic model catalog configure this
+isolated client fixture; they are not evidence of the selected account/model's
+shipping context limit. The CLI/model pair also lacks a pinned exact tokenizer and
+complete hidden-framing measurement, exposes no provider-side output-token cap,
+and cannot yet expose only the scoped transcript-read tool. Those unknowns cannot
+be converted into optimistic zero-cost fields.
+
 ## Qualification result — 30 August 2026
 
 Environment: Apple Silicon macOS, Codex CLI 0.143.0, ChatGPT login reported as
 available by `codex login status`.
 
-- The deterministic Swift suite passed 14 tests.
+- The deterministic Swift suite passed 27 tests.
 - The real synthetic cancellation case passed and reaped the CLI in 128 ms.
 - The real synthetic timeout case passed and reaped the CLI in 137 ms.
 - Both real cases left the initially empty scoped workspace empty.
