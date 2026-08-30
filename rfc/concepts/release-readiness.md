@@ -392,7 +392,10 @@ execution profile.
 - The authenticated Coach adapter passes isolated launch, structured output,
   transcript-tool, cancellation, timeout/reaping, and no-local-rollout tests.
 - Adversarial worker tests prove unrelated filesystem paths and network endpoints
-  are unavailable to cached transcription in the selected execution profile.
+  are unavailable to cached transcription in the selected execution profile. The
+  executable harness and current synthetic-pass/production-blocked result are
+  recorded under
+  [`Qualification/WorkerConfinement`](../../Qualification/WorkerConfinement/README.md).
 - Signing, dependency/model preparation, offline operation, and the complete
   45-minute workflow pass from a clean supported Mac.
 

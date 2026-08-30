@@ -43,6 +43,15 @@ selected profile and a Release build can:
   Request's usable input and the minimum Response's `responseReservedTokens` and
   collector byte ceiling.
 
+The ticket-scoped
+[`WorkerConfinement` qualification](../../Qualification/WorkerConfinement/README.md)
+provides the deny-by-default launch profile, bounded process host, synthetic
+attack worker, and recorded result for the transcription subset of this gate. Its
+synthetic restriction proof passes on the recorded host, but production Crisper
+qualification remains blocked until the exact runtime/model and a non-null
+compatibility patch are supplied and real cached MPS inference passes on the
+minimum supported macOS baseline.
+
 Transcription and Codex need different policies. Cached ASR is no-network and must
 pass the stronger worker-confinement tests above. Codex has intentional OpenAI
 network access. Audora passes a bounded structured envelope through standard input
