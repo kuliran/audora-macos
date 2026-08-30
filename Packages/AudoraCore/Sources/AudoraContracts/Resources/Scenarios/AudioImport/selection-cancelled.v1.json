@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "audio-import.selection-cancelled",
+  "initialState": { "status": "idle" },
+  "commands": [{ "kind": "chooseAudio" }],
+  "dependencyTrace": [
+    { "port": "audioImport", "effect": "choose", "outcome": "cancelled" }
+  ],
+  "expectedState": { "status": "failed", "failure": "cancelled" }
+}

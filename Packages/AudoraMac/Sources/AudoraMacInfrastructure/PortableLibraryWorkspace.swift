@@ -83,6 +83,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     private var externalRequests: [LibraryOpenRequestToken: URL] = [:]
     private var nextExternalRequest = 0
     private var operationInFlight = false
+    private var workspaceGeneration: UInt64 = 0
 
     public init(
         persistence: PortableLibraryPersistence = PortableLibraryPersistence(),
@@ -115,6 +116,46 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     }
 
     var pendingExternalRequestCount: Int { externalRequests.count }
+
+    func acquireAudioImportScope() -> ActiveLibraryImportScope? {
+        guard let activeScope,
+              case let .readWrite(authority) = activeScope.loaded,
+              let importLease = try? access.acquireAccess(to: activeScope.root)
+        else {
+            return nil
+        }
+        return ActiveLibraryImportScope(
+            identity: AudioImportScopeIdentity(
+                libraryID: authority.manifest.libraryID,
+                workspaceGeneration: workspaceGeneration
+            ),
+            root: importLease.url,
+            lease: importLease
+        )
+    }
+
+    func isCurrentAudioImportScope(_ identity: AudioImportScopeIdentity) -> Bool {
+        guard identity.workspaceGeneration == workspaceGeneration,
+              let activeScope,
+              case let .readWrite(authority) = activeScope.loaded
+        else {
+            return false
+        }
+        return authority.manifest.libraryID == identity.libraryID
+    }
+
+    func withCurrentAudioImportScope<Result: Sendable>(
+        _ identity: AudioImportScopeIdentity,
+        perform operation: @Sendable () throws -> Result
+    ) throws -> Result {
+        guard isCurrentAudioImportScope(identity) else {
+            throw AudioImportFailure.libraryChanged
+        }
+        // The synchronous authority-changing operation runs while this actor is
+        // isolated, so close/switch cannot race between the identity check and
+        // the Session directory's no-replace install.
+        return try operation()
+    }
 
     public func restoreActiveLibrary() async -> LibraryOpenOutcome {
         guard reserveOperation() else { return .failed(.candidateUnavailable) }
@@ -213,10 +254,12 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         defer { operationInFlight = false }
         guard let activeScope else {
             self.activeScope = nil
+            workspaceGeneration &+= 1
             return .succeeded(recentAvailable: false)
         }
         guard let libraryID = activeScope.libraryID else {
             self.activeScope = nil
+            workspaceGeneration &+= 1
             activeScope.lease.release()
             return .succeeded(recentAvailable: false)
         }
@@ -228,6 +271,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
             return .failed(.closeFailed)
         }
         self.activeScope = nil
+        workspaceGeneration &+= 1
         activeScope.lease.release()
         return .succeeded(recentAvailable: true)
     }
@@ -310,6 +354,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     private func replaceActiveScope(with candidate: ActiveScope) {
         let previous = activeScope
         activeScope = candidate
+        workspaceGeneration &+= 1
         previous?.lease.release()
     }
 

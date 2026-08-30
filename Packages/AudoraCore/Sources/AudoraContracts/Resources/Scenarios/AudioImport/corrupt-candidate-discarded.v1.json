@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "audio-import.corrupt-candidate-discarded",
+  "initialState": { "status": "idle" },
+  "commands": [{ "kind": "chooseAudio" }],
+  "dependencyTrace": [
+    { "port": "audioImport", "effect": "choose", "outcome": "selected" },
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:00:00.000Z" },
+    { "port": "sessionIdGenerator", "effect": "generateSessionId", "outcome": "ses-20260830T120000000Z-3DEF" },
+    { "port": "audioImport", "effect": "reserveSessionId", "outcome": "reserved" },
+    { "port": "audioImport", "effect": "prepare", "outcome": "corruptCandidate" },
+    { "port": "audioImport", "effect": "discard", "outcome": "discarded" }
+  ],
+  "expectedState": { "status": "failed", "failure": "candidateCorrupt" }
+}

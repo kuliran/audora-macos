@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "audio-import.postcommit-reopen-failure-keeps-session",
+  "initialState": { "status": "idle" },
+  "commands": [{ "kind": "chooseAudio" }],
+  "dependencyTrace": [
+    { "port": "audioImport", "effect": "choose", "outcome": "selected" },
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:00:00.000Z" },
+    { "port": "sessionIdGenerator", "effect": "generateSessionId", "outcome": "ses-20260830T120000000Z-3DEF" },
+    { "port": "audioImport", "effect": "reserveSessionId", "outcome": "reserved" },
+    { "port": "audioImport", "effect": "prepare", "outcome": "candidate" },
+    { "port": "audioImport", "effect": "install", "outcome": "installedNeedsRefresh" }
+  ],
+  "expectedState": { "status": "failed", "failure": "installedNeedsRefresh" }
+}

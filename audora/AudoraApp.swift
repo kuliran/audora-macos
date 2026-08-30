@@ -11,14 +11,16 @@ struct AudoraApp: App {
 
     private let workspace: PortableLibraryWorkspace
     private let feature: DefaultLibraryFeature
+    private let audioImportFeature: DefaultAudioImportFeature
     private let windowCoordinator: MainWindowCoordinator
 
     init() {
         let locatorStore = MachineLibraryLocatorFactory.live()
+        let access = SecurityScopedLibraryAccessGrantor()
         let workspace = PortableLibraryWorkspace(
             locations: AppKitLibraryLocationChooser(),
             bookmarks: SecurityScopedLibraryBookmarks(),
-            access: SecurityScopedLibraryAccessGrantor(),
+            access: access,
             locatorStore: locatorStore,
             revealer: NSWorkspaceLibraryRevealer()
         )
@@ -27,11 +29,22 @@ struct AudoraApp: App {
             clock: SystemLibraryClock(),
             idGenerator: RandomLibraryIDGenerator()
         )
+        let audioImportWorkspace = PortableAudioImportWorkspace(
+            workspace: workspace,
+            chooser: AppKitAudioFileChooser(),
+            sourceAccess: access
+        )
+        let audioImportFeature = DefaultAudioImportFeature(
+            port: audioImportWorkspace,
+            clock: SystemLibraryClock(),
+            sessionIDGenerator: RandomSessionIDGenerator()
+        )
         let windowCoordinator = MainWindowCoordinator(
             access: AppKitMainWindowAccess()
         )
         self.workspace = workspace
         self.feature = feature
+        self.audioImportFeature = audioImportFeature
         self.windowCoordinator = windowCoordinator
         appDelegate.configure(
             feature: feature,
@@ -44,6 +57,7 @@ struct AudoraApp: App {
         Window("Audora", id: "library") {
             LibraryRootView(
                 feature: feature,
+                audioImportFeature: audioImportFeature,
                 windowCoordinator: windowCoordinator
             )
         }

@@ -39,6 +39,7 @@ let package = Package(
             dependencies: [
                 "AudoraMacInfrastructure",
                 .product(name: "AudoraApplication", package: "AudoraCore"),
+                .product(name: "AudoraContracts", package: "AudoraCore"),
                 .product(name: "AudoraDomain", package: "AudoraCore"),
             ]
         ),

@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "fixturePolicy": "generated-synthetic-only",
+  "canonical": {
+    "container": "wav",
+    "encoding": "pcmS16LE",
+    "sampleRateHz": 16000,
+    "channelCount": 1,
+    "bitsPerSample": 16,
+    "maximumFrameCount": 43200000
+  },
+  "normalizer": {
+    "algorithmVersion": 1,
+    "converterInputFrameCount": 4096,
+    "sampleRateConverterAlgorithm": "normal",
+    "sampleRateConverterQuality": "max",
+    "primeMethod": "normal",
+    "dither": false,
+    "tenMillisecondMonoGoldens": [
+      { "sourceSampleRateHz": 8000, "frameCount": 160, "byteCount": 364, "sha256": "e0a01269c8383d3e126b59a90395b2152cb72c61e9d3e804a6bae88d6406f38a" },
+      { "sourceSampleRateHz": 44100, "frameCount": 160, "byteCount": 364, "sha256": "eec7055f44d1ff2e4e3d575fb8b046fb3b76174746b09d191f3be117e187ed5d" },
+      { "sourceSampleRateHz": 48000, "frameCount": 160, "byteCount": 364, "sha256": "b0fb6b2abba998d79b09f14401a799059356d8f30798ba6af54f59c544fc9fd0" }
+    ]
+  },
+  "inputs": [
+    { "container": "wav", "codec": "linearPCM", "sampleRateHz": 8000, "channelCounts": [1, 2] },
+    { "container": "wav", "codec": "linearPCM", "sampleRateHz": 16000, "channelCounts": [1, 2] },
+    { "container": "wav", "codec": "linearPCM", "sampleRateHz": 44100, "channelCounts": [1, 2] },
+    { "container": "wav", "codec": "linearPCM", "sampleRateHz": 48000, "channelCounts": [1, 2] },
+    { "container": "m4a", "codec": "aacLC", "sampleRateHz": 44100, "channelCounts": [1, 2] },
+    { "container": "m4a", "codec": "alac", "sampleRateHz": 44100, "channelCounts": [1, 2] }
+  ],
+  "timelineCases": [
+    "aac-priming-onset-and-tail",
+    "leading-edit-normalized-to-frame-zero",
+    "full-presented-timeline-drain"
+  ],
+  "negativeClasses": [
+    "unsupported-container-bytes-despite-extension-hint",
+    "container-codec-mismatch",
+    "malformed-container",
+    "more-than-two-channels",
+    "ambiguous-two-channel-layout",
+    "source-too-large",
+    "source-mutated-during-copy",
+    "retained-path-replaced-after-descriptor-open",
+    "nonfinite-decoded-sample",
+    "canonical-frame-limit-plus-one",
+    "candidate-hash-mismatch",
+    "destination-collision",
+    "library-scope-changed",
+    "library-root-upgraded-or-corrupt",
+    "session-directory-identity-mismatch",
+    "precommit-fault",
+    "postcommit-reopen-fault"
+  ]
+}

@@ -1,0 +1,606 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/AudioImportFeatureScenario.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "scenarioId": {
+            "type": "string"
+        },
+        "initialState": {
+            "$ref": "#/$defs/AudioImportScenarioState"
+        },
+        "commands": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/AudioImportScenarioCommand"
+            }
+        },
+        "dependencyTrace": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/AudioImportDependencyEvent"
+            }
+        },
+        "expectedState": {
+            "$ref": "#/$defs/AudioImportScenarioState"
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "scenarioId",
+        "initialState",
+        "commands",
+        "dependencyTrace",
+        "expectedState"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "Portable audio-import behavior shared by feature implementations.",
+    "$defs": {
+        "AudioImportScenarioState": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/AudioImportIdleState"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportSelectingState"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportCopyingState"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportInspectingState"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportNormalizingState"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportInstallingState"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportSucceededState"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportFailedState"
+                }
+            ]
+        },
+        "AudioImportScenarioCommand": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/AudioImportChooseAudioCommand"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportCancelCommand"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportClearResultCommand"
+                }
+            ]
+        },
+        "AudioImportDependencyEvent": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/AudioImportChooseEvent"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportRevokeSelectionEvent"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportReserveSessionIdEvent"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportPrepareEvent"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportInstallEvent"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportDiscardEvent"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportClockEvent"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportSessionIdEvent"
+                }
+            ]
+        },
+        "AudioImportIdleState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "idle"
+                }
+            },
+            "required": [
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportSelectingState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "selecting"
+                }
+            },
+            "required": [
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportCopyingState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "copying"
+                }
+            },
+            "required": [
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportInspectingState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "inspecting"
+                }
+            },
+            "required": [
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportNormalizingState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "normalizing"
+                }
+            },
+            "required": [
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportInstallingState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "installing"
+                }
+            },
+            "required": [
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportSucceededState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "succeeded"
+                },
+                "sessionId": {
+                    "$ref": "#/$defs/SessionId"
+                }
+            },
+            "required": [
+                "status",
+                "sessionId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportFailedState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "failed"
+                },
+                "failure": {
+                    "$ref": "#/$defs/AudioImportFailureCode"
+                }
+            },
+            "required": [
+                "status",
+                "failure"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportChooseAudioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "chooseAudio"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportCancelCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "cancelImport"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportClearResultCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "clearResult"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportChooseEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioImport"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "choose"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/AudioImportChooseOutcome"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportRevokeSelectionEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioImport"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "revokeSelection"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "revoked"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportReserveSessionIdEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioImport"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "reserveSessionId"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/AudioImportReserveSessionIdOutcome"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportPrepareEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioImport"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "prepare"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/AudioImportPrepareOutcome"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportInstallEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioImport"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "install"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/AudioImportInstallOutcome"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportDiscardEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioImport"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "discard"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "discarded"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportClockEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "clock"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "now"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/UTCInstant"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioImportSessionIdEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "sessionIdGenerator"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "generateSessionId"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/SessionId"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionId": {
+            "type": "string",
+            "pattern": "^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "AudioImportFailureCode": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "unavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "unsupportedMedia"
+                },
+                {
+                    "type": "string",
+                    "const": "sourceChanged"
+                },
+                {
+                    "type": "string",
+                    "const": "sourceTooLarge"
+                },
+                {
+                    "type": "string",
+                    "const": "malformedMedia"
+                },
+                {
+                    "type": "string",
+                    "const": "durationExceeded"
+                },
+                {
+                    "type": "string",
+                    "const": "decodeFailed"
+                },
+                {
+                    "type": "string",
+                    "const": "nonfiniteSamples"
+                },
+                {
+                    "type": "string",
+                    "const": "insufficientSpace"
+                },
+                {
+                    "type": "string",
+                    "const": "writeFailed"
+                },
+                {
+                    "type": "string",
+                    "const": "candidateCorrupt"
+                },
+                {
+                    "type": "string",
+                    "const": "libraryChanged"
+                },
+                {
+                    "type": "string",
+                    "const": "destinationCollision"
+                },
+                {
+                    "type": "string",
+                    "const": "cancelled"
+                },
+                {
+                    "type": "string",
+                    "const": "installedNeedsRefresh"
+                }
+            ]
+        },
+        "AudioImportChooseOutcome": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "selected"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportFailureCode"
+                }
+            ]
+        },
+        "AudioImportReserveSessionIdOutcome": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "reserved"
+                },
+                {
+                    "type": "string",
+                    "const": "collision"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportFailureCode"
+                }
+            ]
+        },
+        "AudioImportPrepareOutcome": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "candidate"
+                },
+                {
+                    "type": "string",
+                    "const": "corruptCandidate"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportFailureCode"
+                }
+            ]
+        },
+        "AudioImportInstallOutcome": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "reopened"
+                },
+                {
+                    "$ref": "#/$defs/AudioImportFailureCode"
+                }
+            ]
+        },
+        "UTCInstant": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        }
+    }
+}

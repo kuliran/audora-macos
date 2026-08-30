@@ -409,6 +409,82 @@ final class PortableLibraryPersistenceTests: XCTestCase {
         }
     }
 
+    func testOpenReconcilesOnlyARecognizedAbandonedAudioImportTree() throws {
+        try withCreatedLibrary { root, _ in
+            let publications = root.appendingPathComponent("staging/publications")
+            let transaction = publications.appendingPathComponent(
+                "audio_staging_0123456789ABCDEF0123456789ABCDEF"
+            )
+            let session = transaction.appendingPathComponent(
+                "ses-20260830T120000000Z-3DEF"
+            )
+            for directory in [
+                session.appendingPathComponent("audio"),
+                session.appendingPathComponent("transcripts"),
+                session.appendingPathComponent("annotations"),
+            ] {
+                try FileManager.default.createDirectory(
+                    at: directory,
+                    withIntermediateDirectories: true
+                )
+            }
+            try Data("incomplete".utf8).write(
+                to: session.appendingPathComponent(
+                    ".session.json.11111111-1111-1111-1111-111111111111.partial"
+                )
+            )
+            try Data("incomplete".utf8).write(
+                to: session.appendingPathComponent("audio").appendingPathComponent(
+                    ".audio.json.22222222-2222-2222-2222-222222222222.partial"
+                )
+            )
+
+            guard case .readWrite = try PortableLibraryPersistence().open(at: root) else {
+                return XCTFail("supported Library became read-only")
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: transaction.path))
+        }
+    }
+
+    func testOpenPreservesUnknownNewerAndOversizedPublicationEntries() throws {
+        try withCreatedLibrary { root, _ in
+            let publications = root.appendingPathComponent("staging/publications")
+            let unknown = publications.appendingPathComponent("future-publication")
+            try FileManager.default.createDirectory(at: unknown, withIntermediateDirectories: false)
+            let sentinel = Data("preserve-unknown".utf8)
+            try sentinel.write(to: unknown.appendingPathComponent("sentinel"))
+
+            let newer = publications.appendingPathComponent(
+                "audio_staging_11111111111111111111111111111111"
+            ).appendingPathComponent("ses-20260830T120000000Z-3DEF")
+            try FileManager.default.createDirectory(at: newer, withIntermediateDirectories: true)
+            let newerBytes = Data(
+                #"{"future":"preserve","schemaVersion":2,"sessionId":"ses-20260830T120000000Z-3DEF"}"#.utf8
+            )
+            try newerBytes.write(to: newer.appendingPathComponent("session.json"))
+
+            let oversized = publications.appendingPathComponent(
+                "audio_staging_22222222222222222222222222222222"
+            ).appendingPathComponent("ses-20260830T120000000Z-4EFG")
+            try FileManager.default.createDirectory(at: oversized, withIntermediateDirectories: true)
+            let oversizedURL = oversized.appendingPathComponent(
+                ".session.json.33333333-3333-3333-3333-333333333333.partial"
+            )
+            let oversizedBytes = Data(
+                repeating: 0x20,
+                count: PortableAudioImportPersistence.maximumManifestBytes + 1
+            )
+            try oversizedBytes.write(to: oversizedURL)
+
+            guard case .readWrite = try PortableLibraryPersistence().open(at: root) else {
+                return XCTFail("supported Library became read-only")
+            }
+            XCTAssertEqual(try Data(contentsOf: unknown.appendingPathComponent("sentinel")), sentinel)
+            XCTAssertEqual(try Data(contentsOf: newer.appendingPathComponent("session.json")), newerBytes)
+            XCTAssertEqual(try Data(contentsOf: oversizedURL), oversizedBytes)
+        }
+    }
+
     private func withCreatedLibrary(
         _ body: (URL, PortableLibraryAuthority) throws -> Void
     ) throws {

@@ -1,0 +1,120 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/AudioNormalizationVectors.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "stereoRule": {
+            "type": "string",
+            "const": "arithmeticMean"
+        },
+        "quantizerVersion": {
+            "type": "string",
+            "const": "s16-round-away-saturate-v1"
+        },
+        "downmixVectors": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/AudioDownmixVector"
+            }
+        },
+        "quantizationVectors": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/AudioQuantizationVector"
+            }
+        },
+        "frameDurationVectors": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/AudioFrameDurationVector"
+            }
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "stereoRule",
+        "quantizerVersion",
+        "downmixVectors",
+        "quantizationVectors",
+        "frameDurationVectors"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "$defs": {
+        "AudioDownmixVector": {
+            "type": "object",
+            "properties": {
+                "left": {
+                    "type": "number"
+                },
+                "right": {
+                    "type": "number"
+                },
+                "output": {
+                    "type": "number"
+                }
+            },
+            "required": [
+                "left",
+                "right",
+                "output"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioQuantizationVector": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "number"
+                },
+                "output": {
+                    "type": "integer",
+                    "minimum": -32768,
+                    "maximum": 32767
+                }
+            },
+            "required": [
+                "input",
+                "output"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioFrameDurationVector": {
+            "type": "object",
+            "properties": {
+                "frameCount": {
+                    "$ref": "#/$defs/CanonicalFrameCount"
+                },
+                "durationMs": {
+                    "$ref": "#/$defs/CanonicalDurationMilliseconds"
+                }
+            },
+            "required": [
+                "frameCount",
+                "durationMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CanonicalFrameCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 43200000
+        },
+        "CanonicalDurationMilliseconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2700000
+        }
+    }
+}
