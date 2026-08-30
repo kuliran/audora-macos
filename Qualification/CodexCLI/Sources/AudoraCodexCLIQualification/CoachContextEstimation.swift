@@ -64,6 +64,61 @@ public struct CoachTokenEstimator: Sendable {
     }
 }
 
+public enum CompleteToolResponseBudgetError: Error, Equatable, Sendable {
+    case negativeRemainingInputTokens
+    case negativeHiddenTokens
+    case integerOverflow
+}
+
+/// Rechecks one complete canonical tool response against the provider's exact
+/// remaining input budget.
+///
+/// The response is framed and tokenized as one model-visible provider message.
+/// Callers supply canonical response bytes; they never estimate transcript text,
+/// fields, or fragments independently.
+public struct CompleteToolResponseBudget: Sendable {
+    public let remainingInputTokens: Int
+
+    private let responsePrefix: Data
+    private let responseSuffix: Data
+    private let hiddenTokens: Int
+    private let tokenEstimator: CoachTokenEstimator
+
+    public init(
+        remainingInputTokens: Int,
+        responsePrefix: Data,
+        responseSuffix: Data,
+        hiddenTokens: Int,
+        tokenEstimator: CoachTokenEstimator
+    ) throws {
+        guard remainingInputTokens >= 0 else {
+            throw CompleteToolResponseBudgetError.negativeRemainingInputTokens
+        }
+        guard hiddenTokens >= 0 else {
+            throw CompleteToolResponseBudgetError.negativeHiddenTokens
+        }
+        self.remainingInputTokens = remainingInputTokens
+        self.responsePrefix = responsePrefix
+        self.responseSuffix = responseSuffix
+        self.hiddenTokens = hiddenTokens
+        self.tokenEstimator = tokenEstimator
+    }
+
+    public func admits(canonicalResponse: Data) throws -> Bool {
+        var completeFrame = Data()
+        completeFrame.append(responsePrefix)
+        completeFrame.append(canonicalResponse)
+        completeFrame.append(responseSuffix)
+
+        let visibleTokens = try tokenEstimator.tokenCount(forUTF8: completeFrame)
+        let measured = visibleTokens.addingReportingOverflow(hiddenTokens)
+        guard !measured.overflow else {
+            throw CompleteToolResponseBudgetError.integerOverflow
+        }
+        return measured.partialValue <= remainingInputTokens
+    }
+}
+
 public struct CoachContextBudget: Equatable, Sendable {
     public let contextWindowTokens: Int
     public let responseReservedTokens: Int
