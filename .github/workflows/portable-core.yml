@@ -23,9 +23,24 @@ jobs:
         with:
           persist-credentials: false
       - uses: swift-actions/setup-swift@v2
+        if: runner.os == 'Linux'
         with:
           swift-version: "6.0"
-      - run: scripts/check-portable-core.sh
+      - name: Validate bundled Xcode Swift 6.0 toolchain
+        if: runner.os == 'macOS'
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_16.0.app/Contents/Developer
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Run portable Core gate on Linux
+        if: runner.os == 'Linux'
+        run: scripts/check-portable-core.sh
+      - name: Run portable Core gate with Xcode 16.0
+        if: runner.os == 'macOS'
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_16.0.app/Contents/Developer
+        run: scripts/check-portable-core.sh
 
   contracts:
     name: TypeSpec contract drift
@@ -48,14 +63,17 @@ jobs:
   macos-library:
     name: macOS Library adapters / Swift 6.0
     runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.0.app/Contents/Developer
 
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.0"
+      - name: Validate bundled Xcode Swift 6.0 toolchain
+        run: |
+          xcodebuild -version
+          swift --version
       - name: Test macOS Infrastructure and Presentation
         run: swift test --package-path Packages/AudoraMac --parallel
       - name: Validate package document declaration
