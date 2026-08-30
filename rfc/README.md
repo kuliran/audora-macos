@@ -490,7 +490,12 @@ See [`concepts/portable-library.md`](concepts/portable-library.md).
   qualification, and license gates. The versioned Crisper profile, numeric
   thresholds, runner, and blocked preflight are under
   [`Qualification/CrisperBenchmark`](../Qualification/CrisperBenchmark/README.md);
-  a blocked gate does not promote the provisional candidate.
+  the adversarial production-restriction harness and its recorded synthetic proof
+  are under
+  [`Qualification/WorkerConfinement`](../Qualification/WorkerConfinement/README.md).
+  Both artifacts keep real Crisper qualification blocked while the locked
+  runtime/model and compatibility patch are absent; a blocked gate does not
+  promote the provisional candidate.
 - [`implementation-plan.md`](concepts/implementation-plan.md): ordered delivery
   phases and repository strategy.
 - [`release-readiness.md`](concepts/release-readiness.md): acceptance and release

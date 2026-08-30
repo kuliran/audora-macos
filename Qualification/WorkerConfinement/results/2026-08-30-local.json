@@ -1,0 +1,351 @@
+{
+  "engineLockSha256": "c26c6a97338544edc70d6e50d03f547adc820a488df6339ff0838cccbaceba5c",
+  "engineSelectionChanged": false,
+  "executionProfile": {
+    "denyByDefault": true,
+    "jobStaging": "read-write",
+    "limits": {
+      "cpuSeconds": 2,
+      "openFiles": 16,
+      "regularFileBytes": 65536,
+      "stderrBytes": 4096,
+      "stdoutBytes": 4096,
+      "terminationGraceMilliseconds": 500
+    },
+    "mechanism": "macOS sandbox-exec Seatbelt profile v1",
+    "modelInput": "read-only",
+    "networkAllowed": false,
+    "runtimeInput": "read-only",
+    "workerEnvironmentKeys": [
+      "HF_HOME",
+      "HF_HUB_CACHE",
+      "HF_HUB_OFFLINE",
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "PATH",
+      "PYTHONNOUSERSITE",
+      "PYTHONSAFEPATH",
+      "TMPDIR",
+      "TOKENIZERS_PARALLELISM",
+      "TORCH_HOME",
+      "TRANSFORMERS_CACHE",
+      "TRANSFORMERS_OFFLINE",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME"
+    ],
+    "workingDirectory": "job-scoped"
+  },
+  "host": {
+    "machine": "arm64",
+    "operatingSystem": "Darwin",
+    "operatingSystemRelease": "25.6.0"
+  },
+  "productionCrisperQualification": {
+    "expectedHandshake": {
+      "modelRevision": "bcaecf0a584a1f600d8897fe6032b9e2e56429a7",
+      "patchId": null,
+      "protocolVersion": 1,
+      "pythonVersion": "3.12.14"
+    },
+    "reasonCodes": [
+      "AUDORA_COMPATIBILITY_PATCH_UNPINNED",
+      "LOCKED_RUNTIME_NOT_PROVIDED",
+      "MINIMUM_MACOS_15_BASELINE_NOT_RUN",
+      "PINNED_MODEL_NOT_PROVIDED",
+      "REAL_CACHED_INFERENCE_NOT_RUN"
+    ],
+    "status": "blocked"
+  },
+  "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
+  "qualificationStatus": "blocked",
+  "recordedAt": "2026-08-30T14:47:34.930911Z",
+  "schemaVersion": 1,
+  "syntheticRestrictionProof": {
+    "fixture": "ad-hoc-signed Hardened Runtime synthetic worker",
+    "handshake": {
+      "modelRevision": "synthetic-model-revision-v1",
+      "patchId": "synthetic-progress-patch-v1",
+      "protocolVersion": 1,
+      "runtimeVersion": "synthetic-runtime-v1"
+    },
+    "scenarios": [
+      {
+        "code": "CACHED_INFERENCE_COMPLETE",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "cached-inference",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 454
+      },
+      {
+        "code": "READ_DENIED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "read-unrelated",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 367
+      },
+      {
+        "code": "TRAVERSAL_DENIED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "traversal",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 372
+      },
+      {
+        "code": "SYMLINK_ESCAPE_DENIED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "symlink-read",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 377
+      },
+      {
+        "code": "WRITE_DENIED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "write-unrelated",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 368
+      },
+      {
+        "code": "RUNTIME_READ_ONLY",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "write-runtime",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 373
+      },
+      {
+        "code": "MODEL_READ_ONLY",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "write-model",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 371
+      },
+      {
+        "code": "NETWORK_DENIED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "network",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 370
+      },
+      {
+        "code": "PROCESS_CREATION_DENIED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "process",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 379
+      },
+      {
+        "code": "RESOURCE_LIMIT_REACHED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "resource-open-files",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 378
+      },
+      {
+        "code": "OUTPUT_LIMIT_EXCEEDED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "resource-output",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 4097
+      },
+      {
+        "code": "STDERR_LIMIT_EXCEEDED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "stderr-output",
+        "status": "passed",
+        "stderrBytes": 4097,
+        "stdoutBytes": 294
+      },
+      {
+        "code": "MALFORMED_REQUEST",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "malformed-request",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 373
+      },
+      {
+        "code": "MALFORMED_WORKER_OUTPUT",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "bad-output",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 303
+      },
+      {
+        "code": "HANDSHAKE_MISMATCH",
+        "handshake": {},
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "bad-handshake",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 278
+      },
+      {
+        "code": "HANDSHAKE_TIMEOUT",
+        "handshake": {},
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "no-hello",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 0
+      },
+      {
+        "code": "CANCELLED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "cancel",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 294
+      },
+      {
+        "code": "WORKER_CRASHED",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "crash",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 294
+      },
+      {
+        "code": "WORKER_TIMEOUT",
+        "handshake": {
+          "modelRevision": "synthetic-model-revision-v1",
+          "patchId": "synthetic-progress-patch-v1",
+          "protocolVersion": 1,
+          "runtimeVersion": "synthetic-runtime-v1"
+        },
+        "processGroupReaped": true,
+        "reaped": true,
+        "scenario": "timeout",
+        "status": "passed",
+        "stderrBytes": 0,
+        "stdoutBytes": 294
+      }
+    ],
+    "status": "passed"
+  }
+}
