@@ -1,0 +1,237 @@
+{
+  "cachedOffline": {
+    "reasonCodes": [
+      "AUDIO_HASH_NOT_PINNED",
+      "CORPUS_ASSET_NOT_READY",
+      "MODEL_DIRECTORY_NOT_PROVIDED",
+      "PACKAGE_MISSING_OR_DRIFTED",
+      "REFERENCE_HASH_NOT_PINNED"
+    ],
+    "status": "blocked"
+  },
+  "cancellation": {
+    "reasonCodes": [
+      "AUDIO_HASH_NOT_PINNED",
+      "CORPUS_ASSET_NOT_READY",
+      "MODEL_DIRECTORY_NOT_PROVIDED",
+      "PACKAGE_MISSING_OR_DRIFTED",
+      "REFERENCE_HASH_NOT_PINNED"
+    ],
+    "status": "blocked"
+  },
+  "corpusManifestSha256": "b209e8d6789863cdb5bf663c53dfd1e7f7405155d231c1895b4a45a05ebaa018",
+  "engineLockSha256": "c26c6a97338544edc70d6e50d03f547adc820a488df6339ff0838cccbaceba5c",
+  "engineSelectionChanged": false,
+  "environment": {
+    "machine": "arm64",
+    "operatingSystem": "Darwin",
+    "operatingSystemRelease": "25.6.0",
+    "pythonVersion": "3.12.14"
+  },
+  "fixtures": [
+    {
+      "id": "short",
+      "reasonCodes": [
+        "AUDIO_HASH_NOT_PINNED",
+        "CORPUS_ASSET_NOT_READY",
+        "MODEL_DIRECTORY_NOT_PROVIDED",
+        "PACKAGE_MISSING_OR_DRIFTED",
+        "REFERENCE_HASH_NOT_PINNED"
+      ],
+      "status": "blocked"
+    },
+    {
+      "id": "one-minute",
+      "reasonCodes": [
+        "AUDIO_HASH_NOT_PINNED",
+        "CORPUS_ASSET_NOT_READY",
+        "MODEL_DIRECTORY_NOT_PROVIDED",
+        "PACKAGE_MISSING_OR_DRIFTED",
+        "REFERENCE_HASH_NOT_PINNED"
+      ],
+      "status": "blocked"
+    },
+    {
+      "id": "twelve-minute",
+      "reasonCodes": [
+        "AUDIO_HASH_NOT_PINNED",
+        "CORPUS_ASSET_NOT_READY",
+        "MODEL_DIRECTORY_NOT_PROVIDED",
+        "PACKAGE_MISSING_OR_DRIFTED",
+        "REFERENCE_HASH_NOT_PINNED"
+      ],
+      "status": "blocked"
+    },
+    {
+      "id": "forty-five-minute",
+      "reasonCodes": [
+        "AUDIO_HASH_NOT_PINNED",
+        "CORPUS_ASSET_NOT_READY",
+        "MODEL_DIRECTORY_NOT_PROVIDED",
+        "PACKAGE_MISSING_OR_DRIFTED",
+        "REFERENCE_HASH_NOT_PINNED"
+      ],
+      "status": "blocked"
+    }
+  ],
+  "preflight": [
+    {
+      "gate": "runtime.package-lock",
+      "measured": "3c13f64a78c85fd4a2e8319989739d3f89c57a4960117ddefffcc9924272ce19",
+      "status": "passed",
+      "threshold": "3c13f64a78c85fd4a2e8319989739d3f89c57a4960117ddefffcc9924272ce19"
+    },
+    {
+      "gate": "runtime.python-version",
+      "measured": "3.12.14",
+      "status": "passed",
+      "threshold": "3.12.14"
+    },
+    {
+      "gate": "runtime.package.crisperwhisper",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "2.0.0"
+    },
+    {
+      "gate": "runtime.package.torch",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "2.13.0"
+    },
+    {
+      "gate": "runtime.package.transformers",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "5.14.1"
+    },
+    {
+      "gate": "runtime.package.accelerate",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "1.14.0"
+    },
+    {
+      "gate": "runtime.package.numpy",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "2.5.1"
+    },
+    {
+      "gate": "runtime.package.soundfile",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "0.14.0"
+    },
+    {
+      "gate": "runtime.package.soxr",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "1.1.0"
+    },
+    {
+      "gate": "runtime.package.tokenizers",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "0.22.2"
+    },
+    {
+      "gate": "runtime.package.huggingface-hub",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "1.24.0"
+    },
+    {
+      "gate": "runtime.platform",
+      "measured": "Darwin-arm64",
+      "status": "passed",
+      "threshold": "Darwin-arm64"
+    },
+    {
+      "gate": "model.local-assets",
+      "reason": "MODEL_DIRECTORY_NOT_PROVIDED",
+      "status": "blocked",
+      "threshold": "all pinned files"
+    },
+    {
+      "gate": "fixture.short.asset-status",
+      "measured": "awaiting-capture-and-hand-label",
+      "reason": "CORPUS_ASSET_NOT_READY",
+      "status": "blocked",
+      "threshold": "ready"
+    },
+    {
+      "gate": "fixture.short.audio-hash",
+      "reason": "AUDIO_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.short.reference-hash",
+      "reason": "REFERENCE_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.one-minute.asset-status",
+      "measured": "awaiting-capture-and-hand-label",
+      "reason": "CORPUS_ASSET_NOT_READY",
+      "status": "blocked",
+      "threshold": "ready"
+    },
+    {
+      "gate": "fixture.one-minute.audio-hash",
+      "reason": "AUDIO_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.one-minute.reference-hash",
+      "reason": "REFERENCE_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.twelve-minute.asset-status",
+      "measured": "awaiting-capture-and-hand-label",
+      "reason": "CORPUS_ASSET_NOT_READY",
+      "status": "blocked",
+      "threshold": "ready"
+    },
+    {
+      "gate": "fixture.twelve-minute.audio-hash",
+      "reason": "AUDIO_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.twelve-minute.reference-hash",
+      "reason": "REFERENCE_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.forty-five-minute.asset-status",
+      "measured": "awaiting-capture-and-hand-label",
+      "reason": "CORPUS_ASSET_NOT_READY",
+      "status": "blocked",
+      "threshold": "ready"
+    },
+    {
+      "gate": "fixture.forty-five-minute.audio-hash",
+      "reason": "AUDIO_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.forty-five-minute.reference-hash",
+      "reason": "REFERENCE_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    }
+  ],
+  "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
+  "qualificationStatus": "blocked",
+  "recordedAt": "2026-08-30T13:27:48.437486Z",
+  "schemaVersion": 1
+}

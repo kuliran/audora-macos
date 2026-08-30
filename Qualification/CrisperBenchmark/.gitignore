@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.qualification-venv/
+results/*.json
+!results/2026-08-30-local-preflight.json

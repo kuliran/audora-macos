@@ -196,5 +196,9 @@ Acceptance uses hand-labeled fixtures and thresholds. It does not claim perfect
 word recovery. Gate zero must publish numeric corpus-coverage, integrity, runtime,
 memory, and thermal thresholds in a versioned qualification fixture before the
 engine is selected; this RFC intentionally does not invent them after one
-benchmark. If Crisper fails qualification or licensing, the engine contract remains
-and the replacement decision updates the central RFC before implementation.
+benchmark. The pinned profile, predeclared thresholds, reproducible runner, and
+current blocked preflight are published under
+[`Qualification/CrisperBenchmark`](../../Qualification/CrisperBenchmark/README.md).
+The blocked result does not select Crisper or another engine. If Crisper fails
+qualification or licensing, the engine contract remains and the replacement
+decision updates the central RFC before implementation.

@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "corpusId": "audora-english-verbatim-v1",
+  "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
+  "audioFormat": {
+    "container": "wav",
+    "encoding": "linear-pcm-signed-16-bit-little-endian",
+    "sampleRateHz": 16000,
+    "channels": 1
+  },
+  "thresholds": {
+    "quality": {
+      "maximumWordErrorRate": 0.2,
+      "minimumReferenceWordCoverage": 0.8,
+      "minimumVerbatimEventRecall": 0.85,
+      "minimumBeginningAnchorCoverage": 1.0,
+      "minimumTailAnchorCoverage": 1.0,
+      "minimumWordCountRatio": 0.8,
+      "maximumWordCountRatio": 1.2,
+      "maximumExcessRepeatedNgramRun": 1
+    },
+    "timing": {
+      "minimumTimedWordRatio": 0.98,
+      "maximumZeroDurationWordRatio": 0.0,
+      "maximumTailLagMs": 1500,
+      "requireMonotonicWordTimes": true,
+      "requireWordsWithinAudio": true
+    },
+    "runtime": {
+      "maximumColdRealTimeFactor": 1.0,
+      "maximumWarmRealTimeFactor": 0.75,
+      "maximumPeakResidentBytes": 6442450944,
+      "maximumPeakMpsDriverAllocatedBytes": 4294967296,
+      "maximumThermalState": "serious",
+      "thermalRecoveryTarget": "fair",
+      "maximumThermalRecoverySeconds": 300
+    },
+    "cancellation": {
+      "cancelAfterSeconds": 3,
+      "maximumTerminationSeconds": 5,
+      "mustExitWithoutForcedKill": true
+    },
+    "cachedOffline": {
+      "mustSucceed": true,
+      "mustProveNetworkDenied": true
+    }
+  },
+  "fixtures": [
+    {
+      "id": "short",
+      "audioPath": "audio/short.wav",
+      "referencePath": "reference/short.json",
+      "audioSha256": null,
+      "referenceSha256": null,
+      "durationRangeMs": [10000, 30000],
+      "requiredPhenomena": ["beginning-speech", "filled-pause", "immediate-repetition", "tail-speech"],
+      "assetStatus": "awaiting-capture-and-hand-label"
+    },
+    {
+      "id": "one-minute",
+      "audioPath": "audio/one-minute.wav",
+      "referencePath": "reference/one-minute.json",
+      "audioSha256": null,
+      "referenceSha256": null,
+      "durationRangeMs": [55000, 65000],
+      "requiredPhenomena": ["quiet-speech", "filled-pause", "immediate-repetition", "partial-word", "laughter", "long-pause", "tail-speech"],
+      "assetStatus": "awaiting-capture-and-hand-label"
+    },
+    {
+      "id": "twelve-minute",
+      "audioPath": "audio/twelve-minute.wav",
+      "referencePath": "reference/twelve-minute.json",
+      "audioSha256": null,
+      "referenceSha256": null,
+      "durationRangeMs": [710000, 730000],
+      "requiredPhenomena": ["quiet-speech", "filled-pause", "immediate-repetition", "partial-word", "laughter", "long-pause", "longform-boundary", "tail-speech"],
+      "assetStatus": "awaiting-capture-and-hand-label"
+    },
+    {
+      "id": "forty-five-minute",
+      "audioPath": "audio/forty-five-minute.wav",
+      "referencePath": "reference/forty-five-minute.json",
+      "audioSha256": null,
+      "referenceSha256": null,
+      "durationRangeMs": [2690000, 2700000],
+      "requiredPhenomena": ["quiet-speech", "filled-pause", "immediate-repetition", "partial-word", "laughter", "long-pause", "longform-boundary", "final-underfilled-window", "tail-speech"],
+      "assetStatus": "awaiting-capture-and-hand-label"
+    }
+  ]
+}

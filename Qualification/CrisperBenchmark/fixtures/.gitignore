@@ -1,0 +1,4 @@
+audio/
+reference/
+!.gitignore
+!README.md
