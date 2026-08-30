@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "newer-chat-freezes",
+  "libraryId": "lib-20260830T100000000Z-1ABC",
+  "initialChats": [{
+    "chatId": "cht-20260830T120000000Z-2ABC",
+    "draftId": "drf-20260830T120000000Z-3DEF",
+    "memoryId": "mem-20260830T120000000Z-4GHJ",
+    "manifestRevision": 1,
+    "title": "Future Chat",
+    "createdAt": "2026-08-30T12:00:00.000Z",
+    "updatedAt": "2026-08-30T12:05:00.000Z",
+    "creationKind": "newChat",
+    "attachments": [],
+    "draftText": "future local draft",
+    "draftVersion": 1,
+    "messageIds": [],
+    "memoryGeneralNotes": "future memory",
+    "memorySessionSummaries": []
+  }],
+  "commands": [{"kind": "open", "chatId": "cht-20260830T120000000Z-2ABC"}],
+  "dependencyTrace": [
+    {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded"},
+    {"port": "chatStore", "effect": "load", "outcome": "frozen", "reason": "newerSchema"}
+  ],
+  "expectedState": {
+    "allChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "visibleChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "catalogStatus": "ready",
+    "selectedChatId": "cht-20260830T120000000Z-2ABC",
+    "selectedAvailability": "frozen",
+    "selectedFrozenReason": "newerSchema",
+    "notice": "chatFrozen"
+  },
+  "expectedProviderCalls": 0,
+  "expectedInvocationCalls": 0,
+  "expectedAdmissionCalls": 0
+}

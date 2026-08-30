@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "create-empty-development-chat",
+  "libraryId": "lib-20260830T100000000Z-1ABC",
+  "initialChats": [],
+  "commands": [{"kind": "createDevelopmentChat"}],
+  "dependencyTrace": [
+    {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded"},
+    {"port": "profileHead", "effect": "readStatementGeneration", "outcome": 0},
+    {"port": "clock", "effect": "now", "outcome": "2026-08-30T12:00:00.000Z"},
+    {"port": "chatIdGenerator", "effect": "next", "outcome": "cht-20260830T120000000Z-2ABC"},
+    {"port": "chatDraftIdGenerator", "effect": "next", "outcome": "drf-20260830T120000000Z-3DEF"},
+    {"port": "coachMemoryIdGenerator", "effect": "next", "outcome": "mem-20260830T120000000Z-4GHJ"},
+    {
+      "port": "chatStore",
+      "effect": "create",
+      "outcome": "committed",
+      "chat": {
+        "chatId": "cht-20260830T120000000Z-2ABC",
+        "draftId": "drf-20260830T120000000Z-3DEF",
+        "memoryId": "mem-20260830T120000000Z-4GHJ",
+        "manifestRevision": 0,
+        "title": "New Chat",
+        "createdAt": "2026-08-30T12:00:00.000Z",
+        "updatedAt": "2026-08-30T12:00:00.000Z",
+        "creationKind": "newChat",
+        "attachments": [],
+        "draftText": "",
+        "draftVersion": 0,
+        "messageIds": [],
+        "memoryGeneralNotes": "",
+        "memorySessionSummaries": []
+      }
+    }
+  ],
+  "expectedState": {
+    "allChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "visibleChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "selectedChatId": "cht-20260830T120000000Z-2ABC",
+    "selectedTitle": "New Chat",
+    "selectedRevision": 0
+  },
+  "expectedProviderCalls": 0,
+  "expectedInvocationCalls": 0,
+  "expectedAdmissionCalls": 0
+}

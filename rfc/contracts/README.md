@@ -3,8 +3,9 @@
 [`contracts.tsp`](contracts.tsp) is the sole compilation entry point. It imports
 the provider aggregate in [`coach-provider.tsp`](coach-provider.tsp), the
 portable Library document roots in
-[`portable-library.tsp`](portable-library.tsp), and the Library lifecycle
-scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp).
+[`portable-library.tsp`](portable-library.tsp), the Library lifecycle scenario in
+[`library-feature-scenario.tsp`](library-feature-scenario.tsp), and the portable
+Chat roots and scenarios in [`development-chat.tsp`](development-chat.tsp).
 
 The provider source is separated by audience:
 
@@ -19,9 +20,12 @@ TypeSpec compilation emits committed JSON Schemas into the `AudoraContracts`
 package resources. Application and scenario runners do not need Node or TypeSpec
 at runtime.
 
+- [`ChatManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ChatManifest.json)
+- [`CoachMemoryEnvelope.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachMemoryEnvelope.json)
 - [`CoachProviderDescriptor.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json)
 - [`CoachRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json)
 - [`CoachResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json)
+- [`DevelopmentChatFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/DevelopmentChatFeatureScenario.json)
 - [`LibraryFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json)
 - [`LibraryManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json)
 - [`LibraryPreferences.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json)
@@ -34,6 +38,8 @@ at runtime.
 | `CoachProviderDescriptor` | Application configuration | No |
 | `CoachRequest` | Application -> coach | Yes |
 | `CoachResponse` | Coach -> Application | Yes |
+| `ChatManifest` | Portable Library storage | No |
+| `CoachMemoryEnvelope` | Portable Library storage | No |
 | `LibraryManifest` | Portable Library storage | No |
 | `LibraryPreferences` | Portable Library storage | No |
 | `ProfileHead` | Portable Library storage | No |
@@ -54,6 +60,23 @@ relaunch restoration, and newer-root read-only behavior. The
 [`library-launch-no-selection.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/library-launch-no-selection.v1.json)
 fixture describes launch without a saved Library locator. Portable implementations
 consume all scenarios through their package resources.
+
+## Development Chat roots and scenarios
+
+A Development Chat created from the Chat UI starts with `creationKind: newChat`,
+no `originAttachmentId`, exactly zero attachments and messages, an empty stable
+Draft, and an empty stable Coach Memory. Its portable roots are
+`chats/<chat-id>/chat.json`, an empty `messages/` directory, and
+`memory/<memory-id>.json`. Pending-turn, Proposal, and Profile-write operational
+files are absent. Rename changes only the title, manifest revision, and update
+instant; filter is a pure in-memory projection; reopen restores the same IDs and
+local Draft without invoking a provider.
+
+Checked-in fixtures cover create, rename, filter, relaunch, and stale rename.
+Each scenario declares zero provider, Invocation, and admission calls. Rejected
+examples cover ambiguous creation shapes, unknown keys, missing attachments,
+dangling Memory summaries, and newer schemas that must remain byte-identical
+while frozen.
 
 `CoachProviderDescriptor` is app-only configuration. JSON Schema validates each
 field's shape. `displayName` is a bounded Presentation label for provider health

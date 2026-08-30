@@ -1,9 +1,12 @@
 import Foundation
 
 public enum ContractResource: String, CaseIterable, Sendable {
+    case chatManifestSchema = "ChatManifest.json"
+    case coachMemoryEnvelopeSchema = "CoachMemoryEnvelope.json"
     case coachProviderDescriptorSchema = "CoachProviderDescriptor.json"
     case coachRequestSchema = "CoachRequest.json"
     case coachResponseSchema = "CoachResponse.json"
+    case developmentChatFeatureScenarioSchema = "DevelopmentChatFeatureScenario.json"
     case libraryFeatureScenarioSchema = "LibraryFeatureScenario.json"
     case libraryManifestSchema = "LibraryManifest.json"
     case libraryPreferencesSchema = "LibraryPreferences.json"
@@ -30,6 +33,27 @@ public enum ContractResource: String, CaseIterable, Sendable {
     case rejectedInvalidLibraryInstant = "library-invalid-instant.json"
     case rejectedNegativeProfileGeneration = "profile-head-negative-generation.json"
     case newerPreferencesExample = "preferences-newer-schema.json"
+    case developmentChatExample = "chat.json"
+    case developmentChatMemoryExample = "memory.json"
+    case renamedDevelopmentChatExample = "renamed-chat.json"
+    case sessionAnalysisChatExample = "session-analysis-chat.json"
+    case rejectedChatExplicitNullOrigin = "chat-explicit-null-origin.json"
+    case rejectedChatMissingAttachments = "chat-missing-attachments.json"
+    case rejectedNewChatWithOrigin = "chat-newchat-with-origin.json"
+    case rejectedNewerChatSchema = "chat-newer-schema.json"
+    case rejectedChatUnknownKey = "chat-unknown-key.json"
+    case rejectedDanglingMemorySummary = "memory-dangling-summary.json"
+    case createDevelopmentChatScenario = "create-empty-development-chat.v1.json"
+    case renameDevelopmentChatScenario = "rename-preserves-identity.v1.json"
+    case filterDevelopmentChatsScenario = "filter-is-pure.v1.json"
+    case relaunchDevelopmentChatScenario = "relaunch-reopens-exact-aggregate.v1.json"
+    case staleRenameDevelopmentChatScenario = "stale-rename-cannot-overwrite.v1.json"
+    case wrongLibraryDevelopmentChatScenario = "wrong-library-load-fails.v1.json"
+    case corruptDevelopmentChatScenario = "corrupt-chat-freezes.v1.json"
+    case newerDevelopmentChatScenario = "newer-chat-freezes.v1.json"
+    case collisionDevelopmentChatScenario = "create-collision-limit.v1.json"
+    case providerUnavailableDevelopmentChatScenario = "provider-unavailable-creates-locally.v1.json"
+    case suspendedLibrarySwitchDevelopmentChatScenario = "library-switch-during-suspended-load.v1.json"
 }
 
 public enum ContractResourceError: Error, Equatable, Sendable {

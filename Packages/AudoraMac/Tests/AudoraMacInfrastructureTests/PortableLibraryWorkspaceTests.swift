@@ -306,6 +306,66 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testProfileStatementGenerationReadReloadsTheCurrentValidatedHead() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("CurrentProfile.audoralibrary")
+            let persistence = PortableLibraryPersistence()
+            let authority = try persistence.create(at: root, seed: makeSeed())
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let changedHead = ProfileHead(
+                generation: 9,
+                statementGeneration: 7,
+                selection: .null,
+                updatedAt: try UTCInstant("2026-08-30T12:10:00.000Z")
+            )
+            try persistence.atomicallyReplaceRoot(
+                persistence.encodeProfileHead(changedHead),
+                relativePath: LibraryRelativePath("profile/head.json"),
+                under: root
+            )
+
+            let generation = await workspace.activeProfileStatementGeneration(
+                in: LibraryScope(libraryID: authority.manifest.libraryID)
+            )
+
+            XCTAssertEqual(generation, 7)
+        }
+    }
+
+    func testChatLoadPreservesTheActiveReadOnlyLibraryOutcome() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("ReadOnly.audoralibrary")
+            let authority = try PortableLibraryPersistence().create(at: root, seed: makeSeed())
+            let preferences = root.appendingPathComponent("preferences.json")
+            try Data(
+                #"{"annotationsVisible":false,"futurePortablePreference":"preserve","language":"en","playbackRate":1.25,"schemaVersion":2}"#.utf8
+            ).write(to: preferences)
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let store = PortableChatStore(workspace: workspace)
+
+            let outcome = await store.load(
+                try ChatID("cht-20260830T120000000Z-2ABC"),
+                in: LibraryScope(libraryID: authority.manifest.libraryID)
+            )
+
+            XCTAssertEqual(outcome, .readOnlyLibrary)
+        }
+    }
+
     private func withTwoLibraries(
         _ body: (
             URL,

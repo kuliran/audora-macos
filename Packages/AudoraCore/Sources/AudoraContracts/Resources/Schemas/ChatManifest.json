@@ -1,0 +1,245 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/ChatManifest.json",
+    "anyOf": [
+        {
+            "$ref": "#/$defs/NewChatManifest"
+        },
+        {
+            "$ref": "#/$defs/SessionAnalysisChatManifest"
+        }
+    ],
+    "$defs": {
+        "NewChatManifest": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "chatId": {
+                    "$ref": "#/$defs/ChatId"
+                },
+                "manifestRevision": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "title": {
+                    "$ref": "#/$defs/ChatTitleText"
+                },
+                "createdAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "updatedAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "profileStatementGenerationAtCreation": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "attachments": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatSessionAttachment"
+                    }
+                },
+                "draft": {
+                    "$ref": "#/$defs/PersistedChatDraft"
+                },
+                "messageIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatMessageId"
+                    }
+                },
+                "currentMemoryId": {
+                    "$ref": "#/$defs/CoachMemoryId"
+                },
+                "creationKind": {
+                    "type": "string",
+                    "const": "newChat"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "chatId",
+                "manifestRevision",
+                "title",
+                "createdAt",
+                "updatedAt",
+                "profileStatementGenerationAtCreation",
+                "attachments",
+                "draft",
+                "messageIds",
+                "currentMemoryId",
+                "creationKind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionAnalysisChatManifest": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "chatId": {
+                    "$ref": "#/$defs/ChatId"
+                },
+                "manifestRevision": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "title": {
+                    "$ref": "#/$defs/ChatTitleText"
+                },
+                "createdAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "updatedAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "profileStatementGenerationAtCreation": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "attachments": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatSessionAttachment"
+                    }
+                },
+                "draft": {
+                    "$ref": "#/$defs/PersistedChatDraft"
+                },
+                "messageIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatMessageId"
+                    }
+                },
+                "currentMemoryId": {
+                    "$ref": "#/$defs/CoachMemoryId"
+                },
+                "creationKind": {
+                    "type": "string",
+                    "const": "sessionAnalysis"
+                },
+                "originAttachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "chatId",
+                "manifestRevision",
+                "title",
+                "createdAt",
+                "updatedAt",
+                "profileStatementGenerationAtCreation",
+                "attachments",
+                "draft",
+                "messageIds",
+                "currentMemoryId",
+                "creationKind",
+                "originAttachmentId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatId": {
+            "type": "string",
+            "pattern": "^cht-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "ChatTitleText": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+        },
+        "UTCInstant": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        },
+        "ChatSessionAttachment": {
+            "type": "object",
+            "properties": {
+                "attachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                },
+                "sessionId": {
+                    "$ref": "#/$defs/SessionId"
+                },
+                "transcriptRevisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId"
+                }
+            },
+            "required": [
+                "attachmentId",
+                "sessionId",
+                "transcriptRevisionId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedChatDraft": {
+            "type": "object",
+            "properties": {
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "version": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "text": {
+                    "$ref": "#/$defs/ChatDraftText"
+                },
+                "updatedAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                }
+            },
+            "required": [
+                "draftId",
+                "version",
+                "text",
+                "updatedAt"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatMessageId": {
+            "type": "string",
+            "pattern": "^msg-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "CoachMemoryId": {
+            "type": "string",
+            "pattern": "^mem-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ChatSessionAttachmentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[0-9A-Za-z_-]+$"
+        },
+        "SessionId": {
+            "type": "string",
+            "pattern": "^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "TranscriptRevisionId": {
+            "type": "string",
+            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ChatDraftId": {
+            "type": "string",
+            "pattern": "^drf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ChatDraftText": {
+            "type": "string",
+            "maxLength": 32768
+        }
+    }
+}

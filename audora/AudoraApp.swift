@@ -11,6 +11,7 @@ struct AudoraApp: App {
 
     private let workspace: PortableLibraryWorkspace
     private let feature: DefaultLibraryFeature
+    private let chatFeature: DefaultChatFeature
     private let windowCoordinator: MainWindowCoordinator
 
     init() {
@@ -27,11 +28,23 @@ struct AudoraApp: App {
             clock: SystemLibraryClock(),
             idGenerator: RandomLibraryIDGenerator()
         )
+        let chatIdentityGenerator = RandomChatIdentityGenerator()
+        let chatFeature = DefaultChatFeature(
+            store: PortableChatStore(workspace: workspace),
+            profileReader: ActiveLibraryProfileStatementGenerationReader(
+                workspace: workspace
+            ),
+            clock: SystemLibraryClock(),
+            chatIDGenerator: chatIdentityGenerator,
+            draftIDGenerator: chatIdentityGenerator,
+            memoryIDGenerator: chatIdentityGenerator
+        )
         let windowCoordinator = MainWindowCoordinator(
             access: AppKitMainWindowAccess()
         )
         self.workspace = workspace
         self.feature = feature
+        self.chatFeature = chatFeature
         self.windowCoordinator = windowCoordinator
         appDelegate.configure(
             feature: feature,
@@ -44,10 +57,11 @@ struct AudoraApp: App {
         Window("Audora", id: "library") {
             LibraryRootView(
                 feature: feature,
+                chatFeature: chatFeature,
                 windowCoordinator: windowCoordinator
             )
         }
-        .defaultSize(width: 720, height: 480)
+        .defaultSize(width: 920, height: 640)
         .commands {
             CommandGroup(replacing: .newItem) { }
         }

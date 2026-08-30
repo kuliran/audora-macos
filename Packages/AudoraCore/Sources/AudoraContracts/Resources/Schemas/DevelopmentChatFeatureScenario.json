@@ -1,0 +1,893 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/DevelopmentChatFeatureScenario.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "scenarioId": {
+            "type": "string"
+        },
+        "libraryId": {
+            "$ref": "#/$defs/LibraryId"
+        },
+        "initialChats": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/DevelopmentChatScenarioSnapshot"
+            }
+        },
+        "commands": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/DevelopmentChatScenarioCommand"
+            }
+        },
+        "dependencyTrace": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/DevelopmentChatDependencyEvent"
+            }
+        },
+        "expectedState": {
+            "$ref": "#/$defs/DevelopmentChatScenarioState"
+        },
+        "expectedProviderCalls": {
+            "type": "number",
+            "const": 0
+        },
+        "expectedInvocationCalls": {
+            "type": "number",
+            "const": 0
+        },
+        "expectedAdmissionCalls": {
+            "type": "number",
+            "const": 0
+        },
+        "providerAvailability": {
+            "$ref": "#/$defs/DevelopmentChatScenarioProviderAvailability"
+        },
+        "suspendedEffect": {
+            "$ref": "#/$defs/DevelopmentChatScenarioSuspendedEffect"
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "scenarioId",
+        "libraryId",
+        "initialChats",
+        "commands",
+        "dependencyTrace",
+        "expectedState",
+        "expectedProviderCalls",
+        "expectedInvocationCalls",
+        "expectedAdmissionCalls"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "Portable zero-Session Development Chat behavior shared by feature implementations.",
+    "$defs": {
+        "LibraryId": {
+            "type": "string",
+            "pattern": "^lib-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "DevelopmentChatScenarioSnapshot": {
+            "type": "object",
+            "properties": {
+                "chatId": {
+                    "$ref": "#/$defs/ChatId"
+                },
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "memoryId": {
+                    "$ref": "#/$defs/CoachMemoryId"
+                },
+                "manifestRevision": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "title": {
+                    "$ref": "#/$defs/ChatTitleText"
+                },
+                "createdAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "updatedAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "creationKind": {
+                    "type": "string",
+                    "const": "newChat"
+                },
+                "attachments": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatSessionAttachment"
+                    }
+                },
+                "draftText": {
+                    "$ref": "#/$defs/ChatDraftText"
+                },
+                "draftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "messageIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatMessageId"
+                    }
+                },
+                "memoryGeneralNotes": {
+                    "type": "string"
+                },
+                "memorySessionSummaries": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/PersistedCoachMemorySessionSummary"
+                    }
+                }
+            },
+            "required": [
+                "chatId",
+                "draftId",
+                "memoryId",
+                "manifestRevision",
+                "title",
+                "createdAt",
+                "updatedAt",
+                "creationKind",
+                "attachments",
+                "draftText",
+                "draftVersion",
+                "messageIds",
+                "memoryGeneralNotes",
+                "memorySessionSummaries"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "DevelopmentChatScenarioCommand": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/CreateDevelopmentChatScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/RenameDevelopmentChatScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/SetDevelopmentChatFilterScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/OpenDevelopmentChatScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/StartDevelopmentChatScenarioCommand"
+                }
+            ]
+        },
+        "DevelopmentChatDependencyEvent": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/ChatStoreCatalogLoadedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStoreCatalogFailedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStoreChatLoadedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStoreChatFrozenEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStoreChatCreatedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStoreCreateCollisionEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStoreChatRenamedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStoreRenameStaleEvent"
+                },
+                {
+                    "$ref": "#/$defs/ProfileStatementGenerationReadEvent"
+                },
+                {
+                    "$ref": "#/$defs/CurrentInstantReadEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatIdGeneratedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatDraftIdGeneratedEvent"
+                },
+                {
+                    "$ref": "#/$defs/CoachMemoryIdGeneratedEvent"
+                }
+            ]
+        },
+        "DevelopmentChatScenarioState": {
+            "type": "object",
+            "properties": {
+                "allChatIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatId"
+                    }
+                },
+                "visibleChatIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatId"
+                    }
+                },
+                "catalogStatus": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioCatalogStatus"
+                },
+                "selectedChatId": {
+                    "$ref": "#/$defs/ChatId"
+                },
+                "selectedTitle": {
+                    "$ref": "#/$defs/ChatTitleText"
+                },
+                "selectedRevision": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "selectedAvailability": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioSelectionAvailability"
+                },
+                "selectedFrozenReason": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioFrozenReason"
+                },
+                "notice": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioNotice"
+                }
+            },
+            "required": [
+                "allChatIds",
+                "visibleChatIds"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "DevelopmentChatScenarioProviderAvailability": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "available"
+                },
+                {
+                    "type": "string",
+                    "const": "unavailable"
+                }
+            ]
+        },
+        "DevelopmentChatScenarioSuspendedEffect": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "firstCatalogLoad"
+                }
+            ]
+        },
+        "ChatId": {
+            "type": "string",
+            "pattern": "^cht-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ChatDraftId": {
+            "type": "string",
+            "pattern": "^drf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "CoachMemoryId": {
+            "type": "string",
+            "pattern": "^mem-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "ChatTitleText": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+        },
+        "UTCInstant": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        },
+        "ChatSessionAttachment": {
+            "type": "object",
+            "properties": {
+                "attachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                },
+                "sessionId": {
+                    "$ref": "#/$defs/SessionId"
+                },
+                "transcriptRevisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId"
+                }
+            },
+            "required": [
+                "attachmentId",
+                "sessionId",
+                "transcriptRevisionId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatDraftText": {
+            "type": "string",
+            "maxLength": 32768
+        },
+        "ChatMessageId": {
+            "type": "string",
+            "pattern": "^msg-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "PersistedCoachMemorySessionSummary": {
+            "type": "object",
+            "properties": {
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                },
+                "notes": {
+                    "type": "string",
+                    "maxLength": 32768
+                }
+            },
+            "required": [
+                "sessionAttachmentId",
+                "notes"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CreateDevelopmentChatScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "createDevelopmentChat"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RenameDevelopmentChatScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "rename"
+                },
+                "chatId": {
+                    "$ref": "#/$defs/ChatId"
+                },
+                "title": {
+                    "type": "string"
+                },
+                "expectedRevision": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                }
+            },
+            "required": [
+                "kind",
+                "chatId",
+                "title",
+                "expectedRevision"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SetDevelopmentChatFilterScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "setFilter"
+                },
+                "query": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "kind",
+                "query"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "OpenDevelopmentChatScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "open"
+                },
+                "chatId": {
+                    "$ref": "#/$defs/ChatId"
+                }
+            },
+            "required": [
+                "kind",
+                "chatId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "StartDevelopmentChatScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "start"
+                },
+                "libraryId": {
+                    "$ref": "#/$defs/LibraryId"
+                }
+            },
+            "required": [
+                "kind",
+                "libraryId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStoreCatalogLoadedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "loadCatalog"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "loaded"
+                },
+                "libraryId": {
+                    "$ref": "#/$defs/LibraryId"
+                },
+                "chatIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatId"
+                    }
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStoreCatalogFailedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "loadCatalog"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "failed"
+                },
+                "reason": {
+                    "type": "string",
+                    "const": "wrongLibrary"
+                },
+                "libraryId": {
+                    "$ref": "#/$defs/LibraryId"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "reason"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStoreChatLoadedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "load"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "loaded"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStoreChatFrozenEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "load"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "frozen"
+                },
+                "reason": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioFrozenReason"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "reason"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStoreChatCreatedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "create"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "committed"
+                },
+                "chat": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioSnapshot"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "chat"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStoreCreateCollisionEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "create"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "collision"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStoreChatRenamedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "rename"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "committed"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStoreRenameStaleEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "rename"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "stale"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ProfileStatementGenerationReadEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "profileHead"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "readStatementGeneration"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CurrentInstantReadEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "clock"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "now"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/UTCInstant"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatIdGeneratedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatIdGenerator"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "next"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/ChatId"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatDraftIdGeneratedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatDraftIdGenerator"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "next"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/ChatDraftId"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachMemoryIdGeneratedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "coachMemoryIdGenerator"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "next"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/CoachMemoryId"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "DevelopmentChatScenarioCatalogStatus": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "ready"
+                },
+                {
+                    "type": "string",
+                    "const": "failed"
+                }
+            ]
+        },
+        "DevelopmentChatScenarioSelectionAvailability": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "open"
+                },
+                {
+                    "type": "string",
+                    "const": "frozen"
+                }
+            ]
+        },
+        "DevelopmentChatScenarioFrozenReason": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "newerSchema"
+                },
+                {
+                    "type": "string",
+                    "const": "unsupportedSchema"
+                },
+                {
+                    "type": "string",
+                    "const": "corrupt"
+                }
+            ]
+        },
+        "DevelopmentChatScenarioNotice": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "invalidTitle"
+                },
+                {
+                    "type": "string",
+                    "const": "createFailed"
+                },
+                {
+                    "type": "string",
+                    "const": "createCollisionLimitReached"
+                },
+                {
+                    "type": "string",
+                    "const": "renameFailed"
+                },
+                {
+                    "type": "string",
+                    "const": "staleRename"
+                },
+                {
+                    "type": "string",
+                    "const": "chatMissing"
+                },
+                {
+                    "type": "string",
+                    "const": "chatFrozen"
+                },
+                {
+                    "type": "string",
+                    "const": "catalogFailed"
+                },
+                {
+                    "type": "string",
+                    "const": "readOnlyLibrary"
+                }
+            ]
+        },
+        "ChatSessionAttachmentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[0-9A-Za-z_-]+$"
+        },
+        "SessionId": {
+            "type": "string",
+            "pattern": "^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "TranscriptRevisionId": {
+            "type": "string",
+            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        }
+    }
+}

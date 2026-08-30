@@ -32,6 +32,7 @@ let package = Package(
             name: "AudoraMacPresentation",
             dependencies: [
                 .product(name: "AudoraApplication", package: "AudoraCore"),
+                .product(name: "AudoraDomain", package: "AudoraCore"),
             ]
         ),
         .testTarget(
@@ -39,6 +40,7 @@ let package = Package(
             dependencies: [
                 "AudoraMacInfrastructure",
                 .product(name: "AudoraApplication", package: "AudoraCore"),
+                .product(name: "AudoraContracts", package: "AudoraCore"),
                 .product(name: "AudoraDomain", package: "AudoraCore"),
             ]
         ),

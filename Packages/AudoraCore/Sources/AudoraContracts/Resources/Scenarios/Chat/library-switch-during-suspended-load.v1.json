@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "library-switch-during-suspended-load",
+  "libraryId": "lib-20260830T100000000Z-1ABC",
+  "initialChats": [
+    {
+      "chatId": "cht-20260830T120000000Z-2ABC",
+      "draftId": "drf-20260830T120000000Z-3DEF",
+      "memoryId": "mem-20260830T120000000Z-4GHJ",
+      "manifestRevision": 0,
+      "title": "First Library Chat",
+      "createdAt": "2026-08-30T12:00:00.000Z",
+      "updatedAt": "2026-08-30T12:00:00.000Z",
+      "creationKind": "newChat",
+      "attachments": [],
+      "draftText": "first draft",
+      "draftVersion": 1,
+      "messageIds": [],
+      "memoryGeneralNotes": "first memory",
+      "memorySessionSummaries": []
+    },
+    {
+      "chatId": "cht-20260830T121000000Z-5JKM",
+      "draftId": "drf-20260830T121000000Z-6NPQ",
+      "memoryId": "mem-20260830T121000000Z-7RST",
+      "manifestRevision": 0,
+      "title": "Second Library Chat",
+      "createdAt": "2026-08-30T12:10:00.000Z",
+      "updatedAt": "2026-08-30T12:10:00.000Z",
+      "creationKind": "newChat",
+      "attachments": [],
+      "draftText": "second draft",
+      "draftVersion": 1,
+      "messageIds": [],
+      "memoryGeneralNotes": "second memory",
+      "memorySessionSummaries": []
+    }
+  ],
+  "commands": [{"kind": "start", "libraryId": "lib-20260830T110000000Z-2DEF"}],
+  "dependencyTrace": [
+    {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded", "libraryId": "lib-20260830T100000000Z-1ABC", "chatIds": ["cht-20260830T120000000Z-2ABC"]},
+    {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded", "libraryId": "lib-20260830T110000000Z-2DEF", "chatIds": ["cht-20260830T121000000Z-5JKM"]}
+  ],
+  "expectedState": {
+    "allChatIds": ["cht-20260830T121000000Z-5JKM"],
+    "visibleChatIds": ["cht-20260830T121000000Z-5JKM"],
+    "catalogStatus": "ready"
+  },
+  "expectedProviderCalls": 0,
+  "expectedInvocationCalls": 0,
+  "expectedAdmissionCalls": 0,
+  "suspendedEffect": "firstCatalogLoad"
+}

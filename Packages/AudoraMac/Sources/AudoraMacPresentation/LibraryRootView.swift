@@ -1,16 +1,20 @@
 import AudoraApplication
+import AudoraDomain
 import SwiftUI
 
 public struct LibraryRootView: View {
     @StateObject private var model: LibraryPresentationModel
     @Environment(\.openWindow) private var openWindow
+    private let chatFeature: any ChatFeature
     private let windowCoordinator: MainWindowCoordinator
 
     public init(
         feature: any LibraryFeature,
+        chatFeature: any ChatFeature,
         windowCoordinator: MainWindowCoordinator
     ) {
         _model = StateObject(wrappedValue: LibraryPresentationModel(feature: feature))
+        self.chatFeature = chatFeature
         self.windowCoordinator = windowCoordinator
     }
 
@@ -49,6 +53,12 @@ public struct LibraryRootView: View {
                 Text(profileDescription(library.profile))
                     .foregroundStyle(.secondary)
                 libraryActions
+                Divider()
+                ChatRootView(
+                    feature: chatFeature,
+                    scope: LibraryScope(libraryID: library.libraryID)
+                )
+                .id(library.libraryID.rawValue)
 
             case .some(.readOnly):
                 ContentUnavailableView(
@@ -72,7 +82,7 @@ public struct LibraryRootView: View {
                 ProgressView(activityText(activity))
             }
         }
-        .frame(minWidth: 560, minHeight: 360)
+        .frame(minWidth: 720, minHeight: 520)
         .padding(32)
         .disabled(model.snapshot?.activity != nil)
         .task {

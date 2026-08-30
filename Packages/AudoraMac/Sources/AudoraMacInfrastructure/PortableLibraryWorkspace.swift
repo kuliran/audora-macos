@@ -116,6 +116,35 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
 
     var pendingExternalRequestCount: Int { externalRequests.count }
 
+    public func performActiveReadWriteOperation<Value: Sendable>(
+        in scope: LibraryScope,
+        _ operation: @Sendable (URL) -> Value
+    ) -> ActiveLibraryOperationResult<Value> {
+        guard reserveOperation() else { return .unavailable }
+        defer { operationInFlight = false }
+        guard let activeScope, activeScope.libraryID == scope.libraryID else {
+            return .unavailable
+        }
+        switch activeScope.loaded {
+        case .readOnly:
+            return .readOnly
+        case .readWrite:
+            return .performed(operation(activeScope.root))
+        }
+    }
+
+    public func activeProfileStatementGeneration(in scope: LibraryScope) -> UInt64? {
+        guard reserveOperation() else { return nil }
+        defer { operationInFlight = false }
+        guard let activeScope, activeScope.libraryID == scope.libraryID else { return nil }
+        guard case let .readWrite(authority) = try? persistence.open(at: activeScope.root),
+              authority.manifest.libraryID == scope.libraryID
+        else {
+            return nil
+        }
+        return authority.profileHead.statementGeneration
+    }
+
     public func restoreActiveLibrary() async -> LibraryOpenOutcome {
         guard reserveOperation() else { return .failed(.candidateUnavailable) }
         defer { operationInFlight = false }
@@ -338,4 +367,10 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
             return false
         }
     }
+}
+
+public enum ActiveLibraryOperationResult<Value: Sendable>: Sendable {
+    case performed(Value)
+    case readOnly
+    case unavailable
 }

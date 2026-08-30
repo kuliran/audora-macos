@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "stale-rename-cannot-overwrite",
+  "libraryId": "lib-20260830T100000000Z-1ABC",
+  "initialChats": [{
+    "chatId": "cht-20260830T120000000Z-2ABC",
+    "draftId": "drf-20260830T120000000Z-3DEF",
+    "memoryId": "mem-20260830T120000000Z-4GHJ",
+    "manifestRevision": 0,
+    "title": "New Chat",
+    "createdAt": "2026-08-30T12:00:00.000Z",
+    "updatedAt": "2026-08-30T12:00:00.000Z",
+    "creationKind": "newChat",
+    "attachments": [],
+    "draftText": "",
+    "draftVersion": 0,
+    "messageIds": [],
+    "memoryGeneralNotes": "",
+    "memorySessionSummaries": []
+  }],
+  "commands": [
+    {"kind": "open", "chatId": "cht-20260830T120000000Z-2ABC"},
+    {"kind": "rename", "chatId": "cht-20260830T120000000Z-2ABC", "title": "Weekly reflection", "expectedRevision": 0},
+    {"kind": "rename", "chatId": "cht-20260830T120000000Z-2ABC", "title": "Stale title", "expectedRevision": 0}
+  ],
+  "dependencyTrace": [
+    {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded"},
+    {"port": "chatStore", "effect": "load", "outcome": "loaded"},
+    {"port": "clock", "effect": "now", "outcome": "2026-08-30T12:05:00.000Z"},
+    {"port": "chatStore", "effect": "rename", "outcome": "committed"}
+  ],
+  "expectedState": {
+    "allChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "visibleChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "selectedChatId": "cht-20260830T120000000Z-2ABC",
+    "selectedTitle": "Weekly reflection",
+    "selectedRevision": 1,
+    "notice": "staleRename"
+  },
+  "expectedProviderCalls": 0,
+  "expectedInvocationCalls": 0,
+  "expectedAdmissionCalls": 0
+}

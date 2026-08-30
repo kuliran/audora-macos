@@ -90,6 +90,18 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         self.fault = fault
     }
 
+    private var confined: ConfinedPersistencePrimitives<PortableLibraryPersistenceError> {
+        ConfinedPersistencePrimitives(
+            ioFailure: .ioFailure,
+            invalidLayout: .invalidLayout,
+            expectedPathIsSymlink: .expectedPathIsSymlink,
+            rootTooLarge: .rootTooLarge,
+            invalidJSON: .invalidJSON,
+            invalidSchemaVersion: .invalidSchemaVersion,
+            unknownKey: .unknownKey
+        )
+    }
+
     public func create(
         at destination: URL,
         seed: NewLibrarySeed
@@ -325,7 +337,7 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         return authority
     }
 
-    private func load(from rootDescriptor: Int32) throws -> LoadedPortableLibrary {
+    func load(from rootDescriptor: Int32) throws -> LoadedPortableLibrary {
         try validateExpectedLayout(under: rootDescriptor)
 
         let manifestData = try boundedRootData(
@@ -437,40 +449,12 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         named name: String,
         under parentDescriptor: Int32
     ) throws {
-        let descriptor = name.withCString { pointer in
-            Darwin.openat(
-                parentDescriptor,
-                pointer,
-                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                0o600
-            )
-        }
-        guard descriptor >= 0 else { throw PortableLibraryPersistenceError.ioFailure }
-        var closeRequired = true
-        defer { if closeRequired { Darwin.close(descriptor) } }
-        let writeResult = data.withUnsafeBytes { buffer -> Bool in
-            guard let base = buffer.baseAddress else { return data.isEmpty }
-            var offset = 0
-            while offset < buffer.count {
-                let count = Darwin.write(descriptor, base.advanced(by: offset), buffer.count - offset)
-                if count < 0 {
-                    if errno == EINTR { continue }
-                    return false
-                }
-                if count == 0 { return false }
-                offset += count
-            }
-            return true
-        }
-        guard writeResult else {
-            throw PortableLibraryPersistenceError.ioFailure
-        }
-        try flushDescriptor(descriptor)
-        guard Darwin.close(descriptor) == 0 else {
-            closeRequired = false
-            throw PortableLibraryPersistenceError.ioFailure
-        }
-        closeRequired = false
+        try confined.writeExclusive(
+            data,
+            named: name,
+            under: parentDescriptor,
+            flushBeforeClose: true
+        )
     }
 
     private func noReplaceRename(
@@ -478,21 +462,13 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         to destinationName: String,
         under parentDescriptor: Int32
     ) throws {
-        let result = sourceName.withCString { sourcePath in
-            destinationName.withCString { destinationPath in
-                renameatx_np(
-                    parentDescriptor,
-                    sourcePath,
-                    parentDescriptor,
-                    destinationPath,
-                    UInt32(RENAME_EXCL)
-                )
-            }
-        }
-        guard result == 0 else {
-            if errno == EEXIST { throw PortableLibraryPersistenceError.destinationExists }
-            throw PortableLibraryPersistenceError.ioFailure
-        }
+        try confined.renameNoReplace(
+            from: sourceName,
+            under: parentDescriptor,
+            to: destinationName,
+            under: parentDescriptor,
+            collision: .destinationExists
+        )
     }
 
     private func flushOwnedDirectories(under rootDescriptor: Int32) throws {
@@ -508,10 +484,7 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
     }
 
     private func flushDescriptor(_ descriptor: Int32) throws {
-        while fsync(descriptor) != 0 {
-            if errno == EINTR { continue }
-            throw PortableLibraryPersistenceError.ioFailure
-        }
+        try confined.flush(descriptor)
     }
 
     private func boundedRootData(
@@ -524,66 +497,15 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
             under: rootDescriptor
         )
         defer { Darwin.close(parent) }
-        let finalName = path.components.last!
-        let descriptor = finalName.withCString { pointer in
-            Darwin.openat(
-                parent,
-                pointer,
-                O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
-            )
-        }
-        guard descriptor >= 0 else {
-            if isSymlink(named: finalName, under: parent) {
-                throw PortableLibraryPersistenceError.expectedPathIsSymlink
-            }
-            throw PortableLibraryPersistenceError.invalidLayout
-        }
-        defer { Darwin.close(descriptor) }
-
-        var metadata = stat()
-        guard fstat(descriptor, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG
-        else {
-            throw PortableLibraryPersistenceError.invalidLayout
-        }
-
-        var data = Data(count: Self.maximumRootBytes + 1)
-        let count = data.withUnsafeMutableBytes { buffer -> Int in
-            guard let base = buffer.baseAddress else { return 0 }
-            var offset = 0
-            while offset < buffer.count {
-                let result = Darwin.read(
-                    descriptor,
-                    base.advanced(by: offset),
-                    buffer.count - offset
-                )
-                if result == 0 { break }
-                if result < 0 {
-                    if errno == EINTR { continue }
-                    return -1
-                }
-                offset += result
-            }
-            return offset
-        }
-        guard count >= 0 else { throw PortableLibraryPersistenceError.ioFailure }
-        data.removeSubrange(count..<data.count)
-        guard data.count <= Self.maximumRootBytes else {
-            throw PortableLibraryPersistenceError.rootTooLarge
-        }
-        return data
+        return try confined.boundedData(
+            named: path.components.last!,
+            under: parent,
+            maximumBytes: Self.maximumRootBytes
+        )
     }
 
     private func schemaVersion(in data: Data) throws -> UInt64 {
-        _ = try jsonDictionary(data)
-        do {
-            return try JSONDecoder().decode(
-                SchemaVersionEnvelope.self,
-                from: data
-            ).schemaVersion
-        } catch {
-            throw PortableLibraryPersistenceError.invalidSchemaVersion
-        }
+        try confined.schemaVersion(in: data)
     }
 
     private func decodeManifest(_ data: Data) throws -> LibraryManifest {
@@ -679,41 +601,19 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
     }
 
     private func requireExactKeys(_ dictionary: [String: Any], _ expected: Set<String>) throws {
-        guard Set(dictionary.keys) == expected else {
-            throw PortableLibraryPersistenceError.unknownKey
-        }
+        try confined.requireExactKeys(dictionary, expected)
     }
 
     private func jsonDictionary(_ data: Data) throws -> [String: Any] {
-        do {
-            guard let dictionary = try JSONSerialization.jsonObject(
-                with: data,
-                options: []
-            ) as? [String: Any] else {
-                throw PortableLibraryPersistenceError.invalidJSON
-            }
-            return dictionary
-        } catch let error as PortableLibraryPersistenceError {
-            throw error
-        } catch {
-            throw PortableLibraryPersistenceError.invalidJSON
-        }
+        try confined.jsonDictionary(data)
     }
 
     private func decode<T: Decodable>(_ type: T.Type, _ data: Data) throws -> T {
-        do {
-            return try JSONDecoder().decode(type, from: data)
-        } catch {
-            throw PortableLibraryPersistenceError.invalidJSON
-        }
+        try confined.decode(type, from: data)
     }
 
     private func deterministicJSON<T: Encodable>(_ value: T) throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        var data = try encoder.encode(value)
-        data.append(0x0A)
-        return data
+        try confined.deterministicJSON(value)
     }
 
     private func openDirectoryDescriptor(at url: URL) throws -> Int32 {
@@ -758,30 +658,7 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         guard current >= 0 else { throw PortableLibraryPersistenceError.ioFailure }
         do {
             for component in components {
-                let next = component.withCString { pointer -> Int32 in
-                    while true {
-                        let result = Darwin.openat(
-                            current,
-                            pointer,
-                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-                        )
-                        if result < 0, errno == EINTR { continue }
-                        return result
-                    }
-                }
-                guard next >= 0 else {
-                    if isSymlink(named: component, under: current) {
-                        throw PortableLibraryPersistenceError.expectedPathIsSymlink
-                    }
-                    throw PortableLibraryPersistenceError.invalidLayout
-                }
-                var metadata = stat()
-                guard fstat(next, &metadata) == 0,
-                      (metadata.st_mode & S_IFMT) == S_IFDIR
-                else {
-                    Darwin.close(next)
-                    throw PortableLibraryPersistenceError.invalidLayout
-                }
+                let next = try confined.openDirectory(named: component, under: current)
                 Darwin.close(current)
                 current = next
             }
@@ -807,21 +684,11 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
     }
 
     private func isSymlink(named name: String, under descriptor: Int32) -> Bool {
-        var metadata = stat()
-        let result = name.withCString { pointer in
-            fstatat(descriptor, pointer, &metadata, AT_SYMLINK_NOFOLLOW)
-        }
-        return result == 0 && (metadata.st_mode & S_IFMT) == S_IFLNK
+        confined.isSymlink(named: name, under: descriptor)
     }
 
     private func entryExists(named name: String, under descriptor: Int32) throws -> Bool {
-        var metadata = stat()
-        let result = name.withCString { pointer in
-            fstatat(descriptor, pointer, &metadata, AT_SYMLINK_NOFOLLOW)
-        }
-        if result == 0 { return true }
-        if errno == ENOENT { return false }
-        throw PortableLibraryPersistenceError.ioFailure
+        try confined.entryExists(named: name, under: descriptor)
     }
 
     private func removeOwnedStaging(named name: String, under parentDescriptor: Int32) {
@@ -873,10 +740,6 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         "trash/sessions",
         "trash/chats",
     ]
-}
-
-private struct SchemaVersionEnvelope: Decodable {
-    let schemaVersion: UInt64
 }
 
 private struct LibraryManifestDTO: Codable {
