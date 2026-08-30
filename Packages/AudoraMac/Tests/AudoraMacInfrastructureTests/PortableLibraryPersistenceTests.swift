@@ -445,9 +445,10 @@ final class PortableLibraryPersistenceTests: XCTestCase {
     }
 
     private func tree(at root: URL) throws -> [String] {
+        let canonicalRoot = root.resolvingSymlinksInPath()
         let enumerator = try XCTUnwrap(
             FileManager.default.enumerator(
-                at: root,
+                at: canonicalRoot,
                 includingPropertiesForKeys: [.isDirectoryKey],
                 options: [],
                 errorHandler: nil
@@ -455,7 +456,9 @@ final class PortableLibraryPersistenceTests: XCTestCase {
         )
         var values: [String] = []
         for case let url as URL in enumerator {
-            let relative = String(url.path.dropFirst(root.path.count + 1))
+            let relative = String(
+                url.path.dropFirst(canonicalRoot.path.count + 1)
+            )
             let isDirectory = try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
             values.append(relative + (isDirectory ? "/" : ""))
         }

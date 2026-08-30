@@ -202,7 +202,7 @@ final class LibraryFeatureTests: XCTestCase {
             await feature.send(.openExternal(token))
             await completion.markCompleted()
         }
-        await waitForQueuedExternalOpen(in: feature)
+        await waitForQueuedExternalOpen(token, in: feature)
 
         let callsWhileRestoring = await workspace.calls
         let returnedWhileRestoring = await completion.isCompleted
@@ -238,19 +238,20 @@ final class LibraryFeatureTests: XCTestCase {
         let startup = Task { await feature.send(.start) }
         await workspace.waitForRestoreCall()
         let firstCallback = Task { await feature.send(.openExternal(firstToken)) }
-        await waitForQueuedExternalOpen(in: feature)
+        await waitForQueuedExternalOpen(firstToken, in: feature)
         let latestCallback = Task {
             await feature.send(.openExternal(latestToken))
             await latestCompletion.markCompleted()
         }
+        await waitForQueuedExternalOpen(latestToken, in: feature)
 
         // Superseding the only queue slot releases the first caller, while the
         // latest caller stays suspended until its request is actually replayed.
         await firstCallback.value
-        let queuedCount = await feature.queuedExternalOpenCount
+        let queuedToken = await feature.queuedExternalOpenToken
         let callsWhileRestoring = await workspace.calls
         let latestReturnedWhileRestoring = await latestCompletion.isCompleted
-        XCTAssertEqual(queuedCount, 1)
+        XCTAssertEqual(queuedToken, latestToken)
         XCTAssertEqual(callsWhileRestoring, [.restore])
         XCTAssertFalse(latestReturnedWhileRestoring)
 
@@ -296,9 +297,10 @@ final class LibraryFeatureTests: XCTestCase {
     }
 
     private func waitForQueuedExternalOpen(
+        _ token: LibraryOpenRequestToken,
         in feature: DefaultLibraryFeature
     ) async {
-        while await feature.queuedExternalOpenCount == 0 {
+        while await feature.queuedExternalOpenToken != token {
             await Task.yield()
         }
     }
