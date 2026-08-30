@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "library.newer-root-is-read-only",
+  "initialState": { "kind": "noLibrarySelected", "recentAvailable": true },
+  "command": { "kind": "reopenRecent" },
+  "dependencyTrace": [
+    { "port": "libraryWorkspace", "effect": "reopenRecentLibrary", "outcome": "newerSchemaReadOnly" }
+  ],
+  "expectedState": {
+    "kind": "readOnly",
+    "libraryId": "lib-20260830T120000000Z-2ABC",
+    "reason": "newerSchema"
+  },
+  "expectedEffects": [{ "kind": "reopenRecentLibrary" }]
+}

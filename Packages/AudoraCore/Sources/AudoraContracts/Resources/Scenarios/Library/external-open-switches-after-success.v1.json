@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "library.external-open-switches-after-success",
+  "initialState": {
+    "kind": "active",
+    "library": {
+      "libraryId": "lib-20260830T120000000Z-2ABC",
+      "preferences": { "language": "en", "annotationsVisible": true, "playbackRate": 1.0 },
+      "profileKind": "null",
+      "statementCount": 0
+    }
+  },
+  "command": { "kind": "openExternal", "token": "token_B" },
+  "dependencyTrace": [
+    {
+      "port": "libraryWorkspace",
+      "effect": "openExternalRequest",
+      "outcome": "opened",
+      "library": {
+        "libraryId": "lib-20260830T121000000Z-3DEF",
+        "preferences": { "language": "en", "annotationsVisible": false, "playbackRate": 1.5 },
+        "profileKind": "null",
+        "statementCount": 0
+      }
+    }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "library": {
+      "libraryId": "lib-20260830T121000000Z-3DEF",
+      "preferences": { "language": "en", "annotationsVisible": false, "playbackRate": 1.5 },
+      "profileKind": "null",
+      "statementCount": 0
+    }
+  },
+  "expectedEffects": [{ "kind": "openExternalRequest" }]
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "library.relaunch.restores-persisted-values",
+  "initialState": { "kind": "awaitingBootstrap" },
+  "command": { "kind": "start" },
+  "dependencyTrace": [
+    {
+      "port": "libraryWorkspace",
+      "effect": "restoreActiveLibrary",
+      "outcome": "opened",
+      "library": {
+        "libraryId": "lib-20260830T120000000Z-2ABC",
+        "preferences": { "language": "en", "annotationsVisible": false, "playbackRate": 1.25 },
+        "profileKind": "null",
+        "statementCount": 0
+      }
+    }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "library": {
+      "libraryId": "lib-20260830T120000000Z-2ABC",
+      "preferences": { "language": "en", "annotationsVisible": false, "playbackRate": 1.25 },
+      "profileKind": "null",
+      "statementCount": 0
+    }
+  },
+  "expectedEffects": [{ "kind": "restoreActiveLibrary" }]
+}

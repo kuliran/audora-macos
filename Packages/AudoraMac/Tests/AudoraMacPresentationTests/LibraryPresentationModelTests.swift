@@ -1,4 +1,5 @@
 import AudoraApplication
+import AudoraDomain
 import AudoraMacPresentation
 import XCTest
 
@@ -7,8 +8,10 @@ final class LibraryPresentationModelTests: XCTestCase {
     func testStartSendsOneTypedCommandAndProjectsTheFinalSnapshot() async {
         let feature = ScriptedLibraryFeature(
             snapshots: [
-                LibraryFeatureState(phase: .awaitingBootstrap),
-                LibraryFeatureState(phase: .noLibrarySelected),
+                LibraryFeatureState(selection: .awaitingBootstrap),
+                LibraryFeatureState(
+                    selection: .noLibrarySelected(recentAvailable: false)
+                ),
             ]
         )
         let model = LibraryPresentationModel(feature: feature)
@@ -18,10 +21,31 @@ final class LibraryPresentationModelTests: XCTestCase {
 
         XCTAssertEqual(
             model.snapshot,
-            LibraryFeatureState(phase: .noLibrarySelected)
+            LibraryFeatureState(
+                selection: .noLibrarySelected(recentAvailable: false)
+            )
         )
         let commands = await feature.commands
         XCTAssertEqual(commands, [.start])
+    }
+
+    func testRepeatedOpenFocusesAndReopensTheSameSingletonWindowIdentity() {
+        let access = FakeMainWindowAccess()
+        let coordinator = MainWindowCoordinator(access: access)
+        let originalIdentity = access.mainWindowIdentity
+        coordinator.registerReopenAction { access.restoreExistingWindow() }
+
+        let first = coordinator.focusExistingMainWindow()
+        let second = coordinator.focusExistingMainWindow()
+        access.simulateClosedWindow()
+        let reopened = coordinator.focusExistingMainWindow()
+
+        XCTAssertEqual(first, originalIdentity)
+        XCTAssertEqual(second, originalIdentity)
+        XCTAssertEqual(reopened, originalIdentity)
+        XCTAssertEqual(access.focusCount, 3)
+        XCTAssertEqual(access.reopenCount, 1)
+        XCTAssertEqual(access.windowConstructionCount, 1)
     }
 }
 
@@ -32,7 +56,7 @@ private actor ScriptedLibraryFeature: LibraryFeature {
     private(set) var commands: [LibraryCommand] = []
 
     init(snapshots: [LibraryFeatureState]) {
-        state = snapshots.last ?? LibraryFeatureState(phase: .awaitingBootstrap)
+        state = snapshots.last ?? LibraryFeatureState(selection: .awaitingBootstrap)
         states = AsyncStream { continuation in
             for snapshot in snapshots {
                 continuation.yield(snapshot)
@@ -47,5 +71,31 @@ private actor ScriptedLibraryFeature: LibraryFeature {
 
     func send(_ command: LibraryCommand) async {
         commands.append(command)
+    }
+}
+
+@MainActor
+private final class FakeMainWindowAccess: MainWindowAccess {
+    private let originalWindow = NSObject()
+    private var installed = true
+    private(set) var focusCount = 0
+    private(set) var reopenCount = 0
+    private(set) var windowConstructionCount = 1
+
+    var mainWindowIdentity: ObjectIdentifier? {
+        installed ? ObjectIdentifier(originalWindow) : nil
+    }
+
+    func focusMainWindow() {
+        focusCount += 1
+    }
+
+    func simulateClosedWindow() {
+        installed = false
+    }
+
+    func restoreExistingWindow() {
+        reopenCount += 1
+        installed = true
     }
 }

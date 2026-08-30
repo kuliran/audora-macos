@@ -1,0 +1,92 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/ProfileHead.json",
+    "anyOf": [
+        {
+            "$ref": "#/$defs/NullProfileHead"
+        },
+        {
+            "$ref": "#/$defs/SelectedProfileHead"
+        }
+    ],
+    "$defs": {
+        "NullProfileHead": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "generation": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "statementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "updatedAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "generation",
+                "statementGeneration",
+                "updatedAt"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SelectedProfileHead": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "generation": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "statementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "updatedAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "currentRevisionId": {
+                    "$ref": "#/$defs/ProfileRevisionId"
+                },
+                "currentRevisionSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "generation",
+                "statementGeneration",
+                "updatedAt",
+                "currentRevisionId",
+                "currentRevisionSha256"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "UTCInstant": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        },
+        "ProfileRevisionId": {
+            "type": "string",
+            "pattern": "^prf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "Sha256Hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+        }
+    }
+}

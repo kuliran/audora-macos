@@ -1,15 +1,12 @@
 import AudoraApplication
-import Observation
+import Combine
 
 @MainActor
-@Observable
-public final class LibraryPresentationModel {
-    public private(set) var snapshot: LibraryFeatureState?
+public final class LibraryPresentationModel: ObservableObject {
+    @Published public private(set) var snapshot: LibraryFeatureState?
 
-    @ObservationIgnored
     private let feature: any LibraryFeature
 
-    @ObservationIgnored
     private var hasStarted = false
 
     public init(feature: any LibraryFeature) {
@@ -36,5 +33,9 @@ public final class LibraryPresentationModel {
         while !Task.isCancelled, let nextSnapshot = await states.next() {
             snapshot = nextSnapshot
         }
+    }
+
+    public func send(_ command: LibraryCommand) {
+        Task { await feature.send(command) }
     }
 }

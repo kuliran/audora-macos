@@ -1,54 +1,89 @@
+import "./portable-library.tsp";
 import "@typespec/json-schema";
 
 using TypeSpec.JsonSchema;
 
 namespace Audora.Contracts {
-  /** Portable launch behavior shared by feature implementations and runners. */
-  @jsonSchema
-  @id("LibraryFeatureScenario.json")
-  model LibraryFeatureScenario {
-    @minValue(1)
-    @maxValue(1)
-    schemaVersion: int32;
+  model LibraryScenarioPreferences {
+    language: "en";
+    annotationsVisible: boolean;
 
-    scenarioId: "library.launch.no-selection";
-    initialState: LibraryFeatureAwaitingBootstrapState;
-    command: LibraryFeatureStartCommand;
+    @minValueExclusive(0)
+    playbackRate: float64;
+  }
 
-    @minItems(1)
-    @maxItems(1)
-    dependencyTrace: LibraryFeatureDependencyEvent[];
-
-    expectedState: LibraryFeatureNoLibrarySelectedState;
-
-    @minItems(1)
-    @maxItems(1)
-    expectedEffects: LibraryFeatureResolveInitialLibraryEffect[];
+  model LibraryScenarioSnapshot {
+    libraryId: LibraryId;
+    preferences: LibraryScenarioPreferences;
+    profileKind: "null" | "selected";
+    statementCount: NonnegativeWholeNumber;
   }
 
   model LibraryFeatureAwaitingBootstrapState {
     kind: "awaitingBootstrap";
   }
 
-  model LibraryFeatureStartCommand {
-    kind: "start";
+  model LibraryFeatureNoLibrarySelectedState {
+    kind: "noLibrarySelected";
+    recentAvailable: boolean;
+    notice?: string;
+  }
+
+  model LibraryFeatureActiveState {
+    kind: "active";
+    library: LibraryScenarioSnapshot;
+    notice?: string;
+  }
+
+  model LibraryFeatureReadOnlyState {
+    kind: "readOnly";
+    libraryId?: LibraryId;
+    reason: "newerSchema";
+    notice?: string;
+  }
+
+  union LibraryFeatureScenarioState {
+    awaitingBootstrap: LibraryFeatureAwaitingBootstrapState,
+    noLibrarySelected: LibraryFeatureNoLibrarySelectedState,
+    active: LibraryFeatureActiveState,
+    readOnly: LibraryFeatureReadOnlyState,
+  }
+
+  model LibraryFeatureScenarioCommand {
+    kind:
+      | "start"
+      | "create"
+      | "chooseExisting"
+      | "reopenRecent"
+      | "openExternal"
+      | "reveal"
+      | "close";
+    token?: string;
   }
 
   model LibraryFeatureDependencyEvent {
-    port: "libraryBootstrap";
-    effect: LibraryFeatureResolveInitialLibraryEffect;
-    outcome: LibraryFeatureNoLibrarySelectedOutcome;
+    port: "libraryWorkspace" | "clock" | "libraryIdGenerator";
+    effect: string;
+    outcome: string;
+    library?: LibraryScenarioSnapshot;
+    notice?: string;
   }
 
-  model LibraryFeatureNoLibrarySelectedState {
-    kind: "noLibrarySelected";
+  model LibraryFeatureEffect {
+    kind: string;
   }
 
-  model LibraryFeatureResolveInitialLibraryEffect {
-    kind: "resolveInitialLibrary";
-  }
-
-  model LibraryFeatureNoLibrarySelectedOutcome {
-    kind: "noLibrarySelected";
+  /** Portable Library lifecycle behavior shared by feature implementations. */
+  @jsonSchema
+  @id("LibraryFeatureScenario.json")
+  model LibraryFeatureScenario {
+    schemaVersion: 1;
+    scenarioId: string;
+    initialState: LibraryFeatureScenarioState;
+    command?: LibraryFeatureScenarioCommand;
+    commands?: LibraryFeatureScenarioCommand[];
+    dependencyTrace: LibraryFeatureDependencyEvent[];
+    expectedState: LibraryFeatureScenarioState;
+    expectedEffects: LibraryFeatureEffect[];
   }
 }

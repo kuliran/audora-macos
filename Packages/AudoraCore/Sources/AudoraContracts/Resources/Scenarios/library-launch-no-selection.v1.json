@@ -9,21 +9,18 @@
   },
   "dependencyTrace": [
     {
-      "port": "libraryBootstrap",
-      "effect": {
-        "kind": "resolveInitialLibrary"
-      },
-      "outcome": {
-        "kind": "noLibrarySelected"
-      }
+      "port": "libraryWorkspace",
+      "effect": "restoreActiveLibrary",
+      "outcome": "noLibrarySelected"
     }
   ],
   "expectedState": {
-    "kind": "noLibrarySelected"
+    "kind": "noLibrarySelected",
+    "recentAvailable": false
   },
   "expectedEffects": [
     {
-      "kind": "resolveInitialLibrary"
+      "kind": "restoreActiveLibrary"
     }
   ]
 }

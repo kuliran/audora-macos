@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "library.reveal-is-non-mutating",
+  "initialState": {
+    "kind": "active",
+    "library": {
+      "libraryId": "lib-20260830T120000000Z-2ABC",
+      "preferences": { "language": "en", "annotationsVisible": true, "playbackRate": 1.0 },
+      "profileKind": "null",
+      "statementCount": 0
+    }
+  },
+  "command": { "kind": "reveal" },
+  "dependencyTrace": [
+    { "port": "libraryWorkspace", "effect": "revealActiveLibrary", "outcome": "succeeded" }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "library": {
+      "libraryId": "lib-20260830T120000000Z-2ABC",
+      "preferences": { "language": "en", "annotationsVisible": true, "playbackRate": 1.0 },
+      "profileKind": "null",
+      "statementCount": 0
+    }
+  },
+  "expectedEffects": [{ "kind": "revealActiveLibrary" }]
+}
