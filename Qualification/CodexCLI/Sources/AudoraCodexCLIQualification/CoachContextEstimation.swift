@@ -1,0 +1,793 @@
+import Foundation
+
+public enum CoachTokenEstimateMode: String, Codable, Equatable, Sendable {
+    case exact
+    case conservativeUpperBound
+}
+
+public enum CoachTokenEstimatorError: Error, Equatable {
+    case emptyIdentifier
+    case invalidMaximumUTF8BytesPerToken
+    case negativeTokenCount
+}
+
+/// A provider/model-specific tokenizer or a documented conservative substitute.
+///
+/// The implementation receives one complete model-visible provider message at a
+/// time. The planner never sums independently tokenized JSON fields (which can
+/// undercount at tokenizer boundaries), and it preserves provider message
+/// boundaries for transcript tool calls and results.
+public struct CoachTokenEstimator: Sendable {
+    public let identifier: String
+    public let mode: CoachTokenEstimateMode
+    /// A qualified upper bound used to translate a token-bounded value into a
+    /// worst-case collector-byte bound.
+    public let maximumUTF8BytesPerToken: Int
+
+    private let implementation: @Sendable (Data) -> Int
+
+    public init(
+        identifier: String,
+        mode: CoachTokenEstimateMode,
+        maximumUTF8BytesPerToken: Int,
+        implementation: @escaping @Sendable (Data) -> Int
+    ) throws {
+        guard !identifier.isEmpty else {
+            throw CoachTokenEstimatorError.emptyIdentifier
+        }
+        guard maximumUTF8BytesPerToken > 0 else {
+            throw CoachTokenEstimatorError.invalidMaximumUTF8BytesPerToken
+        }
+        self.identifier = identifier
+        self.mode = mode
+        self.maximumUTF8BytesPerToken = maximumUTF8BytesPerToken
+        self.implementation = implementation
+    }
+
+    public func tokenCount(forUTF8 data: Data) throws -> Int {
+        let count = implementation(data)
+        guard count >= 0 else {
+            throw CoachTokenEstimatorError.negativeTokenCount
+        }
+        return count
+    }
+
+    /// A conservative estimator for byte-level provider tokenizers. Known hidden
+    /// special tokens still belong in `CoachProviderFraming`.
+    public static func utf8ByteUpperBound() -> CoachTokenEstimator {
+        try! CoachTokenEstimator(
+            identifier: "utf8-byte-upper-bound-v1",
+            mode: .conservativeUpperBound,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { $0.count }
+        )
+    }
+}
+
+public struct CoachContextBudget: Equatable, Sendable {
+    public let contextWindowTokens: Int
+    public let responseReservedTokens: Int
+    public let safetyMarginTokens: Int
+
+    public init(
+        contextWindowTokens: Int,
+        responseReservedTokens: Int,
+        safetyMarginTokens: Int
+    ) {
+        self.contextWindowTokens = contextWindowTokens
+        self.responseReservedTokens = responseReservedTokens
+        self.safetyMarginTokens = safetyMarginTokens
+    }
+}
+
+/// The app-only fields from `CoachProviderDescriptor.json`.
+public struct CoachProviderDescriptor: Equatable, Sendable {
+    public let displayName: String
+    public let contextBudget: CoachContextBudget
+    public let coachMemoryMaxTokens: Int
+
+    public init(
+        displayName: String,
+        contextBudget: CoachContextBudget,
+        coachMemoryMaxTokens: Int
+    ) {
+        self.displayName = displayName
+        self.contextBudget = contextBudget
+        self.coachMemoryMaxTokens = coachMemoryMaxTokens
+    }
+}
+
+/// Provider and adapter bytes that are outside the Coach JSON contracts.
+///
+/// Prefixes and suffixes include pinned instructions, tool definitions, role
+/// wrappers, and adapter syntax that is actually visible to the provider model.
+/// Hidden token counts cover provider special tokens that have no UTF-8 spelling.
+public struct CoachProviderFraming: Equatable, Sendable {
+    public let initialRequestPrefix: Data
+    public let initialRequestSuffix: Data
+    public let transcriptReadRequestPrefix: Data
+    public let transcriptReadRequestSuffix: Data
+    public let transcriptReadResponsePrefix: Data
+    public let transcriptReadResponseSuffix: Data
+    public let minimumResponsePrefix: Data
+    public let minimumResponseSuffix: Data
+    public let initialRequestHiddenTokens: Int
+    public let transcriptReadExchangeHiddenTokens: Int
+    public let minimumResponseHiddenTokens: Int
+
+    public init(
+        initialRequestPrefix: Data = Data(),
+        initialRequestSuffix: Data = Data(),
+        transcriptReadRequestPrefix: Data = Data(),
+        transcriptReadRequestSuffix: Data = Data(),
+        transcriptReadResponsePrefix: Data = Data(),
+        transcriptReadResponseSuffix: Data = Data(),
+        minimumResponsePrefix: Data = Data(),
+        minimumResponseSuffix: Data = Data(),
+        initialRequestHiddenTokens: Int = 0,
+        transcriptReadExchangeHiddenTokens: Int = 0,
+        minimumResponseHiddenTokens: Int = 0
+    ) {
+        self.initialRequestPrefix = initialRequestPrefix
+        self.initialRequestSuffix = initialRequestSuffix
+        self.transcriptReadRequestPrefix = transcriptReadRequestPrefix
+        self.transcriptReadRequestSuffix = transcriptReadRequestSuffix
+        self.transcriptReadResponsePrefix = transcriptReadResponsePrefix
+        self.transcriptReadResponseSuffix = transcriptReadResponseSuffix
+        self.minimumResponsePrefix = minimumResponsePrefix
+        self.minimumResponseSuffix = minimumResponseSuffix
+        self.initialRequestHiddenTokens = initialRequestHiddenTokens
+        self.transcriptReadExchangeHiddenTokens = transcriptReadExchangeHiddenTokens
+        self.minimumResponseHiddenTokens = minimumResponseHiddenTokens
+    }
+}
+
+/// Qualified implementation details that intentionally remain outside provider DTOs.
+public struct CoachProviderEstimationPolicy: Sendable {
+    public let providerIdentifier: String
+    public let responseCollectorByteCeiling: Int
+    public let framing: CoachProviderFraming
+    public let tokenEstimator: CoachTokenEstimator
+
+    public init(
+        providerIdentifier: String,
+        responseCollectorByteCeiling: Int,
+        framing: CoachProviderFraming,
+        tokenEstimator: CoachTokenEstimator
+    ) {
+        self.providerIdentifier = providerIdentifier
+        self.responseCollectorByteCeiling = responseCollectorByteCeiling
+        self.framing = framing
+        self.tokenEstimator = tokenEstimator
+    }
+}
+
+public enum PreparedCoachAttachment: Equatable, Sendable {
+    /// The complete `SessionAttachmentInline` provider value.
+    case inline(requestValue: CanonicalJSONValue)
+
+    /// The request descriptor plus values needed to reserve one complete atomic
+    /// `ReadSessionTranscripts` exchange.
+    case onDemand(
+        requestValue: CanonicalJSONValue,
+        sessionTranscriptHandle: String,
+        transcriptDisclosure: CanonicalJSONValue
+    )
+}
+
+public struct PreparedCoachContext: Equatable, Sendable {
+    public let profile: CanonicalJSONValue
+    public let memory: CanonicalJSONValue
+    public let history: [CanonicalJSONValue]
+    public let trigger: CanonicalJSONValue
+    public let attachments: [PreparedCoachAttachment]
+
+    public init(
+        profile: CanonicalJSONValue,
+        memory: CanonicalJSONValue,
+        history: [CanonicalJSONValue],
+        trigger: CanonicalJSONValue,
+        attachments: [PreparedCoachAttachment]
+    ) {
+        self.profile = profile
+        self.memory = memory
+        self.history = history
+        self.trigger = trigger
+        self.attachments = attachments
+    }
+
+    public static func minimumRequest(maximumMemory: CanonicalJSONValue) -> Self {
+        PreparedCoachContext(
+            profile: .object(["statements": .array([])]),
+            memory: maximumMemory,
+            history: [],
+            trigger: .object([
+                "kind": .string("userMessage"),
+                "text": .string("x"),
+            ]),
+            attachments: []
+        )
+    }
+}
+
+public enum CoachContextComponent: String, CaseIterable, Codable, Hashable, Sendable {
+    case profile
+    case memory
+    case history
+    case trigger
+    case framing
+    case inlineTranscripts
+    case onDemandExchange
+    case responseReserve
+    case safetyMargin
+}
+
+public struct CoachContextComponentCost: Equatable, Sendable {
+    public let utf8ByteCount: Int
+    public let estimatedTokenCount: Int
+
+    public init(utf8ByteCount: Int, estimatedTokenCount: Int) {
+        self.utf8ByteCount = utf8ByteCount
+        self.estimatedTokenCount = estimatedTokenCount
+    }
+}
+
+public struct CanonicalCoachExchange: Equatable, Sendable {
+    public let request: Data
+    public let transcriptReadRequest: Data?
+    public let transcriptReadResponse: Data?
+    /// Complete framed provider messages in context order. Message boundaries
+    /// are semantically significant and must not be collapsed by an adapter.
+    public let modelInputFrames: [Data]
+    /// A byte-count/debug projection only; this is not itself a provider payload.
+    public let completeModelInput: Data
+
+    public init(
+        request: Data,
+        transcriptReadRequest: Data?,
+        transcriptReadResponse: Data?,
+        modelInputFrames: [Data],
+        completeModelInput: Data
+    ) {
+        self.request = request
+        self.transcriptReadRequest = transcriptReadRequest
+        self.transcriptReadResponse = transcriptReadResponse
+        self.modelInputFrames = modelInputFrames
+        self.completeModelInput = completeModelInput
+    }
+}
+
+public struct CoachContextEstimate: Equatable, Sendable {
+    /// The authoritative whole-envelope estimate used for admission.
+    public let completeInputTokens: Int
+    public let inputCeilingTokens: Int
+    public let reservedResponseTokens: Int
+    public let safetyMarginTokens: Int
+    public let totalContextTokens: Int
+    public let responseCollectorByteCeiling: Int
+    public let fits: Bool
+    public let componentCosts: [CoachContextComponent: CoachContextComponentCost]
+    public let exchange: CanonicalCoachExchange
+    public let estimatorIdentifier: String
+    public let estimatorMode: CoachTokenEstimateMode
+
+    public init(
+        completeInputTokens: Int,
+        inputCeilingTokens: Int,
+        reservedResponseTokens: Int,
+        safetyMarginTokens: Int,
+        totalContextTokens: Int,
+        responseCollectorByteCeiling: Int,
+        fits: Bool,
+        componentCosts: [CoachContextComponent: CoachContextComponentCost],
+        exchange: CanonicalCoachExchange,
+        estimatorIdentifier: String,
+        estimatorMode: CoachTokenEstimateMode
+    ) {
+        self.completeInputTokens = completeInputTokens
+        self.inputCeilingTokens = inputCeilingTokens
+        self.reservedResponseTokens = reservedResponseTokens
+        self.safetyMarginTokens = safetyMarginTokens
+        self.totalContextTokens = totalContextTokens
+        self.responseCollectorByteCeiling = responseCollectorByteCeiling
+        self.fits = fits
+        self.componentCosts = componentCosts
+        self.exchange = exchange
+        self.estimatorIdentifier = estimatorIdentifier
+        self.estimatorMode = estimatorMode
+    }
+}
+
+public enum CoachContextEstimationError: Error, Equatable {
+    case duplicateSessionTranscriptHandle
+    case invalidDescriptor(CoachProviderDescriptorValidationError)
+    case integerOverflow
+}
+
+public struct CoachContextPlanner: Sendable {
+    public init() {}
+
+    public func estimate(
+        _ context: PreparedCoachContext,
+        descriptor: CoachProviderDescriptor,
+        policy: CoachProviderEstimationPolicy
+    ) throws -> CoachContextEstimate {
+        if let descriptorError = basicValidationError(
+            descriptor: descriptor,
+            policy: policy
+        ) {
+            throw CoachContextEstimationError.invalidDescriptor(descriptorError)
+        }
+
+        let prepared = try buildSegments(context: context, framing: policy.framing)
+        let exchange = CanonicalCoachExchange(
+            request: prepared.request,
+            transcriptReadRequest: prepared.transcriptReadRequest,
+            transcriptReadResponse: prepared.transcriptReadResponse,
+            modelInputFrames: prepared.tokenizationUnits,
+            completeModelInput: prepared.completeInput
+        )
+
+        var completeInputTokens = 0
+        for unit in prepared.tokenizationUnits {
+            completeInputTokens = try checkedAdd(
+                completeInputTokens,
+                policy.tokenEstimator.tokenCount(forUTF8: unit)
+            )
+        }
+        completeInputTokens = try checkedAdd(
+            completeInputTokens,
+            policy.framing.initialRequestHiddenTokens
+        )
+        if prepared.transcriptReadRequest != nil {
+            completeInputTokens = try checkedAdd(
+                completeInputTokens,
+                policy.framing.transcriptReadExchangeHiddenTokens
+            )
+        }
+
+        let reservedAndMargin = try checkedAdd(
+            descriptor.contextBudget.responseReservedTokens,
+            descriptor.contextBudget.safetyMarginTokens
+        )
+        let inputCeiling = descriptor.contextBudget.contextWindowTokens - reservedAndMargin
+        let totalContextTokens = try checkedAdd(completeInputTokens, reservedAndMargin)
+
+        var componentCosts: [CoachContextComponent: CoachContextComponentCost] = [:]
+        for component in CoachContextComponent.allCases {
+            switch component {
+            case .responseReserve:
+                componentCosts[component] = CoachContextComponentCost(
+                    utf8ByteCount: 0,
+                    estimatedTokenCount: descriptor.contextBudget.responseReservedTokens
+                )
+            case .safetyMargin:
+                componentCosts[component] = CoachContextComponentCost(
+                    utf8ByteCount: 0,
+                    estimatedTokenCount: descriptor.contextBudget.safetyMarginTokens
+                )
+            default:
+                let data = prepared.componentData[component, default: Data()]
+                var tokens = try policy.tokenEstimator.tokenCount(forUTF8: data)
+                if component == .framing {
+                    tokens = try checkedAdd(tokens, policy.framing.initialRequestHiddenTokens)
+                    if prepared.transcriptReadRequest != nil {
+                        tokens = try checkedAdd(
+                            tokens,
+                            policy.framing.transcriptReadExchangeHiddenTokens
+                        )
+                    }
+                }
+                componentCosts[component] = CoachContextComponentCost(
+                    utf8ByteCount: data.count,
+                    estimatedTokenCount: tokens
+                )
+            }
+        }
+
+        return CoachContextEstimate(
+            completeInputTokens: completeInputTokens,
+            inputCeilingTokens: inputCeiling,
+            reservedResponseTokens: descriptor.contextBudget.responseReservedTokens,
+            safetyMarginTokens: descriptor.contextBudget.safetyMarginTokens,
+            totalContextTokens: totalContextTokens,
+            responseCollectorByteCeiling: policy.responseCollectorByteCeiling,
+            fits: completeInputTokens <= inputCeiling,
+            componentCosts: componentCosts,
+            exchange: exchange,
+            estimatorIdentifier: policy.tokenEstimator.identifier,
+            estimatorMode: policy.tokenEstimator.mode
+        )
+    }
+
+    private func buildSegments(
+        context: PreparedCoachContext,
+        framing: CoachProviderFraming
+    ) throws -> PreparedSegments {
+        let history = CanonicalJSON.serialize(.array(context.history))
+        let memory = CanonicalJSON.serialize(context.memory)
+        let profile = CanonicalJSON.serialize(context.profile)
+        let trigger = CanonicalJSON.serialize(context.trigger)
+
+        var requestSegments: [LabeledSegment] = [
+            LabeledSegment(.framing, Data("{\"conversation\":{\"history\":".utf8)),
+            LabeledSegment(.history, history),
+            LabeledSegment(.framing, Data(",\"memory\":".utf8)),
+            LabeledSegment(.memory, memory),
+            LabeledSegment(.framing, Data(",\"trigger\":".utf8)),
+            LabeledSegment(.trigger, trigger),
+            LabeledSegment(.framing, Data("},\"profile\":".utf8)),
+            LabeledSegment(.profile, profile),
+            LabeledSegment(.framing, Data(",\"sessionAttachments\":[".utf8)),
+        ]
+
+        var handles: [String] = []
+        var disclosures: [CanonicalJSONValue] = []
+        var seenHandles: Set<String> = []
+        for (index, attachment) in context.attachments.enumerated() {
+            if index > 0 {
+                requestSegments.append(LabeledSegment(.framing, Data(",".utf8)))
+            }
+            switch attachment {
+            case let .inline(requestValue):
+                requestSegments.append(
+                    LabeledSegment(.inlineTranscripts, CanonicalJSON.serialize(requestValue))
+                )
+            case let .onDemand(requestValue, handle, disclosure):
+                guard seenHandles.insert(handle).inserted else {
+                    throw CoachContextEstimationError.duplicateSessionTranscriptHandle
+                }
+                requestSegments.append(
+                    LabeledSegment(.onDemandExchange, CanonicalJSON.serialize(requestValue))
+                )
+                handles.append(handle)
+                disclosures.append(disclosure)
+            }
+        }
+        requestSegments.append(LabeledSegment(.framing, Data("]}".utf8)))
+
+        let request = joined(requestSegments)
+        let canonicalRequest = CanonicalJSON.serialize(
+            requestValue(context: context)
+        )
+        precondition(request == canonicalRequest, "segmented request must remain canonical")
+
+        var initialRequestSegments: [LabeledSegment] = [
+            LabeledSegment(.framing, framing.initialRequestPrefix),
+        ]
+        initialRequestSegments.append(contentsOf: requestSegments)
+        initialRequestSegments.append(LabeledSegment(.framing, framing.initialRequestSuffix))
+        var completeSegments = initialRequestSegments
+        var tokenizationUnits = [joined(initialRequestSegments)]
+
+        var readRequest: Data?
+        var readResponse: Data?
+        if !handles.isEmpty {
+            let requestValue = CanonicalJSONValue.object([
+                "sessionTranscriptHandles": .array(handles.map(CanonicalJSONValue.string)),
+            ])
+            let responseValue = CanonicalJSONValue.object([
+                "kind": .string("complete"),
+                "transcripts": .array(disclosures),
+            ])
+            let serializedRequest = CanonicalJSON.serialize(requestValue)
+            let serializedResponse = CanonicalJSON.serialize(responseValue)
+            readRequest = serializedRequest
+            readResponse = serializedResponse
+            let readRequestSegments = [
+                LabeledSegment(.framing, framing.transcriptReadRequestPrefix),
+                LabeledSegment(.onDemandExchange, serializedRequest),
+                LabeledSegment(.framing, framing.transcriptReadRequestSuffix),
+            ]
+            let readResponseSegments = [
+                LabeledSegment(.framing, framing.transcriptReadResponsePrefix),
+                LabeledSegment(.onDemandExchange, serializedResponse),
+                LabeledSegment(.framing, framing.transcriptReadResponseSuffix),
+            ]
+            completeSegments.append(contentsOf: readRequestSegments)
+            completeSegments.append(contentsOf: readResponseSegments)
+            tokenizationUnits.append(joined(readRequestSegments))
+            tokenizationUnits.append(joined(readResponseSegments))
+        }
+
+        var componentData: [CoachContextComponent: Data] = [:]
+        for segment in completeSegments {
+            componentData[segment.component, default: Data()].append(segment.data)
+        }
+
+        return PreparedSegments(
+            request: request,
+            transcriptReadRequest: readRequest,
+            transcriptReadResponse: readResponse,
+            completeInput: joined(completeSegments),
+            tokenizationUnits: tokenizationUnits,
+            componentData: componentData
+        )
+    }
+
+    private func requestValue(context: PreparedCoachContext) -> CanonicalJSONValue {
+        let attachments = context.attachments.map { attachment in
+            switch attachment {
+            case let .inline(requestValue):
+                requestValue
+            case let .onDemand(requestValue, _, _):
+                requestValue
+            }
+        }
+        return .object([
+            "profile": context.profile,
+            "conversation": .object([
+                "history": .array(context.history),
+                "memory": context.memory,
+                "trigger": context.trigger,
+            ]),
+            "sessionAttachments": .array(attachments),
+        ])
+    }
+}
+
+public enum CoachProviderDescriptorValidationError: Error, Equatable, Sendable {
+    case emptyDisplayName
+    case emptyProviderIdentifier
+    case contextWindowMustBePositive
+    case responseReserveMustBePositive
+    case safetyMarginMustBeNonnegative
+    case coachMemoryMaximumMustBePositive
+    case responseCollectorByteCeilingMustBePositive
+    case hiddenFramingTokensMustBeNonnegative
+    case reserveAndSafetyMarginReachContextWindow
+    case invalidMaximumMemoryFixture
+    case maximumMemoryFixtureTokenMismatch(declared: Int, measured: Int)
+    case maximumMemoryDoesNotFitMinimumRequest(required: Int, ceiling: Int)
+    case maximumMemoryDoesNotFitMinimumResponseTokens(required: Int, ceiling: Int)
+    case maximumMemoryDoesNotFitResponseCollectorBytes(required: Int, ceiling: Int)
+    case integerOverflow
+}
+
+public struct QualifiedCoachProviderDescriptor: Equatable, Sendable {
+    public let descriptor: CoachProviderDescriptor
+    public let providerIdentifier: String
+    public let estimatorIdentifier: String
+    public let estimatorMode: CoachTokenEstimateMode
+    public let inputCeilingTokens: Int
+    public let maximumMemoryTokens: Int
+    public let minimumRequestWithMaximumMemoryTokens: Int
+    public let minimumResponseWithMaximumMemoryTokens: Int
+    public let minimumResponseWithMaximumMemoryBytes: Int
+    public let responseCollectorByteCeiling: Int
+
+    public init(
+        descriptor: CoachProviderDescriptor,
+        providerIdentifier: String,
+        estimatorIdentifier: String,
+        estimatorMode: CoachTokenEstimateMode,
+        inputCeilingTokens: Int,
+        maximumMemoryTokens: Int,
+        minimumRequestWithMaximumMemoryTokens: Int,
+        minimumResponseWithMaximumMemoryTokens: Int,
+        minimumResponseWithMaximumMemoryBytes: Int,
+        responseCollectorByteCeiling: Int
+    ) {
+        self.descriptor = descriptor
+        self.providerIdentifier = providerIdentifier
+        self.estimatorIdentifier = estimatorIdentifier
+        self.estimatorMode = estimatorMode
+        self.inputCeilingTokens = inputCeilingTokens
+        self.maximumMemoryTokens = maximumMemoryTokens
+        self.minimumRequestWithMaximumMemoryTokens = minimumRequestWithMaximumMemoryTokens
+        self.minimumResponseWithMaximumMemoryTokens = minimumResponseWithMaximumMemoryTokens
+        self.minimumResponseWithMaximumMemoryBytes = minimumResponseWithMaximumMemoryBytes
+        self.responseCollectorByteCeiling = responseCollectorByteCeiling
+    }
+}
+
+public struct CoachProviderDescriptorQualifier: Sendable {
+    private let planner: CoachContextPlanner
+
+    public init(planner: CoachContextPlanner = CoachContextPlanner()) {
+        self.planner = planner
+    }
+
+    /// Validates the cross-field invariants that JSON Schema cannot express.
+    ///
+    /// `maximumMemory` is a provider qualification fixture and must measure exactly
+    /// to the descriptor's declared Memory ceiling. This prevents qualification
+    /// with a conveniently smaller snapshot.
+    public func qualify(
+        descriptor: CoachProviderDescriptor,
+        policy: CoachProviderEstimationPolicy,
+        maximumMemory: CanonicalJSONValue
+    ) throws -> QualifiedCoachProviderDescriptor {
+        if let error = basicValidationError(descriptor: descriptor, policy: policy) {
+            throw error
+        }
+        guard isStructurallyValidCoachMemory(maximumMemory) else {
+            throw CoachProviderDescriptorValidationError.invalidMaximumMemoryFixture
+        }
+
+        let serializedMemory = CanonicalJSON.serialize(maximumMemory)
+        let memoryTokens = try policy.tokenEstimator.tokenCount(forUTF8: serializedMemory)
+        guard memoryTokens == descriptor.coachMemoryMaxTokens else {
+            throw CoachProviderDescriptorValidationError.maximumMemoryFixtureTokenMismatch(
+                declared: descriptor.coachMemoryMaxTokens,
+                measured: memoryTokens
+            )
+        }
+
+        let requestEstimate = try planner.estimate(
+            .minimumRequest(maximumMemory: maximumMemory),
+            descriptor: descriptor,
+            policy: policy
+        )
+        guard requestEstimate.fits else {
+            throw CoachProviderDescriptorValidationError.maximumMemoryDoesNotFitMinimumRequest(
+                required: requestEstimate.completeInputTokens,
+                ceiling: requestEstimate.inputCeilingTokens
+            )
+        }
+
+        let minimumResponse = CanonicalJSON.serialize(
+            .object(["newMemory": maximumMemory])
+        )
+        var framedResponse = Data()
+        framedResponse.append(policy.framing.minimumResponsePrefix)
+        framedResponse.append(minimumResponse)
+        framedResponse.append(policy.framing.minimumResponseSuffix)
+        var responseTokens = try policy.tokenEstimator.tokenCount(forUTF8: framedResponse)
+        do {
+            responseTokens = try checkedAdd(
+                responseTokens,
+                policy.framing.minimumResponseHiddenTokens
+            )
+        } catch {
+            throw CoachProviderDescriptorValidationError.integerOverflow
+        }
+
+        guard responseTokens <= descriptor.contextBudget.responseReservedTokens else {
+            throw CoachProviderDescriptorValidationError
+                .maximumMemoryDoesNotFitMinimumResponseTokens(
+                    required: responseTokens,
+                    ceiling: descriptor.contextBudget.responseReservedTokens
+                )
+        }
+        let maximumMemoryBytes: Int
+        let maximumResponseBytes: Int
+        do {
+            maximumMemoryBytes = try checkedMultiply(
+                descriptor.coachMemoryMaxTokens,
+                policy.tokenEstimator.maximumUTF8BytesPerToken
+            )
+            let responseWrapperBytes = minimumResponse.count - serializedMemory.count
+            maximumResponseBytes = try checkedAdd(responseWrapperBytes, maximumMemoryBytes)
+        } catch {
+            throw CoachProviderDescriptorValidationError.integerOverflow
+        }
+        let requiredCollectorBytes = max(minimumResponse.count, maximumResponseBytes)
+        guard requiredCollectorBytes <= policy.responseCollectorByteCeiling else {
+            throw CoachProviderDescriptorValidationError
+                .maximumMemoryDoesNotFitResponseCollectorBytes(
+                    required: requiredCollectorBytes,
+                    ceiling: policy.responseCollectorByteCeiling
+                )
+        }
+
+        return QualifiedCoachProviderDescriptor(
+            descriptor: descriptor,
+            providerIdentifier: policy.providerIdentifier,
+            estimatorIdentifier: policy.tokenEstimator.identifier,
+            estimatorMode: policy.tokenEstimator.mode,
+            inputCeilingTokens: requestEstimate.inputCeilingTokens,
+            maximumMemoryTokens: memoryTokens,
+            minimumRequestWithMaximumMemoryTokens: requestEstimate.completeInputTokens,
+            minimumResponseWithMaximumMemoryTokens: responseTokens,
+            minimumResponseWithMaximumMemoryBytes: requiredCollectorBytes,
+            responseCollectorByteCeiling: policy.responseCollectorByteCeiling
+        )
+    }
+}
+
+private struct LabeledSegment {
+    let component: CoachContextComponent
+    let data: Data
+
+    init(_ component: CoachContextComponent, _ data: Data) {
+        self.component = component
+        self.data = data
+    }
+}
+
+private struct PreparedSegments {
+    let request: Data
+    let transcriptReadRequest: Data?
+    let transcriptReadResponse: Data?
+    let completeInput: Data
+    let tokenizationUnits: [Data]
+    let componentData: [CoachContextComponent: Data]
+}
+
+private func joined(_ segments: [LabeledSegment]) -> Data {
+    var result = Data()
+    result.reserveCapacity(segments.reduce(0) { $0 + $1.data.count })
+    for segment in segments {
+        result.append(segment.data)
+    }
+    return result
+}
+
+private func checkedAdd(_ lhs: Int, _ rhs: Int) throws -> Int {
+    let result = lhs.addingReportingOverflow(rhs)
+    guard !result.overflow else {
+        throw CoachContextEstimationError.integerOverflow
+    }
+    return result.partialValue
+}
+
+private func checkedMultiply(_ lhs: Int, _ rhs: Int) throws -> Int {
+    let result = lhs.multipliedReportingOverflow(by: rhs)
+    guard !result.overflow else {
+        throw CoachContextEstimationError.integerOverflow
+    }
+    return result.partialValue
+}
+
+private func basicValidationError(
+    descriptor: CoachProviderDescriptor,
+    policy: CoachProviderEstimationPolicy
+) -> CoachProviderDescriptorValidationError? {
+    guard !descriptor.displayName.isEmpty else { return .emptyDisplayName }
+    guard !policy.providerIdentifier.isEmpty else { return .emptyProviderIdentifier }
+    guard descriptor.contextBudget.contextWindowTokens > 0 else {
+        return .contextWindowMustBePositive
+    }
+    guard descriptor.contextBudget.responseReservedTokens > 0 else {
+        return .responseReserveMustBePositive
+    }
+    guard descriptor.contextBudget.safetyMarginTokens >= 0 else {
+        return .safetyMarginMustBeNonnegative
+    }
+    guard descriptor.coachMemoryMaxTokens > 0 else {
+        return .coachMemoryMaximumMustBePositive
+    }
+    guard policy.responseCollectorByteCeiling > 0 else {
+        return .responseCollectorByteCeilingMustBePositive
+    }
+    let hiddenCounts = [
+        policy.framing.initialRequestHiddenTokens,
+        policy.framing.transcriptReadExchangeHiddenTokens,
+        policy.framing.minimumResponseHiddenTokens,
+    ]
+    guard hiddenCounts.allSatisfy({ $0 >= 0 }) else {
+        return .hiddenFramingTokensMustBeNonnegative
+    }
+
+    let reserveAndMargin = descriptor.contextBudget.responseReservedTokens
+        .addingReportingOverflow(descriptor.contextBudget.safetyMarginTokens)
+    guard !reserveAndMargin.overflow else { return .integerOverflow }
+    guard reserveAndMargin.partialValue < descriptor.contextBudget.contextWindowTokens else {
+        return .reserveAndSafetyMarginReachContextWindow
+    }
+    return nil
+}
+
+private func isStructurallyValidCoachMemory(_ value: CanonicalJSONValue) -> Bool {
+    guard case let .object(fields) = value,
+          fields.count == 2,
+          case .string = fields["generalNotes"],
+          case let .array(summaries)? = fields["sessionSummaries"]
+    else {
+        return false
+    }
+
+    return summaries.allSatisfy { summary in
+        guard case let .object(summaryFields) = summary,
+              summaryFields.count == 2,
+              case let .string(attachmentID)? = summaryFields["sessionAttachmentId"],
+              !attachmentID.isEmpty,
+              case let .string(notes)? = summaryFields["notes"],
+              !notes.isEmpty
+        else {
+            return false
+        }
+        return true
+    }
+}

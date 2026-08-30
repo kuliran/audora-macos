@@ -54,8 +54,9 @@ final class QualificationHarnessTests: XCTestCase {
         let report = QualificationSuiteReport(cases: [])
 
         XCTAssertFalse(report.fullyQualifiedForProduction)
-        XCTAssertEqual(report.externalLimitations.count, 3)
+        XCTAssertEqual(report.externalLimitations.count, 4)
         XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("max-output-token") }))
+        XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("exact tokenizer") }))
         XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("view_image") }))
     }
 
