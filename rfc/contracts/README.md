@@ -4,7 +4,10 @@
 the provider aggregate in [`coach-provider.tsp`](coach-provider.tsp), the
 portable Library document roots in
 [`portable-library.tsp`](portable-library.tsp), and the Library lifecycle
-scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp).
+scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp). The
+portable imported-Session roots and normalization vectors live in
+[`audio-import.tsp`](audio-import.tsp); their Application scenario envelope is
+[`audio-import-scenario.tsp`](audio-import-scenario.tsp).
 
 The provider source is separated by audience:
 
@@ -22,18 +25,24 @@ at runtime.
 - [`CoachProviderDescriptor.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json)
 - [`CoachRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json)
 - [`CoachResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json)
+- [`AudioImportFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioImportFeatureScenario.json)
+- [`AudioManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json)
+- [`AudioNormalizationVectors.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioNormalizationVectors.json)
 - [`LibraryFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json)
 - [`LibraryManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json)
 - [`LibraryPreferences.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json)
 - [`ProfileHead.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json)
 - [`ReadSessionTranscriptsRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json)
 - [`ReadSessionTranscriptsResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json)
+- [`SessionManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionManifest.json)
 
 | Root schema | Direction | Coach-visible instance? |
 | --- | --- | --- |
 | `CoachProviderDescriptor` | Application configuration | No |
 | `CoachRequest` | Application -> coach | Yes |
 | `CoachResponse` | Coach -> Application | Yes |
+| `AudioManifest` | Portable imported-Session storage | No |
+| `SessionManifest` | Portable Session storage | No |
 | `LibraryManifest` | Portable Library storage | No |
 | `LibraryPreferences` | Portable Library storage | No |
 | `ProfileHead` | Portable Library storage | No |
@@ -54,6 +63,28 @@ relaunch restoration, and newer-root read-only behavior. The
 [`library-launch-no-selection.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/library-launch-no-selection.v1.json)
 fixture describes launch without a saved Library locator. Portable implementations
 consume all scenarios through their package resources.
+
+## Audio import contracts
+
+`AudioManifest` is a sealed union over the three v1 container/codec pairs:
+PCM WAV, AAC-LC M4A, and ALAC M4A. It retains the exact original artifact by a
+portable relative path and binds the canonical `audio/audio.wav` artifact. The
+canonical representation is 16 kHz, mono, signed 16-bit little-endian PCM; its
+frame count is authoritative and is limited to 43,200,000 frames. Duration uses
+integer ceiling from that frame count and cannot exceed 2,700,000 ms.
+
+`SessionManifest` binds the exact `audio.json` bytes by SHA-256 and starts with
+no transcript revisions. Cross-field relationships that JSON Schema cannot
+express—canonical WAV length, exact frame-to-duration arithmetic, artifact
+hashes, and cross-root hash binding—are enforced by Domain and Infrastructure
+candidate validation before the Session directory becomes authoritative.
+
+The checked-in normalization vectors lock stereo arithmetic mean, saturating
+round-to-nearest-away signed-16 quantization, and the exact duration boundary.
+Audio-import scenarios cover success, user cancellation, normalization and
+candidate failures, precommit install failure, and the postcommit reopen
+boundary. Portable feature runners consume those fixtures without importing any
+macOS framework.
 
 `CoachProviderDescriptor` is app-only configuration. JSON Schema validates each
 field's shape. `displayName` is a bounded Presentation label for provider health
@@ -94,7 +125,11 @@ pnpm contracts:check
 The compiler and JSON Schema emitter are pinned in `package.json`. The resolved
 dependency graph is committed in `pnpm-lock.yaml`. `generated-json-files.txt`
 enumerates the canonical package-resource schemas and makes the check fail when
-generated roots change unexpectedly or their committed bytes drift.
+generated roots change unexpectedly or their committed bytes drift. The same
+check runs every checked-in audio-import scenario and golden through the
+generated Draft 2020-12 schemas. Rejected fixtures declare the schema boundary
+they cross; cross-root relationships that JSON Schema cannot express continue
+through the descriptor-bound Swift persistence tests.
 
 ## Request context
 

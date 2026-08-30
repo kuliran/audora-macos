@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "stereoRule": "arithmeticMean",
+  "quantizerVersion": "s16-round-away-saturate-v1",
+  "downmixVectors": [
+    { "left": 1.0, "right": -1.0, "output": 0.0 },
+    { "left": 0.75, "right": 0.25, "output": 0.5 },
+    { "left": -0.5, "right": -0.25, "output": -0.375 }
+  ],
+  "quantizationVectors": [
+    { "input": -2.0, "output": -32768 },
+    { "input": -1.0, "output": -32768 },
+    { "input": -0.5, "output": -16384 },
+    { "input": -0.0000152587890625, "output": -1 },
+    { "input": 0.0, "output": 0 },
+    { "input": 0.0000152587890625, "output": 1 },
+    { "input": 0.5, "output": 16384 },
+    { "input": 0.99999, "output": 32767 },
+    { "input": 1.0, "output": 32767 },
+    { "input": 2.0, "output": 32767 }
+  ],
+  "frameDurationVectors": [
+    { "frameCount": 1, "durationMs": 1 },
+    { "frameCount": 16000, "durationMs": 1000 },
+    { "frameCount": 16001, "durationMs": 1001 },
+    { "frameCount": 43200000, "durationMs": 2700000 }
+  ]
+}

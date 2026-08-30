@@ -20,19 +20,36 @@ version one.
 
 Playback, transcription, words, pauses, and annotations use the same
 zero-based canonical timeline. The canonical analysis artifact is 16 kHz, mono,
-linear PCM WAV unless benchmark evidence justifies changing the format.
+signed 16-bit little-endian linear PCM WAV. Version one identifies its pipeline
+as `audora-avfoundation` version 1: stereo is mixed as `(left + right) / 2` in
+`Double`, sample-rate conversion uses one long-lived `AVAudioConverter` with the
+normal/max-quality/normal-prime settings, and quantization multiplies by 32,768,
+rounds ties away from zero, then saturates to the signed-16 range.
+
+The decoded canonical frame count is authoritative. Version one accepts at most
+43,200,000 frames, including that exact boundary, and calculates duration as
+`ceil(frameCount * 1000 / 16000)` with integer arithmetic. It does not use a
+container's rounded duration to decide the final boundary.
 
 For imports:
 
 1. Copy the original byte-for-byte into the Session's partial audio directory;
    version one retains it for the life of the Session.
-2. Inspect its duration, channel count, sample format, and decodeability.
-3. Reject inputs longer than 45 minutes, unsupported channel layouts, and files
+2. Open that retained copy through the Library's anchored, no-follow descriptor
+   capability and inspect and decode from that same file identity; pathname
+   replacement cannot redirect the decoder after validation.
+3. Inspect its duration, channel count, sample format, channel layout, and
+   decodeability.
+4. Reject inputs longer than 45 minutes, unsupported channel layouts, and files
    with more than two channels explicitly.
-4. Decode and deterministically downmix mono or stereo input once to the canonical
+5. Decode and deterministically downmix mono or stereo input once to the canonical
    mono WAV.
-5. Validate duration and readable frames.
-6. Atomically commit the Session with its owned Audio Asset.
+6. Apply container edits and codec priming/trailing trims, normalize the first
+   presented sample to canonical frame zero, and reject discontinuous presented
+   sample buffers instead of silently compressing or extending the timeline.
+7. Validate duration and readable frames.
+8. Revalidate the authoritative Library root and atomically commit the Session
+   with its owned Audio Asset.
 
 Transcription and playback both use the canonical timeline. This avoids M4A codec
 priming/edit-list offsets causing the transcript to appear ahead of playback.

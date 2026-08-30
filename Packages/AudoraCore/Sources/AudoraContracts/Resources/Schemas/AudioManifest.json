@@ -1,0 +1,312 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/AudioManifest.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "acquisitionKind": {
+            "type": "string",
+            "const": "imported"
+        },
+        "original": {
+            "$ref": "#/$defs/OriginalAudioArtifact"
+        },
+        "canonical": {
+            "$ref": "#/$defs/CanonicalAudioArtifact"
+        },
+        "sources": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/ImportedAudioSource"
+            },
+            "minItems": 1,
+            "maxItems": 1
+        },
+        "normalization": {
+            "$ref": "#/$defs/AudioNormalization"
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "acquisitionKind",
+        "original",
+        "canonical",
+        "sources",
+        "normalization"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "$defs": {
+        "OriginalAudioArtifact": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/WAVOriginalAudioArtifact"
+                },
+                {
+                    "$ref": "#/$defs/AACOriginalAudioArtifact"
+                },
+                {
+                    "$ref": "#/$defs/ALACOriginalAudioArtifact"
+                }
+            ]
+        },
+        "CanonicalAudioArtifact": {
+            "type": "object",
+            "properties": {
+                "relativePath": {
+                    "type": "string",
+                    "const": "audio/audio.wav"
+                },
+                "byteCount": {
+                    "$ref": "#/$defs/PositiveByteCount"
+                },
+                "sha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/CanonicalFrameCount"
+                },
+                "durationMs": {
+                    "$ref": "#/$defs/CanonicalDurationMilliseconds"
+                },
+                "container": {
+                    "type": "string",
+                    "const": "wav"
+                },
+                "encoding": {
+                    "type": "string",
+                    "const": "pcmS16LE"
+                },
+                "sampleRateHz": {
+                    "type": "number",
+                    "const": 16000
+                },
+                "channelCount": {
+                    "type": "number",
+                    "const": 1
+                },
+                "bitsPerSample": {
+                    "type": "number",
+                    "const": 16
+                }
+            },
+            "required": [
+                "relativePath",
+                "byteCount",
+                "sha256",
+                "frameCount",
+                "durationMs",
+                "container",
+                "encoding",
+                "sampleRateHz",
+                "channelCount",
+                "bitsPerSample"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ImportedAudioSource": {
+            "type": "object",
+            "properties": {
+                "audioSourceId": {
+                    "$ref": "#/$defs/AudioSourceId"
+                },
+                "role": {
+                    "type": "string",
+                    "const": "microphone"
+                },
+                "timelineOffsetMs": {
+                    "type": "number",
+                    "const": 0
+                }
+            },
+            "required": [
+                "audioSourceId",
+                "role",
+                "timelineOffsetMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioNormalization": {
+            "type": "object",
+            "properties": {
+                "algorithmId": {
+                    "type": "string",
+                    "const": "audora-avfoundation"
+                },
+                "algorithmVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "stereoRule": {
+                    "type": "string",
+                    "const": "arithmeticMean"
+                },
+                "resamplerVersion": {
+                    "type": "string",
+                    "const": "av-audio-converter-normal-max-normal-prime-v1"
+                },
+                "quantizerVersion": {
+                    "type": "string",
+                    "const": "s16-round-away-saturate-v1"
+                }
+            },
+            "required": [
+                "algorithmId",
+                "algorithmVersion",
+                "stereoRule",
+                "resamplerVersion",
+                "quantizerVersion"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "WAVOriginalAudioArtifact": {
+            "type": "object",
+            "properties": {
+                "relativePath": {
+                    "type": "string",
+                    "const": "audio/original.wav"
+                },
+                "container": {
+                    "type": "string",
+                    "const": "wav"
+                },
+                "decodedCodec": {
+                    "type": "string",
+                    "const": "linearPCM"
+                }
+            },
+            "required": [
+                "relativePath",
+                "container",
+                "decodedCodec"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/OriginalAudioArtifactBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AACOriginalAudioArtifact": {
+            "type": "object",
+            "properties": {
+                "relativePath": {
+                    "type": "string",
+                    "const": "audio/original.m4a"
+                },
+                "container": {
+                    "type": "string",
+                    "const": "m4a"
+                },
+                "decodedCodec": {
+                    "type": "string",
+                    "const": "aacLC"
+                }
+            },
+            "required": [
+                "relativePath",
+                "container",
+                "decodedCodec"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/OriginalAudioArtifactBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ALACOriginalAudioArtifact": {
+            "type": "object",
+            "properties": {
+                "relativePath": {
+                    "type": "string",
+                    "const": "audio/original.m4a"
+                },
+                "container": {
+                    "type": "string",
+                    "const": "m4a"
+                },
+                "decodedCodec": {
+                    "type": "string",
+                    "const": "alac"
+                }
+            },
+            "required": [
+                "relativePath",
+                "container",
+                "decodedCodec"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/OriginalAudioArtifactBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PositiveByteCount": {
+            "type": "integer",
+            "minimum": 1
+        },
+        "Sha256Hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+        },
+        "CanonicalFrameCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 43200000
+        },
+        "CanonicalDurationMilliseconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2700000
+        },
+        "AudioSourceId": {
+            "type": "string",
+            "pattern": "^src-0001$"
+        },
+        "OriginalAudioArtifactBase": {
+            "type": "object",
+            "properties": {
+                "byteCount": {
+                    "$ref": "#/$defs/PositiveByteCount"
+                },
+                "sha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                },
+                "sourceSampleRateHz": {
+                    "type": "integer",
+                    "minimum": 8000,
+                    "maximum": 192000
+                },
+                "sourceChannelCount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2
+                }
+            },
+            "required": [
+                "byteCount",
+                "sha256",
+                "sourceSampleRateHz",
+                "sourceChannelCount"
+            ]
+        }
+    }
+}

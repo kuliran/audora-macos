@@ -3,14 +3,19 @@ import SwiftUI
 
 public struct LibraryRootView: View {
     @StateObject private var model: LibraryPresentationModel
+    @StateObject private var audioImportModel: AudioImportPresentationModel
     @Environment(\.openWindow) private var openWindow
     private let windowCoordinator: MainWindowCoordinator
 
     public init(
         feature: any LibraryFeature,
+        audioImportFeature: any AudioImportFeature,
         windowCoordinator: MainWindowCoordinator
     ) {
         _model = StateObject(wrappedValue: LibraryPresentationModel(feature: feature))
+        _audioImportModel = StateObject(
+            wrappedValue: AudioImportPresentationModel(feature: audioImportFeature)
+        )
         self.windowCoordinator = windowCoordinator
     }
 
@@ -49,6 +54,7 @@ public struct LibraryRootView: View {
                 Text(profileDescription(library.profile))
                     .foregroundStyle(.secondary)
                 libraryActions
+                audioImportActions
 
             case .some(.readOnly):
                 ContentUnavailableView(
@@ -74,12 +80,17 @@ public struct LibraryRootView: View {
         }
         .frame(minWidth: 560, minHeight: 360)
         .padding(32)
-        .disabled(model.snapshot?.activity != nil)
         .task {
             windowCoordinator.registerReopenAction {
                 openWindow(id: "library")
             }
             await model.start()
+        }
+        .task {
+            await audioImportModel.start()
+        }
+        .onChange(of: activeLibraryID) {
+            audioImportModel.send(.clearResult)
         }
     }
 
@@ -89,6 +100,47 @@ public struct LibraryRootView: View {
             Button("Choose Another…") { model.send(.chooseExisting) }
             Button("Close Library") { model.send(.close) }
         }
+        .disabled(model.snapshot?.activity != nil || audioImportModel.isImporting)
+    }
+
+    @ViewBuilder
+    private var audioImportActions: some View {
+        switch audioImportModel.snapshot?.status {
+        case nil, .some(.idle):
+            Button("Import Audio…") { audioImportModel.send(.chooseAudio) }
+                .disabled(model.snapshot?.activity != nil)
+
+        case let .some(.succeeded(snapshot)):
+            VStack(spacing: 8) {
+                Text("Audio imported")
+                    .font(.headline)
+                Text(snapshot.session.sessionID.rawValue)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                Button("Import Another…") { audioImportModel.restart() }
+            }
+
+        case let .some(.failed(failure)):
+            VStack(spacing: 8) {
+                Text(audioImportFailureText(failure))
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Try Again") { audioImportModel.restart() }
+                    Button("Dismiss") { audioImportModel.send(.clearResult) }
+                }
+            }
+
+        case let .some(status):
+            VStack(spacing: 8) {
+                ProgressView(audioImportActivityText(status))
+                Button("Cancel") { audioImportModel.send(.cancelImport) }
+            }
+        }
+    }
+
+    private var activeLibraryID: String? {
+        guard case let .active(library) = model.snapshot?.selection else { return nil }
+        return library.libraryID.rawValue
     }
 
     private func profileDescription(_ profile: ActiveLibrarySnapshot.ProfileSummary) -> String {
@@ -124,6 +176,36 @@ public struct LibraryRootView: View {
         case .closeFailed: "The Library could not be closed safely."
         case .multipleExternalOpenRequests: "Open one Library at a time."
         case .externalOpenRequestExpired: "That open request is no longer available."
+        }
+    }
+
+    private func audioImportActivityText(
+        _ status: AudioImportFeatureState.Status
+    ) -> String {
+        switch status {
+        case .selecting: "Selecting audio…"
+        case .copying: "Copying original audio…"
+        case .inspecting: "Checking audio…"
+        case .normalizing: "Creating canonical audio…"
+        case .installing: "Installing Session…"
+        case .idle, .succeeded, .failed: "Importing audio…"
+        }
+    }
+
+    private func audioImportFailureText(_ failure: AudioImportFailure) -> String {
+        switch failure {
+        case .cancelled: "Audio import was cancelled."
+        case .unsupportedMedia: "Choose a supported mono or stereo M4A or WAV file."
+        case .sourceTooLarge: "The selected audio file is too large to import."
+        case .durationExceeded: "Audio must be 45 minutes or shorter."
+        case .malformedMedia, .decodeFailed: "The selected audio could not be decoded."
+        case .nonfiniteSamples: "The decoded audio contains invalid samples."
+        case .insufficientSpace: "There is not enough space in the Library."
+        case .sourceChanged: "The selected audio changed while it was being copied."
+        case .libraryChanged: "The active Library changed before import completed."
+        case .destinationCollision: "A Session with this identity already exists."
+        case .installedNeedsRefresh: "The Session was installed. Reopen the Library to refresh it."
+        case .candidateCorrupt, .writeFailed, .unavailable: "Audio import could not be completed."
         }
     }
 }

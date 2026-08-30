@@ -1,0 +1,39 @@
+{
+  "acquisitionKind": "imported",
+  "canonical": {
+    "bitsPerSample": 16,
+    "byteCount": 50,
+    "channelCount": 1,
+    "container": "wav",
+    "durationMs": 1,
+    "encoding": "pcmS16LE",
+    "frameCount": 3,
+    "relativePath": "audio/audio.wav",
+    "sampleRateHz": 16000,
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "normalization": {
+    "algorithmId": "audora-avfoundation",
+    "algorithmVersion": 1,
+    "quantizerVersion": "s16-round-away-saturate-v1",
+    "resamplerVersion": "av-audio-converter-normal-max-normal-prime-v1",
+    "stereoRule": "arithmeticMean"
+  },
+  "original": {
+    "byteCount": 24,
+    "container": "wav",
+    "decodedCodec": "linearPCM",
+    "relativePath": "audio/original.wav",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceChannelCount": 2,
+    "sourceSampleRateHz": 48000
+  },
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "audioSourceId": "src-0001",
+      "role": "microphone",
+      "timelineOffsetMs": 0
+    }
+  ]
+}

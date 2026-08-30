@@ -71,6 +71,16 @@ and last successful migration. `session.json` is the Session aggregate manifest
 and commit marker. `audio/audio.json` is owned child metadata rather than an
 independent entity.
 
+An imported Session is assembled under one unpredictable
+`staging/publications/<transaction>/<session-id>/` directory. Audora copies the
+original bytes, creates and flushes canonical audio, writes `audio.json`, writes
+`session.json` last, and validates the complete candidate before publication. It
+then installs the whole Session directory into `sessions/` with same-volume
+no-replace rename semantics and flushes that parent. A preexisting destination is
+a collision and is never overwritten or merged. Failures before rename publish
+no Session; a failure reopening after rename reports that the installed Session
+needs refresh and never deletes the committed directory.
+
 ## Persisted schema versions
 
 Only independently persisted root records and envelopes carry `schemaVersion`.

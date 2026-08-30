@@ -36,6 +36,22 @@ public final class AppKitLibraryLocationChooser: LibraryLocationChoosing, @unche
     }
 }
 
+public final class AppKitAudioFileChooser: AudioFileChoosing, @unchecked Sendable {
+    public init() {}
+
+    @MainActor
+    public func chooseAudioFile() async -> URL? {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = ["m4a", "wav"].compactMap {
+            UTType(filenameExtension: $0)
+        }
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+}
+
 public struct SecurityScopedLibraryBookmarks: LibraryBookmarking {
     public init() {}
 
@@ -312,5 +328,23 @@ public struct RandomLibraryIDGenerator: LibraryIDGenerator {
         var generator = SystemRandomNumberGenerator()
         let suffix = String((0..<4).map { _ in Self.crockford.randomElement(using: &generator)! })
         return try! LibraryID("lib-\(compact)-\(suffix)")
+    }
+}
+
+public struct RandomSessionIDGenerator: SessionIDGenerator {
+    private static let crockford = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+    public init() {}
+
+    public func generateSessionID(at instant: UTCInstant) async -> SessionID {
+        let compact = instant.rawValue
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: ":", with: "")
+            .replacingOccurrences(of: ".", with: "")
+        var generator = SystemRandomNumberGenerator()
+        let suffix = String((0..<4).map { _ in
+            Self.crockford.randomElement(using: &generator)!
+        })
+        return try! SessionID("ses-\(compact)-\(suffix)")
     }
 }
