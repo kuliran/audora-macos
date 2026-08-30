@@ -6,33 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		25E42AC02F12550000067344 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 25E42ABF2F12550000067344 /* FluidAudio */; };
-		C56DE0BE2EF38F5E00AB086D /* ConvexMobile in Frameworks */ = {isa = PBXBuildFile; productRef = C56DE0BD2EF38F5E00AB086D /* ConvexMobile */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXFileReference section */
-		25E42AB52F1249FB00067344 /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
-		25E42AB72F1249FC00067344 /* Config.base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.base.xcconfig; sourceTree = "<group>"; };
 		CC5718182E201D8D0042BA88 /* audora.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = audora.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		25E42AB82F1249FC00067344 /* Exceptions for "audora" folder in "audora" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = CC5718172E201D8D0042BA88 /* audora */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		CC57181A2E201D8D0042BA88 /* audora */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				25E42AB82F1249FC00067344 /* Exceptions for "audora" folder in "audora" target */,
-			);
 			path = audora;
 			sourceTree = "<group>";
 		};
@@ -43,8 +23,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				25E42AC02F12550000067344 /* FluidAudio in Frameworks */,
-				C56DE0BE2EF38F5E00AB086D /* ConvexMobile in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -57,8 +35,6 @@
 				CC57181A2E201D8D0042BA88 /* audora */,
 				CC7816BF2E22093900101A90 /* Frameworks */,
 				CC5718192E201D8D0042BA88 /* Products */,
-				25E42AB72F1249FC00067344 /* Config.base.xcconfig */,
-				25E42AB52F1249FB00067344 /* Config.xcconfig */,
 			);
 			sourceTree = "<group>";
 		};
@@ -97,8 +73,6 @@
 			);
 			name = audora;
 			packageProductDependencies = (
-				C56DE0BD2EF38F5E00AB086D /* ConvexMobile */,
-				25E42ABF2F12550000067344 /* FluidAudio */,
 			);
 			productName = audora;
 			productReference = CC5718182E201D8D0042BA88 /* audora.app */;
@@ -129,8 +103,6 @@
 			mainGroup = CC57180F2E201D8D0042BA88;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				C56DE0BC2EF38F5E00AB086D /* XCRemoteSwiftPackageReference "convex-swift" */,
-				25E42ABE2F12550000067344 /* XCRemoteSwiftPackageReference "FluidAudio" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CC5718192E201D8D0042BA88 /* Products */;
@@ -165,7 +137,6 @@
 /* Begin XCBuildConfiguration section */
 		CC5718252E201D8E0042BA88 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 25E42AB72F1249FC00067344 /* Config.base.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -217,7 +188,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -229,7 +200,6 @@
 		};
 		CC5718262E201D8E0042BA88 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 25E42AB72F1249FC00067344 /* Config.base.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -275,7 +245,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = NO;
@@ -291,18 +261,14 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
-				CODE_SIGN_ENTITLEMENTS = audora/audora.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_ASSET_PATHS = "\"audora/Preview Content\"";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = audora/Info.plist;
-				INFOPLIST_KEY_NSCalendarsUsageDescription = "Audora uses your calendar to show upcoming meetings and make it easy to start recording them.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Audora captures microphone audio for transcription. Mic following mode records your microphone ONLY when other apps are actively using it.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Audora records your microphone when you choose to create a speech session.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -310,8 +276,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				MARKETING_VERSION = 0.0.1;
 				ONLY_ACTIVE_ARCH = NO;
-				OTHER_SWIFT_FLAGS = "$(inherited) -D ENABLE_TCC_SPI";
-				PRODUCT_BUNDLE_IDENTIFIER = "$(AUDORA_PRODUCT_BUNDLE_IDENTIFIER)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.audora.local;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -326,18 +291,14 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
-				CODE_SIGN_ENTITLEMENTS = audora/audora.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_ASSET_PATHS = "\"audora/Preview Content\"";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = audora/Info.plist;
-				INFOPLIST_KEY_NSCalendarsUsageDescription = "Audora uses your calendar to show upcoming meetings and make it easy to start recording them.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Audora captures microphone audio for transcription. Mic following mode records your microphone ONLY when other apps are actively using it.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Audora records your microphone when you choose to create a speech session.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -345,8 +306,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				MARKETING_VERSION = 0.0.1;
 				ONLY_ACTIVE_ARCH = YES;
-				OTHER_SWIFT_FLAGS = "$(inherited) -D ENABLE_TCC_SPI";
-				PRODUCT_BUNDLE_IDENTIFIER = "$(AUDORA_PRODUCT_BUNDLE_IDENTIFIER)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.audora.local;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -377,37 +337,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		25E42ABE2F12550000067344 /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
-			requirement = {
-				kind = exactVersion;
-				version = 0.13.5;
-			};
-		};
-		C56DE0BC2EF38F5E00AB086D /* XCRemoteSwiftPackageReference "convex-swift" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/get-convex/convex-swift";
-			requirement = {
-				kind = exactVersion;
-				version = 0.7.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		25E42ABF2F12550000067344 /* FluidAudio */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 25E42ABE2F12550000067344 /* XCRemoteSwiftPackageReference "FluidAudio" */;
-			productName = FluidAudio;
-		};
-		C56DE0BD2EF38F5E00AB086D /* ConvexMobile */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = C56DE0BC2EF38F5E00AB086D /* XCRemoteSwiftPackageReference "convex-swift" */;
-			productName = ConvexMobile;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = CC5718102E201D8D0042BA88 /* Project object */;
 }

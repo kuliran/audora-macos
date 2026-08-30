@@ -1,42 +1,21 @@
-//
-//  ContentView.swift
-//  audora
-//
-//  Created by Owen Gretzinger on 2025-07-10.
-//
-
 import SwiftUI
 
 struct ContentView: View {
-    @EnvironmentObject private var settingsViewModel: SettingsViewModel
-    @State private var showingSettings = false
-    @State private var triggerNewRecording = false
-    @State private var triggerOpenSettings = false
-
     var body: some View {
-        Group {
-            if !settingsViewModel.settings.hasCompletedOnboarding {
-                OnboardingView(settingsViewModel: settingsViewModel)
-            } else {
-                MeetingListView(
-                    settingsViewModel: settingsViewModel,
-                    triggerNewRecording: $triggerNewRecording,
-                    triggerOpenSettings: $triggerOpenSettings
-                )
-                .onAppear {
-                    // No longer restoring auto-recording or mic-following state
-                }
-                .onReceive(NotificationCenter.default.publisher(for: .createNewRecording)) { _ in
-                    triggerNewRecording.toggle()
-                }
-                .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
-                    triggerOpenSettings.toggle()
-                }
-            }
-        }
-    }
-}
+        VStack(spacing: 16) {
+            Image(systemName: "waveform")
+                .font(.system(size: 44, weight: .medium))
+                .foregroundStyle(.tint)
 
-#Preview {
-    ContentView()
+            Text("Audora")
+                .font(.largeTitle.weight(.semibold))
+
+            Text("Your local, native speech library is taking shape.")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(48)
+        .frame(minWidth: 560, minHeight: 360)
+    }
 }
