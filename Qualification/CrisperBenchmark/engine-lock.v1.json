@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
+  "runtime": {
+    "pythonVersion": "3.12.14",
+    "platform": "arm64-apple-macos",
+    "packageLock": "requirements-macos-arm64.lock",
+    "packageLockSha256": "3c13f64a78c85fd4a2e8319989739d3f89c57a4960117ddefffcc9924272ce19"
+  },
+  "engine": {
+    "provider": "crisperwhisper",
+    "package": {
+      "name": "crisperwhisper",
+      "version": "2.0.0",
+      "wheelSha256": "144c22ba84853c292151f73d6c7e7c1021bcdc5231f535ca52d0182034390846",
+      "sourceCommit": "b109acff29f7cbd3793853b3ff5fd1158f38d081"
+    },
+    "backend": "transformers",
+    "device": "mps",
+    "computeType": "float16",
+    "audoraCompatibilityPatchId": null
+  },
+  "model": {
+    "repository": "nyralabs/CrisperWhisper2.0_small",
+    "revision": "bcaecf0a584a1f600d8897fe6032b9e2e56429a7",
+    "licenseReference": "https://huggingface.co/nyralabs/CrisperWhisper2.0_small/blob/4c0619bf87d2d4b7e15e68292dd8402aae4101f8/LICENSE.md",
+    "files": {
+      "LICENSE.md": "c2457a89ec035bccf9ce76f240e1aa4864fef5e7e278b6537a1941649e810ec9",
+      "added_tokens.json": "8fe391c3e28b7187905c636c9283dc074dcc4f4c1a2571cd4ff46563a9ebac53",
+      "config.json": "b2416b6da125c4dd6f82bb795c8ca628333a5b2ac794ca93e0060d482d541fea",
+      "generation_config.json": "6d3620eb703b3ea0c1afecff2cfd50efbf8a0aaf958ea9fe2efc3072060bf209",
+      "merges.txt": "087b991adb6a824ca8a588d1aedd10c27eb57861bb428ef3eb49913390f9d5f8",
+      "model.safetensors": "ecfcbd3d5dddebf9c79cd9ae774b6f6a5d68a500cdbe1b196ce5b2085912ebdf",
+      "normalizer.json": "f8adcae1c635e1df3a0906c4ad0077965d0b14271ef575801395ff3729367a33",
+      "preprocessor_config.json": "f0eb56ab411ce429ad4ce2b659ad69d88beea7ec86e6776be87cedabb4279b18",
+      "special_tokens_map.json": "2042c39e4822a0dfd7fef9733179ac2b9469108e371ea8947b5b2f72f5faa4f2",
+      "tokenizer.json": "53479f2761a4ce747c768a26994e1952736ccfee32baddc2fc44eef8e7228efa",
+      "tokenizer_config.json": "dc13205cf65a43efaf2fe4b51c7eb8dbb6635e4acd143679731af8ae513a8823",
+      "vocab.json": "f34f9127f6e24bab8ad443abc8b16c8fbca48505b927c8551a56b8315bf40d0b"
+    }
+  },
+  "decoding": {
+    "language": "en",
+    "mode": "verbatim",
+    "wordTimestamps": true,
+    "hotwords": null,
+    "longformStrategy": "continuation",
+    "chunkDurationSeconds": 30.0,
+    "strideSeconds": 26.0,
+    "contextWords": 12,
+    "dropWords": 2,
+    "timestampAwareDrop": true,
+    "temperatureFallback": true,
+    "maxNewTokens": 256,
+    "speculativeDecoding": false,
+    "speculativeMode": "strict",
+    "hallucinationMitigation": true,
+    "alignmentHeads": "model-default",
+    "suppressTokens": "model-default"
+  }
+}
