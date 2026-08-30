@@ -61,10 +61,18 @@ public struct TranscriptAudioEvent: Equatable, Sendable {
 }
 
 public struct SessionTranscriptProjection: Equatable, Sendable {
+    /// App-only canonical audio duration used to revalidate provider timing.
+    /// It is deliberately omitted from the provider transcript DTO.
+    public let durationMs: Int
     public let lines: [TranscriptLine]
     public let audioEvents: [TranscriptAudioEvent]
 
-    public init(lines: [TranscriptLine], audioEvents: [TranscriptAudioEvent]) {
+    public init(
+        durationMs: Int,
+        lines: [TranscriptLine],
+        audioEvents: [TranscriptAudioEvent]
+    ) {
+        self.durationMs = durationMs
         self.lines = lines
         self.audioEvents = audioEvents
     }
@@ -614,9 +622,12 @@ private enum RequestParsingError: Error {
 
 private extension SessionTranscriptProjection {
     var isValid: Bool {
+        guard durationMs > 0, durationMs <= Int(Int32.max) else {
+            return false
+        }
         var evidenceIDs: Set<String> = []
         for line in lines {
-            guard line.timeRange.isValid,
+            guard line.timeRange.isStrictlyValid(within: durationMs),
                   !line.text.isEmpty,
                   !line.words.isEmpty
             else {
@@ -626,7 +637,10 @@ private extension SessionTranscriptProjection {
                 guard !word.wordID.isEmpty,
                       !word.text.isEmpty,
                       evidenceIDs.insert(word.wordID).inserted,
-                      word.timeRange?.isValid ?? true
+                      (word.timeRange.map {
+                          $0.isStrictlyValid(within: durationMs)
+                              && line.timeRange.contains($0)
+                      } ?? true)
                 else {
                     return false
                 }
@@ -635,7 +649,7 @@ private extension SessionTranscriptProjection {
         for event in audioEvents {
             guard !event.audioEventID.isEmpty,
                   evidenceIDs.insert(event.audioEventID).inserted,
-                  event.timeRange.isValid
+                  event.timeRange.isStrictlyValid(within: durationMs)
             else {
                 return false
             }
@@ -652,8 +666,12 @@ private extension SessionTranscriptProjection {
 }
 
 private extension TranscriptTimeRange {
-    var isValid: Bool {
-        startMs >= 0 && startMs <= endMs && endMs <= Int(Int32.max)
+    func isStrictlyValid(within durationMs: Int) -> Bool {
+        startMs >= 0 && startMs < endMs && endMs <= durationMs
+    }
+
+    func contains(_ child: TranscriptTimeRange) -> Bool {
+        startMs <= child.startMs && child.endMs <= endMs
     }
 
     var canonicalValue: CanonicalJSONValue {

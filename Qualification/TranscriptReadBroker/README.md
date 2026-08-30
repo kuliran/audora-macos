@@ -43,9 +43,12 @@ revoke(reason:)
 Each grant creates a 256-bit capability and fresh lowercase UUID handles. The
 broker stores only the capability digest and a frozen handle-to-revision map. It
 accepts one unique nonempty ordered subset, stages every exact revision in memory,
-then returns one canonical complete response or no transcript content. A complete
-response may be replayed once for exact transport redelivery; any changed,
-reordered, split, or third request closes the grant.
+revalidates every provider-visible timed range against the app-only canonical
+duration and its enclosing line, then returns one canonical complete response or
+no transcript content. Ranges are strictly half-open (`0 <= startMs < endMs <=
+durationMs`); a Word may remain explicitly untimed. A complete response may be
+replayed once for exact transport redelivery; any changed, reordered, split, or
+third request closes the grant.
 
 The response fit check uses `CompleteToolResponseBudget` from the issue-#6 context
 estimation package. That seam frames and tokenizes the complete canonical tool
@@ -78,8 +81,9 @@ reads, simultaneous reads, cancellation races, all external revocation reasons,
 forbidden data operations, MCP surface reduction, bearer/Host/origin attacks,
 malformed and oversized messages, live loopback closure, partial-body timeout,
 stop-versus-accept and stop-before-receive descriptor-reuse races, overflowing
-configuration/content lengths, contract round trips, and recursive
-provider/report canary scans.
+configuration/content lengths, zero/reversed/negative/out-of-duration timing,
+timed-Word parent containment, contract round trips, and recursive provider/report
+canary scans.
 
 All storage fixtures are synthetic. Storage failures containing transcript, path,
 and token canaries are reduced to the closed `sessionUnavailable` response without
