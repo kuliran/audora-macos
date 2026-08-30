@@ -1,7 +1,11 @@
-# Coach Provider contracts
+# Contracts
 
-[`coach-provider.tsp`](coach-provider.tsp) is the sole compilation entry point.
-The source is separated by audience:
+[`contracts.tsp`](contracts.tsp) is the sole compilation entry point. It imports
+the provider aggregate in [`coach-provider.tsp`](coach-provider.tsp) and the
+portable feature scenario in
+[`library-feature-scenario.tsp`](library-feature-scenario.tsp).
+
+The provider source is separated by audience:
 
 - [`coach-provider-configuration.tsp`](coach-provider-configuration.tsp) contains
   Application-only static provider configuration.
@@ -10,14 +14,16 @@ The source is separated by audience:
 - [`coach-provider-shared.tsp`](coach-provider-shared.tsp) contains shared scalar
   definitions.
 
-TypeSpec compilation emits committed JSON Schemas. The Application does not need
-Node or TypeSpec at runtime.
+TypeSpec compilation emits committed JSON Schemas into the `AudoraContracts`
+package resources. Application and scenario runners do not need Node or TypeSpec
+at runtime.
 
-- [`CoachProviderDescriptor.json`](CoachProviderDescriptor.json)
-- [`CoachRequest.json`](CoachRequest.json)
-- [`CoachResponse.json`](CoachResponse.json)
-- [`ReadSessionTranscriptsRequest.json`](ReadSessionTranscriptsRequest.json)
-- [`ReadSessionTranscriptsResponse.json`](ReadSessionTranscriptsResponse.json)
+- [`CoachProviderDescriptor.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json)
+- [`CoachRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json)
+- [`CoachResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json)
+- [`LibraryFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json)
+- [`ReadSessionTranscriptsRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json)
+- [`ReadSessionTranscriptsResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json)
 
 | Root schema | Direction | Coach-visible instance? |
 | --- | --- | --- |
@@ -30,6 +36,16 @@ Node or TypeSpec at runtime.
 Invocation and Attempt identities, provider idempotency, admission state, token
 estimator identity, Profile integrity hashes, and persisted-record schema versions
 remain outside these provider DTOs.
+
+## Library feature scenarios
+
+`LibraryFeatureScenario` is a versioned, language-neutral description of one
+Application transition. Commands, states, effects, dependency ports, and outcomes
+use literal typed values rather than UI prose or framework-specific data. The
+checked-in
+[`library-launch-no-selection.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/library-launch-no-selection.v1.json)
+fixture describes launch through the temporary no-selected-Library bootstrap
+adapter. Portable implementations consume it through their package resources.
 
 `CoachProviderDescriptor` is app-only configuration. JSON Schema validates each
 field's shape. `displayName` is a bounded Presentation label for provider health
@@ -69,7 +85,8 @@ pnpm contracts:check
 
 The compiler and JSON Schema emitter are pinned in `package.json`. The resolved
 dependency graph is committed in `pnpm-lock.yaml`. `generated-json-files.txt`
-makes the check fail when generated roots change unexpectedly.
+enumerates the canonical package-resource schemas and makes the check fail when
+generated roots change unexpectedly or their committed bytes drift.
 
 ## Request context
 

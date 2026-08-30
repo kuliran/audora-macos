@@ -6,6 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A90A00012F00000000000001 /* AudoraApplication in Frameworks */ = {isa = PBXBuildFile; productRef = A90A00202F00000000000020 /* AudoraApplication */; };
+		A90A00022F00000000000002 /* AudoraMacInfrastructure in Frameworks */ = {isa = PBXBuildFile; productRef = A90A00212F00000000000021 /* AudoraMacInfrastructure */; };
+		A90A00032F00000000000003 /* AudoraMacPresentation in Frameworks */ = {isa = PBXBuildFile; productRef = A90A00222F00000000000022 /* AudoraMacPresentation */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		CC5718182E201D8D0042BA88 /* audora.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = audora.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +29,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A90A00012F00000000000001 /* AudoraApplication in Frameworks */,
+				A90A00022F00000000000002 /* AudoraMacInfrastructure in Frameworks */,
+				A90A00032F00000000000003 /* AudoraMacPresentation in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -73,6 +82,9 @@
 			);
 			name = audora;
 			packageProductDependencies = (
+				A90A00202F00000000000020 /* AudoraApplication */,
+				A90A00212F00000000000021 /* AudoraMacInfrastructure */,
+				A90A00222F00000000000022 /* AudoraMacPresentation */,
 			);
 			productName = audora;
 			productReference = CC5718182E201D8D0042BA88 /* audora.app */;
@@ -103,6 +115,8 @@
 			mainGroup = CC57180F2E201D8D0042BA88;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				A90A00102F00000000000010 /* XCLocalSwiftPackageReference "Packages/AudoraCore" */,
+				A90A00112F00000000000011 /* XCLocalSwiftPackageReference "Packages/AudoraMac" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CC5718192E201D8D0042BA88 /* Products */;
@@ -280,7 +294,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
 		};
@@ -310,7 +324,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};
@@ -336,6 +350,35 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A90A00102F00000000000010 /* XCLocalSwiftPackageReference "Packages/AudoraCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/AudoraCore;
+		};
+		A90A00112F00000000000011 /* XCLocalSwiftPackageReference "Packages/AudoraMac" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/AudoraMac;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A90A00202F00000000000020 /* AudoraApplication */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90A00102F00000000000010 /* XCLocalSwiftPackageReference "Packages/AudoraCore" */;
+			productName = AudoraApplication;
+		};
+		A90A00212F00000000000021 /* AudoraMacInfrastructure */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90A00112F00000000000011 /* XCLocalSwiftPackageReference "Packages/AudoraMac" */;
+			productName = AudoraMacInfrastructure;
+		};
+		A90A00222F00000000000022 /* AudoraMacPresentation */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90A00112F00000000000011 /* XCLocalSwiftPackageReference "Packages/AudoraMac" */;
+			productName = AudoraMacPresentation;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 	};
 	rootObject = CC5718102E201D8D0042BA88 /* Project object */;

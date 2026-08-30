@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "library.launch.no-selection",
+  "initialState": {
+    "kind": "awaitingBootstrap"
+  },
+  "command": {
+    "kind": "start"
+  },
+  "dependencyTrace": [
+    {
+      "port": "libraryBootstrap",
+      "effect": {
+        "kind": "resolveInitialLibrary"
+      },
+      "outcome": {
+        "kind": "noLibrarySelected"
+      }
+    }
+  ],
+  "expectedState": {
+    "kind": "noLibrarySelected"
+  },
+  "expectedEffects": [
+    {
+      "kind": "resolveInitialLibrary"
+    }
+  ]
+}

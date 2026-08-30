@@ -23,11 +23,11 @@ future provider must qualify against the same request, response, evidence, budge
 and failure invariants before it becomes selectable. Presentation never invokes a
 provider or branches on its identity.
 
-[`coach-provider.tsp`](../contracts/coach-provider.tsp) is the TypeSpec compilation
-entry point. App-only provider configuration lives in
-`coach-provider-configuration.tsp`; coach-visible exchanges live in
-`coach-provider-protocol.tsp`. Provider DTOs are transport values and carry no
-persisted-data `schemaVersion`.
+[`contracts.tsp`](../contracts/contracts.tsp) is the TypeSpec compilation entry
+point. The provider aggregate remains in `coach-provider.tsp`; app-only provider
+configuration lives in `coach-provider-configuration.tsp`; coach-visible exchanges
+live in `coach-provider-protocol.tsp`. Provider DTOs are transport values and carry
+no persisted-data `schemaVersion`.
 
 The adapter runs Codex non-interactively with structured output, an empty scoped
 working directory, an allowlisted environment, and no Library path. Browser,
