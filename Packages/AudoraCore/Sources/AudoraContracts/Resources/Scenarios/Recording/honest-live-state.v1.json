@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "recording.honest-live-state",
+  "initialState": { "kind": "unavailable" },
+  "commands": [
+    { "kind": "selectLibrary" },
+    { "kind": "record" }
+  ],
+  "dependencyTrace": [
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "none", "afterCommand": 0 },
+    { "port": "audioCapture", "effect": "begin", "outcome": "started", "afterCommand": 1, "frameCount": 0 },
+    { "port": "audioCapture", "effect": "progress", "outcome": "measured", "afterCommand": 1, "frameCount": 16000, "level": 0.625 }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "elapsedFrames": 16000,
+    "mute": "live",
+    "limitPhase": "ordinary",
+    "confirmation": "none"
+  },
+  "expectedEffects": [
+    { "kind": "captureStarted" },
+    { "kind": "liveLevelMeasured" }
+  ]
+}

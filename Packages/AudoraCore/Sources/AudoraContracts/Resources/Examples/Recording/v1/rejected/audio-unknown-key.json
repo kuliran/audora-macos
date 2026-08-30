@@ -1,0 +1,14 @@
+{
+  "canonicalAudioPath": "audio/audio.wav",
+  "canonicalFormat": {
+    "channelCount": 1,
+    "encoding": "pcmS16LE",
+    "sampleRateHz": 16000
+  },
+  "canonicalSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "frameCount": 16000,
+  "futureField": true,
+  "schemaVersion": 1,
+  "sourceKind": "microphone",
+  "unavailableIntervals": []
+}

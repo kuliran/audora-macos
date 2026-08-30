@@ -1,16 +1,22 @@
 import AudoraApplication
+import AudoraDomain
 import SwiftUI
 
 public struct LibraryRootView: View {
     @StateObject private var model: LibraryPresentationModel
+    @StateObject private var recordingModel: RecordingPresentationModel
     @Environment(\.openWindow) private var openWindow
     private let windowCoordinator: MainWindowCoordinator
 
     public init(
         feature: any LibraryFeature,
+        recordingFeature: any RecordingFeature,
         windowCoordinator: MainWindowCoordinator
     ) {
         _model = StateObject(wrappedValue: LibraryPresentationModel(feature: feature))
+        _recordingModel = StateObject(
+            wrappedValue: RecordingPresentationModel(feature: recordingFeature)
+        )
         self.windowCoordinator = windowCoordinator
     }
 
@@ -49,6 +55,7 @@ public struct LibraryRootView: View {
                 Text(profileDescription(library.profile))
                     .foregroundStyle(.secondary)
                 libraryActions
+                RecordingView(model: recordingModel)
 
             case .some(.readOnly):
                 ContentUnavailableView(
@@ -80,6 +87,21 @@ public struct LibraryRootView: View {
                 openWindow(id: "library")
             }
             await model.start()
+        }
+        .task {
+            await recordingModel.start()
+        }
+        .onChange(of: model.snapshot?.selection, initial: true) { _, selection in
+            switch selection {
+            case let .active(library):
+                recordingModel.selectLibrary(
+                    .writable(LibraryScope(libraryID: library.libraryID))
+                )
+            case .readOnly:
+                recordingModel.selectLibrary(.readOnly)
+            case .awaitingBootstrap, .noLibrarySelected, nil:
+                recordingModel.selectLibrary(.none)
+            }
         }
     }
 
@@ -122,6 +144,7 @@ public struct LibraryRootView: View {
         case .locatorUpdateFailed: "The Library is open, but it may need to be selected again later."
         case .revealFailed: "The Library could not be revealed."
         case .closeFailed: "The Library could not be closed safely."
+        case .recordingInProgress: "Finish or discard the current Recording before changing Libraries."
         case .multipleExternalOpenRequests: "Open one Library at a time."
         case .externalOpenRequestExpired: "That open request is no longer available."
         }

@@ -46,7 +46,7 @@ jobs:
       - run: pnpm contracts:check
 
   macos-library:
-    name: macOS Library adapters / Swift 6.0
+    name: macOS Library + synthetic Recording / Swift 6.0
     runs-on: macos-15
 
     steps:
@@ -56,7 +56,7 @@ jobs:
       - uses: swift-actions/setup-swift@v2
         with:
           swift-version: "6.0"
-      - name: Test macOS Infrastructure and Presentation
+      - name: Test macOS Infrastructure and Presentation (synthetic capture only)
         run: swift test --package-path Packages/AudoraMac --parallel
       - name: Validate package document declaration
         run: plutil -lint audora/Info.plist

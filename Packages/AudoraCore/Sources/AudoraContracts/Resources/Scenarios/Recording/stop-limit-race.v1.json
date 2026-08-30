@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "recording.stop-limit-race",
+  "initialState": { "kind": "unavailable" },
+  "commands": [
+    { "kind": "selectLibrary" },
+    { "kind": "record" },
+    { "kind": "stop" },
+    { "kind": "record" },
+    { "kind": "stop" }
+  ],
+  "dependencyTrace": [
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "none", "afterCommand": 0 },
+    { "port": "audioCapture", "effect": "begin", "outcome": "started", "afterCommand": 1 },
+    { "port": "audioCapture", "effect": "progress", "outcome": "measured", "afterCommand": 1, "frameCount": 8000, "level": 0.2 },
+    { "port": "audioCapture", "effect": "stop", "outcome": "accepted", "afterCommand": 2 },
+    { "port": "audioCapture", "effect": "finishing", "outcome": "userStop", "afterCommand": 2, "frameCount": 8000 },
+    { "port": "audioCapture", "effect": "sealing", "outcome": "userStop", "afterCommand": 2, "frameCount": 8000 },
+    { "port": "audioCapture", "effect": "sealed", "outcome": "userStop", "afterCommand": 2, "frameCount": 8000 },
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "none", "afterCommand": 2 },
+    { "port": "audioCapture", "effect": "finishing", "outcome": "durationLimit", "afterCommand": 2, "frameCount": 43200000 },
+    { "port": "audioCapture", "effect": "sealed", "outcome": "durationLimit", "afterCommand": 2, "frameCount": 43200000 },
+    { "port": "audioCapture", "effect": "begin", "outcome": "started", "afterCommand": 3 },
+    { "port": "audioCapture", "effect": "progress", "outcome": "measured", "afterCommand": 3, "frameCount": 43199999, "level": 0.2 },
+    { "port": "audioCapture", "effect": "finishing", "outcome": "durationLimit", "afterCommand": 3, "frameCount": 43200000 },
+    { "port": "audioCapture", "effect": "sealing", "outcome": "durationLimit", "afterCommand": 4, "frameCount": 43200000 },
+    { "port": "audioCapture", "effect": "sealed", "outcome": "durationLimit", "afterCommand": 4, "frameCount": 43200000 },
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "none", "afterCommand": 4 }
+  ],
+  "expectedState": { "kind": "completed", "notice": "durationLimit" },
+  "expectedEffects": [
+    { "kind": "bothTerminalOrderingsDeterministic" },
+    { "kind": "twoTakesProduceTwoSeals" }
+  ]
+}

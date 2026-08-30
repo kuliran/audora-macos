@@ -7,10 +7,11 @@
   },
   "scripts": {
     "contracts:generate": "tsp compile rfc/contracts",
-    "contracts:check": "tsp format --check \"rfc/contracts/*.tsp\" && sh rfc/contracts/check-generated.sh"
+    "contracts:check": "tsp format --check \"rfc/contracts/*.tsp\" && sh rfc/contracts/check-generated.sh && node rfc/contracts/validate-instances.mjs"
   },
   "devDependencies": {
     "@typespec/compiler": "1.15.0",
-    "@typespec/json-schema": "1.15.0"
+    "@typespec/json-schema": "1.15.0",
+    "ajv": "8.20.0"
   }
 }

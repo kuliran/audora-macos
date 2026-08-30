@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "recording.another-take-new-session",
+  "initialState": { "kind": "unavailable" },
+  "commands": [
+    { "kind": "selectLibrary" },
+    { "kind": "record" },
+    { "kind": "stop" },
+    { "kind": "record" }
+  ],
+  "dependencyTrace": [
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "none", "afterCommand": 0 },
+    { "port": "audioCapture", "effect": "begin", "outcome": "started", "afterCommand": 1 },
+    { "port": "audioCapture", "effect": "progress", "outcome": "measured", "afterCommand": 1, "frameCount": 16000, "level": 0.3 },
+    { "port": "audioCapture", "effect": "stop", "outcome": "accepted", "afterCommand": 2 },
+    { "port": "audioCapture", "effect": "finishing", "outcome": "userStop", "afterCommand": 2, "frameCount": 16000 },
+    { "port": "audioCapture", "effect": "sealing", "outcome": "userStop", "afterCommand": 2, "frameCount": 16000 },
+    { "port": "audioCapture", "effect": "sealed", "outcome": "userStop", "afterCommand": 2, "frameCount": 16000 },
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "none", "afterCommand": 2 },
+    { "port": "audioCapture", "effect": "begin", "outcome": "started", "afterCommand": 3 },
+    { "port": "audioCapture", "effect": "progress", "outcome": "measured", "afterCommand": 3, "frameCount": 4000, "level": 0.5 }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "elapsedFrames": 4000,
+    "mute": "live",
+    "limitPhase": "ordinary",
+    "confirmation": "none"
+  },
+  "expectedEffects": [
+    { "kind": "newRecordingAndSessionIdentity" },
+    { "kind": "firstSessionSealedOnce" }
+  ]
+}

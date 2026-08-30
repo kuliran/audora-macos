@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "recording.live-mute-acknowledgement",
+  "initialState": { "kind": "unavailable" },
+  "commands": [
+    { "kind": "selectLibrary" },
+    { "kind": "record" },
+    { "kind": "mute" },
+    { "kind": "unmute" }
+  ],
+  "dependencyTrace": [
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "none", "afterCommand": 0 },
+    { "port": "audioCapture", "effect": "begin", "outcome": "started", "afterCommand": 1, "frameCount": 0 },
+    { "port": "audioCapture", "effect": "setMuted", "outcome": "accepted", "afterCommand": 2 },
+    { "port": "audioCapture", "effect": "muteChanged", "outcome": "muted", "afterCommand": 2, "frameCount": 16000 },
+    { "port": "audioCapture", "effect": "progress", "outcome": "muted", "afterCommand": 2, "frameCount": 24000 },
+    { "port": "audioCapture", "effect": "setMuted", "outcome": "accepted", "afterCommand": 3 },
+    { "port": "audioCapture", "effect": "muteChanged", "outcome": "live", "afterCommand": 3, "frameCount": 32000 }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "elapsedFrames": 32000,
+    "mute": "live",
+    "limitPhase": "ordinary",
+    "confirmation": "none"
+  },
+  "expectedEffects": [
+    { "kind": "muteCommandsAcknowledged" },
+    { "kind": "mutedLevelUnavailable" }
+  ]
+}

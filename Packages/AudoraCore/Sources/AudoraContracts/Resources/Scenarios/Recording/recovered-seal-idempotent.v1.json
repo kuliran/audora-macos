@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "recording.recovered-seal-idempotent",
+  "initialState": { "kind": "unavailable" },
+  "commands": [
+    { "kind": "selectLibrary" },
+    { "kind": "sealRecovered" },
+    { "kind": "sealRecovered" }
+  ],
+  "dependencyTrace": [
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "committedCleanup", "afterCommand": 0, "frameCount": 16000 },
+    { "port": "audioCapture", "effect": "resolveSeal", "outcome": "sealed", "afterCommand": 1, "frameCount": 16000 },
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "none", "afterCommand": 1 }
+  ],
+  "expectedState": { "kind": "completed" },
+  "expectedEffects": [
+    { "kind": "sameRecoveredSessionPublishedOnce" }
+  ]
+}

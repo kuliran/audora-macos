@@ -1,0 +1,1344 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/RecordingFeatureScenario.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "scenarioId": {
+            "$ref": "#/$defs/RecordingScenarioId"
+        },
+        "initialState": {
+            "$ref": "#/$defs/RecordingScenarioSnapshot"
+        },
+        "commands": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/RecordingScenarioCommand"
+            },
+            "minItems": 1
+        },
+        "dependencyTrace": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/RecordingScenarioDependencyEvent"
+            }
+        },
+        "expectedState": {
+            "$ref": "#/$defs/RecordingScenarioSnapshot"
+        },
+        "expectedEffects": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/RecordingScenarioEffect"
+            },
+            "minItems": 1
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "scenarioId",
+        "initialState",
+        "commands",
+        "dependencyTrace",
+        "expectedState",
+        "expectedEffects"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "Portable Recording feature behavior shared by implementations.",
+    "$defs": {
+        "RecordingScenarioId": {
+            "type": "string",
+            "pattern": "^recording\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "RecordingScenarioSnapshot": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioUnavailableSnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioSelectingLibrarySnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioIdleSnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioStartingSnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioActiveOrdinarySnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioActiveWarningSnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioActiveCountdownSnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioActiveLimitSnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioFinishingSnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioSealingSnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioRecoveryRequiredSnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioResolvingRecoverySnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioCompletedSnapshot"
+                },
+                {
+                    "$ref": "#/$defs/RecordingScenarioFailedSnapshot"
+                }
+            ]
+        },
+        "RecordingScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "selectLibrary"
+                        },
+                        {
+                            "type": "string",
+                            "const": "record"
+                        },
+                        {
+                            "type": "string",
+                            "const": "mute"
+                        },
+                        {
+                            "type": "string",
+                            "const": "unmute"
+                        },
+                        {
+                            "type": "string",
+                            "const": "stop"
+                        },
+                        {
+                            "type": "string",
+                            "const": "cancel"
+                        },
+                        {
+                            "type": "string",
+                            "const": "keepRecording"
+                        },
+                        {
+                            "type": "string",
+                            "const": "discardRecording"
+                        },
+                        {
+                            "type": "string",
+                            "const": "sealRecovered"
+                        },
+                        {
+                            "type": "string",
+                            "const": "discardRecovered"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioDependencyEvent": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/RecordingInspectEmptyDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingInspectItemDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingBeginStartedDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingBeginDeniedDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingMeasuredProgressDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingUnavailableProgressDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingSetMutedDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingMuteChangedDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingNormalizedIntervalsDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingFinishingDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingSealingDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingSealedDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingStopDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingDiscardConfirmedDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingDiscardedDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingRecoveryRequiredDependency"
+                },
+                {
+                    "$ref": "#/$defs/RecordingResolveSealDependency"
+                }
+            ]
+        },
+        "RecordingScenarioEffect": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "captureStarted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "liveLevelMeasured"
+                        },
+                        {
+                            "type": "string",
+                            "const": "muteCommandsAcknowledged"
+                        },
+                        {
+                            "type": "string",
+                            "const": "mutedLevelUnavailable"
+                        },
+                        {
+                            "type": "string",
+                            "const": "normalizedUnavailablePartition"
+                        },
+                        {
+                            "type": "string",
+                            "const": "gapLevelUnavailable"
+                        },
+                        {
+                            "type": "string",
+                            "const": "warningPersistsAfterBoundary"
+                        },
+                        {
+                            "type": "string",
+                            "const": "countdownUsesCeilingAtExactFrames"
+                        },
+                        {
+                            "type": "string",
+                            "const": "sessionSealedExactlyOnce"
+                        },
+                        {
+                            "type": "string",
+                            "const": "persistentDurationLimitExplanation"
+                        },
+                        {
+                            "type": "string",
+                            "const": "neverExceedsMaximumFrames"
+                        },
+                        {
+                            "type": "string",
+                            "const": "noPublicationBeforeCommittedReceipt"
+                        },
+                        {
+                            "type": "string",
+                            "const": "bothTerminalOrderingsDeterministic"
+                        },
+                        {
+                            "type": "string",
+                            "const": "twoTakesProduceTwoSeals"
+                        },
+                        {
+                            "type": "string",
+                            "const": "noDiscardCommand"
+                        },
+                        {
+                            "type": "string",
+                            "const": "timelineContinuesBehindConfirmation"
+                        },
+                        {
+                            "type": "string",
+                            "const": "discardedWithoutSeal"
+                        },
+                        {
+                            "type": "string",
+                            "const": "discardCommandSentOnce"
+                        },
+                        {
+                            "type": "string",
+                            "const": "discardFailureDoesNotClaimIdle"
+                        },
+                        {
+                            "type": "string",
+                            "const": "permissionFailurePublishesNothing"
+                        },
+                        {
+                            "type": "string",
+                            "const": "recoveryOffersSealAndDiscard"
+                        },
+                        {
+                            "type": "string",
+                            "const": "resumeAbsent"
+                        },
+                        {
+                            "type": "string",
+                            "const": "sameRecoveredSessionPublishedOnce"
+                        },
+                        {
+                            "type": "string",
+                            "const": "offerDiscardOnly"
+                        },
+                        {
+                            "type": "string",
+                            "const": "newRecordingAndSessionIdentity"
+                        },
+                        {
+                            "type": "string",
+                            "const": "firstSessionSealedOnce"
+                        },
+                        {
+                            "type": "string",
+                            "const": "lateEventsCannotMutateCompletion"
+                        },
+                        {
+                            "type": "string",
+                            "const": "librarySwitchBlockedWhileActive"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioUnavailableSnapshot": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "unavailable"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioSelectingLibrarySnapshot": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "selectingLibrary"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioIdleSnapshot": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "idle"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioStartingSnapshot": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "starting"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioActiveOrdinarySnapshot": {
+            "type": "object",
+            "properties": {
+                "limitPhase": {
+                    "type": "string",
+                    "const": "ordinary"
+                }
+            },
+            "required": [
+                "limitPhase"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioActiveBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioActiveWarningSnapshot": {
+            "type": "object",
+            "properties": {
+                "limitPhase": {
+                    "type": "string",
+                    "const": "fiveMinuteWarning"
+                }
+            },
+            "required": [
+                "limitPhase"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioActiveBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioActiveCountdownSnapshot": {
+            "type": "object",
+            "properties": {
+                "limitPhase": {
+                    "type": "string",
+                    "const": "oneMinuteCountdown"
+                },
+                "secondsRemaining": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60
+                }
+            },
+            "required": [
+                "limitPhase",
+                "secondsRemaining"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioActiveBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioActiveLimitSnapshot": {
+            "type": "object",
+            "properties": {
+                "limitPhase": {
+                    "type": "string",
+                    "const": "automaticStop"
+                }
+            },
+            "required": [
+                "limitPhase"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioActiveBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioFinishingSnapshot": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "finishing"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioTerminalSnapshotBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioSealingSnapshot": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "sealing"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioTerminalSnapshotBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioRecoveryRequiredSnapshot": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "recoveryRequired"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioResolvingRecoverySnapshot": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "resolvingRecovery"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioCompletedSnapshot": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "completed"
+                },
+                "notice": {
+                    "type": "string",
+                    "const": "durationLimit"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioFailedSnapshot": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "failed"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingInspectEmptyDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "inspectRecovery"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "none"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingInspectItemDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "inspectRecovery"
+                },
+                "outcome": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "sealOrDiscard"
+                        },
+                        {
+                            "type": "string",
+                            "const": "committedCleanup"
+                        },
+                        {
+                            "type": "string",
+                            "const": "discardOnly"
+                        }
+                    ]
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "frameCount"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingBeginStartedDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "begin"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "started"
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingBeginDeniedDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "begin"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "microphonePermissionDenied"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingMeasuredProgressDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "progress"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "measured"
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                },
+                "level": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "frameCount",
+                "level"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingUnavailableProgressDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "progress"
+                },
+                "outcome": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "muted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "captureGap"
+                        }
+                    ]
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "frameCount"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingSetMutedDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "setMuted"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "accepted"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingMuteChangedDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "muteChanged"
+                },
+                "outcome": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "muted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "live"
+                        }
+                    ]
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "frameCount"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingNormalizedIntervalsDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "domain"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "normalizeUnavailableIntervals"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "mutedGapOverlap"
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "frameCount"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingFinishingDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "finishing"
+                },
+                "outcome": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "durationLimit"
+                        },
+                        {
+                            "type": "string",
+                            "const": "userStop"
+                        }
+                    ]
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "frameCount"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingSealingDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "sealing"
+                },
+                "outcome": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "durationLimit"
+                        },
+                        {
+                            "type": "string",
+                            "const": "userStop"
+                        }
+                    ]
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "frameCount"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingSealedDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "sealed"
+                },
+                "outcome": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "durationLimit"
+                        },
+                        {
+                            "type": "string",
+                            "const": "userStop"
+                        }
+                    ]
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "frameCount"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingStopDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "stop"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "accepted"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingDiscardConfirmedDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "discardConfirmed"
+                },
+                "outcome": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "accepted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "stagingDiscardFailed"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingDiscardedDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "discarded"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "discarded"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingRecoveryRequiredDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "recoveryRequired"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "sealOrDiscard"
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "frameCount"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingResolveSealDependency": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "audioCapture"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "resolveSeal"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "sealed"
+                },
+                "frameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "frameCount"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingScenarioDependencyBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingScenarioActiveBase": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "active"
+                },
+                "elapsedFrames": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                },
+                "mute": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "live"
+                        },
+                        {
+                            "type": "string",
+                            "const": "muting"
+                        },
+                        {
+                            "type": "string",
+                            "const": "muted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "unmuting"
+                        }
+                    ]
+                },
+                "confirmation": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "none"
+                        },
+                        {
+                            "type": "string",
+                            "const": "discardRecording"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "kind",
+                "elapsedFrames",
+                "mute",
+                "confirmation"
+            ]
+        },
+        "RecordingScenarioTerminalSnapshotBase": {
+            "type": "object",
+            "properties": {
+                "elapsedFrames": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                },
+                "mute": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "live"
+                        },
+                        {
+                            "type": "string",
+                            "const": "muting"
+                        },
+                        {
+                            "type": "string",
+                            "const": "muted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "unmuting"
+                        }
+                    ]
+                },
+                "limitPhase": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "ordinary"
+                        },
+                        {
+                            "type": "string",
+                            "const": "fiveMinuteWarning"
+                        },
+                        {
+                            "type": "string",
+                            "const": "automaticStop"
+                        }
+                    ]
+                },
+                "terminalReason": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "userStop"
+                        },
+                        {
+                            "type": "string",
+                            "const": "durationLimit"
+                        },
+                        {
+                            "type": "string",
+                            "const": "interruption"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "elapsedFrames",
+                "mute",
+                "limitPhase",
+                "terminalReason"
+            ]
+        },
+        "RecordingScenarioDependencyBase": {
+            "type": "object",
+            "properties": {
+                "afterCommand": {
+                    "type": "integer",
+                    "minimum": 0
+                }
+            },
+            "required": [
+                "afterCommand"
+            ]
+        },
+        "RecordingFrameOffset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 43200000
+        }
+    }
+}

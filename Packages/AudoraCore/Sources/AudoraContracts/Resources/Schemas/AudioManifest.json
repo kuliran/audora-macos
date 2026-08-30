@@ -1,0 +1,123 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/AudioManifest.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "sourceKind": {
+            "type": "string",
+            "const": "microphone"
+        },
+        "canonicalAudioPath": {
+            "type": "string",
+            "const": "audio/audio.wav"
+        },
+        "canonicalFormat": {
+            "$ref": "#/$defs/CanonicalAudioFormat"
+        },
+        "frameCount": {
+            "$ref": "#/$defs/PositiveRecordingFrameCount"
+        },
+        "canonicalSha256": {
+            "$ref": "#/$defs/Sha256Hex"
+        },
+        "unavailableIntervals": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/UnavailableInterval"
+            },
+            "maxItems": 8192
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "sourceKind",
+        "canonicalAudioPath",
+        "canonicalFormat",
+        "frameCount",
+        "canonicalSha256",
+        "unavailableIntervals"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "Session-owned canonical microphone Audio Asset metadata.",
+    "$defs": {
+        "CanonicalAudioFormat": {
+            "type": "object",
+            "properties": {
+                "sampleRateHz": {
+                    "type": "number",
+                    "const": 16000
+                },
+                "channelCount": {
+                    "type": "number",
+                    "const": 1
+                },
+                "encoding": {
+                    "type": "string",
+                    "const": "pcmS16LE"
+                }
+            },
+            "required": [
+                "sampleRateHz",
+                "channelCount",
+                "encoding"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PositiveRecordingFrameCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 43200000
+        },
+        "Sha256Hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+        },
+        "UnavailableInterval": {
+            "type": "object",
+            "properties": {
+                "startFrame": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                },
+                "endFrame": {
+                    "$ref": "#/$defs/PositiveRecordingFrameCount"
+                },
+                "reasons": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/UnavailableReason"
+                    },
+                    "minItems": 1,
+                    "maxItems": 2
+                }
+            },
+            "required": [
+                "startFrame",
+                "endFrame",
+                "reasons"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingFrameOffset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 43200000
+        },
+        "UnavailableReason": {
+            "type": "string",
+            "enum": [
+                "muted",
+                "captureGap"
+            ]
+        }
+    }
+}

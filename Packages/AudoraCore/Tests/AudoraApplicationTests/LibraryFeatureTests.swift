@@ -123,6 +123,62 @@ final class LibraryFeatureTests: XCTestCase {
         XCTAssertEqual(calls, [.restore, .reveal])
     }
 
+    func testRecordingLeaseBlocksLibraryMutationButStillAllowsReveal() async throws {
+        let original = try snapshot(id: "lib-20260830T120000000Z-2ABC")
+        let workspace = ScriptedWorkspace(
+            restore: [.opened(original)],
+            reveal: [.succeeded()]
+        )
+        let activity = LibraryActivityCoordinator()
+        let feature = DefaultLibraryFeature(
+            workspace: workspace,
+            clock: RecordingClock(),
+            idGenerator: RecordingIDGenerator(),
+            activityCoordinator: activity
+        )
+        await feature.send(.start)
+        let scope = LibraryScope(libraryID: original.libraryID)
+        let acquiredLease = await activity.acquireRecording(in: scope)
+        let lease = try XCTUnwrap(acquiredLease)
+
+        await feature.send(.chooseExisting)
+        let blockedState = await feature.currentState
+        XCTAssertEqual(
+            blockedState,
+            LibraryFeatureState(
+                selection: .active(original),
+                notice: .recordingInProgress
+            )
+        )
+        await feature.send(.close)
+        await feature.send(.reveal)
+
+        let calls = await workspace.calls
+        let revealedState = await feature.currentState
+        XCTAssertEqual(calls, [.restore, .reveal])
+        XCTAssertEqual(
+            revealedState,
+            LibraryFeatureState(selection: .active(original))
+        )
+        await activity.release(lease)
+    }
+
+    func testQueuedExternalOpenIsRejectedWhenOpenAcquisitionIsRejected() async throws {
+        try await assertQueuedExternalOpenIsRejectedAtAcquisitionExit(
+            command: .chooseExisting,
+            token: LibraryOpenRequestToken("external_during_rejected_open")!,
+            cleanupToken: LibraryOpenRequestToken("cleanup_rejected_open")!
+        )
+    }
+
+    func testQueuedExternalOpenIsRejectedWhenCloseAcquisitionIsRejected() async throws {
+        try await assertQueuedExternalOpenIsRejectedAtAcquisitionExit(
+            command: .close,
+            token: LibraryOpenRequestToken("external_during_rejected_close")!,
+            cleanupToken: LibraryOpenRequestToken("cleanup_rejected_close")!
+        )
+    }
+
     func testExternalOpenSwitchesOnlyAfterSuccessfulOutcome() async throws {
         let original = try snapshot(id: "lib-20260830T120000000Z-2ABC")
         let replacement = try snapshot(id: "lib-20260830T121000000Z-3DEF")
@@ -287,6 +343,61 @@ final class LibraryFeatureTests: XCTestCase {
         XCTAssertEqual(calls, [.restore])
     }
 
+    private func assertQueuedExternalOpenIsRejectedAtAcquisitionExit(
+        command: LibraryCommand,
+        token: LibraryOpenRequestToken,
+        cleanupToken: LibraryOpenRequestToken
+    ) async throws {
+        let original = try snapshot(id: "lib-20260830T120000000Z-2ABC")
+        let workspace = ScriptedWorkspace(restore: [.opened(original)])
+        let activity = SuspendingLibraryActivityCoordinator()
+        let feature = DefaultLibraryFeature(
+            workspace: workspace,
+            clock: RecordingClock(),
+            idGenerator: RecordingIDGenerator(),
+            activityCoordinator: activity
+        )
+        let capability = CapabilityProbe()
+        await feature.send(.start)
+        let scope = LibraryScope(libraryID: original.libraryID)
+        let acquiredRecordingLease = await activity.acquireRecording(in: scope)
+        let recordingLease = try XCTUnwrap(acquiredRecordingLease)
+        await activity.suspendNextSelectionAcquisition()
+
+        let selectionMutation = Task { await feature.send(command) }
+        await activity.waitForSuspendedSelectionAcquisition()
+        let callback = Task {
+            await capability.retain()
+            await feature.send(.openExternal(token))
+            await capability.release()
+        }
+        await waitForQueuedExternalOpen(in: feature)
+
+        await activity.resumeSelectionAcquisition()
+        await selectionMutation.value
+        let queuedAtAcquisitionExit = await feature.queuedExternalOpenCount
+
+        // Keep a red test from retaining its suspended callback forever.
+        await activity.release(recordingLease)
+        if queuedAtAcquisitionExit != 0 {
+            await feature.send(.openExternal(cleanupToken))
+        }
+        await callback.value
+
+        let finalState = await feature.currentState
+        let calls = await workspace.calls
+        let externalTokens = await workspace.externalTokens
+        let activeCapabilities = await capability.activeCount
+        XCTAssertEqual(queuedAtAcquisitionExit, 0)
+        XCTAssertEqual(activeCapabilities, 0)
+        XCTAssertEqual(calls, [.restore])
+        XCTAssertEqual(externalTokens, [])
+        XCTAssertEqual(
+            finalState,
+            LibraryFeatureState(selection: .active(original), notice: .recordingInProgress)
+        )
+    }
+
     private func makeFeature(_ workspace: ScriptedWorkspace) -> DefaultLibraryFeature {
         DefaultLibraryFeature(
             workspace: workspace,
@@ -325,6 +436,57 @@ private actor CompletionProbe {
 
     func markCompleted() {
         isCompleted = true
+    }
+}
+
+private actor CapabilityProbe {
+    private(set) var activeCount = 0
+
+    func retain() {
+        activeCount += 1
+    }
+
+    func release() {
+        activeCount -= 1
+    }
+}
+
+private actor SuspendingLibraryActivityCoordinator: LibraryActivityCoordinating {
+    private let base = LibraryActivityCoordinator()
+    private var shouldSuspendNextSelectionAcquisition = false
+    private var selectionContinuation: CheckedContinuation<Void, Never>?
+
+    func acquireRecording(in scope: LibraryScope) async -> LibraryActivityLease? {
+        await base.acquireRecording(in: scope)
+    }
+
+    func acquireSelectionMutation() async -> LibraryActivityLease? {
+        if shouldSuspendNextSelectionAcquisition {
+            shouldSuspendNextSelectionAcquisition = false
+            await withCheckedContinuation { continuation in
+                selectionContinuation = continuation
+            }
+        }
+        return await base.acquireSelectionMutation()
+    }
+
+    func release(_ lease: LibraryActivityLease) async {
+        await base.release(lease)
+    }
+
+    func suspendNextSelectionAcquisition() {
+        shouldSuspendNextSelectionAcquisition = true
+    }
+
+    func waitForSuspendedSelectionAcquisition() async {
+        while selectionContinuation == nil {
+            await Task.yield()
+        }
+    }
+
+    func resumeSelectionAcquisition() {
+        selectionContinuation?.resume()
+        selectionContinuation = nil
     }
 }
 

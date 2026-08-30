@@ -1,0 +1,17 @@
+{
+  "availability": "discardOnly",
+  "canonicalFormat": {
+    "channelCount": 1,
+    "encoding": "pcmS16LE",
+    "sampleRateHz": 16000
+  },
+  "durableFrameCount": 0,
+  "libraryId": "lib-20260830T120000000Z-1ABC",
+  "maximumFrames": 43200000,
+  "phase": "recoverable",
+  "recordStreamFormat": "audora-record-stream-v1",
+  "recordingId": "rec-20260830T120000000Z-2ABC",
+  "schemaVersion": 1,
+  "sessionId": "ses-20260830T120000000Z-3DEF",
+  "startedAt": "2026-08-30T12:00:00.000Z"
+}

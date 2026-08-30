@@ -11,6 +11,7 @@ struct AudoraApp: App {
 
     private let workspace: PortableLibraryWorkspace
     private let feature: DefaultLibraryFeature
+    private let recordingFeature: DefaultRecordingFeature
     private let windowCoordinator: MainWindowCoordinator
 
     init() {
@@ -22,16 +23,29 @@ struct AudoraApp: App {
             locatorStore: locatorStore,
             revealer: NSWorkspaceLibraryRevealer()
         )
+        let activityCoordinator = LibraryActivityCoordinator()
         let feature = DefaultLibraryFeature(
             workspace: workspace,
             clock: SystemLibraryClock(),
-            idGenerator: RandomLibraryIDGenerator()
+            idGenerator: RandomLibraryIDGenerator(),
+            activityCoordinator: activityCoordinator
+        )
+        let recordingCapture = AVFoundationAudioCaptureAdapter(
+            roots: workspace,
+            sources: AVFoundationMicrophoneInputSourceFactory()
+        )
+        let recordingFeature = DefaultRecordingFeature(
+            capture: recordingCapture,
+            clock: SystemRecordingClock(),
+            idGenerator: RandomRecordingIDGenerator(),
+            activity: activityCoordinator
         )
         let windowCoordinator = MainWindowCoordinator(
             access: AppKitMainWindowAccess()
         )
         self.workspace = workspace
         self.feature = feature
+        self.recordingFeature = recordingFeature
         self.windowCoordinator = windowCoordinator
         appDelegate.configure(
             feature: feature,
@@ -44,6 +58,7 @@ struct AudoraApp: App {
         Window("Audora", id: "library") {
             LibraryRootView(
                 feature: feature,
+                recordingFeature: recordingFeature,
                 windowCoordinator: windowCoordinator
             )
         }

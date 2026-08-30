@@ -4,6 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "AudoraCore",
+    platforms: [.macOS(.v14)],
     products: [
         .library(name: "AudoraDomain", targets: ["AudoraDomain"]),
         .library(name: "AudoraApplication", targets: ["AudoraApplication"]),

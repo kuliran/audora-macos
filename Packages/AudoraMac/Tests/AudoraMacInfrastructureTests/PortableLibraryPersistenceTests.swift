@@ -455,7 +455,9 @@ final class PortableLibraryPersistenceTests: XCTestCase {
         )
         var values: [String] = []
         for case let url as URL in enumerator {
-            let relative = String(url.path.dropFirst(root.path.count + 1))
+            let relative = url.pathComponents
+                .suffix(enumerator.level)
+                .joined(separator: "/")
             let isDirectory = try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
             values.append(relative + (isDirectory ? "/" : ""))
         }

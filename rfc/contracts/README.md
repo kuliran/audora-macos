@@ -3,8 +3,10 @@
 [`contracts.tsp`](contracts.tsp) is the sole compilation entry point. It imports
 the provider aggregate in [`coach-provider.tsp`](coach-provider.tsp), the
 portable Library document roots in
-[`portable-library.tsp`](portable-library.tsp), and the Library lifecycle
-scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp).
+[`portable-library.tsp`](portable-library.tsp), the Library lifecycle
+scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp), and
+the Recording storage and feature contracts in
+[`recording.tsp`](recording.tsp).
 
 The provider source is separated by audience:
 
@@ -19,6 +21,7 @@ TypeSpec compilation emits committed JSON Schemas into the `AudoraContracts`
 package resources. Application and scenario runners do not need Node or TypeSpec
 at runtime.
 
+- [`AudioManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json)
 - [`CoachProviderDescriptor.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json)
 - [`CoachRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json)
 - [`CoachResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json)
@@ -28,17 +31,27 @@ at runtime.
 - [`ProfileHead.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json)
 - [`ReadSessionTranscriptsRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json)
 - [`ReadSessionTranscriptsResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json)
+- [`RecordingFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingFeatureScenario.json)
+- [`RecordingStagingIdentityManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingIdentityManifest.json)
+- [`RecordingStagingManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingManifest.json)
+- [`SessionManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionManifest.json)
 
 | Root schema | Direction | Coach-visible instance? |
 | --- | --- | --- |
+| `AudioManifest` | Portable Library Session storage | No |
 | `CoachProviderDescriptor` | Application configuration | No |
 | `CoachRequest` | Application -> coach | Yes |
 | `CoachResponse` | Coach -> Application | Yes |
+| `LibraryFeatureScenario` | Portable cross-implementation behavior | No |
 | `LibraryManifest` | Portable Library storage | No |
 | `LibraryPreferences` | Portable Library storage | No |
 | `ProfileHead` | Portable Library storage | No |
 | `ReadSessionTranscriptsRequest` | Coach tool call -> Application | Yes |
 | `ReadSessionTranscriptsResponse` | Application -> coach tool result | Yes |
+| `RecordingFeatureScenario` | Portable cross-implementation behavior | No |
+| `RecordingStagingIdentityManifest` | Recording staging storage | No |
+| `RecordingStagingManifest` | Recording staging storage | No |
+| `SessionManifest` | Portable Library Session storage | No |
 
 Invocation and Attempt identities, provider idempotency, admission state, token
 estimator identity, Profile integrity hashes, and persisted-record schema versions
@@ -71,13 +84,18 @@ turn or its own valid response structurally impossible.
 
 ## Source ordering
 
-TypeSpec declarations are order-independent. Source files favor reading from the
-prominent root outward:
+TypeSpec declarations are order-independent. New contract files and roots that a
+change introduces or substantively modifies favor reading from the prominent
+root outward. Untouched legacy declarations do not need to be reordered solely
+to adopt this convention:
 
-1. Start with the schema named after the file or generated root.
-2. Declare referenced models breadth-first, preserving field and union order.
-3. Put a spread `*Base` after the models that use it.
-4. Start a new queue at each direction or generated-root heading.
+1. Declare each new or substantively modified exported `@jsonSchema` root before
+   the supporting shapes introduced for it.
+2. Traverse those roots in source order, preserving field and union order.
+3. Declare supporting models, unions, enums, and scalars breadth-first in the
+   order they are first referenced.
+4. Put a spread `*Base` after the models that use it.
+5. Start a new root-and-support queue at each direction heading.
 
 Comments explain only non-obvious trust, units, or cross-field rules.
 

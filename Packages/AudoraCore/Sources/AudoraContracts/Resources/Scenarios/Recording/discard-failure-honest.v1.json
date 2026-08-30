@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "recording.discard-failure-honest",
+  "initialState": { "kind": "unavailable" },
+  "commands": [
+    { "kind": "selectLibrary" },
+    { "kind": "record" },
+    { "kind": "cancel" },
+    { "kind": "discardRecording" }
+  ],
+  "dependencyTrace": [
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "none", "afterCommand": 0 },
+    { "port": "audioCapture", "effect": "begin", "outcome": "started", "afterCommand": 1 },
+    { "port": "audioCapture", "effect": "progress", "outcome": "measured", "afterCommand": 1, "frameCount": 16000, "level": 0.35 },
+    { "port": "audioCapture", "effect": "discardConfirmed", "outcome": "stagingDiscardFailed", "afterCommand": 3 }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "elapsedFrames": 16000,
+    "mute": "live",
+    "limitPhase": "ordinary",
+    "confirmation": "discardRecording"
+  },
+  "expectedEffects": [
+    { "kind": "discardFailureDoesNotClaimIdle" }
+  ]
+}

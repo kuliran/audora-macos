@@ -1,0 +1,28 @@
+{
+  "canonicalAudioPath": "audio/audio.wav",
+  "canonicalFormat": {
+    "channelCount": 1,
+    "encoding": "pcmS16LE",
+    "sampleRateHz": 16000
+  },
+  "canonicalSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "frameCount": 1000,
+  "schemaVersion": 1,
+  "sourceKind": "microphone",
+  "unavailableIntervals": [
+    {
+      "endFrame": 500,
+      "reasons": [
+        "muted"
+      ],
+      "startFrame": 100
+    },
+    {
+      "endFrame": 600,
+      "reasons": [
+        "captureGap"
+      ],
+      "startFrame": 400
+    }
+  ]
+}

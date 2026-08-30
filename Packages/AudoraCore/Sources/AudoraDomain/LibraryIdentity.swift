@@ -1,6 +1,8 @@
 public enum LibraryIdentityError: Error, Equatable, Sendable {
     case invalidLibraryID
     case invalidProfileRevisionID
+    case invalidRecordingID
+    case invalidSessionID
     case invalidInstant
 }
 
@@ -30,6 +32,32 @@ public struct ProfileRevisionID: Hashable, Sendable, CustomStringConvertible {
     public var description: String { rawValue }
 }
 
+public struct RecordingID: Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard TypedIdentifierValidator.isValid(rawValue, prefix: "rec-") else {
+            throw LibraryIdentityError.invalidRecordingID
+        }
+        self.rawValue = rawValue
+    }
+
+    public var description: String { rawValue }
+}
+
+public struct SessionID: Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard TypedIdentifierValidator.isValid(rawValue, prefix: "ses-") else {
+            throw LibraryIdentityError.invalidSessionID
+        }
+        self.rawValue = rawValue
+    }
+
+    public var description: String { rawValue }
+}
+
 public struct LibraryScope: Hashable, Sendable {
     public let libraryID: LibraryID
 
@@ -51,7 +79,7 @@ public struct UTCInstant: Hashable, Sendable, CustomStringConvertible {
     public var description: String { rawValue }
 }
 
-private enum TypedIdentifierValidator {
+enum TypedIdentifierValidator {
     private static let crockford = Set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 
     static func isValid(_ value: String, prefix: String) -> Bool {

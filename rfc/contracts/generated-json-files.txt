@@ -1,3 +1,4 @@
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json
@@ -7,3 +8,7 @@ Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingFeatureScenario.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingIdentityManifest.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingManifest.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionManifest.json
