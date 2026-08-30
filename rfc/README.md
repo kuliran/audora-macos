@@ -128,6 +128,15 @@ ceiling, and its core model-visible tool surface cannot be reduced to only Audor
 future scoped transcript read. The application must not wire this candidate into
 its composition root until the exact shipping CLI/model pair passes every gate.
 
+The synthetic Attempt-scoped transcript-read qualification lives under
+[`Qualification/TranscriptReadBroker`](../Qualification/TranscriptReadBroker/README.md).
+Its actor, strict MCP boundary, and IPv4 loopback listener pass the deterministic
+all-or-nothing, bounded-redelivery, revocation, contract, sanitization, and hostile
+transport suite without opening a Library or reading provider credentials. This
+does not change the Codex result above: the real CLI/model exercise remains not run
+for this gate and production coaching remains blocked on the shipping-provider
+evidence.
+
 Version one accepts exactly one transcribable mono source per Session. A possible
 later extension adds dual-track capture: the Speaker's microphone plus a
 separately retained, aligned system or application-audio source. Storage and

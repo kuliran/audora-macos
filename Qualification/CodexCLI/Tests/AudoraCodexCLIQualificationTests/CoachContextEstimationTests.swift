@@ -585,3 +585,34 @@ final class CoachContextEstimationTests: XCTestCase {
         ])
     }
 }
+
+final class CompleteToolResponseBudgetTests: XCTestCase {
+    func testAdmitsExactFitAndRejectsOneTokenOverflowUsingCompleteFramedResponse() throws {
+        let estimator = try CoachTokenEstimator(
+            identifier: "ascii-byte-exact-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { $0.count }
+        )
+        let response = Data(#"{"kind":"contextCannotFit"}"#.utf8)
+        let exactTokens = Data("tool-result:".utf8).count + response.count + 2
+
+        let exact = try CompleteToolResponseBudget(
+            remainingInputTokens: exactTokens,
+            responsePrefix: Data("tool-result:".utf8),
+            responseSuffix: Data(),
+            hiddenTokens: 2,
+            tokenEstimator: estimator
+        )
+        let overflow = try CompleteToolResponseBudget(
+            remainingInputTokens: exactTokens - 1,
+            responsePrefix: Data("tool-result:".utf8),
+            responseSuffix: Data(),
+            hiddenTokens: 2,
+            tokenEstimator: estimator
+        )
+
+        XCTAssertTrue(try exact.admits(canonicalResponse: response))
+        XCTAssertFalse(try overflow.admits(canonicalResponse: response))
+    }
+}
