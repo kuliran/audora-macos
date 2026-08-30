@@ -61,7 +61,12 @@ rejection remains in the broker because the generated schema intentionally has n
 port. It accepts one bounded HTTP/1.1 request per connection, uses close-on-exec
 descriptors, rejects transfer encoding, duplicate headers, excess bytes, invalid
 Host/content type/origin, and partial bodies after a fixed timeout, and emits no
-redirect or CORS headers. Every terminal MCP or Attempt path closes the listener,
+redirect or CORS headers. The listener and every accepted connection have a
+serialized descriptor owner: stop waits for any bounded in-flight syscall, closes
+once, and makes later operations observe closed state before they can touch a
+reused descriptor number. Configuration caps headers at 64 KiB, request bodies at
+1 MiB, and request timeouts at 30 seconds; connection-backlog and byte arithmetic
+use checked conversions. Every terminal MCP or Attempt path closes the listener,
 connections, cached response, handles, and capability digest.
 
 ## Attack coverage
@@ -72,7 +77,9 @@ revisions, exact-budget failure, bounded byte-identical redelivery, second seman
 reads, simultaneous reads, cancellation races, all external revocation reasons,
 forbidden data operations, MCP surface reduction, bearer/Host/origin attacks,
 malformed and oversized messages, live loopback closure, partial-body timeout,
-contract round trips, and recursive provider/report canary scans.
+stop-versus-accept and stop-before-receive descriptor-reuse races, overflowing
+configuration/content lengths, contract round trips, and recursive
+provider/report canary scans.
 
 All storage fixtures are synthetic. Storage failures containing transcript, path,
 and token canaries are reduced to the closed `sessionUnavailable` response without

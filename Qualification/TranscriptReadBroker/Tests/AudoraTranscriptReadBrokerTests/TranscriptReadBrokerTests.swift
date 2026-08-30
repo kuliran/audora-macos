@@ -915,6 +915,166 @@ final class TranscriptReadBrokerTests: XCTestCase {
         XCTAssertEqual(status, .revoked)
     }
 
+    func testLoopbackStopRacingAcceptNeverUsesRecycledListenerDescriptor() async throws {
+        let gate = DescriptorRaceGate()
+        let monitor = DescriptorUseMonitor()
+        let grant = try makeGrant()
+        let server = try LoopbackTranscriptReadHTTPServer.startForTesting(
+            grant: grant,
+            requestTimeout: .seconds(1),
+            testHooks: LoopbackTranscriptReadServerTestHooks(
+                acceptedBeforeRegistration: { descriptor in
+                    gate.block(descriptor: descriptor)
+                },
+                transportDidMarkStopped: {
+                    gate.signalStopMarked()
+                },
+                acceptLoopFinished: {
+                    gate.signalAcceptLoopFinished()
+                },
+                descriptorWillBeUsed: { descriptor in
+                    monitor.observeUse(of: descriptor)
+                }
+            )
+        )
+        let listenerDescriptor = server.listenerDescriptorForTesting()
+        let clientDescriptor = try openLoopbackConnection(port: server.port)
+        defer { Darwin.close(clientDescriptor) }
+        defer { gate.unblock() }
+        guard gate.waitUntilBlocked() else {
+            await server.stop(reason: .protocolFailure)
+            return XCTFail("accept hook was not reached")
+        }
+
+        let stopTask = Task {
+            await server.stop(reason: .cancelled)
+        }
+        guard gate.waitUntilStopMarked() else {
+            gate.unblock()
+            await stopTask.value
+            return XCTFail("transport stop did not linearize")
+        }
+        gate.unblock()
+        await stopTask.value
+
+        let sentinel = try makeDescriptorReuseSentinel(target: listenerDescriptor)
+        defer {
+            Darwin.close(sentinel.descriptor)
+            Darwin.close(sentinel.peer)
+        }
+        monitor.arm(descriptor: sentinel.descriptor)
+        let marker = Data("listener-fd-reuse-canary".utf8)
+        try sendAll(marker, to: sentinel.peer)
+        XCTAssertTrue(gate.waitUntilAcceptLoopFinished())
+        XCTAssertEqual(try receiveExactly(marker.count, from: sentinel.descriptor), marker)
+        XCTAssertEqual(monitor.violations, 0)
+        XCTAssertTrue(server.isStopped())
+    }
+
+    func testLoopbackStopBeforeReceiveNeverUsesRecycledConnectionDescriptor() async throws {
+        let gate = DescriptorRaceGate()
+        let monitor = DescriptorUseMonitor()
+        let grant = try makeGrant()
+        let server = try LoopbackTranscriptReadHTTPServer.startForTesting(
+            grant: grant,
+            requestTimeout: .seconds(1),
+            testHooks: LoopbackTranscriptReadServerTestHooks(
+                acceptedBeforeReceive: { descriptor in
+                    gate.block(descriptor: descriptor)
+                },
+                connectionWorkerFinished: { _ in
+                    gate.signalConnectionWorkerFinished()
+                },
+                descriptorWillBeUsed: { descriptor in
+                    monitor.observeUse(of: descriptor)
+                }
+            )
+        )
+        let clientDescriptor = try openLoopbackConnection(port: server.port)
+        defer { Darwin.close(clientDescriptor) }
+        defer { gate.unblock() }
+        guard gate.waitUntilBlocked(), let acceptedDescriptor = gate.descriptor else {
+            await server.stop(reason: .protocolFailure)
+            return XCTFail("receive hook was not reached")
+        }
+
+        await server.stop(reason: .cancelled)
+        let sentinel = try makeDescriptorReuseSentinel(target: acceptedDescriptor)
+        defer {
+            Darwin.close(sentinel.descriptor)
+            Darwin.close(sentinel.peer)
+        }
+        monitor.arm(descriptor: sentinel.descriptor)
+        let marker = Data("connection-fd-reuse-canary".utf8)
+        try sendAll(marker, to: sentinel.peer)
+        gate.unblock()
+
+        XCTAssertTrue(gate.waitUntilConnectionWorkerFinished())
+        XCTAssertEqual(try receiveExactly(marker.count, from: sentinel.descriptor), marker)
+        XCTAssertEqual(monitor.violations, 0)
+        XCTAssertTrue(server.isStopped())
+    }
+
+    func testLoopbackRejectsOverflowingAndUnboundedConfiguration() async throws {
+        let grant = try makeGrant()
+        let cases: [(body: Int, header: Int, timeout: Duration, connections: Int)] = [
+            (Int.max, 16 * 1_024, .seconds(1), 8),
+            (32 * 1_024, Int.max, .seconds(1), 8),
+            (1 * 1_024 * 1_024 + 1, 16 * 1_024, .seconds(1), 8),
+            (32 * 1_024, 64 * 1_024 + 1, .seconds(1), 8),
+            (32 * 1_024, 16 * 1_024, .seconds(31), 8),
+            (32 * 1_024, 16 * 1_024, .seconds(1), Int(Int32.max) + 1),
+        ]
+
+        for configuration in cases {
+            do {
+                let server = try await LoopbackTranscriptReadHTTPServer.start(
+                    grant: grant,
+                    maximumBodyBytes: configuration.body,
+                    maximumHeaderBytes: configuration.header,
+                    requestTimeout: configuration.timeout,
+                    maximumConnections: configuration.connections
+                )
+                await server.stop(reason: .protocolFailure)
+                XCTFail("expected invalid configuration: \(configuration)")
+            } catch let error as LoopbackTranscriptReadServerError {
+                XCTAssertEqual(error, .invalidConfiguration)
+            }
+        }
+    }
+
+    func testLoopbackRejectsOverflowingContentLengthWithoutStorageOrLeakage() async throws {
+        for length in [String(Int.max) + "0", "+1", "-1"] {
+            let count = LockedCounter()
+            let grant = try makeGrant(readCount: count)
+            let server = try await LoopbackTranscriptReadHTTPServer.start(
+                grant: grant,
+                maximumBodyBytes: 1_024,
+                requestTimeout: .seconds(1)
+            )
+            let request = Data(
+                (
+                    "POST /mcp HTTP/1.1\r\n"
+                        + "Host: 127.0.0.1:\(server.port)\r\n"
+                        + "Content-Type: application/json\r\n"
+                        + "Content-Length: \(length)\r\n\r\n"
+                ).utf8
+            )
+            let response = try rawHTTPExchange(
+                port: server.port,
+                request: request,
+                receiveTimeout: .seconds(1)
+            )
+            let responseText = String(decoding: response, as: UTF8.self)
+            XCTAssertTrue(responseText.hasPrefix("HTTP/1.1 400 Bad Request"))
+            XCTAssertTrue(responseText.contains("requestRejected"))
+            XCTAssertFalse(responseText.contains(length))
+            XCTAssertEqual(count.value, 0)
+            XCTAssertEqual(server.diagnosticHTTPClosedReason(), .invalidContentLength)
+            XCTAssertTrue(server.isStopped())
+        }
+    }
+
     func testSyntheticQualificationReportKeepsRealCodexGateBlockedAndMetadataOnly() async throws {
         let report = try await TranscriptReadQualificationRunner().run()
         XCTAssertEqual(report.qualification, "syntheticOnly")
@@ -1153,6 +1313,120 @@ final class TranscriptReadBrokerTests: XCTestCase {
         return (data, try XCTUnwrap(response as? HTTPURLResponse))
     }
 
+    private func openLoopbackConnection(port: UInt16) throws -> Int32 {
+        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw RawSocketError.failed }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.connect(
+                    descriptor,
+                    socketAddress,
+                    socklen_t(MemoryLayout<sockaddr_in>.size)
+                )
+            }
+        }
+        guard connected == 0 else {
+            Darwin.close(descriptor)
+            throw RawSocketError.failed
+        }
+        return descriptor
+    }
+
+    private func makeDescriptorReuseSentinel(
+        target: Int32
+    ) throws -> (descriptor: Int32, peer: Int32) {
+        errno = 0
+        guard fcntl(target, F_GETFD) == -1, errno == EBADF else {
+            throw RawSocketError.failed
+        }
+
+        var heldDescriptors: [Int32] = []
+        var sentinel: (descriptor: Int32, peer: Int32)?
+        for _ in 0 ..< 128 {
+            var pair = [Int32](repeating: -1, count: 2)
+            let created = pair.withUnsafeMutableBufferPointer { buffer in
+                Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, buffer.baseAddress!)
+            }
+            guard created == 0 else { break }
+            if pair[0] == target {
+                sentinel = (pair[0], pair[1])
+                break
+            }
+            if pair[1] == target {
+                sentinel = (pair[1], pair[0])
+                break
+            }
+            heldDescriptors.append(contentsOf: pair)
+            if pair[0] > target, pair[1] > target {
+                break
+            }
+        }
+        for descriptor in heldDescriptors {
+            Darwin.close(descriptor)
+        }
+        guard let sentinel else { throw RawSocketError.failed }
+
+        var noSigPipe: Int32 = 1
+        var timeout = timeval(tv_sec: 1, tv_usec: 0)
+        for socket in [sentinel.descriptor, sentinel.peer] {
+            guard setsockopt(
+                socket,
+                SOL_SOCKET,
+                SO_NOSIGPIPE,
+                &noSigPipe,
+                socklen_t(MemoryLayout<Int32>.size)
+            ) == 0,
+            setsockopt(
+                socket,
+                SOL_SOCKET,
+                SO_RCVTIMEO,
+                &timeout,
+                socklen_t(MemoryLayout<timeval>.size)
+            ) == 0
+            else {
+                Darwin.close(sentinel.descriptor)
+                Darwin.close(sentinel.peer)
+                throw RawSocketError.failed
+            }
+        }
+        return sentinel
+    }
+
+    private func sendAll(_ data: Data, to descriptor: Int32) throws {
+        try data.withUnsafeBytes { pointer in
+            var sent = 0
+            while sent < pointer.count {
+                let count = Darwin.send(
+                    descriptor,
+                    pointer.baseAddress?.advanced(by: sent),
+                    pointer.count - sent,
+                    0
+                )
+                guard count > 0 else { throw RawSocketError.failed }
+                sent += count
+            }
+        }
+    }
+
+    private func receiveExactly(_ count: Int, from descriptor: Int32) throws -> Data {
+        var result = Data()
+        while result.count < count {
+            var bytes = [UInt8](repeating: 0, count: count - result.count)
+            let received = bytes.withUnsafeMutableBytes { pointer in
+                Darwin.recv(descriptor, pointer.baseAddress, pointer.count, 0)
+            }
+            guard received > 0 else { throw RawSocketError.failed }
+            result.append(contentsOf: bytes.prefix(received))
+        }
+        return result
+    }
+
     private func rawHTTPExchange(
         port: UInt16,
         request: Data,
@@ -1258,6 +1532,88 @@ private final class LockedCounter: @unchecked Sendable {
     func increment() {
         lock.lock()
         storage += 1
+        lock.unlock()
+    }
+}
+
+private final class DescriptorRaceGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedDescriptor: Int32?
+    private let blocked = DispatchSemaphore(value: 0)
+    private let release = DispatchSemaphore(value: 0)
+    private let stopMarked = DispatchSemaphore(value: 0)
+    private let acceptLoopFinished = DispatchSemaphore(value: 0)
+    private let connectionWorkerFinished = DispatchSemaphore(value: 0)
+
+    var descriptor: Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedDescriptor
+    }
+
+    func block(descriptor: Int32) {
+        lock.lock()
+        storedDescriptor = descriptor
+        lock.unlock()
+        blocked.signal()
+        release.wait()
+    }
+
+    func unblock() {
+        release.signal()
+    }
+
+    func signalStopMarked() {
+        stopMarked.signal()
+    }
+
+    func signalAcceptLoopFinished() {
+        acceptLoopFinished.signal()
+    }
+
+    func signalConnectionWorkerFinished() {
+        connectionWorkerFinished.signal()
+    }
+
+    func waitUntilBlocked() -> Bool {
+        blocked.wait(timeout: .now() + 2) == .success
+    }
+
+    func waitUntilStopMarked() -> Bool {
+        stopMarked.wait(timeout: .now() + 2) == .success
+    }
+
+    func waitUntilAcceptLoopFinished() -> Bool {
+        acceptLoopFinished.wait(timeout: .now() + 2) == .success
+    }
+
+    func waitUntilConnectionWorkerFinished() -> Bool {
+        connectionWorkerFinished.wait(timeout: .now() + 2) == .success
+    }
+}
+
+private final class DescriptorUseMonitor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armedDescriptors: Set<Int32> = []
+    private var violationCount = 0
+
+    var violations: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return violationCount
+    }
+
+    func arm(descriptor: Int32) {
+        lock.lock()
+        armedDescriptors.insert(descriptor)
+        lock.unlock()
+    }
+
+    func observeUse(of descriptor: Int32) {
+        lock.lock()
+        if armedDescriptors.contains(descriptor) {
+            violationCount += 1
+        }
         lock.unlock()
     }
 }

@@ -18,12 +18,44 @@ public enum LoopbackTranscriptReadHTTPClosedReason: String, Equatable, Sendable 
     case bodyTimedOut
 }
 
+struct LoopbackTranscriptReadServerTestHooks: Sendable {
+    let acceptedBeforeRegistration: (@Sendable (Int32) -> Void)?
+    let acceptedBeforeReceive: (@Sendable (Int32) -> Void)?
+    let transportDidMarkStopped: (@Sendable () -> Void)?
+    let acceptLoopFinished: (@Sendable () -> Void)?
+    let connectionWorkerFinished: (@Sendable (Int32) -> Void)?
+    let descriptorWillBeUsed: (@Sendable (Int32) -> Void)?
+
+    init(
+        acceptedBeforeRegistration: (@Sendable (Int32) -> Void)? = nil,
+        acceptedBeforeReceive: (@Sendable (Int32) -> Void)? = nil,
+        transportDidMarkStopped: (@Sendable () -> Void)? = nil,
+        acceptLoopFinished: (@Sendable () -> Void)? = nil,
+        connectionWorkerFinished: (@Sendable (Int32) -> Void)? = nil,
+        descriptorWillBeUsed: (@Sendable (Int32) -> Void)? = nil
+    ) {
+        self.acceptedBeforeRegistration = acceptedBeforeRegistration
+        self.acceptedBeforeReceive = acceptedBeforeReceive
+        self.transportDidMarkStopped = transportDidMarkStopped
+        self.acceptLoopFinished = acceptLoopFinished
+        self.connectionWorkerFinished = connectionWorkerFinished
+        self.descriptorWillBeUsed = descriptorWillBeUsed
+    }
+
+    static let none = LoopbackTranscriptReadServerTestHooks()
+}
+
 /// Attempt-owned loopback listener for the strict MCP boundary.
 ///
 /// It accepts one bounded HTTP/1.1 request per connection, never redirects,
 /// never emits CORS headers, and closes the listening endpoint whenever the MCP
 /// boundary reaches a terminal state.
 public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
+    private static let maximumAllowedBodyBytes = 1 * 1_024 * 1_024
+    private static let maximumAllowedHeaderBytes = 64 * 1_024
+    private static let maximumAllowedRequestTimeout: Duration = .seconds(30)
+    private static let acceptPollMilliseconds: Int32 = 10
+
     public let host = "127.0.0.1"
     public let port: UInt16
 
@@ -31,34 +63,42 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
         URL(string: "http://127.0.0.1:\(port)/mcp")!
     }
 
-    private let listenerDescriptor: Int32
+    private let listener: SerializedSocket
     private let queue: DispatchQueue
     private let boundary: TranscriptReadMCPBoundary
     private let maximumBodyBytes: Int
     private let maximumHeaderBytes: Int
+    private let maximumCollectedBytes: Int
+    private let maximumReadCapacity: Int
     private let requestTimeout: Duration
     private let maximumConnections: Int
+    private let testHooks: LoopbackTranscriptReadServerTestHooks
     private let stateLock = NSLock()
     private var stopped = false
-    private var connections: Set<Int32> = []
-    private var readSource: DispatchSourceRead?
+    private var connections: [ObjectIdentifier: SerializedSocket] = [:]
     private var httpClosedReason: LoopbackTranscriptReadHTTPClosedReason?
 
     private init(
-        listenerDescriptor: Int32,
+        listener: SerializedSocket,
         port: UInt16,
         grant: AttemptTranscriptGrant,
         maximumBodyBytes: Int,
         maximumHeaderBytes: Int,
+        maximumCollectedBytes: Int,
+        maximumReadCapacity: Int,
         requestTimeout: Duration,
-        maximumConnections: Int
+        maximumConnections: Int,
+        testHooks: LoopbackTranscriptReadServerTestHooks
     ) {
-        self.listenerDescriptor = listenerDescriptor
+        self.listener = listener
         self.port = port
         self.maximumBodyBytes = maximumBodyBytes
         self.maximumHeaderBytes = maximumHeaderBytes
+        self.maximumCollectedBytes = maximumCollectedBytes
+        self.maximumReadCapacity = maximumReadCapacity
         self.requestTimeout = requestTimeout
         self.maximumConnections = maximumConnections
+        self.testHooks = testHooks
         queue = DispatchQueue(label: "audora.transcript-read.loopback")
         boundary = grant.makeMCPBoundary(
             expectedAuthority: "127.0.0.1:\(port)",
@@ -77,10 +117,58 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
         requestTimeout: Duration = .seconds(2),
         maximumConnections: Int = 8
     ) async throws -> LoopbackTranscriptReadHTTPServer {
+        try startConfigured(
+            grant: grant,
+            maximumBodyBytes: maximumBodyBytes,
+            maximumHeaderBytes: maximumHeaderBytes,
+            requestTimeout: requestTimeout,
+            maximumConnections: maximumConnections,
+            testHooks: .none
+        )
+    }
+
+    static func startForTesting(
+        grant: AttemptTranscriptGrant,
+        maximumBodyBytes: Int = 32 * 1_024,
+        maximumHeaderBytes: Int = 16 * 1_024,
+        requestTimeout: Duration = .seconds(2),
+        maximumConnections: Int = 8,
+        testHooks: LoopbackTranscriptReadServerTestHooks
+    ) throws -> LoopbackTranscriptReadHTTPServer {
+        try startConfigured(
+            grant: grant,
+            maximumBodyBytes: maximumBodyBytes,
+            maximumHeaderBytes: maximumHeaderBytes,
+            requestTimeout: requestTimeout,
+            maximumConnections: maximumConnections,
+            testHooks: testHooks
+        )
+    }
+
+    private static func startConfigured(
+        grant: AttemptTranscriptGrant,
+        maximumBodyBytes: Int,
+        maximumHeaderBytes: Int,
+        requestTimeout: Duration,
+        maximumConnections: Int,
+        testHooks: LoopbackTranscriptReadServerTestHooks
+    ) throws -> LoopbackTranscriptReadHTTPServer {
+        let headerWithSeparator = maximumHeaderBytes.addingReportingOverflow(4)
+        let maximumRequest = headerWithSeparator.partialValue.addingReportingOverflow(
+            maximumBodyBytes
+        )
+        let maximumRead = maximumRequest.partialValue.addingReportingOverflow(1)
         guard maximumBodyBytes > 0,
+              maximumBodyBytes <= maximumAllowedBodyBytes,
               maximumHeaderBytes > 0,
+              maximumHeaderBytes <= maximumAllowedHeaderBytes,
               requestTimeout > .zero,
-              maximumConnections > 0
+              requestTimeout <= maximumAllowedRequestTimeout,
+              maximumConnections > 0,
+              let listenBacklog = Int32(exactly: maximumConnections),
+              !headerWithSeparator.overflow,
+              !maximumRequest.overflow,
+              !maximumRead.overflow
         else {
             throw LoopbackTranscriptReadServerError.invalidConfiguration
         }
@@ -114,7 +202,7 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
             }
         }
         guard bindResult == 0,
-              Darwin.listen(descriptor, Int32(maximumConnections)) == 0
+              Darwin.listen(descriptor, listenBacklog) == 0
         else {
             throw LoopbackTranscriptReadServerError.listenerFailed
         }
@@ -132,14 +220,21 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
             throw LoopbackTranscriptReadServerError.listenerFailed
         }
 
+        let listener = SerializedSocket(
+            descriptor: descriptor,
+            operationObserver: testHooks.descriptorWillBeUsed
+        )
         let server = LoopbackTranscriptReadHTTPServer(
-            listenerDescriptor: descriptor,
+            listener: listener,
             port: UInt16(bigEndian: boundAddress.sin_port),
             grant: grant,
             maximumBodyBytes: maximumBodyBytes,
             maximumHeaderBytes: maximumHeaderBytes,
+            maximumCollectedBytes: maximumRequest.partialValue,
+            maximumReadCapacity: maximumRead.partialValue,
             requestTimeout: requestTimeout,
-            maximumConnections: maximumConnections
+            maximumConnections: maximumConnections,
+            testHooks: testHooks
         )
         shouldClose = false
         server.beginAccepting()
@@ -167,91 +262,152 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
         return httpClosedReason
     }
 
+    func listenerDescriptorForTesting() -> Int32 {
+        listener.initialDescriptor
+    }
+
     private func beginAccepting() {
-        let source = DispatchSource.makeReadSource(
-            fileDescriptor: listenerDescriptor,
-            queue: queue
-        )
-        source.setEventHandler { [weak self] in
-            self?.acceptAvailableConnections()
-        }
-        stateLock.lock()
-        readSource = source
-        stateLock.unlock()
-        source.resume()
+        enqueueAcceptStep()
     }
 
-    private func acceptAvailableConnections() {
-        while !isStopped() {
-            var address = sockaddr_storage()
-            var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
-            let descriptor = withUnsafeMutablePointer(to: &address) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
-                    Darwin.accept(listenerDescriptor, socketAddress, &length)
-                }
-            }
-            if descriptor < 0 {
-                if errno == EAGAIN || errno == EWOULDBLOCK {
-                    return
-                }
-                Task { [weak self] in
-                    await self?.boundary.stop(reason: .protocolFailure)
-                    self?.closeTransport()
-                }
-                return
-            }
+    private func enqueueAcceptStep() {
+        queue.async { [weak self] in
+            self?.acceptOne()
+        }
+    }
 
-            guard setCloseOnExec(descriptor),
-                  setBlocking(descriptor),
-                  setNoSigPipe(descriptor),
-                  setTimeout(descriptor, duration: requestTimeout),
-                  addConnection(descriptor)
-            else {
-                Darwin.close(descriptor)
-                Task { [weak self] in
-                    await self?.boundary.stop(reason: .protocolFailure)
-                    self?.closeTransport()
-                }
-                return
-            }
+    /// Processes one bounded poll/accept step, then releases the strong server
+    /// reference before scheduling the next weakly captured step. Dropping the
+    /// last Attempt owner therefore still reaches deinit and closes the listener.
+    private func acceptOne() {
+        guard !isStopped(),
+              let step = listener.withOpenDescriptor({ descriptor in
+                  pollAndAccept(listenerDescriptor: descriptor)
+              })
+        else {
+            testHooks.acceptLoopFinished?()
+            return
+        }
+        switch step {
+        case .idle:
+            enqueueAcceptStep()
+        case let .accepted(connection):
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.readOneRequest(from: descriptor)
+                self?.readOneRequest(from: connection)
             }
+            enqueueAcceptStep()
+        case .stopped:
+            testHooks.acceptLoopFinished?()
+        case .failed:
+            testHooks.acceptLoopFinished?()
+            requestProtocolStop()
         }
     }
 
-    private func addConnection(_ descriptor: Int32) -> Bool {
+    /// Runs under the listener owner's lock. This makes acceptance and
+    /// registration indivisible with respect to listener close: stop either
+    /// snapshots the registered connection or registration observes stopped and
+    /// closes it before the listener lock is released.
+    private func pollAndAccept(listenerDescriptor: Int32) -> ListenerStep {
+        var pollDescriptor = pollfd(
+            fd: listenerDescriptor,
+            events: Int16(POLLIN),
+            revents: 0
+        )
+        let pollResult = Darwin.poll(
+            &pollDescriptor,
+            1,
+            Self.acceptPollMilliseconds
+        )
+        if pollResult == 0 || (pollResult < 0 && errno == EINTR) {
+            return .idle
+        }
+        guard pollResult > 0, pollDescriptor.revents & Int16(POLLIN) != 0 else {
+            return isStopped() ? .stopped : .failed
+        }
+
+        var address = sockaddr_storage()
+        var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let acceptedDescriptor = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.accept(listenerDescriptor, socketAddress, &length)
+            }
+        }
+        if acceptedDescriptor < 0 {
+            return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR
+                ? .idle
+                : (isStopped() ? .stopped : .failed)
+        }
+
+        let connection = SerializedSocket(
+            descriptor: acceptedDescriptor,
+            operationObserver: testHooks.descriptorWillBeUsed
+        )
+        testHooks.acceptedBeforeRegistration?(acceptedDescriptor)
+        let configured = connection.withOpenDescriptor { descriptor in
+            setCloseOnExec(descriptor)
+                && setBlocking(descriptor)
+                && setNoSigPipe(descriptor)
+                && setTimeout(descriptor, duration: requestTimeout)
+        } ?? false
+        guard configured else {
+            connection.close()
+            return isStopped() ? .stopped : .failed
+        }
+
+        switch addConnection(connection) {
+        case .registered:
+            return .accepted(connection)
+        case .stopped:
+            connection.close()
+            return .stopped
+        case .capacityExceeded:
+            connection.close()
+            return .failed
+        }
+    }
+
+    private func addConnection(_ connection: SerializedSocket) -> ConnectionRegistration {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard !stopped, connections.count < maximumConnections else {
-            return false
+        guard !stopped else { return .stopped }
+        guard connections.count < maximumConnections else {
+            return .capacityExceeded
         }
-        connections.insert(descriptor)
-        return true
+        connections[ObjectIdentifier(connection)] = connection
+        return .registered
     }
 
-    private func readOneRequest(from descriptor: Int32) {
-        let maximumTotal = maximumHeaderBytes + maximumBodyBytes
+    private func readOneRequest(from connection: SerializedSocket) {
+        let descriptor = connection.initialDescriptor
+        defer { testHooks.connectionWorkerFinished?(descriptor) }
+        testHooks.acceptedBeforeReceive?(descriptor)
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: requestTimeout)
         var collected = Data()
-        while collected.count <= maximumTotal {
+        while collected.count < maximumReadCapacity {
             let remaining = clock.now.duration(to: deadline)
-            guard remaining > .zero,
-                  setReceiveTimeout(descriptor, duration: remaining)
-            else {
-                failProtocol(descriptor, reason: .bodyTimedOut)
+            guard remaining > .zero else {
+                failProtocol(connection, reason: .bodyTimedOut)
                 return
             }
             var bytes = [UInt8](
                 repeating: 0,
-                count: min(16 * 1_024, maximumTotal + 1 - collected.count)
+                count: min(16 * 1_024, maximumReadCapacity - collected.count)
             )
-            let received = bytes.withUnsafeMutableBytes { pointer in
-                Darwin.recv(descriptor, pointer.baseAddress, pointer.count, 0)
+            guard let received = connection.withOpenDescriptor({ descriptor in
+                guard setReceiveTimeout(descriptor, duration: remaining) else {
+                    return -1
+                }
+                return bytes.withUnsafeMutableBytes { pointer in
+                    Darwin.recv(descriptor, pointer.baseAddress, pointer.count, 0)
+                }
+            }) else {
+                finishConnection(connection)
+                return
             }
             guard received > 0 else {
-                failProtocol(descriptor, reason: .bodyTimedOut)
+                failProtocol(connection, reason: .bodyTimedOut)
                 return
             }
             collected.append(contentsOf: bytes.prefix(received))
@@ -260,15 +416,15 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
             case .incomplete:
                 continue
             case let .invalid(reason):
-                failProtocol(descriptor, reason: reason)
+                failProtocol(connection, reason: reason)
                 return
             case let .complete(request):
                 Task { [weak self] in
                     guard let self else { return }
                     let response = await boundary.handle(request)
                     let stopAfterResponse = await boundary.isStopped()
-                    self.send(response, to: descriptor)
-                    self.finishConnection(descriptor)
+                    self.send(response, to: connection)
+                    self.finishConnection(connection)
                     if stopAfterResponse {
                         self.closeTransport()
                     }
@@ -276,7 +432,7 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
                 return
             }
         }
-        failProtocol(descriptor, reason: .bodySmuggling)
+        failProtocol(connection, reason: .bodySmuggling)
     }
 
     private func parseRequest(_ data: Data) -> HTTPParseResult {
@@ -326,17 +482,23 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
         else {
             return .invalid(.missingRequiredHeader)
         }
-        guard let contentLength = Int(lengthText),
-              contentLength >= 0,
+        guard !lengthText.isEmpty,
+              lengthText.utf8.allSatisfy({ (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains($0) }),
+              let contentLength = Int(lengthText),
               contentLength <= maximumBodyBytes
         else {
             return .invalid(.invalidContentLength)
         }
 
         let bodyStart = headerRange.upperBound
-        let expectedSize = bodyStart + contentLength
-        guard data.count >= expectedSize else { return .incomplete }
-        guard data.count == expectedSize else { return .invalid(.bodySmuggling) }
+        let expectedSize = bodyStart.addingReportingOverflow(contentLength)
+        guard !expectedSize.overflow,
+              expectedSize.partialValue <= maximumCollectedBytes
+        else {
+            return .invalid(.invalidContentLength)
+        }
+        guard data.count >= expectedSize.partialValue else { return .incomplete }
+        guard data.count == expectedSize.partialValue else { return .invalid(.bodySmuggling) }
         return .complete(
             TranscriptReadHTTPRequest(
                 method: String(requestParts[0]),
@@ -345,13 +507,13 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
                 contentType: contentType,
                 authorization: headers["authorization"],
                 origin: headers["origin"],
-                body: data.subdata(in: bodyStart ..< expectedSize)
+                body: data.subdata(in: bodyStart ..< expectedSize.partialValue)
             )
         )
     }
 
     private func failProtocol(
-        _ descriptor: Int32,
+        _ connection: SerializedSocket,
         reason: LoopbackTranscriptReadHTTPClosedReason
     ) {
         stateLock.lock()
@@ -360,13 +522,13 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
         Task { [weak self] in
             guard let self else { return }
             await boundary.stop(reason: .protocolFailure)
-            send(.closedProtocolError, to: descriptor)
-            finishConnection(descriptor)
+            send(.closedProtocolError, to: connection)
+            finishConnection(connection)
             closeTransport()
         }
     }
 
-    private func send(_ response: TranscriptReadHTTPResponse, to descriptor: Int32) {
+    private func send(_ response: TranscriptReadHTTPResponse, to connection: SerializedSocket) {
         let reason: String
         switch response.statusCode {
         case 200:
@@ -386,37 +548,28 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
         var bytes = Data(headers.utf8)
         bytes.append(response.body)
 
-        // Serialize send against connection teardown so a closed descriptor
-        // cannot be reused elsewhere in the process between validation and send.
-        stateLock.lock()
-        guard connections.contains(descriptor) else {
-            stateLock.unlock()
-            return
-        }
-        bytes.withUnsafeBytes { pointer in
-            var sent = 0
-            while sent < pointer.count {
-                let result = Darwin.send(
-                    descriptor,
-                    pointer.baseAddress?.advanced(by: sent),
-                    pointer.count - sent,
-                    0
-                )
-                guard result > 0 else { return }
-                sent += result
+        _ = connection.withOpenDescriptor { descriptor in
+            bytes.withUnsafeBytes { pointer in
+                var sent = 0
+                while sent < pointer.count {
+                    let result = Darwin.send(
+                        descriptor,
+                        pointer.baseAddress?.advanced(by: sent),
+                        pointer.count - sent,
+                        0
+                    )
+                    guard result > 0 else { return }
+                    sent += result
+                }
             }
         }
-        stateLock.unlock()
     }
 
-    private func finishConnection(_ descriptor: Int32) {
+    private func finishConnection(_ connection: SerializedSocket) {
         stateLock.lock()
-        let wasTracked = connections.remove(descriptor) != nil
+        connections.removeValue(forKey: ObjectIdentifier(connection))
         stateLock.unlock()
-        if wasTracked {
-            Darwin.shutdown(descriptor, SHUT_RDWR)
-            Darwin.close(descriptor)
-        }
+        connection.close()
     }
 
     private func closeTransport() {
@@ -426,18 +579,22 @@ public final class LoopbackTranscriptReadHTTPServer: @unchecked Sendable {
             return
         }
         stopped = true
-        let descriptors = connections
+        let activeConnections = Array(connections.values)
         connections.removeAll(keepingCapacity: false)
-        let source = readSource
-        readSource = nil
         stateLock.unlock()
 
-        source?.cancel()
-        Darwin.shutdown(listenerDescriptor, SHUT_RDWR)
-        Darwin.close(listenerDescriptor)
-        for descriptor in descriptors {
-            Darwin.shutdown(descriptor, SHUT_RDWR)
-            Darwin.close(descriptor)
+        testHooks.transportDidMarkStopped?()
+        listener.close()
+        for connection in activeConnections {
+            connection.close()
+        }
+    }
+
+    private func requestProtocolStop() {
+        Task { [weak self] in
+            guard let self else { return }
+            await boundary.stop(reason: .protocolFailure)
+            closeTransport()
         }
     }
 }
@@ -446,6 +603,64 @@ private enum HTTPParseResult {
     case incomplete
     case invalid(LoopbackTranscriptReadHTTPClosedReason)
     case complete(TranscriptReadHTTPRequest)
+}
+
+private enum ListenerStep {
+    case idle
+    case accepted(SerializedSocket)
+    case stopped
+    case failed
+}
+
+private enum ConnectionRegistration {
+    case registered
+    case stopped
+    case capacityExceeded
+}
+
+/// Owns one descriptor for its entire lifetime. The lock stays held across each
+/// syscall, including bounded blocking calls. Close acquires the same lock and
+/// clears the descriptor before releasing it, so no later operation can target a
+/// different in-process resource that reused the numeric descriptor.
+private final class SerializedSocket: @unchecked Sendable {
+    let initialDescriptor: Int32
+
+    private let lock = NSLock()
+    private let operationObserver: (@Sendable (Int32) -> Void)?
+    private var descriptor: Int32?
+
+    init(
+        descriptor: Int32,
+        operationObserver: (@Sendable (Int32) -> Void)? = nil
+    ) {
+        initialDescriptor = descriptor
+        self.operationObserver = operationObserver
+        self.descriptor = descriptor
+    }
+
+    deinit {
+        close()
+    }
+
+    func withOpenDescriptor<Result>(_ operation: (Int32) -> Result) -> Result? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let descriptor else { return nil }
+        operationObserver?(descriptor)
+        return operation(descriptor)
+    }
+
+    func close() {
+        lock.lock()
+        guard let descriptor else {
+            lock.unlock()
+            return
+        }
+        self.descriptor = nil
+        Darwin.shutdown(descriptor, SHUT_RDWR)
+        Darwin.close(descriptor)
+        lock.unlock()
+    }
 }
 
 private func setCloseOnExec(_ descriptor: Int32) -> Bool {

@@ -2,13 +2,16 @@
 
 Recorded 30 August 2026 on Apple Silicon macOS with Swift 6.
 
-- All 23 deterministic broker, MCP, schema, lifecycle, sanitization, concurrency,
+- All 27 deterministic broker, MCP, schema, lifecycle, sanitization, concurrency,
   and live loopback tests passed.
 - The loopback listener bound only `127.0.0.1` on an OS-selected ephemeral port,
   returned no redirect or CORS authority, and was closed on normal completion and
   protocol failure.
 - A partial HTTP body was stopped by the fixed request timeout, returned one
   sanitized closed error, touched no transcript storage, and revoked the Attempt.
+- Forced descriptor reuse after stop could not induce a late listener or accepted-
+  connection syscall; overflowing configuration and Content-Length values failed
+  closed without storage access or reflected input.
 - Complete responses were canonical and byte-identical on the sole allowed replay;
   no second storage read occurred.
 - Unavailable, corrupt, and budget-failed batches returned no partial transcript.
