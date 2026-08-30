@@ -1,0 +1,5 @@
+rfc/contracts/CoachProviderDescriptor.json
+rfc/contracts/CoachRequest.json
+rfc/contracts/CoachResponse.json
+rfc/contracts/ReadSessionTranscriptsRequest.json
+rfc/contracts/ReadSessionTranscriptsResponse.json

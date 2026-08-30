@@ -1,0 +1,64 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/CoachProviderDescriptor.json",
+    "type": "object",
+    "properties": {
+        "displayName": {
+            "$ref": "#/$defs/NonEmptyText"
+        },
+        "contextBudget": {
+            "$ref": "#/$defs/CoachContextBudget"
+        },
+        "coachMemoryMaxTokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647,
+            "description": "Hard token ceiling for one replacement Coach Memory."
+        }
+    },
+    "required": [
+        "displayName",
+        "contextBudget",
+        "coachMemoryMaxTokens"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "Capabilities and limits for one configured Coach Provider.",
+    "$defs": {
+        "NonEmptyText": {
+            "type": "string",
+            "minLength": 1
+        },
+        "CoachContextBudget": {
+            "type": "object",
+            "properties": {
+                "contextWindowTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647
+                },
+                "responseReservedTokens": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2147483647,
+                    "description": "Space preserved for the current response."
+                },
+                "safetyMarginTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647,
+                    "description": "Allowance for provider framing and estimation uncertainty."
+                }
+            },
+            "required": [
+                "contextWindowTokens",
+                "responseReservedTokens",
+                "safetyMarginTokens"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        }
+    }
+}

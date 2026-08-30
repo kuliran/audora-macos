@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "revisionId": "prf-20260823T120000000Z-2ABC",
+  "parentRevisionId": "prf-20260821T091500000Z-7K2M",
+  "generation": 12,
+  "statementGeneration": 8,
+  "createdAt": "2026-08-23T12:00:00.000Z",
+  "statements": [
+    {
+      "statementId": "stm-20260818T083000000Z-G4MW",
+      "statementKind": "goal",
+      "wording": "Make technical explanations easier to follow.",
+      "supportingSessionCount": 0,
+      "evidence": []
+    },
+    {
+      "statementId": "stm-20260823T114500000Z-K6RT",
+      "statementKind": "growthDirection",
+      "wording": "When moving between points, you tend to rush; practice a short pause before introducing the next point.",
+      "supportingSessionCount": 2,
+      "evidence": [
+        {
+          "sessionId": "ses-20260820T101500000Z-P4R7",
+          "transcriptRevisionId": "trv-20260820T104000000Z-V2FK",
+          "anchor": {
+            "kind": "wordRange",
+            "startWordId": "word-183",
+            "endWordId": "word-199"
+          },
+          "displaySnapshot": {
+            "sessionLabel": "Architecture reflection",
+            "timestampMs": 258000
+          }
+        },
+        {
+          "sessionId": "ses-20260822T153045123Z-P4R7",
+          "transcriptRevisionId": "trv-20260822T155000000Z-W8CN",
+          "anchor": {
+            "kind": "wordRange",
+            "startWordId": "word-420",
+            "endWordId": "word-438"
+          },
+          "displaySnapshot": {
+            "sessionLabel": "Product reflection",
+            "timestampMs": 423000
+          }
+        }
+      ]
+    }
+  ]
+}

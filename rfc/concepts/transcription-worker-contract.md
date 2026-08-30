@@ -34,9 +34,11 @@ Model weights and generated outputs carry separate licensing constraints. The
 engine descriptor exposes a reviewed `EngineUsePolicy` including
 covered artifacts, private-local evaluation/export, external processing, public
 distribution, commercial-use booleans, and a pinned license reference/hash.
-CrisperWhisper is private local non-commercial evaluation-only: public sharing and
-Codex transmission are disabled until written permission or a compatible
-replacement is secured. See
+CrisperWhisper is private local evaluation-only under Audora's conservative
+policy: routine operational use, public sharing, and external processing remain
+disabled until the exact license obligations are cleared or a compatible
+replacement is secured. The license does not name Codex or ban all AI inference;
+see
 [`execution-and-distribution.md`](execution-and-distribution.md).
 
 ## Process boundary
@@ -45,9 +47,8 @@ The initial personal-build adapter owns a child process for the active
 transcription job and communicates over anonymous stdin/stdout pipes using
 versioned JSON Lines. There is no listener, port, named FIFO, Unix-domain socket,
 token, or shell command. The Application-facing port and message DTOs are
-transport-neutral: if the sandboxed-distribution spike requires a bundled XPC
-helper, it preserves the same request/event semantics and candidate-validation
-boundary.
+transport-neutral so a future App Sandbox/XPC profile can preserve the same
+request/event semantics and candidate-validation boundary.
 
 - The executable URL and arguments are fixed by the adapter.
 - Recording paths and transcript text do not appear in arguments or logs.
@@ -72,7 +73,7 @@ privacy alone:
 - a startup `hello` that identifies protocol/runtime/model/patch versions before
   audio is accepted.
 
-The chosen macOS sandbox/helper mechanism must prove these properties in an
+The chosen worker-confinement mechanism must prove these properties in an
 adversarial integration test; the JSONL transport by itself does not enforce them.
 
 ## Requests and events
@@ -92,7 +93,7 @@ in version one:
   },
   "sources": [
     {
-      "sourceId": "src-0001",
+      "audioSourceId": "src-0001",
       "role": "microphone",
       "path": "input/audio.wav",
       "timelineOffsetMs": 0
@@ -191,7 +192,7 @@ Validation failure preserves the raw result for local diagnostics without select
 it or invoking coaching.
 
 Minimum voiced-coverage extraction needed for this gate is part of audio sealing
-and transcription validation, not the later coaching-metrics phase. Acceptance is
+and transcription validation, not a user-facing metric. Acceptance is
 fixture-specific: Audora must retain the labeled beginning, tail, fillers, and
 repairs in its representative corpus. No ASR engine is claimed to guarantee that
 every spoken word is correct.

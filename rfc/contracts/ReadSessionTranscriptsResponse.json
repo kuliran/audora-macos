@@ -1,0 +1,241 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/ReadSessionTranscriptsResponse.json",
+    "oneOf": [
+        {
+            "$ref": "#/$defs/ReadSessionTranscriptsResponseComplete"
+        },
+        {
+            "$ref": "#/$defs/ReadSessionTranscriptsResponseSessionUnavailable"
+        },
+        {
+            "$ref": "#/$defs/ReadSessionTranscriptsResponseContextCannotFit"
+        }
+    ],
+    "$defs": {
+        "ReadSessionTranscriptsResponseComplete": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "complete"
+                },
+                "transcripts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionTranscriptDisclosure"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "kind",
+                "transcripts"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ReadSessionTranscriptsResponseSessionUnavailable": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "sessionUnavailable"
+                },
+                "unavailableSessionTranscriptHandles": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionTranscriptHandle"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "kind",
+                "unavailableSessionTranscriptHandles"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ReadSessionTranscriptsResponseContextCannotFit": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "contextCannotFit"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionTranscriptDisclosure": {
+            "type": "object",
+            "properties": {
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/SessionAttachmentId"
+                },
+                "transcript": {
+                    "$ref": "#/$defs/SessionTranscript"
+                }
+            },
+            "required": [
+                "sessionAttachmentId",
+                "transcript"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionTranscriptHandle": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36,
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "description": "Lowercase canonical UUID text."
+        },
+        "SessionAttachmentId": {
+            "type": "string",
+            "minLength": 1
+        },
+        "SessionTranscript": {
+            "type": "object",
+            "properties": {
+                "lines": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/TranscriptAttachmentLine"
+                    }
+                },
+                "audioEvents": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/AudioEvent"
+                    }
+                }
+            },
+            "required": [
+                "lines",
+                "audioEvents"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptAttachmentLine": {
+            "type": "object",
+            "properties": {
+                "timeRange": {
+                    "$ref": "#/$defs/SessionTimeRange"
+                },
+                "text": {
+                    "$ref": "#/$defs/NonEmptyText"
+                },
+                "words": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/TranscriptAttachmentWord"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "timeRange",
+                "text",
+                "words"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioEvent": {
+            "type": "object",
+            "properties": {
+                "audioEventId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "category": {
+                    "$ref": "#/$defs/AudioEventCategory"
+                },
+                "timeRange": {
+                    "$ref": "#/$defs/SessionTimeRange"
+                }
+            },
+            "required": [
+                "audioEventId",
+                "category",
+                "timeRange"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionTimeRange": {
+            "type": "object",
+            "properties": {
+                "startMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                },
+                "endMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                }
+            },
+            "required": [
+                "startMs",
+                "endMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "NonEmptyText": {
+            "type": "string",
+            "minLength": 1
+        },
+        "TranscriptAttachmentWord": {
+            "type": "object",
+            "properties": {
+                "wordId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "text": {
+                    "$ref": "#/$defs/NonEmptyText"
+                },
+                "timeRange": {
+                    "$ref": "#/$defs/SessionTimeRange",
+                    "description": "Missing when the Word has no reliable audio span."
+                }
+            },
+            "required": [
+                "wordId",
+                "text"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "EntityId": {
+            "type": "string",
+            "minLength": 1
+        },
+        "AudioEventCategory": {
+            "type": "string",
+            "enum": [
+                "nonSpeech",
+                "silentPause",
+                "untranscribedVoicedInterval",
+                "muted",
+                "captureGap"
+            ]
+        }
+    }
+}

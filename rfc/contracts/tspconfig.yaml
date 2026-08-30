@@ -1,0 +1,12 @@
+kind: project
+entrypoint: coach-provider.tsp
+warn-as-error: true
+
+emit:
+  - "@typespec/json-schema"
+
+options:
+  "@typespec/json-schema":
+    emitter-output-dir: "{project-root}"
+    file-type: json
+    seal-object-schemas: true

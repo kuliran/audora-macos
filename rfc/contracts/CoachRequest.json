@@ -1,0 +1,652 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/CoachRequest.json",
+    "type": "object",
+    "properties": {
+        "profile": {
+            "$ref": "#/$defs/ProfileContext"
+        },
+        "conversation": {
+            "$ref": "#/$defs/ConversationContext"
+        },
+        "sessionAttachments": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SessionAttachment"
+            }
+        }
+    },
+    "required": [
+        "profile",
+        "conversation",
+        "sessionAttachments"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "$defs": {
+        "ProfileContext": {
+            "type": "object",
+            "properties": {
+                "statements": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ProfileStatement"
+                    }
+                }
+            },
+            "required": [
+                "statements"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ConversationContext": {
+            "type": "object",
+            "properties": {
+                "history": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatTurn"
+                    }
+                },
+                "memory": {
+                    "$ref": "#/$defs/CoachMemory"
+                },
+                "trigger": {
+                    "$ref": "#/$defs/ConversationTrigger"
+                }
+            },
+            "required": [
+                "history",
+                "memory",
+                "trigger"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionAttachment": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/SessionAttachmentInline"
+                },
+                {
+                    "$ref": "#/$defs/SessionAttachmentOnDemand"
+                }
+            ]
+        },
+        "ProfileStatement": {
+            "type": "object",
+            "properties": {
+                "statementId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "statementKind": {
+                    "$ref": "#/$defs/ProfileStatementKind"
+                },
+                "wording": {
+                    "$ref": "#/$defs/NonEmptyText"
+                },
+                "supportingSessionCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647,
+                    "description": "Total distinct supporting Sessions, including unattached Sessions."
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachEvidencePointer"
+                    },
+                    "minItems": 1,
+                    "description": "Evidence whose exact Session/Transcript Revision pair is attached."
+                }
+            },
+            "required": [
+                "statementId",
+                "statementKind",
+                "wording",
+                "supportingSessionCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatTurn": {
+            "type": "object",
+            "properties": {
+                "role": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "user"
+                        },
+                        {
+                            "type": "string",
+                            "const": "coach"
+                        }
+                    ]
+                },
+                "text": {
+                    "$ref": "#/$defs/NonEmptyText",
+                    "description": "Exact user text or canonical coach-block prose projection."
+                }
+            },
+            "required": [
+                "role",
+                "text"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachMemory": {
+            "type": "object",
+            "properties": {
+                "generalNotes": {
+                    "type": "string"
+                },
+                "sessionSummaries": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachMemorySessionSummary"
+                    }
+                }
+            },
+            "required": [
+                "generalNotes",
+                "sessionSummaries"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ConversationTrigger": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/ConversationTriggerUserMessage"
+                },
+                {
+                    "$ref": "#/$defs/ConversationTriggerReconsiderProfileChange"
+                }
+            ]
+        },
+        "SessionAttachmentInline": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "inline"
+                },
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/SessionAttachmentId"
+                },
+                "displayLabel": {
+                    "$ref": "#/$defs/NonEmptyText"
+                },
+                "transcript": {
+                    "$ref": "#/$defs/SessionTranscript"
+                }
+            },
+            "required": [
+                "kind",
+                "sessionAttachmentId",
+                "displayLabel",
+                "transcript"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionAttachmentOnDemand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "onDemand"
+                },
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/SessionAttachmentId"
+                },
+                "displayLabel": {
+                    "$ref": "#/$defs/NonEmptyText"
+                },
+                "sessionTranscriptHandle": {
+                    "$ref": "#/$defs/SessionTranscriptHandle"
+                }
+            },
+            "required": [
+                "kind",
+                "sessionAttachmentId",
+                "displayLabel",
+                "sessionTranscriptHandle"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "EntityId": {
+            "type": "string",
+            "minLength": 1
+        },
+        "ProfileStatementKind": {
+            "type": "string",
+            "enum": [
+                "goal",
+                "coachingPreference",
+                "selfAssessment",
+                "speakingObservation",
+                "growthDirection"
+            ]
+        },
+        "NonEmptyText": {
+            "type": "string",
+            "minLength": 1
+        },
+        "CoachEvidencePointer": {
+            "type": "object",
+            "properties": {
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/SessionAttachmentId"
+                },
+                "target": {
+                    "$ref": "#/$defs/CoachEvidenceTarget"
+                }
+            },
+            "required": [
+                "sessionAttachmentId",
+                "target"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "Pointer into an attached canonical transcript. Coach-returned values are untrusted."
+        },
+        "CoachMemorySessionSummary": {
+            "type": "object",
+            "properties": {
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/SessionAttachmentId"
+                },
+                "notes": {
+                    "$ref": "#/$defs/NonEmptyText"
+                }
+            },
+            "required": [
+                "sessionAttachmentId",
+                "notes"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ConversationTriggerUserMessage": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "userMessage"
+                },
+                "text": {
+                    "$ref": "#/$defs/NonEmptyText"
+                }
+            },
+            "required": [
+                "kind",
+                "text"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ConversationTriggerReconsiderProfileChange": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "reconsiderProfileChange"
+                },
+                "previousEdits": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachProfileEditProposal"
+                    },
+                    "minItems": 1
+                },
+                "inactiveEditTargets": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ProfileStatement"
+                    },
+                    "minItems": 1,
+                    "description": "Inactive targets referenced by the previous edits or pending evidence."
+                },
+                "inactiveTargetsEvidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachProfileEvidenceAppend"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionAttachmentId": {
+            "type": "string",
+            "minLength": 1
+        },
+        "SessionTranscript": {
+            "type": "object",
+            "properties": {
+                "lines": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/TranscriptAttachmentLine"
+                    }
+                },
+                "audioEvents": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/AudioEvent"
+                    }
+                }
+            },
+            "required": [
+                "lines",
+                "audioEvents"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionTranscriptHandle": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36,
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "description": "Lowercase canonical UUID text."
+        },
+        "CoachEvidenceTarget": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/CoachEvidenceTargetWordRange"
+                },
+                {
+                    "$ref": "#/$defs/CoachEvidenceTargetAudioEvent"
+                }
+            ]
+        },
+        "CoachProfileEditProposal": {
+            "type": "object",
+            "properties": {
+                "edit": {
+                    "$ref": "#/$defs/CoachProfileEdit"
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachEvidencePointer"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "edit"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachProfileEvidenceAppend": {
+            "type": "object",
+            "properties": {
+                "targetStatementId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachEvidencePointer"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "targetStatementId",
+                "evidence"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptAttachmentLine": {
+            "type": "object",
+            "properties": {
+                "timeRange": {
+                    "$ref": "#/$defs/SessionTimeRange"
+                },
+                "text": {
+                    "$ref": "#/$defs/NonEmptyText"
+                },
+                "words": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/TranscriptAttachmentWord"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "timeRange",
+                "text",
+                "words"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioEvent": {
+            "type": "object",
+            "properties": {
+                "audioEventId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "category": {
+                    "$ref": "#/$defs/AudioEventCategory"
+                },
+                "timeRange": {
+                    "$ref": "#/$defs/SessionTimeRange"
+                }
+            },
+            "required": [
+                "audioEventId",
+                "category",
+                "timeRange"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachEvidenceTargetWordRange": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "wordRange"
+                },
+                "startWordId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "endWordId": {
+                    "$ref": "#/$defs/EntityId"
+                }
+            },
+            "required": [
+                "kind",
+                "startWordId",
+                "endWordId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachEvidenceTargetAudioEvent": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "audioEvent"
+                },
+                "audioEventId": {
+                    "$ref": "#/$defs/EntityId"
+                }
+            },
+            "required": [
+                "kind",
+                "audioEventId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachProfileEdit": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/CoachProfileEditAdd"
+                },
+                {
+                    "$ref": "#/$defs/CoachProfileEditReplace"
+                },
+                {
+                    "$ref": "#/$defs/CoachProfileEditRetire"
+                }
+            ]
+        },
+        "SessionTimeRange": {
+            "type": "object",
+            "properties": {
+                "startMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                },
+                "endMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                }
+            },
+            "required": [
+                "startMs",
+                "endMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptAttachmentWord": {
+            "type": "object",
+            "properties": {
+                "wordId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "text": {
+                    "$ref": "#/$defs/NonEmptyText"
+                },
+                "timeRange": {
+                    "$ref": "#/$defs/SessionTimeRange",
+                    "description": "Missing when the Word has no reliable audio span."
+                }
+            },
+            "required": [
+                "wordId",
+                "text"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "AudioEventCategory": {
+            "type": "string",
+            "enum": [
+                "nonSpeech",
+                "silentPause",
+                "untranscribedVoicedInterval",
+                "muted",
+                "captureGap"
+            ]
+        },
+        "CoachProfileEditAdd": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "add"
+                },
+                "statementKind": {
+                    "$ref": "#/$defs/ProfileStatementKind"
+                },
+                "wording": {
+                    "$ref": "#/$defs/NonEmptyText"
+                }
+            },
+            "required": [
+                "kind",
+                "statementKind",
+                "wording"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachProfileEditReplace": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "replace"
+                },
+                "targetStatementId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "wording": {
+                    "$ref": "#/$defs/NonEmptyText"
+                }
+            },
+            "required": [
+                "kind",
+                "targetStatementId",
+                "wording"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachProfileEditRetire": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "retire"
+                },
+                "targetStatementId": {
+                    "$ref": "#/$defs/EntityId"
+                }
+            },
+            "required": [
+                "kind",
+                "targetStatementId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        }
+    }
+}

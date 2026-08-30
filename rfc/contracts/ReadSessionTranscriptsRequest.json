@@ -1,0 +1,29 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/ReadSessionTranscriptsRequest.json",
+    "type": "object",
+    "properties": {
+        "sessionTranscriptHandles": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SessionTranscriptHandle"
+            },
+            "minItems": 1
+        }
+    },
+    "required": [
+        "sessionTranscriptHandles"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "$defs": {
+        "SessionTranscriptHandle": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36,
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "description": "Lowercase canonical UUID text."
+        }
+    }
+}

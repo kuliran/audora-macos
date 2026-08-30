@@ -1,0 +1,347 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/CoachResponse.json",
+    "type": "object",
+    "properties": {
+        "messageBlocks": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/CoachResponseBlock"
+            },
+            "minItems": 1
+        },
+        "newMemory": {
+            "$ref": "#/$defs/CoachMemory",
+            "description": "Complete replacement; omission retains the current Coach Memory."
+        },
+        "proposeProfileEdits": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/CoachProfileEditProposal"
+            },
+            "minItems": 1
+        },
+        "appendProfileEvidence": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/CoachProfileEvidenceAppend"
+            },
+            "minItems": 1
+        }
+    },
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "$defs": {
+        "CoachResponseBlock": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/CoachResponseBlockMarkdown"
+                },
+                {
+                    "$ref": "#/$defs/CoachResponseBlockEvidenceObservation"
+                }
+            ]
+        },
+        "CoachMemory": {
+            "type": "object",
+            "properties": {
+                "generalNotes": {
+                    "type": "string"
+                },
+                "sessionSummaries": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachMemorySessionSummary"
+                    }
+                }
+            },
+            "required": [
+                "generalNotes",
+                "sessionSummaries"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachProfileEditProposal": {
+            "type": "object",
+            "properties": {
+                "edit": {
+                    "$ref": "#/$defs/CoachProfileEdit"
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachEvidencePointer"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "edit"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachProfileEvidenceAppend": {
+            "type": "object",
+            "properties": {
+                "targetStatementId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachEvidencePointer"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "targetStatementId",
+                "evidence"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachResponseBlockMarkdown": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "markdown"
+                },
+                "markdown": {
+                    "$ref": "#/$defs/NonEmptyText",
+                    "description": "Coaching prose that does not need evidence controls."
+                }
+            },
+            "required": [
+                "kind",
+                "markdown"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachResponseBlockEvidenceObservation": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "evidenceObservation"
+                },
+                "markdown": {
+                    "$ref": "#/$defs/NonEmptyText"
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachEvidencePointer"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "kind",
+                "markdown",
+                "evidence"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachMemorySessionSummary": {
+            "type": "object",
+            "properties": {
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/SessionAttachmentId"
+                },
+                "notes": {
+                    "$ref": "#/$defs/NonEmptyText"
+                }
+            },
+            "required": [
+                "sessionAttachmentId",
+                "notes"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachProfileEdit": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/CoachProfileEditAdd"
+                },
+                {
+                    "$ref": "#/$defs/CoachProfileEditReplace"
+                },
+                {
+                    "$ref": "#/$defs/CoachProfileEditRetire"
+                }
+            ]
+        },
+        "CoachEvidencePointer": {
+            "type": "object",
+            "properties": {
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/SessionAttachmentId"
+                },
+                "target": {
+                    "$ref": "#/$defs/CoachEvidenceTarget"
+                }
+            },
+            "required": [
+                "sessionAttachmentId",
+                "target"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "Pointer into an attached canonical transcript. Coach-returned values are untrusted."
+        },
+        "EntityId": {
+            "type": "string",
+            "minLength": 1
+        },
+        "NonEmptyText": {
+            "type": "string",
+            "minLength": 1
+        },
+        "SessionAttachmentId": {
+            "type": "string",
+            "minLength": 1
+        },
+        "CoachProfileEditAdd": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "add"
+                },
+                "statementKind": {
+                    "$ref": "#/$defs/ProfileStatementKind"
+                },
+                "wording": {
+                    "$ref": "#/$defs/NonEmptyText"
+                }
+            },
+            "required": [
+                "kind",
+                "statementKind",
+                "wording"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachProfileEditReplace": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "replace"
+                },
+                "targetStatementId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "wording": {
+                    "$ref": "#/$defs/NonEmptyText"
+                }
+            },
+            "required": [
+                "kind",
+                "targetStatementId",
+                "wording"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachProfileEditRetire": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "retire"
+                },
+                "targetStatementId": {
+                    "$ref": "#/$defs/EntityId"
+                }
+            },
+            "required": [
+                "kind",
+                "targetStatementId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachEvidenceTarget": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/CoachEvidenceTargetWordRange"
+                },
+                {
+                    "$ref": "#/$defs/CoachEvidenceTargetAudioEvent"
+                }
+            ]
+        },
+        "ProfileStatementKind": {
+            "type": "string",
+            "enum": [
+                "goal",
+                "coachingPreference",
+                "selfAssessment",
+                "speakingObservation",
+                "growthDirection"
+            ]
+        },
+        "CoachEvidenceTargetWordRange": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "wordRange"
+                },
+                "startWordId": {
+                    "$ref": "#/$defs/EntityId"
+                },
+                "endWordId": {
+                    "$ref": "#/$defs/EntityId"
+                }
+            },
+            "required": [
+                "kind",
+                "startWordId",
+                "endWordId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachEvidenceTargetAudioEvent": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "audioEvent"
+                },
+                "audioEventId": {
+                    "$ref": "#/$defs/EntityId"
+                }
+            },
+            "required": [
+                "kind",
+                "audioEventId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        }
+    }
+}

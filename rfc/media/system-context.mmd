@@ -5,8 +5,10 @@ flowchart LR
     App --> ASR[Crisper worker adapter]
     App --> Evidence[Acoustic evidence adapter]
     App --> Domain[Domain annotation and validation]
-    App --> Coach[Codex coach adapter]
+    App --> Invocation[Invocation module]
+    Invocation --> Coach[Codex coach adapter]
     App --> Store[Portable library repository]
+    Invocation --> Store
     Audio --> Stage[Capability-scoped job staging]
     ASR --> Stage
     Evidence --> Stage
@@ -16,7 +18,7 @@ flowchart LR
     Audio --> App
     ASR --> App
     Evidence --> App
-    Coach --> App
+    Coach --> Invocation
     Domain --> App
 
     %% Only Application can publish authoritative manifests through Store.

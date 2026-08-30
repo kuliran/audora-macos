@@ -1,0 +1,172 @@
+# Coach Provider contracts
+
+[`coach-provider.tsp`](coach-provider.tsp) is the sole compilation entry point.
+The source is separated by audience:
+
+- [`coach-provider-configuration.tsp`](coach-provider-configuration.tsp) contains
+  Application-only static provider configuration.
+- [`coach-provider-protocol.tsp`](coach-provider-protocol.tsp) contains JSON sent
+  to or returned by the coach and the scoped transcript-read tool.
+- [`coach-provider-shared.tsp`](coach-provider-shared.tsp) contains shared scalar
+  definitions.
+
+TypeSpec compilation emits committed JSON Schemas. The Application does not need
+Node or TypeSpec at runtime.
+
+- [`CoachProviderDescriptor.json`](CoachProviderDescriptor.json)
+- [`CoachRequest.json`](CoachRequest.json)
+- [`CoachResponse.json`](CoachResponse.json)
+- [`ReadSessionTranscriptsRequest.json`](ReadSessionTranscriptsRequest.json)
+- [`ReadSessionTranscriptsResponse.json`](ReadSessionTranscriptsResponse.json)
+
+| Root schema | Direction | Coach-visible instance? |
+| --- | --- | --- |
+| `CoachProviderDescriptor` | Application configuration | No |
+| `CoachRequest` | Application -> coach | Yes |
+| `CoachResponse` | Coach -> Application | Yes |
+| `ReadSessionTranscriptsRequest` | Coach tool call -> Application | Yes |
+| `ReadSessionTranscriptsResponse` | Application -> coach tool result | Yes |
+
+Invocation and Attempt identities, provider idempotency, admission state, token
+estimator identity, Profile integrity hashes, and persisted-record schema versions
+remain outside these provider DTOs.
+
+`CoachProviderDescriptor` is app-only configuration. JSON Schema validates each
+field's shape. `displayName` is a bounded Presentation label for provider health
+and errors; no behavior branches on its text. Application additionally rejects the
+descriptor unless:
+
+- `responseReservedTokens + safetyMarginTokens < contextWindowTokens`;
+- a maximum valid canonically serialized `CoachMemory`, inside the minimum valid
+  Request, fits the resulting input ceiling; and
+- that same Memory, inside the minimum valid Response, fits both
+  `responseReservedTokens` and the response collector's byte ceiling.
+
+This guarantees that accepting a maximum-sized Memory cannot make the next minimal
+turn or its own valid response structurally impossible.
+
+## Source ordering
+
+TypeSpec declarations are order-independent. Source files favor reading from the
+prominent root outward:
+
+1. Start with the schema named after the file or generated root.
+2. Declare referenced models breadth-first, preserving field and union order.
+3. Put a spread `*Base` after the models that use it.
+4. Start a new queue at each direction or generated-root heading.
+
+Comments explain only non-obvious trust, units, or cross-field rules.
+
+## Generation
+
+From the macOS project directory:
+
+```sh
+pnpm install
+pnpm contracts:generate
+pnpm contracts:check
+```
+
+The compiler and JSON Schema emitter are pinned in `package.json`. The resolved
+dependency graph is committed in `pnpm-lock.yaml`. `generated-json-files.txt`
+makes the check fail when generated roots change unexpectedly.
+
+## Request context
+
+A Chat freezes its Session attachment set at creation. A request may contain no
+Session attachments. Each attachment has a stable Chat-scoped
+`sessionAttachmentId`; Library Session and revision identities stay local.
+
+For each Provider Attempt, Application projects every attachment as either:
+
+- `inline`, with its complete immutable transcript; or
+- `onDemand`, with a fresh Attempt-scoped `SessionTranscriptHandle`.
+
+The projection may change between Attempts without changing attachment identity.
+Application chooses it from the exact serialized context and provider limits. The
+coach receives no estimates or admission inputs.
+
+`ProfileContext` is a structured projection of the current Profile. Each
+`ProfileStatement` exposes its stable target ID, kind, wording, total distinct
+supporting-Session count, and only the supporting evidence whose exact
+`(sessionId, transcriptRevisionId)` pair is attached to this Chat. Matching a
+Session at a different Transcript Revision never remaps Word or Audio Event IDs.
+
+`ConversationContext` contains the complete eligible Chat-history prose projection,
+current structured Coach Memory, and one trigger. A user `ChatTurn.text` is the
+stored user text. A coach `ChatTurn.text` concatenates its persisted block Markdown
+in order with exactly two newline characters between blocks. Evidence controls and
+pointers remain in local message storage rather than being synthesized into that
+text. This projection is deterministic and never omits an eligible successful turn.
+
+Analyze is not a trigger: it creates a Chat, seeds
+an ordinary user-message Draft, and submits that Draft through the same path.
+Pending Drafts, errors, Proposals, processing state, and Profile-update dividers
+never enter history.
+
+Coach Memory is a complete Chat-scoped working snapshot with free general notes
+and per-attachment summaries. `CoachResponse.newMemory` is optional. Omission keeps
+the current snapshot; presence replaces it atomically with successful response
+publication. Superseded snapshots are not retained.
+
+## Transcript reads
+
+The transcript-read tool accepts a unique nonempty subset of the handles in the
+current request. Its response is atomic:
+
+- `complete` returns every requested transcript;
+- `sessionUnavailable` identifies unavailable handles and returns no transcript;
+  or
+- `contextCannotFit` returns no transcript.
+
+Each complete disclosure includes `sessionAttachmentId` so multiple returned
+transcripts never rely on array position. Application owns retries, limits, and
+failure presentation.
+
+`TranscriptAttachmentLine.text` and `words` intentionally overlap. Text preserves
+coherent punctuation; Words provide stable evidence anchors. Punctuation is not a
+Word. A Word may omit its time range when no reliable span exists. Lines and Audio
+Events need no audio-source identity because each remains grouped inside one
+Session attachment. Word IDs and Audio Event IDs remain because the coach can use
+them as evidence targets.
+
+## Responses, evidence, and Profile edits
+
+`messageBlocks` form one ordered response batch, not a streaming protocol. A
+Markdown block is ordinary coaching prose. An Evidence Observation is prose that
+Presentation renders with evidence controls. The output limit and whole-response
+validation bound the batch; there is no independent block-size limit.
+
+Every `CoachEvidencePointer` is semantically untrusted. Application accepts one
+only when:
+
+- its `sessionAttachmentId` belongs to this Chat;
+- its IDs exist in that attachment's canonical immutable transcript; and
+- a Word range is ordered and belongs to that transcript.
+
+The evidence need not have been disclosed during the current Attempt: the coach
+may have retained relevant transcript conclusions in Coach Memory. Application
+validates structural truth, not whether the evidence supports the coach's claim.
+
+`proposeProfileEdits` contains reviewed semantic edits. Add selects a Statement
+kind; Replace preserves the target Statement kind and therefore omits it; Retire
+only identifies its target. The coach never allocates Statement IDs for additions
+or replacements.
+
+`appendProfileEvidence` contains evidence-only additions to active Statements. A
+wholly evidence-only response may be committed silently. If any semantic edit
+survives normalization, every surviving effect becomes one reviewed Proposal.
+Application deduplicates evidence by `(statementId, Session)` using provider order.
+
+A Reconsider trigger supplies the complete prior `CoachProfileEditProposal`
+values, including their evidence. When targets became inactive, it also supplies
+their `ProfileStatement` snapshots and any pending standalone evidence through
+`inactiveEditTargets` and `inactiveTargetsEvidence`. Application requires at least
+one of the three optional arrays, unique inactive target IDs, and exact resolution
+of every referenced inactive ID. Any resulting effect still requires review.
+
+The complete `CoachResponse` is one semantically untrusted batch. Application
+rejects it atomically when schema, Memory, evidence, edit, conflict, or size
+validation fails. For an ordinary user-message trigger, Application additionally
+requires `messageBlocks`. Reconsider may validly return no message and no Profile
+effect, which withdraws the old Proposal without publishing an empty Chat message.
