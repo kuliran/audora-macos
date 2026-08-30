@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "library.create.installs-null-authority",
+  "initialState": { "kind": "noLibrarySelected", "recentAvailable": false },
+  "command": { "kind": "create" },
+  "dependencyTrace": [
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:00:00.000Z" },
+    { "port": "libraryIdGenerator", "effect": "generateLibraryId", "outcome": "lib-20260830T120000000Z-2ABC" },
+    {
+      "port": "libraryWorkspace",
+      "effect": "createLibrary",
+      "outcome": "opened",
+      "library": {
+        "libraryId": "lib-20260830T120000000Z-2ABC",
+        "preferences": { "language": "en", "annotationsVisible": true, "playbackRate": 1.0 },
+        "profileKind": "null",
+        "statementCount": 0
+      }
+    }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "library": {
+      "libraryId": "lib-20260830T120000000Z-2ABC",
+      "preferences": { "language": "en", "annotationsVisible": true, "playbackRate": 1.0 },
+      "profileKind": "null",
+      "statementCount": 0
+    }
+  },
+  "expectedEffects": [
+    { "kind": "now" },
+    { "kind": "generateLibraryId" },
+    { "kind": "createLibrary" }
+  ]
+}

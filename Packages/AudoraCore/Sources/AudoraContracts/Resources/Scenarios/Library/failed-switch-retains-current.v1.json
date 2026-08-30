@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "library.failed-switch-retains-current",
+  "initialState": {
+    "kind": "active",
+    "library": {
+      "libraryId": "lib-20260830T120000000Z-2ABC",
+      "preferences": { "language": "en", "annotationsVisible": true, "playbackRate": 1.0 },
+      "profileKind": "null",
+      "statementCount": 0
+    }
+  },
+  "command": { "kind": "chooseExisting" },
+  "dependencyTrace": [
+    { "port": "libraryWorkspace", "effect": "chooseLibrary", "outcome": "candidateCorrupt" }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "notice": "candidateCorrupt",
+    "library": {
+      "libraryId": "lib-20260830T120000000Z-2ABC",
+      "preferences": { "language": "en", "annotationsVisible": true, "playbackRate": 1.0 },
+      "profileKind": "null",
+      "statementCount": 0
+    }
+  },
+  "expectedEffects": [{ "kind": "chooseLibrary" }]
+}

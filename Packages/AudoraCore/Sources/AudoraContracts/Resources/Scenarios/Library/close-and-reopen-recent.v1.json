@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "library.close-and-reopen-recent",
+  "initialState": {
+    "kind": "active",
+    "library": {
+      "libraryId": "lib-20260830T120000000Z-2ABC",
+      "preferences": { "language": "en", "annotationsVisible": true, "playbackRate": 1.0 },
+      "profileKind": "null",
+      "statementCount": 0
+    }
+  },
+  "commands": [{ "kind": "close" }, { "kind": "reopenRecent" }],
+  "dependencyTrace": [
+    { "port": "libraryWorkspace", "effect": "closeActiveLibrary", "outcome": "succeeded" },
+    {
+      "port": "libraryWorkspace",
+      "effect": "reopenRecentLibrary",
+      "outcome": "opened",
+      "library": {
+        "libraryId": "lib-20260830T120000000Z-2ABC",
+        "preferences": { "language": "en", "annotationsVisible": true, "playbackRate": 1.0 },
+        "profileKind": "null",
+        "statementCount": 0
+      }
+    }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "library": {
+      "libraryId": "lib-20260830T120000000Z-2ABC",
+      "preferences": { "language": "en", "annotationsVisible": true, "playbackRate": 1.0 },
+      "profileKind": "null",
+      "statementCount": 0
+    }
+  },
+  "expectedEffects": [{ "kind": "closeActiveLibrary" }, { "kind": "reopenRecentLibrary" }]
+}

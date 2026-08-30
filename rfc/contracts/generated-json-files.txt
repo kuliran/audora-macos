@@ -2,5 +2,8 @@ Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescr
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json

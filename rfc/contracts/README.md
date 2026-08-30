@@ -1,9 +1,10 @@
 # Contracts
 
 [`contracts.tsp`](contracts.tsp) is the sole compilation entry point. It imports
-the provider aggregate in [`coach-provider.tsp`](coach-provider.tsp) and the
-portable feature scenario in
-[`library-feature-scenario.tsp`](library-feature-scenario.tsp).
+the provider aggregate in [`coach-provider.tsp`](coach-provider.tsp), the
+portable Library document roots in
+[`portable-library.tsp`](portable-library.tsp), and the Library lifecycle
+scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp).
 
 The provider source is separated by audience:
 
@@ -22,6 +23,9 @@ at runtime.
 - [`CoachRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json)
 - [`CoachResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json)
 - [`LibraryFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json)
+- [`LibraryManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json)
+- [`LibraryPreferences.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json)
+- [`ProfileHead.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json)
 - [`ReadSessionTranscriptsRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json)
 - [`ReadSessionTranscriptsResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json)
 
@@ -30,6 +34,9 @@ at runtime.
 | `CoachProviderDescriptor` | Application configuration | No |
 | `CoachRequest` | Application -> coach | Yes |
 | `CoachResponse` | Coach -> Application | Yes |
+| `LibraryManifest` | Portable Library storage | No |
+| `LibraryPreferences` | Portable Library storage | No |
+| `ProfileHead` | Portable Library storage | No |
 | `ReadSessionTranscriptsRequest` | Coach tool call -> Application | Yes |
 | `ReadSessionTranscriptsResponse` | Application -> coach tool result | Yes |
 
@@ -40,12 +47,13 @@ remain outside these provider DTOs.
 ## Library feature scenarios
 
 `LibraryFeatureScenario` is a versioned, language-neutral description of one
-Application transition. Commands, states, effects, dependency ports, and outcomes
-use literal typed values rather than UI prose or framework-specific data. The
-checked-in
+Application lifecycle. Commands, states, effects, dependency ports, and outcomes
+use literal typed values rather than UI prose or framework-specific data. Checked-in
+fixtures cover creation, failed and successful selection, reveal, close/reopen,
+relaunch restoration, and newer-root read-only behavior. The
 [`library-launch-no-selection.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/library-launch-no-selection.v1.json)
-fixture describes launch through the temporary no-selected-Library bootstrap
-adapter. Portable implementations consume it through their package resources.
+fixture describes launch without a saved Library locator. Portable implementations
+consume all scenarios through their package resources.
 
 `CoachProviderDescriptor` is app-only configuration. JSON Schema validates each
 field's shape. `displayName` is a bounded Presentation label for provider health

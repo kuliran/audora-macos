@@ -1,0 +1,31 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/LibraryPreferences.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "language": {
+            "type": "string",
+            "const": "en"
+        },
+        "annotationsVisible": {
+            "type": "boolean"
+        },
+        "playbackRate": {
+            "type": "number",
+            "exclusiveMinimum": 0
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "language",
+        "annotationsVisible",
+        "playbackRate"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    }
+}

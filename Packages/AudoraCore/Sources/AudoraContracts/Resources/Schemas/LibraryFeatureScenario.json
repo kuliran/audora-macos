@@ -4,45 +4,44 @@
     "type": "object",
     "properties": {
         "schemaVersion": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 1
+            "type": "number",
+            "const": 1
         },
         "scenarioId": {
-            "type": "string",
-            "const": "library.launch.no-selection"
+            "type": "string"
         },
         "initialState": {
-            "$ref": "#/$defs/LibraryFeatureAwaitingBootstrapState"
+            "$ref": "#/$defs/LibraryFeatureScenarioState"
         },
         "command": {
-            "$ref": "#/$defs/LibraryFeatureStartCommand"
+            "$ref": "#/$defs/LibraryFeatureScenarioCommand"
+        },
+        "commands": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/LibraryFeatureScenarioCommand"
+            }
         },
         "dependencyTrace": {
             "type": "array",
             "items": {
                 "$ref": "#/$defs/LibraryFeatureDependencyEvent"
-            },
-            "minItems": 1,
-            "maxItems": 1
+            }
         },
         "expectedState": {
-            "$ref": "#/$defs/LibraryFeatureNoLibrarySelectedState"
+            "$ref": "#/$defs/LibraryFeatureScenarioState"
         },
         "expectedEffects": {
             "type": "array",
             "items": {
-                "$ref": "#/$defs/LibraryFeatureResolveInitialLibraryEffect"
-            },
-            "minItems": 1,
-            "maxItems": 1
+                "$ref": "#/$defs/LibraryFeatureEffect"
+            }
         }
     },
     "required": [
         "schemaVersion",
         "scenarioId",
         "initialState",
-        "command",
         "dependencyTrace",
         "expectedState",
         "expectedEffects"
@@ -50,8 +49,125 @@
     "unevaluatedProperties": {
         "not": {}
     },
-    "description": "Portable launch behavior shared by feature implementations and runners.",
+    "description": "Portable Library lifecycle behavior shared by feature implementations.",
     "$defs": {
+        "LibraryFeatureScenarioState": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/LibraryFeatureAwaitingBootstrapState"
+                },
+                {
+                    "$ref": "#/$defs/LibraryFeatureNoLibrarySelectedState"
+                },
+                {
+                    "$ref": "#/$defs/LibraryFeatureActiveState"
+                },
+                {
+                    "$ref": "#/$defs/LibraryFeatureReadOnlyState"
+                }
+            ]
+        },
+        "LibraryFeatureScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "start"
+                        },
+                        {
+                            "type": "string",
+                            "const": "create"
+                        },
+                        {
+                            "type": "string",
+                            "const": "chooseExisting"
+                        },
+                        {
+                            "type": "string",
+                            "const": "reopenRecent"
+                        },
+                        {
+                            "type": "string",
+                            "const": "openExternal"
+                        },
+                        {
+                            "type": "string",
+                            "const": "reveal"
+                        },
+                        {
+                            "type": "string",
+                            "const": "close"
+                        }
+                    ]
+                },
+                "token": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LibraryFeatureDependencyEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "libraryWorkspace"
+                        },
+                        {
+                            "type": "string",
+                            "const": "clock"
+                        },
+                        {
+                            "type": "string",
+                            "const": "libraryIdGenerator"
+                        }
+                    ]
+                },
+                "effect": {
+                    "type": "string"
+                },
+                "outcome": {
+                    "type": "string"
+                },
+                "library": {
+                    "$ref": "#/$defs/LibraryScenarioSnapshot"
+                },
+                "notice": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LibraryFeatureEffect": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "LibraryFeatureAwaitingBootstrapState": {
             "type": "object",
             "properties": {
@@ -67,88 +183,142 @@
                 "not": {}
             }
         },
-        "LibraryFeatureStartCommand": {
-            "type": "object",
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "const": "start"
-                }
-            },
-            "required": [
-                "kind"
-            ],
-            "unevaluatedProperties": {
-                "not": {}
-            }
-        },
-        "LibraryFeatureDependencyEvent": {
-            "type": "object",
-            "properties": {
-                "port": {
-                    "type": "string",
-                    "const": "libraryBootstrap"
-                },
-                "effect": {
-                    "$ref": "#/$defs/LibraryFeatureResolveInitialLibraryEffect"
-                },
-                "outcome": {
-                    "$ref": "#/$defs/LibraryFeatureNoLibrarySelectedOutcome"
-                }
-            },
-            "required": [
-                "port",
-                "effect",
-                "outcome"
-            ],
-            "unevaluatedProperties": {
-                "not": {}
-            }
-        },
         "LibraryFeatureNoLibrarySelectedState": {
             "type": "object",
             "properties": {
                 "kind": {
                     "type": "string",
                     "const": "noLibrarySelected"
+                },
+                "recentAvailable": {
+                    "type": "boolean"
+                },
+                "notice": {
+                    "type": "string"
                 }
             },
             "required": [
-                "kind"
+                "kind",
+                "recentAvailable"
             ],
             "unevaluatedProperties": {
                 "not": {}
             }
         },
-        "LibraryFeatureResolveInitialLibraryEffect": {
+        "LibraryFeatureActiveState": {
             "type": "object",
             "properties": {
                 "kind": {
                     "type": "string",
-                    "const": "resolveInitialLibrary"
+                    "const": "active"
+                },
+                "library": {
+                    "$ref": "#/$defs/LibraryScenarioSnapshot"
+                },
+                "notice": {
+                    "type": "string"
                 }
             },
             "required": [
-                "kind"
+                "kind",
+                "library"
             ],
             "unevaluatedProperties": {
                 "not": {}
             }
         },
-        "LibraryFeatureNoLibrarySelectedOutcome": {
+        "LibraryFeatureReadOnlyState": {
             "type": "object",
             "properties": {
                 "kind": {
                     "type": "string",
-                    "const": "noLibrarySelected"
+                    "const": "readOnly"
+                },
+                "libraryId": {
+                    "$ref": "#/$defs/LibraryId"
+                },
+                "reason": {
+                    "type": "string",
+                    "const": "newerSchema"
+                },
+                "notice": {
+                    "type": "string"
                 }
             },
             "required": [
-                "kind"
+                "kind",
+                "reason"
             ],
             "unevaluatedProperties": {
                 "not": {}
             }
+        },
+        "LibraryScenarioSnapshot": {
+            "type": "object",
+            "properties": {
+                "libraryId": {
+                    "$ref": "#/$defs/LibraryId"
+                },
+                "preferences": {
+                    "$ref": "#/$defs/LibraryScenarioPreferences"
+                },
+                "profileKind": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "null"
+                        },
+                        {
+                            "type": "string",
+                            "const": "selected"
+                        }
+                    ]
+                },
+                "statementCount": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                }
+            },
+            "required": [
+                "libraryId",
+                "preferences",
+                "profileKind",
+                "statementCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LibraryId": {
+            "type": "string",
+            "pattern": "^lib-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "LibraryScenarioPreferences": {
+            "type": "object",
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "const": "en"
+                },
+                "annotationsVisible": {
+                    "type": "boolean"
+                },
+                "playbackRate": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                }
+            },
+            "required": [
+                "language",
+                "annotationsVisible",
+                "playbackRate"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
         }
     }
 }
