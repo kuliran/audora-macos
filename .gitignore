@@ -117,7 +117,7 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
-# API Keys and sensitive data
+# Local-only configuration and sensitive data
 *.plist.local
 APIKeys.swift
 .env
@@ -126,17 +126,11 @@ Config.xcconfig
 
 releases/
 # Xcode
-audora.entitlements
 audora.xcodeproj/project.pbxproj
 audora.xcodeproj/xcshareddata/xcschemes/Audora.xcscheme
 audora.xcodeproj/xcuserdata/
 
-# Convex
-convex/_generated/
-.convex/
-convex.json
-
-# Node.js (for Convex CLI)
+# Node.js development tooling
 node_modules/
 package-lock.json
 
