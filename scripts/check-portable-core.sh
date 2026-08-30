@@ -33,6 +33,9 @@ swift build --package-path Packages/AudoraCore \
 portable_gate_stage='AudoraContracts release build'
 swift build --package-path Packages/AudoraCore \
   --configuration release --product AudoraContracts
+portable_gate_stage='queued external-open replacement test'
+swift test --package-path Packages/AudoraCore \
+  --filter LibraryFeatureTests/testRepeatedExternalCallbacksDuringSuspendedRestoreKeepOnlyLatestRequest
 portable_gate_stage='portable Core tests'
 swift test --package-path Packages/AudoraCore --parallel
 portable_gate_stage='feature scenario tests'

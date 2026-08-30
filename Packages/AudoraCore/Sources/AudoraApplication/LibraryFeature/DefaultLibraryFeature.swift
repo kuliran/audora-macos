@@ -30,8 +30,8 @@ public actor DefaultLibraryFeature: LibraryFeature {
         state
     }
 
-    var queuedExternalOpenCount: Int {
-        queuedExternalOpen == nil ? 0 : 1
+    var queuedExternalOpenToken: LibraryOpenRequestToken? {
+        queuedExternalOpen?.token
     }
 
     public nonisolated var states: AsyncStream<LibraryFeatureState> {
