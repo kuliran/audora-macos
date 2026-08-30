@@ -1,5 +1,6 @@
-rfc/contracts/CoachProviderDescriptor.json
-rfc/contracts/CoachRequest.json
-rfc/contracts/CoachResponse.json
-rfc/contracts/ReadSessionTranscriptsRequest.json
-rfc/contracts/ReadSessionTranscriptsResponse.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json

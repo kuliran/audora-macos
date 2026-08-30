@@ -1,5 +1,5 @@
 kind: project
-entrypoint: coach-provider.tsp
+entrypoint: contracts.tsp
 warn-as-error: true
 
 emit:
@@ -7,6 +7,6 @@ emit:
 
 options:
   "@typespec/json-schema":
-    emitter-output-dir: "{project-root}"
+    emitter-output-dir: "{project-root}/../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas"
     file-type: json
     seal-object-schemas: true

@@ -1,0 +1,154 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/LibraryFeatureScenario.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1
+        },
+        "scenarioId": {
+            "type": "string",
+            "const": "library.launch.no-selection"
+        },
+        "initialState": {
+            "$ref": "#/$defs/LibraryFeatureAwaitingBootstrapState"
+        },
+        "command": {
+            "$ref": "#/$defs/LibraryFeatureStartCommand"
+        },
+        "dependencyTrace": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/LibraryFeatureDependencyEvent"
+            },
+            "minItems": 1,
+            "maxItems": 1
+        },
+        "expectedState": {
+            "$ref": "#/$defs/LibraryFeatureNoLibrarySelectedState"
+        },
+        "expectedEffects": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/LibraryFeatureResolveInitialLibraryEffect"
+            },
+            "minItems": 1,
+            "maxItems": 1
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "scenarioId",
+        "initialState",
+        "command",
+        "dependencyTrace",
+        "expectedState",
+        "expectedEffects"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "Portable launch behavior shared by feature implementations and runners.",
+    "$defs": {
+        "LibraryFeatureAwaitingBootstrapState": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "awaitingBootstrap"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LibraryFeatureStartCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "start"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LibraryFeatureDependencyEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "libraryBootstrap"
+                },
+                "effect": {
+                    "$ref": "#/$defs/LibraryFeatureResolveInitialLibraryEffect"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/LibraryFeatureNoLibrarySelectedOutcome"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LibraryFeatureNoLibrarySelectedState": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "noLibrarySelected"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LibraryFeatureResolveInitialLibraryEffect": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "resolveInitialLibrary"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "LibraryFeatureNoLibrarySelectedOutcome": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "noLibrarySelected"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        }
+    }
+}

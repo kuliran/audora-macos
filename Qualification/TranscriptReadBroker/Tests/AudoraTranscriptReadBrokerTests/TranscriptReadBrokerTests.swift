@@ -1510,13 +1510,17 @@ final class TranscriptReadBrokerTests: XCTestCase {
 
     private func requestContractURL() -> URL {
         packageRootURL()
-            .appendingPathComponent("../../rfc/contracts/ReadSessionTranscriptsRequest.json")
+            .appendingPathComponent(
+                "../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json"
+            )
             .standardizedFileURL
     }
 
     private func responseContractURL() -> URL {
         packageRootURL()
-            .appendingPathComponent("../../rfc/contracts/ReadSessionTranscriptsResponse.json")
+            .appendingPathComponent(
+                "../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json"
+            )
             .standardizedFileURL
     }
 

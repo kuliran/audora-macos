@@ -442,7 +442,7 @@ See [`concepts/portable-library.md`](concepts/portable-library.md).
   the requested subset of exact attached Transcript Revisions; it accepts no path,
   arbitrary Session ID, write, search, audio, or Library operation. The
   language-neutral provider seam is
-  [`contracts/coach-provider.tsp`](contracts/coach-provider.tsp); compilation emits
+  [`contracts/contracts.tsp`](contracts/contracts.tsp); compilation emits
   the committed machine-readable schemas. Every Provider Attempt receives fresh
   transcript handles, one hidden capability, and one provider idempotency key.
   Application—not the coach—owns read limits, automatic retry, and cancellation.
