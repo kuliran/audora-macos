@@ -122,7 +122,7 @@ public enum RecordingPresentationMapper {
                     ? "Finishing recovered recording…"
                     : "Discarding recovered recording…",
                 detail: "The current recovery action is completing safely.",
-                recoveryItems: recoveryItems(catalog)
+                recoveryItems: recoveryItems(catalog, actionsEnabled: false)
             )
         case let .completed(snapshot, notice):
             let durationNotice = notice == .durationLimit
@@ -265,7 +265,8 @@ public enum RecordingPresentationMapper {
     }
 
     private static func recoveryItems(
-        _ catalog: RecordingRecoveryCatalog
+        _ catalog: RecordingRecoveryCatalog,
+        actionsEnabled: Bool = true
     ) -> [RecordingRecoveryPresentation] {
         catalog.items.map {
             let committedCleanup = $0.availability == .committedCleanup
@@ -275,8 +276,9 @@ public enum RecordingPresentationMapper {
                 recordingID: $0.recordingID,
                 sessionID: $0.sessionID,
                 elapsed: elapsed(frames: $0.durableFrameCount),
-                canSeal: $0.availability == .sealOrDiscard || committedCleanup,
-                canDiscard: !committedCleanup && !readOnly,
+                canSeal: actionsEnabled &&
+                    ($0.availability == .sealOrDiscard || committedCleanup),
+                canDiscard: actionsEnabled && !committedCleanup && !readOnly,
                 sealActionLabel: committedCleanup
                     ? "Retry Cleanup"
                     : "Seal Recovered Recording",
