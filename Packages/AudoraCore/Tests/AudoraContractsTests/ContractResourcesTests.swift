@@ -279,6 +279,42 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(
             successEffects.contains { $0["kind"] as? String == "publishedThroughValidator" }
         )
+        for resource in [
+            ContractResource.sessionProcessingQualifiedSuccessScenario,
+            .sessionProcessingCandidateRejectedScenario,
+            .sessionProcessingModelPrepareStartScenario,
+        ] {
+            let scenario = try jsonObject(resource)
+            let trace = try XCTUnwrap(
+                scenario["dependencyTrace"] as? [[String: Any]]
+            )
+            let identityAndCreationEffects = trace.compactMap {
+                $0["effect"] as? String
+            }.filter {
+                [
+                    "generateJobId", "generateRevisionId",
+                    "generateCancellationAuthorityId", "create",
+                ].contains($0)
+            }
+            XCTAssertEqual(
+                identityAndCreationEffects,
+                [
+                    "generateJobId", "generateRevisionId",
+                    "generateCancellationAuthorityId", "create",
+                ],
+                resource.bundlePath
+            )
+            let authorityEvent = try XCTUnwrap(
+                trace.first {
+                    $0["effect"] as? String == "generateCancellationAuthorityId"
+                }
+            )
+            XCTAssertEqual(authorityEvent["port"] as? String, "identifiers")
+            XCTAssertEqual(
+                authorityEvent["outcome"] as? String,
+                "cancel-synthetic-authority"
+            )
+        }
 
         let cancellation = try jsonObject(.sessionProcessingCancellationScenario)
         let cancellationEffects = try XCTUnwrap(
@@ -434,8 +470,16 @@ final class ContractResourcesTests: XCTestCase {
             1
         )
         XCTAssertEqual(
+            (featureProperties["initialJobs"] as? [String: Any])?["maxItems"] as? Int,
+            10_000
+        )
+        XCTAssertEqual(
             (featureProperties["expectedJobs"] as? [String: Any])?["minItems"] as? Int,
             1
+        )
+        XCTAssertEqual(
+            (featureProperties["expectedJobs"] as? [String: Any])?["maxItems"] as? Int,
+            10_000
         )
         let durableJobSchema = try XCTUnwrap(
             featureDefinitions["SessionProcessingScenarioDurableJob"]

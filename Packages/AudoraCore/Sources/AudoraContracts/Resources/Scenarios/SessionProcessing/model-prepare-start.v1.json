@@ -25,6 +25,7 @@
     { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:06:00.000Z" },
     { "port": "identifiers", "effect": "generateJobId", "outcome": "job-20260830T120500000Z-5GHJ" },
     { "port": "identifiers", "effect": "generateRevisionId", "outcome": "trv-20260830T120600000Z-6JKM" },
+    { "port": "identifiers", "effect": "generateCancellationAuthorityId", "outcome": "cancel-synthetic-authority" },
     { "port": "jobs", "effect": "create", "outcome": "written" },
     { "port": "jobs", "effect": "transitionRunning", "outcome": "written" },
     { "port": "engine", "effect": "transcribe", "outcome": "candidate" },

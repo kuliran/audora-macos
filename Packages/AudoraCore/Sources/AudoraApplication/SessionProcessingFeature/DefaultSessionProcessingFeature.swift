@@ -5,6 +5,16 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private static let maximumIdentityAttempts = 16
     private static let maximumReconciledJobCount = 10_000
 
+    private struct CompletedRecoveryKey: Hashable {
+        let libraryID: String
+        let sessionID: String
+
+        init(_ selection: SessionProcessingSelection) {
+            libraryID = selection.scope.libraryID.rawValue
+            sessionID = selection.sessionID.rawValue
+        }
+    }
+
     private enum PendingSelectionCommand {
         case select(SessionProcessingSelection)
         case clear
@@ -42,6 +52,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private var pendingSelectionCommand: PendingSelectionCommand?
     private var pendingLibraryActivationScope: LibraryScope?
     private var cancelledRunJobID: TranscriptionJobID?
+    private var invalidCompletedJobs: [CompletedRecoveryKey: SessionProcessingJob]
+        = [:]
     private var suppressStateTransitions = false
     private var stateContinuations: [UInt64: AsyncStream<SessionProcessingFeatureState>.Continuation]
         = [:]
@@ -157,6 +169,9 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             await jobs.finishReconciliation(reconciliationID)
             return
         }
+        // One writable Library is active at a time. Its bounded inventory is
+        // the authority for launch-time completed-Job recovery errors.
+        invalidCompletedJobs.removeAll(keepingCapacity: true)
 
         let preservedProfile = selectedProfile
         suppressStateTransitions = true
@@ -168,12 +183,11 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             case .queued, .preparing, .running:
                 await reconcileBackgroundControl(job)
                 continue
-            case .completed, .failed, .cancelled, .interrupted:
-                // Durable terminal authority is already deterministic and does
-                // not require launch-time canonical-audio work. An explicitly
-                // selected completed Session still gets exact Revision checks.
+            case .failed, .cancelled, .interrupted:
+                // These terminal outcomes remain terminal and require no
+                // canonical-audio or Revision work during activation.
                 continue
-            case .validating:
+            case .validating, .completed:
                 break
             }
             let selection = SessionProcessingSelection(
@@ -188,7 +202,22 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                   source.selection == selection,
                   source.isValid
             else {
-                await persistBackgroundTerminal(job, as: .interrupted)
+                // Validating work may safely become retryable interruption.
+                // Completed authority is immutable: missing/corrupt sealed
+                // source leaves it fail-closed so selecting that Session opens
+                // the canonical recovery error instead of retranscribing.
+                if job.state == .validating {
+                    await persistBackgroundTerminal(job, as: .interrupted)
+                } else {
+                    invalidCompletedJobs[CompletedRecoveryKey(selection)] = job
+                }
+                continue
+            }
+            if job.state == .completed {
+                guard await completedRevisionMatches(job, source: source) else {
+                    invalidCompletedJobs[CompletedRecoveryKey(selection)] = job
+                    continue
+                }
                 continue
             }
             await reconcile(job, source: source)
@@ -240,6 +269,18 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         lastSelection = selection
         selectedSource = nil
         selectedProfile = nil
+        if let invalid = invalidCompletedJobs[CompletedRecoveryKey(selection)] {
+            transition(
+                to: .failed(
+                    SessionProcessingFailedSnapshot(
+                        job: invalid,
+                        reason: .canonicalRevisionIntegrityFailed,
+                        actions: []
+                    )
+                )
+            )
+            return
+        }
         switch await sourcePort.load(selection) {
         case let .available(source):
             guard source.selection == selection, source.isValid else {
@@ -539,7 +580,13 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             to: .validating,
             candidateArtifactSHA256: verified.artifactFingerprint.sha256
         )
-        guard case .written = await jobs.transition(job, from: running) else {
+        let candidateWrite = await jobs.transition(job, from: running)
+        // Cancel may enter while the durable running→validating CAS is
+        // suspended. Whichever CAS commits owns the outcome: the original
+        // transcribe path must not publish or overwrite cancellation after
+        // returning across this suspension boundary.
+        guard cancelledRunJobID != jobID else { return }
+        guard case .written = candidateWrite else {
             transition(
                 to: .failed(
                     SessionProcessingFailedSnapshot(
@@ -931,8 +978,23 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             await finishCancellationFinalization()
             return
         }
-        guard case .written = await jobs.transition(requested, from: active.job.state)
-        else {
+        let requestWrite = await jobs.transition(requested, from: active.job.state)
+        switch requestWrite {
+        case .written:
+            break
+        case .stale:
+            // A candidate may have committed running→validating while this
+            // cancellation CAS was suspended. Refresh that exact Job and let
+            // its already-accepted validation/publication outcome finish;
+            // never send cancellation authority to a worker after losing CAS.
+            guard await resumeAcceptedCandidateAfterCancellationCASLoss(active)
+            else {
+                await retainRecoveryForUnconfirmedCancellation(active.job)
+                return
+            }
+            await finishCancellationFinalization()
+            return
+        case .collision, .failed:
             let outcome = await engine.cancel(active.job.executionReference)
             guard outcome == .reaped || outcome == .alreadyAbsent else {
                 await retainRecoveryForUnconfirmedCancellation(active.job)
@@ -988,6 +1050,29 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             )
         )
         await finishCancellationFinalization()
+    }
+
+    private func resumeAcceptedCandidateAfterCancellationCASLoss(
+        _ active: SessionProcessingActiveSnapshot
+    ) async -> Bool {
+        guard case let .loaded(current) = await jobs.latest(
+            for: active.source.selection
+        ),
+              current.jobID == active.job.jobID,
+              current.sessionID == active.job.sessionID,
+              current.revisionID == active.job.revisionID,
+              current.profileID == active.job.profileID,
+              current.createdAt == active.job.createdAt,
+              current.expectedSelectedRevisionID ==
+                active.job.expectedSelectedRevisionID,
+              current.hasCapturedSelectionBaseline ==
+                active.job.hasCapturedSelectionBaseline,
+              current.cancellationAuthorityID ==
+                active.job.cancellationAuthorityID,
+              current.state == .validating || current.state == .completed
+        else { return false }
+        await reconcile(current, source: active.source)
+        return true
     }
 
     private func retainRecoveryForUnconfirmedCancellation(

@@ -16,6 +16,7 @@
                 "$ref": "#/$defs/SessionProcessingScenarioDurableJob"
             },
             "minItems": 1,
+            "maxItems": 10000,
             "description": "Durable Job summaries present before the first command, when relevant."
         },
         "initialState": {
@@ -43,6 +44,7 @@
                 "$ref": "#/$defs/SessionProcessingScenarioDurableJob"
             },
             "minItems": 1,
+            "maxItems": 10000,
             "description": "Durable Job summaries after all commands and dependency effects."
         },
         "expectedEffects": {

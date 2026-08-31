@@ -102,6 +102,7 @@ namespace Audora.Contracts {
 
     /** Durable Job summaries present before the first command, when relevant. */
     @minItems(1)
+    @maxItems(10000)
     initialJobs?: SessionProcessingScenarioDurableJob[];
 
     initialState: SessionProcessingScenarioState;
@@ -114,6 +115,7 @@ namespace Audora.Contracts {
 
     /** Durable Job summaries after all commands and dependency effects. */
     @minItems(1)
+    @maxItems(10000)
     expectedJobs?: SessionProcessingScenarioDurableJob[];
 
     @minItems(1)
