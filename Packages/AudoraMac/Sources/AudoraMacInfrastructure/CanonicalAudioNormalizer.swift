@@ -158,6 +158,25 @@ final class StreamingCanonicalSampleRateConverter {
         return output
     }
 
+    /// Advances the same converter through unavailable source time without
+    /// allocating one array proportional to a stalled capture interval.
+    func consumeSilence(
+        frameCount: UInt64,
+        onOutput: ([Double]) throws -> Void
+    ) throws {
+        guard !finished, frameCount > 0 else { throw AudioImportFailure.decodeFailed }
+        let boundedSilence = [Double](repeating: 0, count: Self.inputFrameCount)
+        var remaining = frameCount
+        while remaining > 0 {
+            let count = min(remaining, UInt64(Self.inputFrameCount))
+            let input = count == UInt64(boundedSilence.count)
+                ? boundedSilence
+                : Array(boundedSilence.prefix(Int(count)))
+            try onOutput(consume(input))
+            remaining -= count
+        }
+    }
+
     func finish() throws -> [Double] {
         guard !finished else { throw AudioImportFailure.writeFailed }
         finished = true

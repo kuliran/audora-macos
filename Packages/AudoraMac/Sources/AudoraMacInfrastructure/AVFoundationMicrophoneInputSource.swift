@@ -173,12 +173,14 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
     private let slots: [Slot]
     private let producer = Atomic<Int>(0)
     private let consumer = Atomic<Int>(0)
-    private let latestEndSampleFrame = Atomic<Int64>(0)
-    private let latestSampleRate = Atomic<UInt32>(0)
-    private let latestChannelCount = Atomic<Int>(0)
-    private let latestMuteEpoch = Atomic<UInt64>(0)
-    private let callbacksSeen = Atomic<Int>(0)
-    private let drops = Atomic<Int>(0)
+    private let evenDropCount = Atomic<Int>(0)
+    private let evenDropEnd = Atomic<Int64>(0)
+    private let evenDropRate = Atomic<UInt32>(0)
+    private let evenDropChannels = Atomic<Int>(0)
+    private let oddDropCount = Atomic<Int>(0)
+    private let oddDropEnd = Atomic<Int64>(0)
+    private let oddDropRate = Atomic<UInt32>(0)
+    private let oddDropChannels = Atomic<Int>(0)
 
     init(capacity: Int = 16, maximumFrames: Int) {
         precondition(capacity >= 2)
@@ -206,19 +208,15 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
             return .invalidClock
         }
         let end = absoluteSampleFrame + Int64(frameCount)
-        latestEndSampleFrame.store(end, ordering: .relaxed)
-        latestSampleRate.store(sampleRateHz, ordering: .relaxed)
-        latestChannelCount.store(channelCount, ordering: .relaxed)
-        latestMuteEpoch.store(
-            AVFoundationInputRelay.encode(muteEpoch),
-            ordering: .relaxed
-        )
-        callbacksSeen.wrappingAdd(1, ordering: .relaxed)
-
         let write = producer.load(ordering: .relaxed)
         let read = consumer.load(ordering: .acquiring)
         guard write - read < capacity else {
-            drops.wrappingAdd(1, ordering: .relaxed)
+            recordDrop(
+                sampleRateHz: sampleRateHz,
+                endSampleFrame: end,
+                channelCount: channelCount,
+                epoch: muteEpoch
+            )
             return .full
         }
 
@@ -238,10 +236,10 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
         return .enqueued
     }
 
-    func dequeue() -> BufferedMicrophoneInputBlock? {
+    func dequeue(through watermark: Int = .max) -> BufferedMicrophoneInputBlock? {
         let read = consumer.load(ordering: .relaxed)
         let write = producer.load(ordering: .acquiring)
-        guard read < write else { return nil }
+        guard read < write, read < watermark else { return nil }
         let slot = slots[read % capacity]
         var channels: [[Float]] = []
         channels.reserveCapacity(slot.channelCount)
@@ -266,23 +264,50 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
         return block
     }
 
-    var droppedCallbackCount: Int { drops.load(ordering: .acquiring) }
+    var publicationWatermark: Int { producer.load(ordering: .acquiring) }
 
-    var latestCallbackEnd: (
+    func recordDrop(
         sampleRateHz: UInt32,
         endSampleFrame: Int64,
         channelCount: Int,
-        muteEpoch: MicrophoneMuteEpoch
+        epoch: MicrophoneMuteEpoch
+    ) {
+        if epoch.sequence.isMultiple(of: 2) {
+            evenDropEnd.store(endSampleFrame, ordering: .relaxed)
+            evenDropRate.store(sampleRateHz, ordering: .relaxed)
+            evenDropChannels.store(channelCount, ordering: .relaxed)
+            evenDropCount.wrappingAdd(1, ordering: .releasing)
+        } else {
+            oddDropEnd.store(endSampleFrame, ordering: .relaxed)
+            oddDropRate.store(sampleRateHz, ordering: .relaxed)
+            oddDropChannels.store(channelCount, ordering: .relaxed)
+            oddDropCount.wrappingAdd(1, ordering: .releasing)
+        }
+    }
+
+    func takeDropEvidence(for epoch: MicrophoneMuteEpoch) -> (
+        sampleRateHz: UInt32,
+        endSampleFrame: Int64,
+        channelCount: Int
     )? {
-        guard callbacksSeen.load(ordering: .acquiring) > 0 else { return nil }
-        return (
-            latestSampleRate.load(ordering: .acquiring),
-            latestEndSampleFrame.load(ordering: .acquiring),
-            latestChannelCount.load(ordering: .acquiring),
-            AVFoundationInputRelay.decode(
-                latestMuteEpoch.load(ordering: .acquiring)
-            )
-        )
+        let count: Int
+        let end: Int64
+        let rate: UInt32
+        let channels: Int
+        if epoch.sequence.isMultiple(of: 2) {
+            count = evenDropCount.exchange(0, ordering: .acquiringAndReleasing)
+            end = evenDropEnd.load(ordering: .acquiring)
+            rate = evenDropRate.load(ordering: .acquiring)
+            channels = evenDropChannels.load(ordering: .acquiring)
+            guard count > 0 else { return nil }
+        } else {
+            count = oddDropCount.exchange(0, ordering: .acquiringAndReleasing)
+            end = oddDropEnd.load(ordering: .acquiring)
+            rate = oddDropRate.load(ordering: .acquiring)
+            channels = oddDropChannels.load(ordering: .acquiring)
+            guard count > 0 else { return nil }
+        }
+        return (rate, end, channels)
     }
 }
 
@@ -300,6 +325,11 @@ final class AVFoundationInputRelay: @unchecked Sendable {
     private let terminal = Atomic<Int>(0)
     private let timelineOriginHostTime = Atomic<UInt64>(0)
     private let encodedMuteEpoch = Atomic<UInt64>(0)
+    private let publishedMuteEpoch = Atomic<UInt64>(0)
+    private let evenEpochCallbacks = Atomic<Int>(0)
+    private let oddEpochCallbacks = Atomic<Int>(0)
+    private let callbackEpochSampled: (@Sendable () -> Void)?
+    private let beforeMuteAcknowledgement: (@Sendable () -> Void)?
     private var baselineSampleFrame: Int64?
     private var baselineRelativeFrame: UInt64 = 0
     private var deliveredInputEnd: UInt64 = 0
@@ -310,7 +340,9 @@ final class AVFoundationInputRelay: @unchecked Sendable {
         expectedSampleRateHz: UInt32? = nil,
         expectedChannelCount: Int? = nil,
         queueCapacity: Int = 16,
-        drainQueue: DispatchQueue? = nil
+        drainQueue: DispatchQueue? = nil,
+        callbackEpochSampled: (@Sendable () -> Void)? = nil,
+        beforeMuteAcknowledgement: (@Sendable () -> Void)? = nil
     ) {
         self.continuation = continuation
         self.expectedSampleRateHz = expectedSampleRateHz
@@ -319,11 +351,13 @@ final class AVFoundationInputRelay: @unchecked Sendable {
             label: "com.audora.microphone-input-relay.drain",
             qos: .userInitiated
         )
+        self.callbackEpochSampled = callbackEpochSampled
+        self.beforeMuteAcknowledgement = beforeMuteAcknowledgement
         ring = BoundedMicrophoneInputQueue(
             capacity: queueCapacity,
             maximumFrames: Self.maximumAcceptedFramesPerCallback
         )
-        let source = DispatchSource.makeUserDataAddSource(queue: drainQueue)
+        let source = DispatchSource.makeUserDataAddSource(queue: self.drainQueue)
         drainSource = source
         source.setEventHandler { [weak self] in self?.drainAcceptedBlocks() }
         source.resume()
@@ -347,16 +381,23 @@ final class AVFoundationInputRelay: @unchecked Sendable {
             isMuted: muted
         )
         encodedMuteEpoch.store(Self.encode(epoch), ordering: .releasing)
+        while callbacksInFlight(for: current.sequence) > 0 {
+            sched_yield()
+        }
+        let oldWatermark = ring.publicationWatermark
+        beforeMuteAcknowledgement?()
         drainQueue.sync {
-            drainAcceptedBlocks()
-            emitTrailingOverflowGapIfNeeded()
+            drainAcceptedBlocks(through: oldWatermark)
+            emitOverflowGapIfNeeded(for: current)
             continuation.yield(
                 .muteChanged(
                     epoch: epoch,
                     effectiveInputFrame: deliveredInputEnd
                 )
             )
+            publishedMuteEpoch.store(Self.encode(epoch), ordering: .releasing)
         }
+        drainSource.add(data: 1)
         return true
     }
 
@@ -364,7 +405,9 @@ final class AVFoundationInputRelay: @unchecked Sendable {
         let frameCount = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)
         guard terminal.load(ordering: .acquiring) == 0 else { return }
-        let muteEpoch = Self.decode(encodedMuteEpoch.load(ordering: .acquiring))
+        guard let muteEpoch = sampleMuteEpochForCallback() else { return }
+        defer { releaseCallbackEpoch(muteEpoch) }
+        callbackEpochSampled?()
         guard time.isSampleTimeValid,
               Int64(time.sampleTime) >= 0,
               Int64(frameCount) <= Int64.max - Int64(time.sampleTime),
@@ -386,6 +429,16 @@ final class AVFoundationInputRelay: @unchecked Sendable {
               expectedChannelCount.map({ $0 == channelCount }) ?? true
         else {
             interrupt()
+            return
+        }
+        guard Self.decode(publishedMuteEpoch.load(ordering: .acquiring)) == muteEpoch else {
+            ring.recordDrop(
+                sampleRateHz: UInt32(buffer.format.sampleRate),
+                endSampleFrame: Int64(time.sampleTime) + Int64(frameCount),
+                channelCount: channelCount,
+                epoch: muteEpoch
+            )
+            drainSource.add(data: 1)
             return
         }
         let enqueue = ring.enqueue(
@@ -439,18 +492,18 @@ final class AVFoundationInputRelay: @unchecked Sendable {
         }
     }
 
-    private func drainAcceptedBlocks() {
+    private func drainAcceptedBlocks(through watermark: Int = .max) {
         guard !finished else { return }
-        while let block = ring.dequeue() {
+        while let block = ring.dequeue(through: watermark) {
             guard project(block) else {
                 terminal.store(3, ordering: .releasing)
                 break
             }
         }
         let terminalKind = terminal.load(ordering: .acquiring)
+        let published = Self.decode(publishedMuteEpoch.load(ordering: .acquiring))
+        emitOverflowGapIfNeeded(for: published)
         guard terminalKind != 0 else { return }
-
-        emitTrailingOverflowGapIfNeeded()
         switch terminalKind {
         case 2:
             continuation.yield(.interrupted)
@@ -500,10 +553,9 @@ final class AVFoundationInputRelay: @unchecked Sendable {
         return true
     }
 
-    private func emitTrailingOverflowGapIfNeeded() {
-        guard ring.droppedCallbackCount > 0,
-              let latest = ring.latestCallbackEnd,
-              let baselineSampleFrame,
+    private func emitOverflowGapIfNeeded(for epoch: MicrophoneMuteEpoch) {
+        guard let baselineSampleFrame,
+              let latest = ring.takeDropEvidence(for: epoch),
               latest.endSampleFrame >= baselineSampleFrame
         else { return }
         let delta = UInt64(latest.endSampleFrame - baselineSampleFrame)
@@ -515,7 +567,7 @@ final class AVFoundationInputRelay: @unchecked Sendable {
                 startSampleFrame: deliveredInputEnd,
                 frameCount: latestRelativeEnd - deliveredInputEnd,
                 channelCount: UInt8(latest.channelCount),
-                muteEpoch: latest.muteEpoch
+                muteEpoch: epoch
             )
         )
         deliveredInputEnd = latestRelativeEnd
@@ -530,5 +582,42 @@ final class AVFoundationInputRelay: @unchecked Sendable {
             sequence: encoded >> 1,
             isMuted: encoded & 1 == 1
         )
+    }
+
+    private func sampleMuteEpochForCallback() -> MicrophoneMuteEpoch? {
+        while terminal.load(ordering: .acquiring) == 0 {
+            let encoded = encodedMuteEpoch.load(ordering: .acquiring)
+            let epoch = Self.decode(encoded)
+            retainCallbackEpoch(epoch)
+            if encodedMuteEpoch.load(ordering: .acquiring) == encoded {
+                return epoch
+            }
+            releaseCallbackEpoch(epoch)
+        }
+        return nil
+    }
+
+    private func retainCallbackEpoch(_ epoch: MicrophoneMuteEpoch) {
+        if epoch.sequence.isMultiple(of: 2) {
+            evenEpochCallbacks.wrappingAdd(1, ordering: .acquiringAndReleasing)
+        } else {
+            oddEpochCallbacks.wrappingAdd(1, ordering: .acquiringAndReleasing)
+        }
+    }
+
+    private func releaseCallbackEpoch(_ epoch: MicrophoneMuteEpoch) {
+        if epoch.sequence.isMultiple(of: 2) {
+            evenEpochCallbacks.wrappingAdd(-1, ordering: .acquiringAndReleasing)
+        } else {
+            oddEpochCallbacks.wrappingAdd(-1, ordering: .acquiringAndReleasing)
+        }
+    }
+
+    private func callbacksInFlight(for sequence: UInt64) -> Int {
+        if sequence.isMultiple(of: 2) {
+            evenEpochCallbacks.load(ordering: .acquiring)
+        } else {
+            oddEpochCallbacks.load(ordering: .acquiring)
+        }
     }
 }

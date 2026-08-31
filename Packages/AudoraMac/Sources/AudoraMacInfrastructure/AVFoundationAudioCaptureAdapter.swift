@@ -13,12 +13,21 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
     }
 
     private struct ActiveCapture {
+        struct PendingMute: Equatable {
+            let isMuted: Bool
+            let monotonicBoundaryFrame: UInt64
+        }
+
         let generation: UInt64
         let handle: RecordingStagingHandle
         let source: any MicrophoneInputSource
         let continuation: AsyncStream<CaptureObservation>.Continuation
+        let startedAtMonotonicNanoseconds: UInt64
         var assembler: CanonicalPCMAssembler
         var acknowledgedMuteEpoch: MicrophoneMuteEpoch
+        var projectedElapsedFrame: UInt64
+        var pendingMute: PendingMute?
+        var pendingDurationDeadlineFrame: UInt64?
         var terminalIntent: TerminalIntent?
         var finalizing: Bool
     }
@@ -71,6 +80,7 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
 
         let generation = nextGeneration
         nextGeneration &+= 1
+        let captureStartedAt = await monotonicClock.now()
         // State observations are projections, not the durable audio stream.
         // Keep the newest bounded window; terminal observations are emitted
         // after capture has stopped, so they displace stale progress if needed.
@@ -82,8 +92,12 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
                 handle: handle,
                 source: source,
                 continuation: continuation,
+                startedAtMonotonicNanoseconds: captureStartedAt,
                 assembler: CanonicalPCMAssembler(),
                 acknowledgedMuteEpoch: .initial,
+                projectedElapsedFrame: 0,
+                pendingMute: nil,
+                pendingDurationDeadlineFrame: nil,
                 terminalIntent: nil,
                 finalizing: false
             )
@@ -96,9 +110,10 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
         active?.continuation.yield(
             .progress(frameCount: 0, level: .unavailable(.stale))
         )
-        let captureStartedAt = await monotonicClock.now()
         deadlineTask = Task { [weak self] in
-            for seconds in [UInt64(40 * 60), UInt64(44 * 60), UInt64(45 * 60)] {
+            let countdownSeconds = (0...59).map { UInt64(44 * 60 + $0) }
+            let deadlines = [UInt64(40 * 60)] + countdownSeconds + [UInt64(45 * 60)]
+            for seconds in deadlines {
                 let (deadline, overflow) = captureStartedAt.addingReportingOverflow(
                     seconds * 1_000_000_000
                 )
@@ -136,11 +151,37 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
         }
         switch command {
         case let .setMuted(muted):
-            return await current.source.setMuted(muted)
-                ? .accepted
-                : .rejected(.stagingWriteFailedRecoverable)
+            if let pending = current.pendingMute {
+                return pending.isMuted == muted
+                    ? .accepted
+                    : .rejected(.staleCommand)
+            }
+            guard current.acknowledgedMuteEpoch.isMuted != muted else {
+                return .accepted
+            }
+            let now = await monotonicClock.now()
+            let boundary = monotonicFrame(
+                now: now,
+                startedAt: current.startedAtMonotonicNanoseconds
+            )
+            active?.pendingMute = ActiveCapture.PendingMute(
+                isMuted: muted,
+                monotonicBoundaryFrame: boundary
+            )
+            guard await current.source.setMuted(muted) else {
+                if active?.generation == current.generation {
+                    active?.pendingMute = nil
+                }
+                return .rejected(.stagingWriteFailedRecoverable)
+            }
+            return .accepted
 
         case .stop:
+            let now = await monotonicClock.now()
+            active?.pendingDurationDeadlineFrame = monotonicFrame(
+                now: now,
+                startedAt: current.startedAtMonotonicNanoseconds
+            )
             active?.terminalIntent = .seal(.userStop)
             // `stop` is a quiesce-and-drain operation. The source must detach
             // callbacks and finish its feed only after every accepted event has
@@ -376,13 +417,43 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
             } catch {
                 await requestRecovery(generation: generation)
             }
-        case let .muteChanged(epoch, _):
+        case let .muteChanged(epoch, effectiveInputFrame):
+            let sourceBoundary: UInt64
+            do {
+                sourceBoundary = try current.assembler.canonicalFrame(
+                    forInputFrame: effectiveInputFrame
+                ) ?? current.handle.durableFrameCount
+            } catch {
+                await requestRecovery(generation: generation)
+                return
+            }
+            if let pending = current.pendingMute,
+               pending.isMuted == epoch.isMuted
+            {
+                do {
+                    try materializeDeadlineRemainder(
+                        &current,
+                        through: max(sourceBoundary, pending.monotonicBoundaryFrame)
+                    )
+                } catch {
+                    await requestRecovery(generation: generation)
+                    return
+                }
+                current.pendingMute = nil
+            }
             current.acknowledgedMuteEpoch = epoch
+            current.projectedElapsedFrame = min(
+                CanonicalRecordingLimits.maximumFrames,
+                max(
+                    current.projectedElapsedFrame,
+                    max(sourceBoundary, current.handle.durableFrameCount)
+                )
+            )
             active = current
             current.continuation.yield(
                 .muteChanged(
                     isMuted: epoch.isMuted,
-                    effectiveFrame: current.handle.durableFrameCount
+                    effectiveFrame: current.projectedElapsedFrame
                 )
             )
         }
@@ -394,42 +465,25 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
               current.terminalIntent == nil,
               !current.finalizing
         else { return }
-        do {
-            let spans = try current.assembler.consumeTimedGap(
-                throughCanonicalFrame: targetFrame,
-                muted: current.acknowledgedMuteEpoch.isMuted
-            )
-            active?.assembler = current.assembler
-            for span in spans {
-                guard let live = active,
-                      live.generation == generation,
-                      !live.finalizing
-                else { return }
-                let bounded = try span.prefix(
-                    maximumFrames: CanonicalRecordingLimits.maximumFrames -
-                        live.handle.durableFrameCount
-                )
-                let frames = try persistence.append(bounded, to: live.handle)
-                live.continuation.yield(
-                    .progress(
-                        frameCount: frames,
-                        level: .unavailable(
-                            bounded.reasons.contains(.muted) ? .muted : .captureGap
-                        )
-                    )
-                )
-            }
-            if targetFrame >= CanonicalRecordingLimits.maximumFrames,
-               let live = active,
-               live.generation == generation,
-               live.terminalIntent == nil
-            {
-                active?.terminalIntent = .seal(.durationLimit)
-                await live.source.stop()
-            }
-        } catch {
-            await requestRecovery(generation: generation)
+        guard targetFrame < CanonicalRecordingLimits.maximumFrames else {
+            active?.pendingDurationDeadlineFrame = targetFrame
+            active?.terminalIntent = .seal(.durationLimit)
+            await current.source.stop()
+            return
         }
+        // Deadline observations advance the UI only. They must not turn a
+        // temporarily backlogged callback queue into durable capture gaps.
+        current.projectedElapsedFrame = min(
+            CanonicalRecordingLimits.maximumFrames,
+            max(current.projectedElapsedFrame, targetFrame)
+        )
+        active = current
+        current.continuation.yield(
+            .progress(
+                frameCount: current.projectedElapsedFrame,
+                level: .unavailable(.stale)
+            )
+        )
     }
 
     private func inputEnded(generation: UInt64) async {
@@ -439,6 +493,9 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
         else { return }
         if case .seal = current.terminalIntent {
             do {
+                if let deadline = current.pendingDurationDeadlineFrame {
+                    try materializeDeadlineRemainder(&current, through: deadline)
+                }
                 try flushAssembler(&current)
             } catch {
                 current.terminalIntent = .recover
@@ -491,6 +548,45 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
                 return
             }
         }
+    }
+
+    private func materializeDeadlineRemainder(
+        _ current: inout ActiveCapture,
+        through deadline: UInt64
+    ) throws {
+        let spans = try current.assembler.consumeTimedGap(
+            throughCanonicalFrame: deadline,
+            muted: current.acknowledgedMuteEpoch.isMuted
+        )
+        active?.assembler = current.assembler
+        for span in spans {
+            let remaining = CanonicalRecordingLimits.maximumFrames -
+                current.handle.durableFrameCount
+            guard remaining > 0 else { return }
+            let bounded = try span.prefix(maximumFrames: remaining)
+            let frames = try persistence.append(bounded, to: current.handle)
+            current.continuation.yield(
+                .progress(
+                    frameCount: frames,
+                    level: .unavailable(
+                        bounded.reasons.contains(.muted) ? .muted : .captureGap
+                    )
+                )
+            )
+        }
+    }
+
+    private func monotonicFrame(now: UInt64, startedAt: UInt64) -> UInt64 {
+        guard now > startedAt else { return 0 }
+        let elapsedNanoseconds = now - startedAt
+        let (scaled, overflow) = elapsedNanoseconds.multipliedReportingOverflow(
+            by: CanonicalRecordingLimits.sampleRate
+        )
+        guard !overflow else { return CanonicalRecordingLimits.maximumFrames }
+        return min(
+            CanonicalRecordingLimits.maximumFrames,
+            scaled / 1_000_000_000
+        )
     }
 
     private func sealAfterDrain(

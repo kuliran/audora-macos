@@ -71,16 +71,19 @@ struct CanonicalPCMAssembler {
         if effectiveStart > greatestInputEnd {
             var reasons: Set<UnavailableReason> = [.captureGap]
             if muted { reasons.insert(.muted) }
-            spans.append(try unavailableSpan(
+            spans += try appendSilence(
                 sourceStart: greatestInputEnd, sourceEnd: effectiveStart, reasons: reasons
-            ))
-            greatestInputEnd = effectiveStart
+            )
         }
         let offset = Int(effectiveStart - chunk.startSampleFrame)
-        let source: [Double]
         if muted {
-            source = Array(repeating: 0, count: Int(inputEnd - effectiveStart))
-        } else if chunk.channels.count == 1 {
+            spans += try appendSilence(
+                sourceStart: effectiveStart, sourceEnd: inputEnd, reasons: [.muted]
+            )
+            return spans
+        }
+        let source: [Double]
+        if chunk.channels.count == 1 {
             source = chunk.channels[0][offset...].map(Double.init)
         } else {
             source = zip(chunk.channels[0][offset...], chunk.channels[1][offset...]).map {
@@ -91,7 +94,7 @@ struct CanonicalPCMAssembler {
             sourceFrames: source,
             sourceStart: effectiveStart,
             sourceEnd: inputEnd,
-            reasons: muted ? [.muted] : []
+            reasons: []
         )
         return spans
     }
@@ -124,17 +127,15 @@ struct CanonicalPCMAssembler {
         if effectiveStart > greatestInputEnd {
             var reasons: Set<UnavailableReason> = [.captureGap]
             if muted { reasons.insert(.muted) }
-            spans.append(try unavailableSpan(
+            spans += try appendSilence(
                 sourceStart: greatestInputEnd, sourceEnd: effectiveStart, reasons: reasons
-            ))
-            greatestInputEnd = effectiveStart
+            )
         }
         var reasons: Set<UnavailableReason> = [.captureGap]
         if muted { reasons.insert(.muted) }
-        spans.append(try unavailableSpan(
+        spans += try appendSilence(
             sourceStart: effectiveStart, sourceEnd: inputEnd, reasons: reasons
-        ))
-        greatestInputEnd = inputEnd
+        )
         return spans
     }
 
@@ -142,6 +143,13 @@ struct CanonicalPCMAssembler {
         guard !finished, let resampler else { return [] }
         finished = true
         return try drain(resampler.finish())
+    }
+
+    /// Projects source-clock control acknowledgements onto the canonical
+    /// timeline without materializing any audio or unavailable evidence.
+    func canonicalFrame(forInputFrame inputFrame: UInt64) throws -> UInt64? {
+        guard let inputSampleRate else { return nil }
+        return try canonicalCeiling(inputFrame: inputFrame, inputRate: inputSampleRate)
     }
 
     private mutating func configure(sampleRateHz: UInt32, channelCount: Int) throws {
@@ -172,20 +180,40 @@ struct CanonicalPCMAssembler {
         return try drain(resampler.consume(sourceFrames))
     }
 
-    private mutating func unavailableSpan(
+    private mutating func appendSilence(
         sourceStart: UInt64,
         sourceEnd: UInt64,
         reasons: Set<UnavailableReason>
-    ) throws -> CanonicalPCMSpan {
-        guard let inputSampleRate else { throw CanonicalPCMAssemblerError.unsupportedInputFormat }
+    ) throws -> [CanonicalPCMSpan] {
+        guard let inputSampleRate, let resampler else {
+            throw CanonicalPCMAssemblerError.unsupportedInputFormat
+        }
         let start = try canonicalCeiling(inputFrame: sourceStart, inputRate: inputSampleRate)
         let end = try canonicalCeiling(inputFrame: sourceEnd, inputRate: inputSampleRate)
-        guard end > start else { throw CanonicalPCMAssemblerError.inputClockOverflow }
-        let span = CanonicalPCMSpan(
-            frameCount: end - start, pcmLittleEndian: nil, reasons: reasons, level: nil
-        )
-        frameCount += span.frameCount
-        return span
+        if end > start {
+            pending.append(PendingSpan(frameCount: end - start, reasons: reasons))
+        }
+        greatestInputEnd = sourceEnd
+        var spans: [CanonicalPCMSpan] = []
+        try resampler.consumeSilence(frameCount: sourceEnd - sourceStart) { samples in
+            for span in try drain(samples) {
+                if let last = spans.last,
+                   last.pcmLittleEndian == nil,
+                   span.pcmLittleEndian == nil,
+                   last.reasons == span.reasons
+                {
+                    spans[spans.count - 1] = CanonicalPCMSpan(
+                        frameCount: last.frameCount + span.frameCount,
+                        pcmLittleEndian: nil,
+                        reasons: last.reasons,
+                        level: nil
+                    )
+                } else {
+                    spans.append(span)
+                }
+            }
+        }
+        return spans
     }
 
     private mutating func drain(_ samples: [Double]) throws -> [CanonicalPCMSpan] {

@@ -147,6 +147,139 @@ final class RecordingInfrastructureTests: XCTestCase {
         )
     }
 
+    func testObservedGapObservedSharesSourceOrderedResamplingWithImportAtNonNativeRates() throws {
+        for sampleRate in [UInt32(48_000), 44_100] {
+            let before = (0..<127).map { Float(sin(Double($0) * 0.071) * 0.4) }
+            let after = (0..<193).map { Float(cos(Double($0) * 0.053) * 0.35) }
+            let gapFrames = 271
+            let imported = try canonicalImportPCM(
+                sampleRateHz: sampleRate,
+                channelCount: 2,
+                interleavedChunks: [(before + Array(repeating: 0, count: gapFrames) + after)
+                    .flatMap { [$0, $0] }]
+            )
+            let expected = silenceCanonicalFrames(
+                in: imported,
+                from: canonicalCeiling(127, at: sampleRate),
+                through: canonicalCeiling(127 + UInt64(gapFrames), at: sampleRate)
+            )
+            let whole = try microphonePCMWithUnavailableZeros(
+                sampleRateHz: sampleRate,
+                before: before,
+                unavailableFrames: gapFrames,
+                after: after,
+                muted: false,
+                partitioned: false
+            )
+            let partitioned = try microphonePCMWithUnavailableZeros(
+                sampleRateHz: sampleRate,
+                before: before,
+                unavailableFrames: gapFrames,
+                after: after,
+                muted: false,
+                partitioned: true
+            )
+
+            XCTAssertEqual(whole.pcm, expected, "rate \(sampleRate)")
+            XCTAssertEqual(partitioned.pcm, expected, "rate \(sampleRate)")
+            XCTAssertEqual(
+                whole.unavailable,
+                [
+                    UnavailableInterval(
+                        start: canonicalCeiling(127, at: sampleRate),
+                        end: canonicalCeiling(127 + UInt64(gapFrames), at: sampleRate),
+                        reasons: [.captureGap]
+                    ),
+                ],
+                "rate \(sampleRate)"
+            )
+        }
+    }
+
+    func testObservedMuteObservedSharesSourceOrderedResamplingWithImportAtNonNativeRates() throws {
+        for sampleRate in [UInt32(48_000), 44_100] {
+            let before = (0..<127).map { Float(sin(Double($0) * 0.071) * 0.4) }
+            let withheld = (0..<271).map { Float(cos(Double($0) * 0.053) * 0.35) }
+            let after = (0..<193).map { Float(sin(Double($0) * 0.029) * 0.3) }
+            let imported = try canonicalImportPCM(
+                sampleRateHz: sampleRate,
+                channelCount: 2,
+                interleavedChunks: [(before + Array(repeating: 0, count: withheld.count) + after)
+                    .flatMap { [$0, $0] }]
+            )
+            let expected = silenceCanonicalFrames(
+                in: imported,
+                from: canonicalCeiling(127, at: sampleRate),
+                through: canonicalCeiling(127 + UInt64(withheld.count), at: sampleRate)
+            )
+            let whole = try microphonePCMWithUnavailableZeros(
+                sampleRateHz: sampleRate,
+                before: before,
+                unavailableFrames: withheld.count,
+                after: after,
+                muted: true,
+                partitioned: false,
+                withheld: withheld
+            )
+            let partitioned = try microphonePCMWithUnavailableZeros(
+                sampleRateHz: sampleRate,
+                before: before,
+                unavailableFrames: withheld.count,
+                after: after,
+                muted: true,
+                partitioned: true,
+                withheld: withheld
+            )
+
+            XCTAssertEqual(whole.pcm, expected, "rate \(sampleRate)")
+            XCTAssertEqual(partitioned.pcm, expected, "rate \(sampleRate)")
+            XCTAssertEqual(
+                whole.unavailable,
+                [
+                    UnavailableInterval(
+                        start: canonicalCeiling(127, at: sampleRate),
+                        end: canonicalCeiling(127 + UInt64(withheld.count), at: sampleRate),
+                        reasons: [.muted]
+                    ),
+                ],
+                "rate \(sampleRate)"
+            )
+        }
+    }
+
+    func testConsecutiveSubcanonicalGapsStillAdvanceResamplerAtFortyEightKilohertz() throws {
+        let before: [Float] = [0.4]
+        let after = (0..<96).map { Float(sin(Double($0) * 0.071) * 0.4) }
+        let expected = try canonicalImportPCM(
+            sampleRateHz: 48_000,
+            channelCount: 2,
+            interleavedChunks: [(before + [0, 0] + after).flatMap { [$0, $0] }]
+        )
+
+        var assembler = CanonicalPCMAssembler()
+        var spans = try assembler.consume(
+            MicrophoneInputChunk(sampleRateHz: 48_000, startSampleFrame: 0, channels: [before, before]),
+            muted: false
+        )
+        spans += try assembler.consumeGap(
+            sampleRateHz: 48_000, startSampleFrame: 1, frameCount: 1, channelCount: 2, muted: false
+        )
+        spans += try assembler.consumeGap(
+            sampleRateHz: 48_000, startSampleFrame: 2, frameCount: 1, channelCount: 2, muted: false
+        )
+        spans += try assembler.consume(
+            MicrophoneInputChunk(sampleRateHz: 48_000, startSampleFrame: 3, channels: [after, after]),
+            muted: false
+        )
+        spans += try assembler.finish()
+
+        let pcm = spans.reduce(into: Data()) { pcm, span in
+            pcm.append(span.pcmLittleEndian ?? Data(repeating: 0, count: Int(span.frameCount * 2)))
+        }
+        XCTAssertEqual(pcm, expected)
+        XCTAssertTrue(spans.allSatisfy(\.reasons.isEmpty))
+    }
+
     func testStereoResamplingHasPartitionInvariantGoldenFingerprint() throws {
         let left: [Float] = (0..<96).map { Float(($0 % 11) - 5) / 5 }
         let right: [Float] = (0..<96).map { Float(($0 % 7) - 3) / 3 }
@@ -238,30 +371,18 @@ final class RecordingInfrastructureTests: XCTestCase {
 
     func testExplicitCaptureGapAdvancesCanonicalTimelineWithoutObservedSilence() throws {
         var assembler = CanonicalPCMAssembler()
-        let leading = try assembler.consumeGap(
+        var leading = try assembler.consumeGap(
             sampleRateHz: 48_000,
             startSampleFrame: 12_000,
             frameCount: 6_000,
             channelCount: 1,
             muted: false
         )
-        XCTAssertEqual(
-            leading,
-            [
-                CanonicalPCMSpan(
-                    frameCount: 4_000,
-                    pcmLittleEndian: nil,
-                    reasons: [.captureGap],
-                    level: nil
-                ),
-                CanonicalPCMSpan(
-                    frameCount: 2_000,
-                    pcmLittleEndian: nil,
-                    reasons: [.captureGap],
-                    level: nil
-                ),
-            ]
-        )
+        leading += try assembler.finish()
+        XCTAssertEqual(leading.reduce(0) { $0 + $1.frameCount }, 6_000)
+        XCTAssertTrue(leading.allSatisfy {
+            $0.pcmLittleEndian == nil && $0.reasons == [.captureGap] && $0.level == nil
+        })
         XCTAssertEqual(assembler.frameCount, 6_000)
     }
 
@@ -1160,6 +1281,104 @@ final class RecordingInfrastructureTests: XCTestCase {
             pcm.append(try XCTUnwrap(span.pcmLittleEndian))
         }
         return pcm
+    }
+
+    private struct UnavailableInterval: Equatable {
+        let start: UInt64
+        let end: UInt64
+        let reasons: Set<UnavailableReason>
+    }
+
+    private func microphonePCMWithUnavailableZeros(
+        sampleRateHz: UInt32,
+        before: [Float],
+        unavailableFrames: Int,
+        after: [Float],
+        muted: Bool,
+        partitioned: Bool,
+        withheld: [Float]? = nil
+    ) throws -> (pcm: Data, unavailable: [UnavailableInterval]) {
+        var assembler = CanonicalPCMAssembler()
+        var spans: [CanonicalPCMSpan] = []
+        func consume(_ samples: [Float], at start: Int, muted: Bool) throws {
+            spans += try assembler.consume(
+                MicrophoneInputChunk(
+                    sampleRateHz: sampleRateHz,
+                    startSampleFrame: UInt64(start),
+                    channels: [samples, samples]
+                ),
+                muted: muted
+            )
+        }
+        if partitioned {
+            try consume(Array(before[..<41]), at: 0, muted: false)
+            try consume(Array(before[41...]), at: 41, muted: false)
+        } else {
+            try consume(before, at: 0, muted: false)
+        }
+        let unavailableStart = before.count
+        if muted {
+            try consume(
+                withheld ?? Array(repeating: 0.25, count: unavailableFrames),
+                at: unavailableStart,
+                muted: true
+            )
+        } else {
+            spans += try assembler.consumeGap(
+                sampleRateHz: sampleRateHz,
+                startSampleFrame: UInt64(unavailableStart),
+                frameCount: UInt64(unavailableFrames),
+                channelCount: 2,
+                muted: false
+            )
+        }
+        let afterStart = unavailableStart + unavailableFrames
+        if partitioned {
+            try consume(Array(after[..<73]), at: afterStart, muted: false)
+            try consume(Array(after[73...]), at: afterStart + 73, muted: false)
+        } else {
+            try consume(after, at: afterStart, muted: false)
+        }
+        spans += try assembler.finish()
+
+        var pcm = Data()
+        var unavailable: [UnavailableInterval] = []
+        var offset: UInt64 = 0
+        for span in spans {
+            if let observed = span.pcmLittleEndian {
+                pcm.append(observed)
+            } else {
+                pcm.append(Data(repeating: 0, count: Int(span.frameCount * 2)))
+                let interval = UnavailableInterval(
+                    start: offset,
+                    end: offset + span.frameCount,
+                    reasons: span.reasons
+                )
+                if let last = unavailable.last,
+                   last.end == interval.start,
+                   last.reasons == interval.reasons
+                {
+                    unavailable[unavailable.count - 1] = UnavailableInterval(
+                        start: last.start, end: interval.end, reasons: last.reasons
+                    )
+                } else {
+                    unavailable.append(interval)
+                }
+            }
+            offset += span.frameCount
+        }
+        return (pcm, unavailable)
+    }
+
+    private func canonicalCeiling(_ sourceFrame: UInt64, at sampleRateHz: UInt32) -> UInt64 {
+        (sourceFrame * CanonicalRecordingLimits.sampleRate + UInt64(sampleRateHz) - 1) /
+            UInt64(sampleRateHz)
+    }
+
+    private func silenceCanonicalFrames(in pcm: Data, from start: UInt64, through end: UInt64) -> Data {
+        var result = pcm
+        result.replaceSubrange(Int(start * 2)..<Int(end * 2), with: Data(repeating: 0, count: Int((end - start) * 2)))
+        return result
     }
 }
 
