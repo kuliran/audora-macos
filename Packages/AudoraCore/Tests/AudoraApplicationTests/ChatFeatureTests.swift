@@ -1201,7 +1201,8 @@ final class ChatFeatureTests: XCTestCase {
         store: any ChatStorePort,
         clock: any ChatClock = FixedChatClock(),
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator = FixedChatIDs(),
-        autosaveScheduler: any ChatAutosaveScheduling = ImmediateChatAutosaveScheduler()
+        autosaveScheduler: any ChatAutosaveScheduling = ImmediateChatAutosaveScheduler(),
+        invocations: any Invocations = RecordingInterruptedInvocationGateway()
     ) -> DefaultChatFeature {
         DefaultChatFeature(
             store: store,
@@ -1215,7 +1216,8 @@ final class ChatFeatureTests: XCTestCase {
             autosaveScheduler: autosaveScheduler,
             coachContext: DefaultCoachContextFeature(
                 source: AlwaysFitCoachContextSnapshotPort()
-            )
+            ),
+            invocations: invocations
         )
     }
 
@@ -1302,6 +1304,18 @@ final class ChatFeatureTests: XCTestCase {
             throw TestError.unexpectedState
         }
         return draft
+    }
+}
+
+/// Legacy Chat feature fixtures stop at the single typed Invocation boundary.
+/// The feature retains its already-installed lock while this recorder reports
+/// an interruption without fabricating provider execution in these tests.
+private actor RecordingInterruptedInvocationGateway: Invocations {
+    private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        requests.append(request)
+        return .interrupted(nil, .providerFailed)
     }
 }
 

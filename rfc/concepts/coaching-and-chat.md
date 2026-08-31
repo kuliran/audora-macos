@@ -44,6 +44,12 @@ Attempts, cancellation, and terminal failure creation. Chat, Proposal, and futur
 maintenance use cases submit stable entity IDs and an `InvocationIntent`; they do
 not duplicate these checks or construct provider DTOs.
 
+The current #22 vertical slice implements only `answerPendingUserTurn` with a
+bounded deterministic synthetic provider. It durably claims the rolling ledger,
+installs one portable Invocation, and atomically publishes the two-message fake
+turn. Real provider adapters, automatic Attempt retry, Stop, transcript tools,
+Reconsider, and Profile or Memory effects remain owned by their later slices.
+
 ```text
 InvocationIntent
   answerPendingUserTurn

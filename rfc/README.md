@@ -137,6 +137,16 @@ does not change the Codex result above: the real CLI/model exercise remains not 
 for this gate and production coaching remains blocked on the shipping-provider
 evidence.
 
+The executable Send slice crosses one Application-owned Invocation coordinator.
+It revalidates the locked Pending User Turn and exact prepared context, claims the
+machine-local Library rolling window, and durably installs one portable Invocation
+before its deterministic synthetic Provider can run. Its only successful effect is
+one atomic user/Coach message pair plus a fresh Draft; pre-commit interruption or
+CAS conflict publishes neither message and retires the installed authority. Live
+composition still fails closed because the shipping Provider descriptor is not
+qualified. Real Provider execution, automatic retries, Stop, transcript tools,
+and Profile or Memory effects remain outside this slice.
+
 Version one accepts exactly one transcribable mono source per Session. A possible
 later extension adds dual-track capture: the Speaker's microphone plus a
 separately retained, aligned system or application-audio source. Storage and

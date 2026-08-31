@@ -125,9 +125,9 @@ namespace Audora.Contracts {
     commands: DevelopmentChatScenarioCommand[];
     dependencyTrace: DevelopmentChatDependencyEvent[];
     expectedState: DevelopmentChatScenarioState;
-    expectedProviderCalls: 0;
-    expectedInvocationCalls: 0;
-    expectedAdmissionCalls: 0;
+    expectedProviderCalls: NonnegativeWholeNumber;
+    expectedInvocationCalls: NonnegativeWholeNumber;
+    expectedAdmissionCalls: NonnegativeWholeNumber;
     providerAvailability?: DevelopmentChatScenarioProviderAvailability;
     contextCapacityMode?: DevelopmentChatScenarioContextCapacityMode;
     suspendedEffect?: DevelopmentChatScenarioSuspendedEffect;
@@ -199,6 +199,7 @@ namespace Audora.Contracts {
     selectedFrozenReason?: DevelopmentChatScenarioFrozenReason;
     selectedDraftText?: ChatDraftText;
     selectedDraftVersion?: NonnegativeWholeNumber;
+    selectedMessageIds?: ChatMessageId[];
     composerStatus?: DevelopmentChatScenarioComposerStatus;
     pendingUserTurnId?: PendingUserTurnId;
     responsePositionId?: ChatResponsePositionId;

@@ -625,11 +625,12 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(schema.contains("unevaluatedProperties"))
     }
 
-    func testEveryDevelopmentChatScenarioForbidsProviderAndAdmissionEffects() throws {
+    func testDevelopmentChatScenariosDeclareExactInvocationProviderAndAdmissionCalls() throws {
         let resources: [ContractResource] = [
             .createDevelopmentChatScenario,
             .draftSendDiscardDevelopmentChatScenario,
             .contextCapacityRecoveryDevelopmentChatScenario,
+            .fakeProviderSuccessDevelopmentChatScenario,
             .renameDevelopmentChatScenario,
             .filterDevelopmentChatsScenario,
             .relaunchDevelopmentChatScenario,
@@ -647,9 +648,60 @@ final class ContractResourcesTests: XCTestCase {
                     with: ContractResources.data(for: resource)
                 ) as? [String: Any]
             )
-            XCTAssertEqual((object["expectedProviderCalls"] as? NSNumber)?.intValue, 0)
-            XCTAssertEqual((object["expectedInvocationCalls"] as? NSNumber)?.intValue, 0)
-            XCTAssertEqual((object["expectedAdmissionCalls"] as? NSNumber)?.intValue, 0)
+            let executesFake = resource == .fakeProviderSuccessDevelopmentChatScenario
+            XCTAssertEqual(
+                (object["expectedProviderCalls"] as? NSNumber)?.intValue,
+                executesFake ? 1 : 0
+            )
+            let expectedInvocationCalls = [
+                ContractResource.draftSendDiscardDevelopmentChatScenario,
+                .contextCapacityRecoveryDevelopmentChatScenario,
+                .fakeProviderSuccessDevelopmentChatScenario,
+            ].contains(resource) ? 1 : 0
+            XCTAssertEqual(
+                (object["expectedInvocationCalls"] as? NSNumber)?.intValue,
+                expectedInvocationCalls
+            )
+            XCTAssertEqual(
+                (object["expectedAdmissionCalls"] as? NSNumber)?.intValue,
+                executesFake ? 1 : 0
+            )
+        }
+    }
+
+    func testInvocationGoldensBindOneResponsePositionAndMachineLocalDebit() throws {
+        let user = try jsonObject(.developmentChatUserMessageExample)
+        let coach = try jsonObject(.developmentChatCoachMessageExample)
+        let invocation = try jsonObject(.developmentChatCoachInvocationExample)
+        XCTAssertEqual(user["role"] as? String, "user")
+        XCTAssertEqual(coach["role"] as? String, "coach")
+        XCTAssertEqual(
+            user["responsePositionId"] as? String,
+            coach["responsePositionId"] as? String
+        )
+        XCTAssertEqual(
+            invocation["responsePositionId"] as? String,
+            user["responsePositionId"] as? String
+        )
+        XCTAssertEqual(invocation["draftVersion"] as? Int, 1)
+        XCTAssertEqual(invocation["expectedManifestRevision"] as? Int, 1)
+
+        let ledger = try jsonObject(.invocationAdmissionLedgerExample)
+        let entries = try XCTUnwrap(ledger["entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(
+            entries[0]["libraryId"] as? String,
+            invocation["libraryId"] as? String
+        )
+        for resource in [
+            ContractResource.chatMessageSchema,
+            .coachInvocationSchema,
+            .invocationAdmissionLedgerSchema,
+        ] {
+            let schema = try XCTUnwrap(
+                String(data: ContractResources.data(for: resource), encoding: .utf8)
+            )
+            XCTAssertTrue(schema.contains("unevaluatedProperties"), resource.bundlePath)
         }
     }
 

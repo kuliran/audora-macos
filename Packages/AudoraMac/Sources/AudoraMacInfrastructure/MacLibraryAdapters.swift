@@ -1,5 +1,5 @@
 import AppKit
-import AudoraApplication
+@_spi(InvocationInfrastructure) import AudoraApplication
 import AudoraDomain
 import Darwin
 import Foundation
@@ -356,6 +356,50 @@ public struct RandomChatIdentityGenerator:
         var generator = SystemRandomNumberGenerator()
         let suffix = String((0..<4).map { _ in crockford.randomElement(using: &generator)! })
         return "\(prefix)\(compact)-\(suffix)"
+    }
+}
+
+@_spi(InvocationInfrastructure)
+public struct RandomInvocationIdentityGenerator: InvocationIdentityGenerating {
+    private static let crockford = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+    public init() {}
+
+    public func generate(at instant: UTCInstant) async -> InvocationLaunchIdentity {
+        let attemptID = try! CoachProviderAttemptID(
+            Self.identifier(prefix: "atm-", instant: instant)
+        )
+        let userMessageRaw = Self.identifier(prefix: "msg-", instant: instant)
+        return InvocationLaunchIdentity(
+            invocationID: try! CoachInvocationID(
+                Self.identifier(prefix: "inv-", instant: instant)
+            ),
+            attemptID: attemptID,
+            idempotencyValue: try! ProviderIdempotencyValue(attemptID.rawValue),
+            userMessageID: try! ChatMessageID(userMessageRaw),
+            coachMessageID: try! ChatMessageID(
+                Self.nextIdentifier(after: userMessageRaw)
+            ),
+            freshDraftID: try! ChatDraftID(
+                Self.identifier(prefix: "drf-", instant: instant)
+            )
+        )
+    }
+
+    private static func identifier(prefix: String, instant: UTCInstant) -> String {
+        let compact = instant.rawValue
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: ":", with: "")
+            .replacingOccurrences(of: ".", with: "")
+        var generator = SystemRandomNumberGenerator()
+        let suffix = String((0..<4).map { _ in crockford.randomElement(using: &generator)! })
+        return "\(prefix)\(compact)-\(suffix)"
+    }
+
+    private static func nextIdentifier(after value: String) -> String {
+        let last = value.last!
+        let index = crockford.firstIndex(of: last)!
+        return String(value.dropLast()) + String(crockford[(index + 1) % crockford.count])
     }
 }
 

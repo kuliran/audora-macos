@@ -44,6 +44,7 @@ public actor DefaultChatFeature: ChatFeature {
     private let responsePositionIDGenerator: any ChatResponsePositionIDGenerator
     private let autosaveScheduler: any ChatAutosaveScheduling
     private let coachContext: any CoachContextCoordinating
+    private let invocations: any Invocations
 
     private var activeContext: ChatCommandContext?
     private var requestedContext: ChatCommandContext?
@@ -69,7 +70,8 @@ public actor DefaultChatFeature: ChatFeature {
         memoryIDGenerator: any CoachMemoryIDGenerator,
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
-        autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler()
+        autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
+        invocations: any Invocations
     ) {
         self.store = store
         self.profileReader = profileReader
@@ -81,6 +83,7 @@ public actor DefaultChatFeature: ChatFeature {
         self.responsePositionIDGenerator = responsePositionIDGenerator
         self.autosaveScheduler = autosaveScheduler
         coachContext = DefaultCoachContextFeature()
+        self.invocations = invocations
     }
 
     init(
@@ -93,7 +96,8 @@ public actor DefaultChatFeature: ChatFeature {
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
-        coachContext: any CoachContextCoordinating
+        coachContext: any CoachContextCoordinating,
+        invocations: any Invocations
     ) {
         self.store = store
         self.profileReader = profileReader
@@ -105,6 +109,7 @@ public actor DefaultChatFeature: ChatFeature {
         self.responsePositionIDGenerator = responsePositionIDGenerator
         self.autosaveScheduler = autosaveScheduler
         self.coachContext = coachContext
+        self.invocations = invocations
     }
 
     public var currentState: ChatFeatureState { state }
@@ -786,6 +791,20 @@ public actor DefaultChatFeature: ChatFeature {
             publish()
             return
         }
+        guard flushedDraft.text.utf8.count <=
+            CoachContextInputLimits.maximumUserMessageUTF8Bytes
+        else {
+            state = replacing(
+                contextAdvisory: .messageTooLong(
+                    maximumUTF8Bytes: CoachContextInputLimits.maximumUserMessageUTF8Bytes
+                ),
+                clearsRecoveryIntent: true,
+                activity: nil,
+                notice: .messageMustBeShortened
+            )
+            publish()
+            return
+        }
 
         state = replacing(activity: .lockingDraft(flushed.chat.id), notice: nil)
         publish()
@@ -802,84 +821,134 @@ public actor DefaultChatFeature: ChatFeature {
             draftVersion: flushedDraft.version,
             responsePositionID: responsePositionID
         )
-        let request: CoachContextPendingTurnRequest
-        do {
-            request = try CoachContextPendingTurnRequest(
-                library: context.libraryScope,
-                chatID: flushed.chat.id,
-                draft: flushedDraft,
-                pendingUserTurn: pending
-            )
-        } catch {
-            state = replacing(activity: nil, notice: .coachContextUnavailable)
-            publish()
-            return
-        }
-        let preparation = await coachContext.preparePendingUserTurn(request)
-        guard isActive(context),
-              case let .open(current) = state.selection,
-              current.chat.id == flushed.chat.id,
-              current.pendingUserTurn == nil,
-              case let .editable(currentDraft, false) = state.composer,
-              currentDraft == flushedDraft
-        else {
-            return
-        }
+        await lockAndInvoke(
+            pending,
+            aggregate: flushed,
+            gateway: invocations,
+            context: context
+        )
+    }
 
-        let pendingToInstall: PendingUserTurn
-        switch preparation {
-        case let .prepared(prepared):
-            pendingToInstall = pending
-            state = replacing(
-                contextAdvisory: .available(prepared.quote),
-                clearsRecoveryIntent: true,
-                activity: .lockingDraft(flushed.chat.id),
-                notice: nil
-            )
-        case let .cannotFit(failure):
-            pendingToInstall = pending.replacingFailure(.coachContextCannotFit)
-            state = replacing(
-                contextAdvisory: .available(failure.quote),
-                clearsRecoveryIntent: true,
-                activity: .lockingDraft(flushed.chat.id),
-                notice: nil
-            )
-        case let .messageTooLong(maximumUTF8Bytes):
-            state = replacing(
-                contextAdvisory: .messageTooLong(
-                    maximumUTF8Bytes: maximumUTF8Bytes
-                ),
-                clearsRecoveryIntent: true,
-                activity: nil,
-                notice: .messageMustBeShortened
-            )
-            publish()
-            return
-        case let .unavailable(reason):
-            state = replacing(
-                contextAdvisory: .unavailable(reason),
-                clearsRecoveryIntent: true,
-                activity: nil,
-                notice: .coachContextUnavailable
-            )
-            publish()
-            return
-        }
-        publish()
-        let outcome = await store.lockPendingUserTurn(
+    private func lockAndInvoke(
+        _ pending: PendingUserTurn,
+        aggregate: ChatAggregate,
+        gateway: any Invocations,
+        context: ChatCommandContext
+    ) async {
+        let lockOutcome = await store.lockPendingUserTurn(
             LockPendingUserTurnMutation(
                 library: context.libraryScope,
-                chatID: flushed.chat.id,
-                pendingUserTurn: pendingToInstall
+                chatID: aggregate.chat.id,
+                pendingUserTurn: pending
             )
         )
         guard isActive(context) else { return }
-        applyPendingMutationOutcome(
-            outcome,
-            expectedChatID: flushed.chat.id,
-            expectedPending: pendingToInstall,
-            operationFailure: .pendingUserTurnFailed
+        let locked: ChatAggregate
+        switch lockOutcome {
+        case let .committed(current)
+            where current.chat.id == aggregate.chat.id &&
+            current.pendingUserTurn == pending:
+            locked = current
+            install(
+                current,
+                selection: .open(current),
+                notice: nil,
+                activity: .invokingCoach(current.chat.id)
+            )
+        case let .stale(current):
+            install(current, selection: .open(current), notice: .draftChanged)
+            return
+        case let .frozen(frozen):
+            install(frozen, selection: .frozen(frozen), notice: .chatFrozen)
+            return
+        case .readOnlyLibrary:
+            state = replacing(activity: nil, notice: .readOnlyLibrary)
+            publish()
+            return
+        case .collision, .profileStatementGenerationChanged, .failed, .committed:
+            state = replacing(activity: nil, notice: .pendingUserTurnFailed)
+            publish()
+            return
+        }
+
+        let outcome = await gateway.tryInvoke(
+            PendingCoachInvocationRequest(
+                library: context.libraryScope,
+                chatID: locked.chat.id,
+                pendingUserTurnID: pending.id
+            )
         )
+        guard isActive(context) else { return }
+        switch outcome {
+        case let .published(current, quote):
+            state = replacing(
+                contextAdvisory: .available(quote),
+                clearsRecoveryIntent: true,
+                activity: nil,
+                notice: nil
+            )
+            install(current, selection: .open(current), notice: nil)
+        case let .contextCapacityFailure(current, quote):
+            state = replacing(
+                contextAdvisory: .available(quote),
+                clearsRecoveryIntent: true,
+                activity: nil,
+                notice: nil
+            )
+            install(current, selection: .open(current), notice: nil)
+        case let .rejected(current, reason):
+            let notice = notice(for: reason)
+            if case let .messageMustBeShortened(maximumUTF8Bytes) = reason {
+                state = replacing(
+                    contextAdvisory: .messageTooLong(
+                        maximumUTF8Bytes: maximumUTF8Bytes
+                    ),
+                    clearsRecoveryIntent: true,
+                    activity: nil,
+                    notice: notice
+                )
+            } else if case let .contextUnavailable(reason) = reason {
+                state = replacing(
+                    contextAdvisory: .unavailable(reason),
+                    clearsRecoveryIntent: true,
+                    activity: nil,
+                    notice: notice
+                )
+            }
+            if let current {
+                install(current, selection: .open(current), notice: notice)
+            } else {
+                state = replacing(activity: nil, notice: .coachResponseInterrupted)
+                publish()
+            }
+        case let .interrupted(current, _):
+            if let current {
+                install(
+                    current,
+                    selection: .open(current),
+                    notice: .coachResponseInterrupted
+                )
+            } else {
+                state = replacing(activity: nil, notice: .coachResponseInterrupted)
+                publish()
+            }
+        }
+    }
+
+    private func notice(for rejection: InvocationRejectionReason) -> ChatNotice {
+        switch rejection {
+        case .activeInvocation:
+            .coachBusy
+        case .admissionCooldown, .clockRollback, .admissionLedgerFull:
+            .coachAdmissionLimited
+        case .messageMustBeShortened:
+            .messageMustBeShortened
+        case .contextUnavailable:
+            .coachContextUnavailable
+        case .eligibilityChanged, .contextChanged, .admissionUnavailable,
+             .persistenceUnavailable:
+            .coachSendUnavailable
+        }
     }
 
     private func discardPendingUserTurn(

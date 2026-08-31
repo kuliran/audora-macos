@@ -1,6 +1,6 @@
 import AppKit
-import AudoraApplication
-import AudoraMacInfrastructure
+@_spi(InvocationInfrastructure) import AudoraApplication
+@_spi(InvocationInfrastructure) import AudoraMacInfrastructure
 import AudoraMacPresentation
 import SwiftUI
 
@@ -79,8 +79,15 @@ struct AudoraApp: App {
             activityCoordinator: activityCoordinator
         )
         let chatIdentityGenerator = RandomChatIdentityGenerator()
+        let chatStore = PortableChatStore(workspace: workspace)
+        let invocations = DefaultInvocations(
+            persistence: PortableInvocationStore(workspace: workspace),
+            admission: MachineInvocationAdmissionFactory.live(),
+            clock: SystemLibraryClock(),
+            identities: RandomInvocationIdentityGenerator()
+        )
         let chatFeature = DefaultChatFeature(
-            store: PortableChatStore(workspace: workspace),
+            store: chatStore,
             profileReader: ActiveLibraryProfileStatementGenerationReader(
                 workspace: workspace
             ),
@@ -89,7 +96,8 @@ struct AudoraApp: App {
             draftIDGenerator: chatIdentityGenerator,
             memoryIDGenerator: chatIdentityGenerator,
             pendingUserTurnIDGenerator: chatIdentityGenerator,
-            responsePositionIDGenerator: chatIdentityGenerator
+            responsePositionIDGenerator: chatIdentityGenerator,
+            invocations: invocations
         )
         let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,

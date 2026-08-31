@@ -232,10 +232,12 @@ local Draft without invoking a provider.
 Checked-in fixtures cover create, rename, filter, relaunch, stale rename, and the
 Draft lock-and-discard lifecycle in
 [`draft-send-discard.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/Chat/draft-send-discard.v1.json).
-Each scenario declares zero provider, Invocation, and admission calls. Rejected
-examples cover ambiguous creation shapes, unknown keys, missing attachments,
-dangling Memory summaries, and newer schemas that must remain byte-identical
-while frozen.
+Each scenario declares exact provider, Invocation, and admission call totals. The
+two Send scenarios cross the single Invocation gateway once while their #21-only
+fixtures intentionally stop before provider/admission; non-Send scenarios declare
+zero. Rejected examples cover ambiguous creation shapes, unknown keys, missing
+attachments, dangling Memory summaries, and newer schemas that must remain
+byte-identical while frozen.
 
 `CoachContextQuote.json` is the app-only advisory projection. Its golden locks the
 16,384 UTF-8-byte Send limit and exactly nine explanatory cost categories:
@@ -243,7 +245,21 @@ Profile, Memory, history, Draft, framing, attachments, one complete transcript
 exchange, response reserve, and safety margin. It deliberately contains no
 canonical provider bytes. `context-capacity-recovery.v1.json` exercises an exact
 local miss, typed Create New Chat intent, identity-preserving Retry, and Discard;
-it declares zero provider, Invocation, and admission calls.
+it declares one Invocation-gateway call and zero provider or admission calls.
+
+`ChatMessage.json` seals the mutually exclusive stored user-text and Coach-Markdown
+shapes. `CoachInvocation.json` is the portable launch authority bound to one
+Library, Chat, Pending User Turn, Draft version, response position, and expected
+manifest revision. `InvocationAdmissionLedger.json` is machine-local rather than
+portable Library content; it permits at most 4,096 Library debits and stores the
+last admitted UTC instant used by the conservative rolling-window policy. The
+Application additionally enforces UTF-8 byte ceilings and exact aggregate
+identity checks that JSON Schema cannot express.
+
+`fake-provider-success.v1.json` crosses the real Application Invocation
+coordinator with synthetic context, admission, identity, and provider fixtures. It
+locks one Draft, records one admission and provider launch, then projects the
+atomic two-message publication and fresh Draft while retaining the Chat identity.
 
 `CoachProviderDescriptor` is app-only configuration. JSON Schema validates each
 field's shape. `displayName` is a bounded Presentation label for provider health

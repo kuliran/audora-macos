@@ -72,6 +72,10 @@ public enum ChatNotice: String, Equatable, Sendable {
     case pendingUserTurnFailed
     case coachContextUnavailable
     case messageMustBeShortened
+    case coachBusy
+    case coachAdmissionLimited
+    case coachSendUnavailable
+    case coachResponseInterrupted
 }
 
 public enum CoachContextAdvisoryState: Equatable, Sendable {
@@ -112,6 +116,7 @@ public struct ChatFeatureState: Equatable, Sendable {
         case creating
         case renaming(ChatID)
         case lockingDraft(ChatID)
+        case invokingCoach(ChatID)
         case retryingPendingUserTurn(ChatID)
         case discardingPendingUserTurn(ChatID)
     }

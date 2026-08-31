@@ -1,4 +1,4 @@
-@testable @_spi(CoachContextQualification) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(InvocationInfrastructure) import AudoraApplication
 import AudoraContracts
 import AudoraDomain
 import Foundation
@@ -11,6 +11,7 @@ final class DevelopmentChatScenarioTests: XCTestCase {
             .createDevelopmentChatScenario,
             .draftSendDiscardDevelopmentChatScenario,
             .contextCapacityRecoveryDevelopmentChatScenario,
+            .fakeProviderSuccessDevelopmentChatScenario,
             .renameDevelopmentChatScenario,
             .filterDevelopmentChatsScenario,
             .relaunchDevelopmentChatScenario,
@@ -29,9 +30,6 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 from: ContractResources.data(for: resource)
             )
             XCTAssertEqual(dto.schemaVersion, 1, dto.scenarioId)
-            XCTAssertEqual(dto.expectedProviderCalls, 0, dto.scenarioId)
-            XCTAssertEqual(dto.expectedInvocationCalls, 0, dto.scenarioId)
-            XCTAssertEqual(dto.expectedAdmissionCalls, 0, dto.scenarioId)
 
             let recorder = ChatScenarioRecorder()
             let initial = try dto.initialChats.map(aggregate)
@@ -42,6 +40,14 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 suspendFirstCatalogLoad: dto.suspendedEffect == "firstCatalogLoad"
             )
             let scripted = ChatScenarioScript(events: dto.dependencyTrace, recorder: recorder)
+            let contextSource = ScenarioCoachContextSnapshotPort(
+                mode: dto.contextCapacityMode ?? "alwaysFits"
+            )
+            let invocations: any ScenarioMeasuringInvocations = if dto.expectedProviderCalls > 0 {
+                try ScenarioFakeInvocationGateway(store: store, source: contextSource)
+            } else {
+                ScenarioContextInvocationGateway(store: store, source: contextSource)
+            }
             let feature = DefaultChatFeature(
                 store: store,
                 profileReader: scripted,
@@ -52,10 +58,9 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 pendingUserTurnIDGenerator: scripted,
                 responsePositionIDGenerator: scripted,
                 coachContext: DefaultCoachContextFeature(
-                    source: ScenarioCoachContextSnapshotPort(
-                        mode: dto.contextCapacityMode ?? "alwaysFits"
-                    )
-                )
+                    source: contextSource
+                ),
+                invocations: invocations
             )
             let scope = LibraryScope(libraryID: try LibraryID(dto.libraryId))
             var commandGeneration: UInt64 = 1
@@ -106,6 +111,22 @@ final class DevelopmentChatScenarioTests: XCTestCase {
             }
 
             let state = await feature.currentState
+            let invocationCounts = await invocations.counts()
+            XCTAssertEqual(
+                invocationCounts.invocations,
+                dto.expectedInvocationCalls,
+                dto.scenarioId
+            )
+            XCTAssertEqual(
+                invocationCounts.provider,
+                dto.expectedProviderCalls,
+                dto.scenarioId
+            )
+            XCTAssertEqual(
+                invocationCounts.admission,
+                dto.expectedAdmissionCalls,
+                dto.scenarioId
+            )
             XCTAssertEqual(
                 catalogStatus(state),
                 dto.expectedState.catalogStatus ?? "ready",
@@ -135,6 +156,13 @@ final class DevelopmentChatScenarioTests: XCTestCase {
             }
             if let expected = dto.expectedState.selectedDraftVersion {
                 XCTAssertEqual(selectedChat(state)?.chat.draft.version, expected, dto.scenarioId)
+            }
+            if let expected = dto.expectedState.selectedMessageIds {
+                XCTAssertEqual(
+                    selectedChat(state)?.chat.messageIDs.map(\.rawValue),
+                    expected,
+                    dto.scenarioId
+                )
             }
             if let expected = dto.expectedState.composerStatus {
                 XCTAssertEqual(composerStatus(state), expected, dto.scenarioId)
@@ -523,6 +551,7 @@ private struct DevelopmentChatStateDTO: Decodable {
     let selectedFrozenReason: String?
     let selectedDraftText: String?
     let selectedDraftVersion: UInt64?
+    let selectedMessageIds: [String]?
     let composerStatus: String?
     let pendingUserTurnId: String?
     let responsePositionId: String?
@@ -763,6 +792,20 @@ private actor ChatScenarioStore: ChatStorePort {
         }
     }
 
+    func invocationSnapshot(_ chatID: ChatID) -> ChatAggregate? {
+        chats[chatID]
+    }
+
+    func commitInvocationPublication(
+        _ mutation: PublishCoachInvocationMutation
+    ) -> InvocationPublicationOutcome {
+        guard chats[mutation.invocation.chatID] == mutation.base else {
+            return .stale(chats[mutation.invocation.chatID])
+        }
+        chats[mutation.invocation.chatID] = mutation.replacement
+        return .committed(mutation.replacement)
+    }
+
     private func consume(effect: String) -> DevelopmentChatEventDTO? {
         guard let index = events.firstIndex(where: { $0.effect == effect }) else {
             return nil
@@ -777,6 +820,263 @@ private actor ChatScenarioStore: ChatStorePort {
             outcome: event.outcome.rendered
         )
     }
+}
+
+private struct ScenarioInvocationCounts: Equatable, Sendable {
+    let invocations: Int
+    let provider: Int
+    let admission: Int
+}
+
+private protocol ScenarioMeasuringInvocations: Invocations {
+    func counts() async -> ScenarioInvocationCounts
+}
+
+private actor ScenarioContextInvocationGateway: ScenarioMeasuringInvocations {
+    private let store: ChatScenarioStore
+    private let context: DefaultCoachContextFeature
+    private(set) var callCount = 0
+
+    init(store: ChatScenarioStore, source: ScenarioCoachContextSnapshotPort) {
+        self.store = store
+        context = DefaultCoachContextFeature(source: source)
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        callCount += 1
+        guard let locked = await store.invocationSnapshot(request.chatID),
+              let pending = locked.pendingUserTurn,
+              pending.id == request.pendingUserTurnID,
+              let contextRequest = try? CoachContextPendingTurnRequest(
+                  library: request.library,
+                  chatID: request.chatID,
+                  draft: locked.chat.draft,
+                  pendingUserTurn: pending
+              )
+        else { return .rejected(nil, .eligibilityChanged) }
+
+        switch await context.preparePendingUserTurn(contextRequest) {
+        case .prepared:
+            return .interrupted(nil, .providerFailed)
+        case let .cannotFit(failure):
+            let failed = pending.replacingFailure(.coachContextCannotFit)
+            guard let mutation = try? ReplacePendingUserTurnMutation(
+                library: request.library,
+                chatID: request.chatID,
+                base: pending,
+                replacement: failed
+            ) else { return .interrupted(locked, .persistenceUnavailable) }
+            guard case let .committed(current) = await store.replacePendingUserTurn(mutation)
+            else { return .interrupted(locked, .persistenceUnavailable) }
+            return .contextCapacityFailure(current, failure.quote)
+        case let .messageTooLong(maximumUTF8Bytes):
+            return .rejected(locked, .messageMustBeShortened(
+                maximumUTF8Bytes: maximumUTF8Bytes
+            ))
+        case let .unavailable(reason):
+            return .rejected(locked, .contextUnavailable(reason))
+        }
+    }
+
+    func counts() async -> ScenarioInvocationCounts {
+        ScenarioInvocationCounts(invocations: callCount, provider: 0, admission: 0)
+    }
+}
+
+private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
+    private let coordinator: DefaultInvocations
+    private let admission: ScenarioInvocationAdmission
+    private let provider: ScenarioSyntheticProvider
+    private var invocationCalls = 0
+
+    init(
+        store: ChatScenarioStore,
+        source: ScenarioCoachContextSnapshotPort
+    ) throws {
+        let persistence = ScenarioInvocationPersistence(store: store)
+        let admission = ScenarioInvocationAdmission()
+        let provider = ScenarioSyntheticProvider()
+        self.admission = admission
+        self.provider = provider
+        coordinator = DefaultInvocations(
+            persistence: persistence,
+            admission: admission,
+            provider: provider,
+            coachContext: DefaultCoachContextFeature(source: source),
+            clock: ScenarioInvocationClock(),
+            identities: try ScenarioInvocationIdentities()
+        )
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        invocationCalls += 1
+        return await coordinator.tryInvoke(request)
+    }
+
+    func counts() async -> ScenarioInvocationCounts {
+        ScenarioInvocationCounts(
+            invocations: invocationCalls,
+            provider: await provider.callCount,
+            admission: await admission.callCount
+        )
+    }
+}
+
+private actor ScenarioInvocationPersistence: InvocationPersistencePort {
+    private let store: ChatScenarioStore
+    private var active: CoachInvocation?
+
+    init(store: ChatScenarioStore) { self.store = store }
+
+    func resolvePending(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationPendingResolutionOutcome {
+        guard let aggregate = await store.invocationSnapshot(request.chatID) else {
+            return .ineligible(nil)
+        }
+        guard let authority = try? InvocationPendingAuthority(
+            request: request,
+            aggregate: aggregate
+        ) else { return .ineligible(aggregate) }
+        return .eligible(authority)
+    }
+
+    func checkActiveInvocation(
+        in library: LibraryScope
+    ) async -> InvocationActiveCheckOutcome {
+        active == nil ? .none : .exists
+    }
+
+    func installInvocation(
+        _ mutation: InstallCoachInvocationMutation
+    ) async -> InvocationInstallOutcome {
+        guard active == nil else { return .activeExists }
+        guard await store.invocationSnapshot(mutation.invocation.chatID) ==
+            mutation.authority.aggregate
+        else {
+            return .stale(await store.invocationSnapshot(mutation.invocation.chatID))
+        }
+        active = mutation.invocation
+        return .installed(mutation.invocation)
+    }
+
+    func markContextCapacityFailure(
+        _ authority: InvocationPendingAuthority
+    ) async -> InvocationPendingMutationOutcome {
+        let failed = authority.pendingUserTurn.replacingFailure(.coachContextCannotFit)
+        guard let mutation = try? ReplacePendingUserTurnMutation(
+            library: authority.request.library,
+            chatID: authority.request.chatID,
+            base: authority.pendingUserTurn,
+            replacement: failed
+        ) else { return .failed }
+        return pendingOutcome(await store.replacePendingUserTurn(mutation))
+    }
+
+    func rejectNewSend(
+        _ authority: InvocationPendingAuthority
+    ) async -> InvocationPendingMutationOutcome {
+        pendingOutcome(
+            await store.discardPendingUserTurn(
+                DiscardPendingUserTurnMutation(
+                    library: authority.request.library,
+                    chatID: authority.request.chatID,
+                    pendingUserTurn: authority.pendingUserTurn
+                )
+            )
+        )
+    }
+
+    func abortInstalledNewSend(
+        _ invocation: CoachInvocation
+    ) async -> InvocationPendingMutationOutcome {
+        guard active == invocation,
+              let aggregate = await store.invocationSnapshot(invocation.chatID),
+              let pending = aggregate.pendingUserTurn
+        else { return .stale(await store.invocationSnapshot(invocation.chatID)) }
+        active = nil
+        return pendingOutcome(
+            await store.discardPendingUserTurn(
+                DiscardPendingUserTurnMutation(
+                    library: LibraryScope(libraryID: invocation.libraryID),
+                    chatID: invocation.chatID,
+                    pendingUserTurn: pending
+                )
+            )
+        )
+    }
+
+    func publish(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationOutcome {
+        guard active == mutation.invocation else {
+            return .stale(await store.invocationSnapshot(mutation.invocation.chatID))
+        }
+        let outcome = await store.commitInvocationPublication(mutation)
+        if case .committed = outcome { active = nil }
+        return outcome
+    }
+
+    private func pendingOutcome(
+        _ outcome: ChatMutationOutcome
+    ) -> InvocationPendingMutationOutcome {
+        switch outcome {
+        case let .committed(value): .committed(value)
+        case let .stale(value): .stale(value)
+        default: .failed
+        }
+    }
+}
+
+private actor ScenarioInvocationAdmission: InvocationAdmissionPort {
+    private(set) var callCount = 0
+
+    func claim(
+        library: LibraryScope,
+        at instant: UTCInstant
+    ) async -> InvocationAdmissionClaimOutcome {
+        callCount += 1
+        return .admitted
+    }
+}
+
+private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
+    private(set) var callCount = 0
+
+    func run(_ request: SyntheticCoachProviderRequest) async throws -> String {
+        callCount += 1
+        return "A complete **synthetic** Coach response."
+    }
+}
+
+private actor ScenarioInvocationClock: ChatClock {
+    private var instants = [
+        try! UTCInstant("2026-08-30T12:00:02.000Z"),
+        try! UTCInstant("2026-08-30T12:00:03.000Z"),
+    ]
+
+    func now() async -> UTCInstant {
+        instants.isEmpty
+            ? try! UTCInstant("2026-08-30T12:00:03.000Z")
+            : instants.removeFirst()
+    }
+}
+
+private struct ScenarioInvocationIdentities: InvocationIdentityGenerating {
+    private let identity: InvocationLaunchIdentity
+
+    init() throws {
+        identity = InvocationLaunchIdentity(
+            invocationID: try CoachInvocationID("inv-20260830T120002000Z-5KMN"),
+            attemptID: try CoachProviderAttemptID("atm-20260830T120002000Z-6PQR"),
+            idempotencyValue: try ProviderIdempotencyValue("synthetic-attempt-6PQR"),
+            userMessageID: try ChatMessageID("msg-20260830T120003000Z-7STV"),
+            coachMessageID: try ChatMessageID("msg-20260830T120003000Z-8WXY"),
+            freshDraftID: try ChatDraftID("drf-20260830T120003000Z-9Z23")
+        )
+    }
+
+    func generate(at instant: UTCInstant) async -> InvocationLaunchIdentity { identity }
 }
 
 private actor ChatScenarioScript:

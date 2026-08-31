@@ -65,6 +65,6 @@
     "composerStatus": "editable"
   },
   "expectedProviderCalls": 0,
-  "expectedInvocationCalls": 0,
+  "expectedInvocationCalls": 1,
   "expectedAdmissionCalls": 0
 }

@@ -21,17 +21,24 @@ const coachContextExamplesDirectory = path.join(
   resourcesDirectory,
   "Examples/CoachContext/v1",
 );
+const invocationExamplesDirectory = path.join(
+  resourcesDirectory,
+  "Examples/Invocation/v1",
+);
 const rejectedDirectory = path.join(examplesDirectory, "rejected");
 const scenariosDirectory = path.join(resourcesDirectory, "Scenarios/Chat");
 
 const positiveInventory = [
   "chat.json",
+  "coach-invocation.json",
+  "coach-message.json",
   "memory.json",
   "pending-user-turn-capacity-failure.json",
   "pending-user-turn.json",
   "rejected",
   "renamed-chat.json",
   "session-analysis-chat.json",
+  "user-message.json",
 ];
 const scenarioInventory = [
   "corrupt-chat-freezes.v1.json",
@@ -39,6 +46,7 @@ const scenarioInventory = [
   "create-collision-limit.v1.json",
   "create-empty-development-chat.v1.json",
   "draft-send-discard.v1.json",
+  "fake-provider-success.v1.json",
   "filter-is-pure.v1.json",
   "library-switch-during-suspended-load.v1.json",
   "newer-chat-freezes.v1.json",
@@ -98,6 +106,9 @@ await assertExactInventory(rejectedDirectory, rejectedInventory, "rejected Chat 
 const chatManifest = await validator("ChatManifest.json");
 const coachMemory = await validator("CoachMemoryEnvelope.json");
 const pendingUserTurn = await validator("PendingUserTurn.json");
+const chatMessage = await validator("ChatMessage.json");
+const coachInvocation = await validator("CoachInvocation.json");
+const invocationAdmissionLedger = await validator("InvocationAdmissionLedger.json");
 const scenario = await validator("DevelopmentChatFeatureScenario.json");
 const coachContextQuote = await validator("CoachContextQuote.json");
 
@@ -111,6 +122,17 @@ assertValidation(
   await loadJSON(path.join(coachContextExamplesDirectory, "quote.json")),
   true,
   "coach-context/quote.json",
+);
+await assertExactInventory(
+  invocationExamplesDirectory,
+  ["admission-ledger.json"],
+  "Invocation fixture",
+);
+assertValidation(
+  invocationAdmissionLedger,
+  await loadJSON(path.join(invocationExamplesDirectory, "admission-ledger.json")),
+  true,
+  "invocation/admission-ledger.json",
 );
 
 for (const name of ["chat.json", "renamed-chat.json", "session-analysis-chat.json"]) {
@@ -126,6 +148,20 @@ assertValidation(
   await loadJSON(path.join(examplesDirectory, "memory.json")),
   true,
   "memory.json",
+);
+for (const name of ["user-message.json", "coach-message.json"]) {
+  assertValidation(
+    chatMessage,
+    await loadJSON(path.join(examplesDirectory, name)),
+    true,
+    name,
+  );
+}
+assertValidation(
+  coachInvocation,
+  await loadJSON(path.join(examplesDirectory, "coach-invocation.json")),
+  true,
+  "coach-invocation.json",
 );
 assertValidation(
   pendingUserTurn,

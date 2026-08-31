@@ -26,6 +26,10 @@ enum ChatNoticePresentation {
         case .pendingUserTurnFailed: "The pending Chat turn could not be changed."
         case .coachContextUnavailable: "Context capacity is unavailable for this Coach configuration."
         case .messageMustBeShortened: "Message is too long. Shorten it to send."
+        case .coachBusy: "The Coach is already working in this Library. Try again after it finishes."
+        case .coachAdmissionLimited: "The Coach was used recently. Try this Send again when admission reopens."
+        case .coachSendUnavailable: "The Coach could not accept this Send. Your Draft is still editable."
+        case .coachResponseInterrupted: "The Coach response was interrupted and nothing was published."
         }
     }
 
@@ -351,6 +355,8 @@ public struct ChatRootView: View {
             ProgressView("Renaming Chat…")
         case .lockingDraft:
             ProgressView("Preparing Draft…")
+        case .invokingCoach:
+            ProgressView("Coach is responding…")
         case .retryingPendingUserTurn:
             ProgressView("Rechecking Chat capacity…")
         case .discardingPendingUserTurn:
