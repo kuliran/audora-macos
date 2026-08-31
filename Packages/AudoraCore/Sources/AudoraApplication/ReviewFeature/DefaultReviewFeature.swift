@@ -229,12 +229,18 @@ public actor DefaultReviewFeature: ReviewFeature {
 
     private func setAnnotationsVisible(_ visible: Bool) async {
         guard let ready = readySnapshot,
-              ready.annotations.isVisible != visible,
-              await annotationVisibility.setAnnotationsVisible(
-                  visible,
-                  in: ready.selection.scope
-              ),
-              let current = readySnapshot,
+              ready.annotations.isVisible != visible
+        else { return }
+        transition(
+            to: .ready(
+                replacing(ready, activity: .settingAnnotationVisibility)
+            )
+        )
+        let persisted = await annotationVisibility.setAnnotationsVisible(
+            visible,
+            in: ready.selection.scope
+        )
+        guard let current = readySnapshot,
               current.selection == ready.selection,
               current.selectedRevisionID == ready.selectedRevisionID,
               current.playback.audioCapabilityID ==
@@ -246,7 +252,10 @@ public actor DefaultReviewFeature: ReviewFeature {
             to: .ready(
                 replacing(
                     current,
-                    annotations: current.annotations.settingVisibility(visible)
+                    annotations: persisted
+                        ? current.annotations.settingVisibility(visible)
+                        : current.annotations,
+                    activity: nil
                 )
             )
         )

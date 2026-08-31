@@ -118,6 +118,7 @@ public struct ReviewView: View {
                 .accessibilityHint(
                     "Shows or hides local speech evidence without changing the transcript."
                 )
+                .disabled(snapshot.activity != nil)
 
                 Menu {
                     ForEach(snapshot.revisionIDs, id: \.self) { revisionID in
@@ -147,9 +148,7 @@ public struct ReviewView: View {
             }
 
             if let activity = snapshot.activity {
-                ProgressView(activity == .selectingRevision
-                    ? "Selecting revision…"
-                    : "Transcribing another revision…")
+                ProgressView(activityLabel(activity))
                     .controlSize(.small)
             }
             if let notice = snapshot.notice {
@@ -161,7 +160,8 @@ public struct ReviewView: View {
             ReviewTranscriptTextView(
                 revision: snapshot.selectedRevision,
                 activeWordID: snapshot.activeWordID,
-                annotations: snapshot.annotations
+                annotations: snapshot.annotations,
+                allowsSeeking: snapshot.activity == nil
             ) { lineID, utf8ByteOffset in
                 model.seek(lineID: lineID, utf8ByteOffset: utf8ByteOffset)
             }
@@ -211,6 +211,14 @@ public struct ReviewView: View {
 
     private func selectedRevisionNumber(_ snapshot: ReviewReadySnapshot) -> Int {
         (snapshot.revisionIDs.firstIndex(of: snapshot.selectedRevisionID) ?? 0) + 1
+    }
+
+    private func activityLabel(_ activity: ReviewActivity) -> String {
+        switch activity {
+        case .settingAnnotationVisibility: "Saving annotation preference…"
+        case .selectingRevision: "Selecting revision…"
+        case .retranscribing: "Transcribing another revision…"
+        }
     }
 
     private func format(_ milliseconds: UInt64) -> String {
@@ -263,6 +271,7 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
     let revision: TranscriptRevision
     let activeWordID: TranscriptWordID?
     let annotations: ReviewAnnotations
+    let allowsSeeking: Bool
     let onSeek: (TranscriptLineID, Int) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onSeek: onSeek) }
@@ -301,7 +310,8 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         context.coordinator.install(
             revision: revision,
             activeWordID: activeWordID,
-            annotations: annotations
+            annotations: annotations,
+            allowsSeeking: allowsSeeking
         )
         return scrollView
     }
@@ -311,7 +321,8 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         context.coordinator.install(
             revision: revision,
             activeWordID: activeWordID,
-            annotations: annotations
+            annotations: annotations,
+            allowsSeeking: allowsSeeking
         )
     }
 
@@ -328,6 +339,7 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         private var installedRevisionID: TranscriptRevisionID?
         private var installedActiveWordID: TranscriptWordID?
         private var installedAnnotations: ReviewAnnotations?
+        private var allowsSeeking = true
         private var linePlacements: [LinePlacement] = []
         private var wordRanges: [TranscriptWordID: NSRange] = [:]
 
@@ -338,8 +350,10 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         func install(
             revision: TranscriptRevision,
             activeWordID: TranscriptWordID?,
-            annotations: ReviewAnnotations
+            annotations: ReviewAnnotations,
+            allowsSeeking: Bool
         ) {
+            self.allowsSeeking = allowsSeeking
             if installedRevisionID != revision.revisionID {
                 rebuild(revision)
                 installedRevisionID = revision.revisionID
@@ -351,7 +365,9 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         }
 
         func seek(characterIndex: Int) {
-            guard let placement = placement(containing: characterIndex) else { return }
+            guard allowsSeeking,
+                  let placement = placement(containing: characterIndex)
+            else { return }
             let localUTF16Offset = min(
                 max(characterIndex - placement.characterRange.location, 0),
                 placement.text.utf16.count

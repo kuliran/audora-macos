@@ -101,6 +101,10 @@ final class ReviewFeatureTests: XCTestCase {
 
         let toggle = Task { await feature.send(.setAnnotationsVisible(false)) }
         await visibility.waitUntilWriteStarts()
+        guard case let .ready(savingPreference) = await feature.currentState else {
+            return XCTFail("visibility persistence must retain Ready review")
+        }
+        XCTAssertEqual(savingPreference.activity, .settingAnnotationVisibility)
         await playback.emit(
             ReviewPlaybackSnapshot(
                 audioCapabilityID: capability,
@@ -120,6 +124,7 @@ final class ReviewFeatureTests: XCTestCase {
         XCTAssertEqual(ready.playback.status, .playing)
         XCTAssertEqual(ready.activeWordID, revision.lines[0].words[1].wordID)
         XCTAssertFalse(ready.annotations.isVisible)
+        XCTAssertNil(ready.activity)
     }
 
     func testQueuedVisibilityIntentCannotCrossAReviewSelectionBoundary() async throws {

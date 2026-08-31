@@ -125,6 +125,7 @@ public struct ReviewPlaybackSnapshot: Equatable, Sendable {
 }
 
 public enum ReviewActivity: Equatable, Sendable {
+    case settingAnnotationVisibility
     case selectingRevision
     case retranscribing
 }
