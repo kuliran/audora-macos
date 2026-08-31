@@ -183,8 +183,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
               let lastSelection
         else { return }
         await select(lastSelection)
-        guard selectedSource != nil else { return }
-        await start()
+        guard selectedSource != nil, acceptsRefreshedRetryLaunch else { return }
+        await launch()
     }
 
     private func prepare(_ action: SessionProcessingRecoveryAction) async {
@@ -230,16 +230,14 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     }
 
     private func start() async {
+        guard acceptsStartCommand else { return }
+        await launch()
+    }
+
+    /// Internal execution primitive. Callers must first establish either
+    /// public Start authority or refreshed Retry authority.
+    private func launch() async {
         guard let source = selectedSource else { return }
-        switch state {
-        case .ready, .unavailable, .completed, .cancelled, .interrupted:
-            break
-        case let .failed(failure):
-            guard failure.actions.contains(.retry) else { return }
-        case .preparing, .queued, .running, .cancelling, .validating,
-             .recoveryRequired:
-            return
-        }
 
         let runtimeResolution = await runtime.resolve()
         guard case let .qualified(profile) = runtimeResolution else {
@@ -963,6 +961,20 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
              .recoveryRequired:
             []
         }
+    }
+
+    private var acceptsStartCommand: Bool {
+        switch state {
+        case .ready, .completed: true
+        case .unavailable, .preparing, .queued, .running, .cancelling,
+             .validating, .failed, .cancelled, .interrupted, .recoveryRequired:
+            false
+        }
+    }
+
+    private var acceptsRefreshedRetryLaunch: Bool {
+        if case .ready = state { return true }
+        return advertisedRecoveryActions.contains(.retry)
     }
 
     private func runtimeUnavailable(

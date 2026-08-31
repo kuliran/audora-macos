@@ -250,17 +250,19 @@ final class SessionProcessingFeatureTests: XCTestCase {
         let runtime = RuntimeProbe(
             .unavailable(.qualificationBlocked(profileID: fixture.profile.profileID))
         )
+        let source = SourceProbe(.available(fixture.source))
         let model = ModelProbe(.ready)
         let jobs = JobProbe()
+        let revisions = RevisionProbe()
         let engine = EngineProbe(result: .failure(.launchFailed))
         let feature = DefaultSessionProcessingFeature(
-            source: SourceProbe(.available(fixture.source)),
+            source: source,
             runtime: runtime,
             model: model,
             acoustics: AcousticProbe(fixture.evidence),
             jobs: jobs,
             engine: engine,
-            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            publisher: TranscriptRevisionPublisher(repository: revisions),
             clock: FixedProcessingClock(fixture.createdAt),
             identifiers: FixedProcessingIdentifiers(
                 jobID: fixture.jobID,
@@ -279,12 +281,85 @@ final class SessionProcessingFeatureTests: XCTestCase {
             .qualificationBlocked(profileID: fixture.profile.profileID)
         )
         XCTAssertEqual(unavailable.actions, [])
+        let blockedState = await feature.currentState
+        let resolutionCountBeforeSecondStart = await runtime.resolutionCount
+
+        await feature.send(.start)
+
         let persistedStates = await jobs.states
         let engineRequests = await engine.requests
         let modelVerificationCount = await model.verificationCount
+        let resolutionCountAfterSecondStart = await runtime.resolutionCount
+        let sourceLoadCount = await source.loadCount
+        let publishCount = await revisions.publishCountValue()
+        let stateAfterSecondStart = await feature.currentState
         XCTAssertEqual(persistedStates, [])
         XCTAssertEqual(engineRequests.count, 0)
         XCTAssertEqual(modelVerificationCount, 0)
+        XCTAssertEqual(resolutionCountBeforeSecondStart, 1)
+        XCTAssertEqual(resolutionCountAfterSecondStart, resolutionCountBeforeSecondStart)
+        XCTAssertEqual(sourceLoadCount, 1)
+        XCTAssertEqual(publishCount, 0)
+        XCTAssertEqual(stateAfterSecondStart, blockedState)
+    }
+
+    func testStartIsInertForRetryOnlyTerminalStates() async throws {
+        let fixture = try ProcessingFixture()
+        let terminalJobs = [
+            fixture.job(state: .cancelled),
+            fixture.job(state: .interrupted),
+            fixture.job(state: .failed, failure: .engineFailed),
+        ]
+
+        for terminalJob in terminalJobs {
+            let source = SourceProbe(.available(fixture.source))
+            let runtime = RuntimeProbe(.qualified(fixture.profile))
+            let model = ModelProbe(.ready)
+            let jobs = JobProbe(latest: terminalJob)
+            let revisions = RevisionProbe()
+            let engine = EngineProbe(
+                result: .success(
+                    VerifiedTranscriptionCandidate(
+                        candidate: fixture.candidate,
+                        artifactFingerprint: fixture.candidateFingerprint
+                    )
+                )
+            )
+            let feature = DefaultSessionProcessingFeature(
+                source: source,
+                runtime: runtime,
+                model: model,
+                acoustics: AcousticProbe(fixture.evidence),
+                jobs: jobs,
+                engine: engine,
+                publisher: TranscriptRevisionPublisher(repository: revisions),
+                clock: FixedProcessingClock(fixture.createdAt),
+                identifiers: FixedProcessingIdentifiers(
+                    jobID: fixture.jobID,
+                    revisionID: fixture.revisionID
+                )
+            )
+
+            await feature.send(.selectSession(fixture.selection))
+            let stateBeforeStart = await feature.currentState
+
+            await feature.send(.start)
+
+            let stateAfterStart = await feature.currentState
+            let sourceLoadCount = await source.loadCount
+            let runtimeResolutionCount = await runtime.resolutionCount
+            let modelVerificationCount = await model.verificationCount
+            let persistedStates = await jobs.states
+            let engineRequestCount = await engine.requestCount()
+            let publishCount = await revisions.publishCountValue()
+            XCTAssertEqual(stateAfterStart, stateBeforeStart, "\(terminalJob.state)")
+            XCTAssertEqual(sourceLoadCount, 1, "\(terminalJob.state)")
+            XCTAssertEqual(runtimeResolutionCount, 0, "\(terminalJob.state)")
+            XCTAssertEqual(modelVerificationCount, 0, "\(terminalJob.state)")
+            XCTAssertEqual(persistedStates, [], "\(terminalJob.state)")
+            XCTAssertEqual(engineRequestCount, 0, "\(terminalJob.state)")
+            XCTAssertEqual(publishCount, 0, "\(terminalJob.state)")
+        }
     }
 
     func testMissingModelCanBePreparedThenStartedWithoutChangingEngine() async throws {
@@ -936,6 +1011,68 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(selectedAfterRetry, selectedBeforeRetry)
     }
 
+    func testRetryStopsWhenRefreshReopensCompletedJob() async throws {
+        let fixture = try ProcessingFixture(selectedRevisionID: true)
+        let completed = fixture.job(
+            state: .completed,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+        let source = SourceProbe([
+            .unavailable,
+            .available(fixture.source),
+        ])
+        let jobs = JobProbe(latest: completed)
+        let revisions = RevisionProbe(selected: try fixture.validatedRevision())
+        let runtime = RuntimeProbe(.qualified(fixture.profile))
+        let engine = EngineProbe(
+            result: .success(
+                VerifiedTranscriptionCandidate(
+                    candidate: fixture.candidate,
+                    artifactFingerprint: fixture.candidateFingerprint
+                )
+            )
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: runtime,
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+        guard case let .unavailable(unavailable) = await feature.currentState else {
+            return XCTFail("expected retryable source failure before refresh")
+        }
+        XCTAssertEqual(unavailable.actions, [.retry])
+
+        await feature.send(.retry)
+
+        guard case let .completed(reopened) = await feature.currentState else {
+            return XCTFail("expected refreshed durable completion")
+        }
+        let sourceLoadCount = await source.loadCount
+        let persistedStates = await jobs.states
+        let engineRequestCount = await engine.requestCount()
+        let runtimeResolutionCount = await runtime.resolutionCount
+        let publishCount = await revisions.publishCountValue()
+        let selectedRevisionID = await revisions.selected?.revisionID
+        XCTAssertEqual(reopened.jobID, completed.jobID)
+        XCTAssertEqual(sourceLoadCount, 2)
+        XCTAssertEqual(persistedStates, [])
+        XCTAssertEqual(engineRequestCount, 0)
+        XCTAssertEqual(runtimeResolutionCount, 0)
+        XCTAssertEqual(publishCount, 0)
+        XCTAssertEqual(selectedRevisionID, fixture.revisionID)
+    }
+
     func testRetryRereadsPreviouslyUnavailableSealedSourceBeforeStarting() async throws {
         let fixture = try ProcessingFixture()
         let source = SourceProbe([.unavailable, .available(fixture.source)])
@@ -981,14 +1118,20 @@ final class SessionProcessingFeatureTests: XCTestCase {
 
     func testNoSessionDoesNotAdvertiseANoOpRecoveryAction() async throws {
         let fixture = try ProcessingFixture()
+        let source = SourceProbe(.available(fixture.source))
+        let runtime = RuntimeProbe(.qualified(fixture.profile))
+        let model = ModelProbe(.ready)
+        let jobs = JobProbe()
+        let revisions = RevisionProbe()
+        let engine = EngineProbe(result: .failure(.launchFailed))
         let feature = DefaultSessionProcessingFeature(
-            source: SourceProbe(.available(fixture.source)),
-            runtime: RuntimeProbe(.qualified(fixture.profile)),
-            model: ModelProbe(.ready),
+            source: source,
+            runtime: runtime,
+            model: model,
             acoustics: AcousticProbe(fixture.evidence),
-            jobs: JobProbe(),
-            engine: EngineProbe(result: .failure(.launchFailed)),
-            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
             clock: FixedProcessingClock(fixture.createdAt),
             identifiers: FixedProcessingIdentifiers(
                 jobID: fixture.jobID,
@@ -1001,6 +1144,24 @@ final class SessionProcessingFeatureTests: XCTestCase {
         }
         XCTAssertEqual(unavailable.reason, .noSession)
         XCTAssertEqual(unavailable.actions, [])
+
+        let stateBeforeStart = await feature.currentState
+        await feature.send(.start)
+
+        let stateAfterStart = await feature.currentState
+        let sourceLoadCount = await source.loadCount
+        let runtimeResolutionCount = await runtime.resolutionCount
+        let modelVerificationCount = await model.verificationCount
+        let persistedStates = await jobs.states
+        let engineRequestCount = await engine.requestCount()
+        let publishCount = await revisions.publishCountValue()
+        XCTAssertEqual(stateAfterStart, stateBeforeStart)
+        XCTAssertEqual(sourceLoadCount, 0)
+        XCTAssertEqual(runtimeResolutionCount, 0)
+        XCTAssertEqual(modelVerificationCount, 0)
+        XCTAssertEqual(persistedStates, [])
+        XCTAssertEqual(engineRequestCount, 0)
+        XCTAssertEqual(publishCount, 0)
     }
 
     func testLatestSelectionIsReplayedWhenPreviousSourceLoadIsSuspended() async throws {
@@ -1340,7 +1501,8 @@ private struct ProcessingFixture {
     func job(
         state: SessionProcessingJobState,
         expectedSelectedRevisionID: TranscriptRevisionID? = nil,
-        candidateArtifactSHA256: String? = nil
+        candidateArtifactSHA256: String? = nil,
+        failure: SessionProcessingFailureReason? = nil
     ) -> SessionProcessingJob {
         SessionProcessingJob(
             jobID: jobID,
@@ -1353,7 +1515,8 @@ private struct ProcessingFixture {
             cancellationAuthorityID: try! TranscriptionCancellationAuthorityID(
                 "cancel-fixture-authority"
             ),
-            candidateArtifactSHA256: candidateArtifactSHA256
+            candidateArtifactSHA256: candidateArtifactSHA256,
+            failure: failure
         )
     }
 
@@ -1400,12 +1563,16 @@ private struct ProcessingFixture {
 private actor RuntimeProbe: TranscriptionRuntimePort {
     private let resolution: TranscriptionRuntimeResolution
     private(set) var preparationActions: [SessionProcessingRecoveryAction] = []
+    private(set) var resolutionCount = 0
 
     init(_ resolution: TranscriptionRuntimeResolution) {
         self.resolution = resolution
     }
 
-    func resolve() async -> TranscriptionRuntimeResolution { resolution }
+    func resolve() async -> TranscriptionRuntimeResolution {
+        resolutionCount += 1
+        return resolution
+    }
 
     func prepare(_ action: SessionProcessingRecoveryAction) async
         -> TranscriptionRuntimeResolution

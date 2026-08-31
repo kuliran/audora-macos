@@ -184,7 +184,7 @@ shape. Application still requires exact source, Job, engine-lock, runtime-lock,
 patch, timing, coverage, and textual evidence validation before publication.
 Checked-in scenarios cover a synthetic qualified offline success, the current
 production qualification block with no fallback, Candidate rejection with no
-selection, and explicit model Prepare/Retry.
+selection, and explicit model Prepare/Start.
 
 ## Transcript Revision contract
 
