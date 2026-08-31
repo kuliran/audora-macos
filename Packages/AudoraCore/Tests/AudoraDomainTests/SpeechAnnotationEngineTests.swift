@@ -74,6 +74,102 @@ final class SpeechAnnotationEngineTests: XCTestCase {
         )
     }
 
+    func testRepetitionRetainsLongestMeaningfulOverlappingCandidate() throws {
+        let revision = try annotationRevision(
+            text: "very very good very good",
+            words: [
+                ("very", .lexical, 100, 180),
+                ("very", .lexical, 220, 300),
+                ("good", .lexical, 340, 420),
+                ("very", .lexical, 460, 540),
+                ("good", .lexical, 580, 660),
+            ]
+        )
+
+        let first = try DeterministicSpeechAnnotator().annotate(
+            revision: revision,
+            evidence: .none
+        )
+        let second = try DeterministicSpeechAnnotator().annotate(
+            revision: revision,
+            evidence: .none
+        )
+
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(
+            first.textualEvents.map {
+                "\($0.textualEventID.rawValue):" +
+                    "\($0.wordRange.firstWordID.rawValue)..." +
+                    $0.wordRange.lastWordID.rawValue
+            },
+            [
+                "t000000:w000000...w000001",
+                "t000001:w000001...w000004",
+            ]
+        )
+    }
+
+    func testRepetitionKeepsOneMaximalCandidateForContainedRun() throws {
+        let revision = try annotationRevision(
+            text: "very very very",
+            words: [
+                ("very", .lexical, 100, 180),
+                ("very", .lexical, 220, 300),
+                ("very", .lexical, 340, 420),
+            ]
+        )
+
+        let result = try DeterministicSpeechAnnotator().annotate(
+            revision: revision,
+            evidence: .none
+        )
+
+        XCTAssertEqual(
+            result.textualEvents.map {
+                "\($0.textualEventID.rawValue):" +
+                    "\($0.wordRange.firstWordID.rawValue)..." +
+                    $0.wordRange.lastWordID.rawValue
+            },
+            ["t000000:w000000...w000002"]
+        )
+    }
+
+    func testRepetitionPhraseWidthIsBoundedAtThreeWords() throws {
+        let revision = try annotationRevision(
+            text: "one two three one two three stop red orange yellow green red orange yellow green",
+            words: [
+                ("one", .lexical, 100, 180),
+                ("two", .lexical, 220, 300),
+                ("three", .lexical, 340, 420),
+                ("one", .lexical, 460, 540),
+                ("two", .lexical, 580, 660),
+                ("three", .lexical, 700, 780),
+                ("stop", .lexical, 820, 900),
+                ("red", .lexical, 940, 1_020),
+                ("orange", .lexical, 1_060, 1_140),
+                ("yellow", .lexical, 1_180, 1_260),
+                ("green", .lexical, 1_300, 1_380),
+                ("red", .lexical, 1_420, 1_500),
+                ("orange", .lexical, 1_540, 1_620),
+                ("yellow", .lexical, 1_660, 1_740),
+                ("green", .lexical, 1_780, 1_860),
+            ]
+        )
+
+        let result = try DeterministicSpeechAnnotator().annotate(
+            revision: revision,
+            evidence: .none
+        )
+
+        XCTAssertEqual(
+            result.textualEvents.map {
+                $0.wordRange.firstWordID.rawValue + "..." +
+                    $0.wordRange.lastWordID.rawValue
+            },
+            ["w000000...w000005"]
+        )
+    }
+
     func testSubtractsUnavailableAndCanonicalCoverageBeforeAudioClassification() throws {
         let duration: UInt64 = 2_000
         let nonSpeech = TranscriptAudioEvent(

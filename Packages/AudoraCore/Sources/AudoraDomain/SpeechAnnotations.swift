@@ -527,7 +527,10 @@ public struct DeterministicSpeechAnnotator: Sendable {
         }
         guard lexical.count >= 2 else { return [] }
 
+        let occurrenceCountsByWidth = (1...Self.maximumRepetitionPhraseWords)
+            .map { repetitionOccurrenceCounts(in: lexical, phraseWidth: $0) }
         var result: [TextualDraft] = []
+        var furthestMatchedEnd = -1
         var start = 0
         while start < lexical.count - 1 {
             var matchedWidth: Int?
@@ -538,31 +541,8 @@ public struct DeterministicSpeechAnnotator: Sendable {
             )
             if widest > 0 {
                 for width in stride(from: widest, through: 1, by: -1) {
-                    guard phrasesMatch(lexical, first: start, second: start + width, width: width),
-                          gapIsBounded(
-                              lexical,
-                              previousStart: start,
-                              nextStart: start + width,
-                              width: width
-                          )
-                    else { continue }
-                    var occurrences = 2
-                    while start + (occurrences + 1) * width <= lexical.count,
-                          phrasesMatch(
-                              lexical,
-                              first: start,
-                              second: start + occurrences * width,
-                              width: width
-                          ),
-                          gapIsBounded(
-                              lexical,
-                              previousStart: start + (occurrences - 1) * width,
-                              nextStart: start + occurrences * width,
-                              width: width
-                          )
-                    {
-                        occurrences += 1
-                    }
+                    let occurrences = occurrenceCountsByWidth[width - 1][start]
+                    guard occurrences >= 2 else { continue }
                     matchedWidth = width
                     matchedOccurrences = occurrences
                     break
@@ -573,6 +553,12 @@ public struct DeterministicSpeechAnnotator: Sendable {
                 continue
             }
             let last = start + width * matchedOccurrences - 1
+            // Suppress only candidates contained by an earlier maximal range;
+            // an overlap that extends the evidence remains independently useful.
+            guard last > furthestMatchedEnd else {
+                start += 1
+                continue
+            }
             result.append(
                 TextualDraft(
                     category: .repetitionCandidate,
@@ -581,9 +567,36 @@ public struct DeterministicSpeechAnnotator: Sendable {
                     confidence: .medium
                 )
             )
-            start = last + 1
+            furthestMatchedEnd = last
+            start += 1
         }
         return result
+    }
+
+    private func repetitionOccurrenceCounts(
+        in words: [LexicalWord],
+        phraseWidth: Int
+    ) -> [Int] {
+        var counts = Array(repeating: 1, count: words.count)
+        guard words.count >= phraseWidth * 2 else { return counts }
+        for start in stride(
+            from: words.count - phraseWidth * 2,
+            through: 0,
+            by: -1
+        ) where phrasesMatch(
+            words,
+            first: start,
+            second: start + phraseWidth,
+            width: phraseWidth
+        ) && gapIsBounded(
+            words,
+            previousStart: start,
+            nextStart: start + phraseWidth,
+            width: phraseWidth
+        ) {
+            counts[start] = counts[start + phraseWidth] + 1
+        }
+        return counts
     }
 
     private func phrasesMatch(

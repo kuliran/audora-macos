@@ -341,7 +341,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         else { return nil }
         guard let rootIdentity = LibraryRootIdentity.capture(
             processingLease.url
-        ) else {
+        ), rootIdentity == activeScope.rootIdentity else {
             processingLease.release()
             return nil
         }

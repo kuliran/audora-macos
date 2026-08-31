@@ -60,6 +60,31 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testProcessingScopeRejectsSameIDRootReplacementBeforeAcquisition() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Root.audoralibrary")
+            let moved = parent.appendingPathComponent("Original.audoralibrary")
+            let seed = try makeSeed()
+            let authority = try PortableLibraryPersistence().create(at: root, seed: seed)
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+
+            try FileManager.default.moveItem(at: root, to: moved)
+            _ = try PortableLibraryPersistence().create(at: root, seed: seed)
+
+            let acquired = await workspace.acquireSessionProcessingScope(
+                for: LibraryScope(libraryID: authority.manifest.libraryID)
+            )
+            XCTAssertNil(acquired)
+        }
+    }
+
     func testSuccessfulSwitchAcquiresCandidateBeforeReleasingOldLease() async throws {
         try await withTwoLibraries { first, second, firstAuthority, secondAuthority in
             let access = RecordingAccessGrantor()
