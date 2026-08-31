@@ -189,18 +189,15 @@ namespace Audora.Contracts {
     confirmation: "none" | "discardRecording";
   }
 
-  model RecordingScenarioActiveOrdinarySnapshot
-    extends RecordingScenarioActiveBase {
+  model RecordingScenarioActiveOrdinarySnapshot extends RecordingScenarioActiveBase {
     limitPhase: "ordinary";
   }
 
-  model RecordingScenarioActiveWarningSnapshot
-    extends RecordingScenarioActiveBase {
+  model RecordingScenarioActiveWarningSnapshot extends RecordingScenarioActiveBase {
     limitPhase: "fiveMinuteWarning";
   }
 
-  model RecordingScenarioActiveCountdownSnapshot
-    extends RecordingScenarioActiveBase {
+  model RecordingScenarioActiveCountdownSnapshot extends RecordingScenarioActiveBase {
     limitPhase: "oneMinuteCountdown";
 
     @minValue(1)
@@ -208,8 +205,7 @@ namespace Audora.Contracts {
     secondsRemaining: integer;
   }
 
-  model RecordingScenarioActiveLimitSnapshot
-    extends RecordingScenarioActiveBase {
+  model RecordingScenarioActiveLimitSnapshot extends RecordingScenarioActiveBase {
     limitPhase: "automaticStop";
   }
 
@@ -220,13 +216,11 @@ namespace Audora.Contracts {
     terminalReason: "userStop" | "durationLimit" | "interruption";
   }
 
-  model RecordingScenarioFinishingSnapshot
-    extends RecordingScenarioTerminalSnapshotBase {
+  model RecordingScenarioFinishingSnapshot extends RecordingScenarioTerminalSnapshotBase {
     kind: "finishing";
   }
 
-  model RecordingScenarioSealingSnapshot
-    extends RecordingScenarioTerminalSnapshotBase {
+  model RecordingScenarioSealingSnapshot extends RecordingScenarioTerminalSnapshotBase {
     kind: "sealing";
   }
 
@@ -252,8 +246,7 @@ namespace Audora.Contracts {
     afterCommand: integer;
   }
 
-  model RecordingInspectEmptyDependency
-    extends RecordingScenarioDependencyBase {
+  model RecordingInspectEmptyDependency extends RecordingScenarioDependencyBase {
     port: "audioCapture";
     effect: "inspectRecovery";
     outcome: "none";
@@ -266,8 +259,7 @@ namespace Audora.Contracts {
     frameCount: RecordingFrameOffset;
   }
 
-  model RecordingBeginStartedDependency
-    extends RecordingScenarioDependencyBase {
+  model RecordingBeginStartedDependency extends RecordingScenarioDependencyBase {
     port: "audioCapture";
     effect: "begin";
     outcome: "started";
@@ -280,8 +272,7 @@ namespace Audora.Contracts {
     outcome: "microphonePermissionDenied";
   }
 
-  model RecordingMeasuredProgressDependency
-    extends RecordingScenarioDependencyBase {
+  model RecordingMeasuredProgressDependency extends RecordingScenarioDependencyBase {
     port: "audioCapture";
     effect: "progress";
     outcome: "measured";
@@ -292,8 +283,7 @@ namespace Audora.Contracts {
     level: float64;
   }
 
-  model RecordingUnavailableProgressDependency
-    extends RecordingScenarioDependencyBase {
+  model RecordingUnavailableProgressDependency extends RecordingScenarioDependencyBase {
     port: "audioCapture";
     effect: "progress";
     outcome: "muted" | "captureGap";
@@ -313,8 +303,7 @@ namespace Audora.Contracts {
     frameCount: RecordingFrameOffset;
   }
 
-  model RecordingNormalizedIntervalsDependency
-    extends RecordingScenarioDependencyBase {
+  model RecordingNormalizedIntervalsDependency extends RecordingScenarioDependencyBase {
     port: "domain";
     effect: "normalizeUnavailableIntervals";
     outcome: "mutedGapOverlap";
@@ -348,8 +337,7 @@ namespace Audora.Contracts {
     outcome: "accepted";
   }
 
-  model RecordingDiscardConfirmedDependency
-    extends RecordingScenarioDependencyBase {
+  model RecordingDiscardConfirmedDependency extends RecordingScenarioDependencyBase {
     port: "audioCapture";
     effect: "discardConfirmed";
     outcome: "accepted" | "stagingDiscardFailed";
@@ -361,8 +349,7 @@ namespace Audora.Contracts {
     outcome: "discarded";
   }
 
-  model RecordingRecoveryRequiredDependency
-    extends RecordingScenarioDependencyBase {
+  model RecordingRecoveryRequiredDependency extends RecordingScenarioDependencyBase {
     port: "audioCapture";
     effect: "recoveryRequired";
     outcome: "sealOrDiscard";
