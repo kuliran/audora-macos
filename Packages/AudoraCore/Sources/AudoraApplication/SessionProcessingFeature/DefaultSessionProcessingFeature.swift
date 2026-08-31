@@ -503,8 +503,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         case .sourceUnavailable, .sourceIntegrityMismatch,
              .acousticEvidenceUnavailable:
             actions = [.retry]
-        case .qualificationBlocked, .runtimeMissing, .runtimeLockMismatch,
-             .modelMissing, .modelCorrupt, .modelLockMismatch:
+        case .qualificationBlocked:
+            actions = []
+        case .runtimeMissing, .runtimeLockMismatch, .modelMissing, .modelCorrupt,
+             .modelLockMismatch:
             actions = [.prepare, .reinstall, .retry]
         }
         return SessionProcessingUnavailableSnapshot(

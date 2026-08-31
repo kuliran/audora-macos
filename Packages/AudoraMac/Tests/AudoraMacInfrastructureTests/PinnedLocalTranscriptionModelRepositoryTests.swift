@@ -103,6 +103,40 @@ final class PinnedLocalTranscriptionModelRepositoryTests: XCTestCase {
         }
     }
 
+    func testVerifiedCapabilityFreezesBytesAgainstSameInodeMutation() async throws {
+        try await withSyntheticModel { root, manifest, profile in
+            try installSyntheticModel(at: root)
+            let modelURL = root.appendingPathComponent("model.safetensors")
+            let originalIdentity = try fileIdentity(modelURL)
+            let repository = PinnedLocalTranscriptionModelRepository(
+                root: root,
+                manifest: manifest
+            )
+            let resolution = await repository.verify(profile)
+            XCTAssertEqual(resolution, .ready)
+            let acquiredCapability = await repository.executionCapability(for: profile)
+            let capability = try XCTUnwrap(acquiredCapability)
+
+            try overwriteInPlace(
+                modelURL,
+                bytes: Data("tampered--model\n".utf8)
+            )
+            XCTAssertEqual(try fileIdentity(modelURL), originalIdentity)
+
+            let acquiredModel = await repository.resolveModel(capability, profile: profile)
+            let resolved = try XCTUnwrap(acquiredModel)
+            let descriptors = try resolved.duplicateReadOnlyFileDescriptors()
+            defer { descriptors.values.forEach { Darwin.close($0) } }
+            let descriptor = try XCTUnwrap(descriptors["model.safetensors"])
+            XCTAssertNotEqual(try fileIdentity(descriptor), originalIdentity)
+            XCTAssertEqual(fcntl(descriptor, F_GETFL) & O_ACCMODE, O_RDONLY)
+            XCTAssertEqual(
+                try readModelDescriptor(descriptor),
+                Data("synthetic-model\n".utf8)
+            )
+        }
+    }
+
     private func withSyntheticModel(
         _ body: (URL, PinnedTranscriptionModelManifest, QualifiedTranscriptionProfile)
             async throws -> Void
@@ -174,6 +208,54 @@ final class PinnedLocalTranscriptionModelRepositoryTests: XCTestCase {
             compatibilityPatchID: qualification.compatibilityPatchID,
             engine: engine
         )
+    }
+}
+
+private struct ModelFileIdentity: Equatable {
+    let device: UInt64
+    let inode: UInt64
+    let byteCount: UInt64
+}
+
+private func fileIdentity(_ url: URL) throws -> ModelFileIdentity {
+    var metadata = stat()
+    guard url.withUnsafeFileSystemRepresentation({ path in
+        guard let path else { return false }
+        return lstat(path, &metadata) == 0
+    }), metadata.st_size >= 0 else {
+        throw CocoaError(.fileReadUnknown)
+    }
+    return ModelFileIdentity(
+        device: UInt64(truncatingIfNeeded: metadata.st_dev),
+        inode: UInt64(truncatingIfNeeded: metadata.st_ino),
+        byteCount: UInt64(metadata.st_size)
+    )
+}
+
+private func fileIdentity(_ descriptor: Int32) throws -> ModelFileIdentity {
+    var metadata = stat()
+    guard fstat(descriptor, &metadata) == 0, metadata.st_size >= 0 else {
+        throw CocoaError(.fileReadUnknown)
+    }
+    return ModelFileIdentity(
+        device: UInt64(truncatingIfNeeded: metadata.st_dev),
+        inode: UInt64(truncatingIfNeeded: metadata.st_ino),
+        byteCount: UInt64(metadata.st_size)
+    )
+}
+
+private func overwriteInPlace(_ url: URL, bytes: Data) throws {
+    let descriptor = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+        guard let path else { return -1 }
+        return Darwin.open(path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+    }
+    guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
+    defer { Darwin.close(descriptor) }
+    let written = bytes.withUnsafeBytes { buffer in
+        Darwin.pwrite(descriptor, buffer.baseAddress, buffer.count, 0)
+    }
+    guard written == bytes.count, fsync(descriptor) == 0 else {
+        throw CocoaError(.fileWriteUnknown)
     }
 }
 

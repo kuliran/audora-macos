@@ -83,7 +83,7 @@ final class SessionProcessingFeatureTests: XCTestCase {
             unavailable.reason,
             .qualificationBlocked(profileID: fixture.profile.profileID)
         )
-        XCTAssertEqual(unavailable.actions, [.prepare, .reinstall, .retry])
+        XCTAssertEqual(unavailable.actions, [])
         let persistedStates = await jobs.states
         let engineRequests = await engine.requests
         let modelVerificationCount = await model.verificationCount

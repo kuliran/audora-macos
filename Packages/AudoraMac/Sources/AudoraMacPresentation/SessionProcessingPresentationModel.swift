@@ -133,7 +133,7 @@ public enum SessionProcessingPresentationMapper {
         case let .qualificationBlocked(profileID):
             (
                 "Offline transcription isn’t qualified",
-                "The pinned profile \(profileID) has not passed qualification. Audora will not substitute another engine."
+                "The pinned profile \(profileID) has not passed qualification. Install an Audora update with qualified offline processing when one is available; Audora cannot repair or substitute this engine in place."
             )
         case .runtimeMissing:
             ("Offline runtime is not prepared", "Prepare the exact pinned runtime, then retry.")

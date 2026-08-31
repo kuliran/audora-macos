@@ -18,7 +18,7 @@
   "expectedState": {
     "status": "unavailable",
     "reason": "qualificationBlocked",
-    "actions": ["prepare", "reinstall", "retry"]
+    "actions": []
   },
   "expectedEffects": [
     { "kind": "noJobCreated" },

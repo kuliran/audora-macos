@@ -5,13 +5,15 @@ import XCTest
 
 @MainActor
 final class SessionProcessingPresentationModelTests: XCTestCase {
-    func testBlockedQualificationIsHonestAndExposesOnlyTypedRecoveryActions() throws {
+    func testBlockedQualificationOffersNoImpossibleRepairAndExplainsReleaseRecovery()
+        throws
+    {
         let selection = try makeSelection()
         let state = SessionProcessingFeatureState.unavailable(
             SessionProcessingUnavailableSnapshot(
                 selection: selection,
                 reason: .qualificationBlocked(profileID: "crisper-profile-v1"),
-                actions: [.prepare, .reinstall, .retry]
+                actions: []
             )
         )
 
@@ -20,7 +22,8 @@ final class SessionProcessingPresentationModelTests: XCTestCase {
         XCTAssertEqual(presentation.status, .unavailable)
         XCTAssertEqual(presentation.title, "Offline transcription isn’t qualified")
         XCTAssertTrue(presentation.detail?.contains("crisper-profile-v1") == true)
-        XCTAssertEqual(presentation.actions, [.prepare, .reinstall, .retry])
+        XCTAssertTrue(presentation.detail?.contains("Audora update") == true)
+        XCTAssertEqual(presentation.actions, [])
     }
 
     func testModelProjectsStatesAndSendsTypedStartAndRecoveryCommands() async throws {

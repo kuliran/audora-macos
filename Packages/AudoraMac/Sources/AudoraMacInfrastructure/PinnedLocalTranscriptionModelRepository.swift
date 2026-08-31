@@ -35,6 +35,11 @@ fileprivate struct RetainedModelFile: Sendable {
     let byteCount: UInt64
 }
 
+private struct PrivateModelSnapshotDirectory {
+    let url: URL
+    let descriptor: Int32
+}
+
 public final class ConfinedPinnedTranscriptionModel:
     ConfinedTranscriptionModelExecutionCapability,
     @unchecked Sendable
@@ -154,6 +159,7 @@ public actor PinnedLocalTranscriptionModelRepository:
     ConfinedTranscriptionModelResolving
 {
     private static let maximumModelFileBytes: UInt64 = 4 * 1_024 * 1_024 * 1_024
+    private static let maximumModelSnapshotBytes: UInt64 = 8 * 1_024 * 1_024 * 1_024
 
     private let root: URL?
     private let manifest: PinnedTranscriptionModelManifest
@@ -268,17 +274,43 @@ public actor PinnedLocalTranscriptionModelRepository:
                 maximumCount: manifest.files.count
             )
             guard entries == manifest.files.keys.sorted() else { return .corrupt }
+            let snapshotDirectory = try Self.createPrivateSnapshotDirectory()
+            var snapshotDirectoryRemoved = false
+            defer {
+                Darwin.close(snapshotDirectory.descriptor)
+                if !snapshotDirectoryRemoved {
+                    _ = Self.removeSnapshotDirectory(snapshotDirectory.url)
+                }
+            }
+            var snapshotByteCount: UInt64 = 0
             for name in manifest.files.keys.sorted() {
                 guard let expectedHash = manifest.files[name] else {
                     return .corrupt
                 }
-                let file = try Self.openVerifiedFile(
+                let (remainingSnapshotBytes, underflow) = Self
+                    .maximumModelSnapshotBytes.subtractingReportingOverflow(
+                        snapshotByteCount
+                    )
+                guard !underflow else { return .corrupt }
+                let file = try Self.makeVerifiedSnapshot(
                     named: name,
-                    under: descriptor,
-                    expectedHash: expectedHash
+                    sourceParent: descriptor,
+                    snapshotParent: snapshotDirectory.descriptor,
+                    expectedHash: expectedHash,
+                    maximumSnapshotBytes: remainingSnapshotBytes
                 )
                 retained[name] = file
+                let (nextSnapshotByteCount, overflow) = snapshotByteCount
+                    .addingReportingOverflow(file.byteCount)
+                guard !overflow,
+                      nextSnapshotByteCount <= Self.maximumModelSnapshotBytes
+                else { return .corrupt }
+                snapshotByteCount = nextSnapshotByteCount
             }
+            guard Self.removeSnapshotDirectory(snapshotDirectory.url) else {
+                return .corrupt
+            }
+            snapshotDirectoryRemoved = true
             let capabilityID = try TranscriptionModelCapabilityID(
                 "model-\(UUID().uuidString)"
             )
@@ -313,52 +345,194 @@ public actor PinnedLocalTranscriptionModelRepository:
         )
     }
 
-    private static func openVerifiedFile(
+    private static func createPrivateSnapshotDirectory() throws
+        -> PrivateModelSnapshotDirectory
+    {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+            ".audora-model-snapshot-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: url,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            throw ModelVerificationFailure.failed
+        }
+        let modeChanged = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return false }
+            return chmod(path, 0o700) == 0
+        }
+        guard modeChanged else {
+            _ = removeSnapshotDirectory(url)
+            throw ModelVerificationFailure.failed
+        }
+        let descriptor = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return Darwin.open(
+                path,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard descriptor >= 0 else {
+            _ = removeSnapshotDirectory(url)
+            throw ModelVerificationFailure.failed
+        }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFDIR,
+              metadata.st_uid == geteuid(),
+              metadata.st_mode & 0o077 == 0
+        else {
+            Darwin.close(descriptor)
+            _ = removeSnapshotDirectory(url)
+            throw ModelVerificationFailure.failed
+        }
+        return PrivateModelSnapshotDirectory(url: url, descriptor: descriptor)
+    }
+
+    private static func removeSnapshotDirectory(_ url: URL) -> Bool {
+        url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return false }
+            return Darwin.rmdir(path) == 0
+        }
+    }
+
+    private static func makeVerifiedSnapshot(
         named name: String,
-        under parent: Int32,
-        expectedHash: String
+        sourceParent: Int32,
+        snapshotParent: Int32,
+        expectedHash: String,
+        maximumSnapshotBytes: UInt64
     ) throws -> RetainedModelFile {
-        let descriptor = name.withCString {
+        let source = name.withCString {
             Darwin.openat(
-                parent,
+                sourceParent,
                 $0,
                 O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
             )
         }
-        guard descriptor >= 0 else { throw ModelVerificationFailure.failed }
-        var metadata = stat()
-        guard fstat(descriptor, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG,
-              metadata.st_size >= 0,
-              UInt64(metadata.st_size) <= maximumModelFileBytes
+        guard source >= 0 else { throw ModelVerificationFailure.failed }
+        defer { Darwin.close(source) }
+        var sourceMetadata = stat()
+        guard fstat(source, &sourceMetadata) == 0,
+              (sourceMetadata.st_mode & S_IFMT) == S_IFREG,
+              sourceMetadata.st_size >= 0,
+              UInt64(sourceMetadata.st_size) <= maximumModelFileBytes,
+              UInt64(sourceMetadata.st_size) <= maximumSnapshotBytes
         else {
-            Darwin.close(descriptor)
             throw ModelVerificationFailure.failed
+        }
+
+        var writer = name.withCString { pointer -> Int32 in
+            while true {
+                let result = Darwin.openat(
+                    snapshotParent,
+                    pointer,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                    0o600
+                )
+                if result < 0, errno == EINTR { continue }
+                return result
+            }
+        }
+        guard writer >= 0 else { throw ModelVerificationFailure.failed }
+        var snapshotLinked = true
+        defer {
+            if writer >= 0 { Darwin.close(writer) }
+            if snapshotLinked { _ = unlinkat(snapshotParent, name, 0) }
         }
 
         var digest = SHA256()
         var buffer = [UInt8](repeating: 0, count: 1_048_576)
+        var copiedBytes: UInt64 = 0
         while true {
-            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            let count = Darwin.read(source, &buffer, buffer.count)
             if count == 0 { break }
             if count < 0 {
                 if errno == EINTR { continue }
-                Darwin.close(descriptor)
                 throw ModelVerificationFailure.failed
             }
+            let (nextCopiedBytes, overflow) = copiedBytes.addingReportingOverflow(
+                UInt64(count)
+            )
+            guard !overflow,
+                  nextCopiedBytes <= UInt64(sourceMetadata.st_size),
+                  nextCopiedBytes <= maximumSnapshotBytes
+            else { throw ModelVerificationFailure.failed }
+            try writeAll(buffer, byteCount: count, to: writer)
             digest.update(data: Data(buffer[0..<count]))
+            copiedBytes = nextCopiedBytes
         }
         let measured = digest.finalize().map { String(format: "%02x", $0) }.joined()
-        guard measured == expectedHash, lseek(descriptor, 0, SEEK_SET) == 0 else {
-            Darwin.close(descriptor)
+        guard copiedBytes == UInt64(sourceMetadata.st_size),
+              measured == expectedHash,
+              fsync(writer) == 0,
+              fchmod(writer, mode_t(S_IRUSR)) == 0
+        else {
             throw ModelVerificationFailure.failed
         }
+        let completedWriter = writer
+        writer = -1
+        guard Darwin.close(completedWriter) == 0 else {
+            throw ModelVerificationFailure.failed
+        }
+
+        let snapshot = name.withCString {
+            Darwin.openat(
+                snapshotParent,
+                $0,
+                O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard snapshot >= 0 else { throw ModelVerificationFailure.failed }
+        var snapshotTransferred = false
+        defer { if !snapshotTransferred { Darwin.close(snapshot) } }
+        var snapshotMetadata = stat()
+        guard fstat(snapshot, &snapshotMetadata) == 0,
+              (snapshotMetadata.st_mode & S_IFMT) == S_IFREG,
+              snapshotMetadata.st_size == sourceMetadata.st_size,
+              snapshotMetadata.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH) == 0,
+              fcntl(snapshot, F_GETFL) & O_ACCMODE == O_RDONLY,
+              unlinkat(snapshotParent, name, 0) == 0,
+              lseek(snapshot, 0, SEEK_SET) == 0
+        else { throw ModelVerificationFailure.failed }
+        snapshotLinked = false
+        snapshotTransferred = true
         return RetainedModelFile(
-            descriptor: descriptor,
-            device: UInt64(truncatingIfNeeded: metadata.st_dev),
-            inode: UInt64(truncatingIfNeeded: metadata.st_ino),
-            byteCount: UInt64(metadata.st_size)
+            descriptor: snapshot,
+            device: UInt64(truncatingIfNeeded: snapshotMetadata.st_dev),
+            inode: UInt64(truncatingIfNeeded: snapshotMetadata.st_ino),
+            byteCount: UInt64(snapshotMetadata.st_size)
         )
+    }
+
+    private static func writeAll(
+        _ buffer: [UInt8],
+        byteCount: Int,
+        to descriptor: Int32
+    ) throws {
+        let success = buffer.withUnsafeBytes { rawBuffer -> Bool in
+            guard let base = rawBuffer.baseAddress else { return byteCount == 0 }
+            var offset = 0
+            while offset < byteCount {
+                let count = Darwin.write(
+                    descriptor,
+                    base.advanced(by: offset),
+                    byteCount - offset
+                )
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    return false
+                }
+                if count == 0 { return false }
+                offset += count
+            }
+            return true
+        }
+        guard success else { throw ModelVerificationFailure.failed }
     }
 }
 
