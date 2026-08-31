@@ -121,24 +121,134 @@ public final class ConfinedCanonicalAudioInput: @unchecked Sendable, Equatable {
 
     deinit { Darwin.close(descriptor) }
 
-    /// The caller owns the returned descriptor. It is read-only, positioned at
-    /// byte zero, close-on-exec, and still names the anonymous verified file.
+    /// The caller owns the returned descriptor. It is a distinct read-only
+    /// open description positioned at byte zero, so concurrent worker staging
+    /// cannot move another invocation's file offset.
     public func duplicateReadOnlyFileDescriptor() throws -> Int32 {
-        let duplicate = fcntl(descriptor, F_DUPFD_CLOEXEC, 0)
-        guard duplicate >= 0, lseek(duplicate, 0, SEEK_SET) == 0 else {
-            if duplicate >= 0 { Darwin.close(duplicate) }
-            throw ConfinedCanonicalAudioInputError.snapshotUnavailable
-        }
-        var metadata = stat()
-        guard fstat(duplicate, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG,
-              metadata.st_size >= 0,
-              UInt64(metadata.st_size) == byteCount
+        var sourceMetadata = stat()
+        guard fstat(descriptor, &sourceMetadata) == 0,
+              (sourceMetadata.st_mode & S_IFMT) == S_IFREG,
+              sourceMetadata.st_size >= 0,
+              UInt64(sourceMetadata.st_size) == byteCount
         else {
-            Darwin.close(duplicate)
             throw ConfinedCanonicalAudioInputError.snapshotUnavailable
         }
-        return duplicate
+
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "audora-transcription-duplicate-\(UUID().uuidString).wav",
+            isDirectory: false
+        )
+        let writer = temporary.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return Darwin.open(
+                path,
+                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                S_IRUSR | S_IWUSR
+            )
+        }
+        guard writer >= 0 else {
+            throw ConfinedCanonicalAudioInputError.snapshotUnavailable
+        }
+        var reader: Int32 = -1
+        defer {
+            Darwin.close(writer)
+            temporary.withUnsafeFileSystemRepresentation { path in
+                if let path { _ = Darwin.unlink(path) }
+            }
+        }
+        do {
+            var offset = 0
+            var buffer = [UInt8](repeating: 0, count: 1_048_576)
+            while offset < Int(sourceMetadata.st_size) {
+                let requested = min(
+                    buffer.count,
+                    Int(sourceMetadata.st_size) - offset
+                )
+                let readCount = buffer.withUnsafeMutableBytes { raw -> Int in
+                    guard let base = raw.baseAddress else { return -1 }
+                    return Darwin.pread(
+                        descriptor,
+                        base,
+                        requested,
+                        off_t(offset)
+                    )
+                }
+                if readCount < 0 {
+                    if errno == EINTR { continue }
+                    throw ConfinedCanonicalAudioInputError.snapshotUnavailable
+                }
+                guard readCount > 0 else {
+                    throw ConfinedCanonicalAudioInputError.snapshotUnavailable
+                }
+                var chunkOffset = 0
+                while chunkOffset < readCount {
+                    let written = buffer.withUnsafeBytes { raw -> Int in
+                        guard let base = raw.baseAddress else { return -1 }
+                        return Darwin.write(
+                            writer,
+                            base.advanced(by: chunkOffset),
+                            readCount - chunkOffset
+                        )
+                    }
+                    if written < 0 {
+                        if errno == EINTR { continue }
+                        throw ConfinedCanonicalAudioInputError.snapshotUnavailable
+                    }
+                    guard written > 0 else {
+                        throw ConfinedCanonicalAudioInputError.snapshotUnavailable
+                    }
+                    chunkOffset += written
+                }
+                offset += readCount
+            }
+            var finalSourceMetadata = stat()
+            guard fstat(descriptor, &finalSourceMetadata) == 0,
+                  finalSourceMetadata.st_dev == sourceMetadata.st_dev,
+                  finalSourceMetadata.st_ino == sourceMetadata.st_ino,
+                  finalSourceMetadata.st_size == sourceMetadata.st_size
+            else { throw ConfinedCanonicalAudioInputError.snapshotUnavailable }
+            while fsync(writer) != 0 {
+                if errno == EINTR { continue }
+                throw ConfinedCanonicalAudioInputError.snapshotUnavailable
+            }
+            while fchmod(writer, S_IRUSR) != 0 {
+                if errno == EINTR { continue }
+                throw ConfinedCanonicalAudioInputError.snapshotUnavailable
+            }
+            reader = temporary.withUnsafeFileSystemRepresentation { path -> Int32 in
+                guard let path else { return -1 }
+                return Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            }
+            guard reader >= 0 else {
+                throw ConfinedCanonicalAudioInputError.snapshotUnavailable
+            }
+            var writerMetadata = stat()
+            var readerMetadata = stat()
+            guard fstat(writer, &writerMetadata) == 0,
+                  fstat(reader, &readerMetadata) == 0,
+                  (writerMetadata.st_mode & S_IFMT) == S_IFREG,
+                  (readerMetadata.st_mode & S_IFMT) == S_IFREG,
+                  writerMetadata.st_dev == readerMetadata.st_dev,
+                  writerMetadata.st_ino == readerMetadata.st_ino,
+                  writerMetadata.st_size == sourceMetadata.st_size,
+                  readerMetadata.st_size == sourceMetadata.st_size,
+                  try Self.sha256(descriptor: reader) == fingerprint.sha256
+            else {
+                throw ConfinedCanonicalAudioInputError.snapshotUnavailable
+            }
+            temporary.withUnsafeFileSystemRepresentation { path in
+                if let path { _ = Darwin.unlink(path) }
+            }
+            let result = reader
+            reader = -1
+            return result
+        } catch {
+            if reader >= 0 {
+                Darwin.close(reader)
+                reader = -1
+            }
+            throw error
+        }
     }
 
     public static func == (
@@ -155,22 +265,21 @@ public final class ConfinedCanonicalAudioInput: @unchecked Sendable, Equatable {
     }
 
     private static func sha256(descriptor: Int32) throws -> String {
-        guard lseek(descriptor, 0, SEEK_SET) == 0 else {
-            throw ConfinedCanonicalAudioInputError.snapshotUnavailable
-        }
         var digest = SHA256()
         var buffer = [UInt8](repeating: 0, count: 1_048_576)
+        var offset = 0
         while true {
-            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            let count = buffer.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return -1 }
+                return Darwin.pread(descriptor, base, raw.count, off_t(offset))
+            }
             if count == 0 { break }
             if count < 0 {
                 if errno == EINTR { continue }
                 throw ConfinedCanonicalAudioInputError.snapshotUnavailable
             }
             digest.update(data: Data(buffer[0..<count]))
-        }
-        guard lseek(descriptor, 0, SEEK_SET) == 0 else {
-            throw ConfinedCanonicalAudioInputError.snapshotUnavailable
+            offset += count
         }
         return digest.finalize().map { String(format: "%02x", $0) }.joined()
     }
@@ -235,6 +344,16 @@ public actor PortableSessionProcessingWorkspace:
         let audio: ConfinedCanonicalAudioInput
     }
 
+    /// Source reconstruction can fail while a durable validating Job still
+    /// needs a deterministic terminal transition. Keep that source-independent
+    /// authority separate from the audio/publication binding so failure never
+    /// grants transcription or publication capabilities.
+    private struct JobBinding {
+        let selection: SessionProcessingSelection
+        let scope: ActiveLibraryProcessingScope
+        let jobs: PortableSessionProcessingJobRepository
+    }
+
     private struct ReconciliationBinding {
         let reconciliationID: SessionProcessingReconciliationID
         let scope: LibraryScope
@@ -245,6 +364,7 @@ public actor PortableSessionProcessingWorkspace:
 
     private let scopes: any SessionProcessingLibraryScopeProviding
     private var binding: Binding?
+    private var jobBinding: JobBinding?
     private var reconciliationBinding: ReconciliationBinding?
     private var reconciliationSessionBinding: Binding?
 
@@ -256,6 +376,7 @@ public actor PortableSessionProcessingWorkspace:
         _ selection: SessionProcessingSelection
     ) async -> SessionTranscriptionSourceResult {
         binding = nil
+        jobBinding = nil
         reconciliationBinding = nil
         reconciliationSessionBinding = nil
         guard let active = await scopes.acquireSessionProcessingScope(
@@ -263,6 +384,15 @@ public actor PortableSessionProcessingWorkspace:
         ) else {
             return .unavailable
         }
+        jobBinding = JobBinding(
+            selection: selection,
+            scope: active,
+            jobs: PortableSessionProcessingJobRepository(
+                root: active.root,
+                libraryID: selection.scope.libraryID,
+                expectedRootIdentity: active.identity.rootIdentity
+            )
+        )
         return await load(
             selection,
             active: active,
@@ -301,7 +431,8 @@ public actor PortableSessionProcessingWorkspace:
         ) else { return .integrityMismatch }
         let repository = PortableSessionProcessingJobRepository(
             root: active.root,
-            libraryID: scope.libraryID
+            libraryID: scope.libraryID,
+            expectedRootIdentity: active.identity.rootIdentity
         )
         let result: SessionProcessingJobInventoryResult
         do {
@@ -391,7 +522,8 @@ public actor PortableSessionProcessingWorkspace:
                     revisions: revisions,
                     jobs: PortableSessionProcessingJobRepository(
                         root: root,
-                        libraryID: selection.scope.libraryID
+                        libraryID: selection.scope.libraryID,
+                        expectedRootIdentity: active.identity.rootIdentity
                     ),
                     audio: audio
                 )
@@ -428,16 +560,18 @@ public actor PortableSessionProcessingWorkspace:
     public func latest(
         for selection: SessionProcessingSelection
     ) async -> SessionProcessingJobLoadResult {
-        guard let binding, binding.selection == selection,
-              await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
+        guard let jobBinding, jobBinding.selection == selection,
+              await scopes.isCurrentSessionProcessingScope(jobBinding.scope.identity)
         else { return .unavailable }
         do {
             let result = try await scopes.withCurrentSessionProcessingScope(
-                binding.scope.identity
+                jobBinding.scope.identity
             ) {
-                binding.jobs.latestSynchronously(for: selection)
+                jobBinding.jobs.latestSynchronously(for: selection)
             }
-            guard await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
+            guard await scopes.isCurrentSessionProcessingScope(
+                jobBinding.scope.identity
+            )
             else { return .unavailable }
             return result
         } catch {
@@ -492,16 +626,18 @@ public actor PortableSessionProcessingWorkspace:
                 return .failed
             }
         }
-        guard let binding, binding.selection.sessionID == job.sessionID,
-              await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
+        guard let jobBinding, jobBinding.selection.sessionID == job.sessionID,
+              await scopes.isCurrentSessionProcessingScope(jobBinding.scope.identity)
         else { return .failed }
         do {
             let result = try await scopes.withCurrentSessionProcessingScope(
-                binding.scope.identity
+                jobBinding.scope.identity
             ) {
-                binding.jobs.transitionSynchronously(job, from: expected)
+                jobBinding.jobs.transitionSynchronously(job, from: expected)
             }
-            guard await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
+            guard await scopes.isCurrentSessionProcessingScope(
+                jobBinding.scope.identity
+            )
             else { return .failed }
             return result
         } catch {

@@ -7,6 +7,37 @@ import Foundation
 import XCTest
 
 final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
+    func testConcurrentCanonicalAudioDuplicatesHaveIndependentOpenDescriptions()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let input = try ConfinedCanonicalAudioInput(
+            copyingVerifiedCanonicalWAV: fixture.canonicalAudio,
+            capabilityID: fixture.request.audioCapabilityID,
+            fingerprint: fixture.request.audioFingerprint
+        )
+        let descriptors = try await withThrowingTaskGroup(of: Int32.self) { group in
+            for _ in 0..<2 {
+                group.addTask {
+                    try input.duplicateReadOnlyFileDescriptor()
+                }
+            }
+            var values: [Int32] = []
+            for try await descriptor in group { values.append(descriptor) }
+            return values
+        }
+        XCTAssertEqual(descriptors.count, 2)
+        defer { descriptors.forEach { Darwin.close($0) } }
+        let first = try XCTUnwrap(descriptors.first)
+        let second = try XCTUnwrap(descriptors.last)
+
+        XCTAssertEqual(lseek(first, 17, SEEK_SET), 17)
+        XCTAssertEqual(lseek(second, 0, SEEK_CUR), 0)
+        XCTAssertEqual(try readToEnd(first), fixture.canonicalAudio)
+        XCTAssertEqual(lseek(second, 0, SEEK_CUR), 0)
+        XCTAssertEqual(try readToEnd(second), fixture.canonicalAudio)
+    }
+
     func testExactHandshakeAndSingleHashVerifiedCandidateAreReturnedOffline() async throws {
         let fixture = try WorkerFixture()
         let artifact = try fixture.candidateArtifact()

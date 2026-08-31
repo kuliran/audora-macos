@@ -28,6 +28,7 @@
   ],
   "expectedState": {
     "status": "completed",
+    "revisionId": "trv-20260830T120600000Z-6JKM",
     "selectedRevisionId": "trv-20260830T120600000Z-6JKM"
   },
   "expectedEffects": [

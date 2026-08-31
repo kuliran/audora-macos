@@ -99,6 +99,10 @@
                     "anyOf": [
                         {
                             "type": "string",
+                            "const": "activateLibrary"
+                        },
+                        {
+                            "type": "string",
                             "const": "selectSession"
                         },
                         {
@@ -186,6 +190,10 @@
                         },
                         {
                             "type": "string",
+                            "const": "inventory"
+                        },
+                        {
+                            "type": "string",
                             "const": "latest"
                         },
                         {
@@ -254,7 +262,7 @@
                         },
                         {
                             "type": "string",
-                            "const": "reopenSelected"
+                            "const": "reopenRevision"
                         },
                         {
                             "type": "string",
@@ -365,6 +373,10 @@
                         {
                             "type": "string",
                             "const": "canonicalRevisionReopened"
+                        },
+                        {
+                            "type": "string",
+                            "const": "allDurableJobsReconciled"
                         },
                         {
                             "type": "string",
@@ -590,12 +602,25 @@
                     "type": "string",
                     "const": "completed"
                 },
+                "revisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId",
+                    "description": "Exact immutable Revision owned by the completed Job."
+                },
                 "selectedRevisionId": {
-                    "$ref": "#/$defs/TranscriptRevisionId"
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/TranscriptRevisionId"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "description": "Current Session selection, which may be absent or point at another Revision."
                 }
             },
             "required": [
                 "status",
+                "revisionId",
                 "selectedRevisionId"
             ],
             "unevaluatedProperties": {

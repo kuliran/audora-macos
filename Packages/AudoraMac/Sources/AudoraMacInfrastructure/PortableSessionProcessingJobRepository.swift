@@ -7,6 +7,7 @@ import Foundation
 private func sessionProcessingJobFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 
 enum JobReconciliationFault: Hashable, Sendable {
+    case beforeJobMutationCommit
     case beforeCreationPartialUnlink
     case beforeTransitionPartialUnlink
 }
@@ -22,10 +23,16 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
 
     private let root: URL
     private let libraryID: LibraryID
+    private let expectedRootIdentity: SessionProcessingRootIdentity?
     private let reconciliationFault: @Sendable (JobReconciliationFault) throws -> Void
 
     public init(root: URL, libraryID: LibraryID) {
-        self.init(root: root, libraryID: libraryID, reconciliationFault: { _ in })
+        self.init(
+            root: root,
+            libraryID: libraryID,
+            expectedRootIdentity: SessionProcessingRootIdentity.capture(root),
+            reconciliationFault: { _ in }
+        )
     }
 
     init(
@@ -34,8 +41,24 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
         reconciliationFault: @escaping @Sendable (JobReconciliationFault) throws
             -> Void
     ) {
+        self.init(
+            root: root,
+            libraryID: libraryID,
+            expectedRootIdentity: SessionProcessingRootIdentity.capture(root),
+            reconciliationFault: reconciliationFault
+        )
+    }
+
+    init(
+        root: URL,
+        libraryID: LibraryID,
+        expectedRootIdentity: SessionProcessingRootIdentity?,
+        reconciliationFault: @escaping @Sendable (JobReconciliationFault) throws
+            -> Void = { _ in }
+    ) {
         self.root = root
         self.libraryID = libraryID
+        self.expectedRootIdentity = expectedRootIdentity
         self.reconciliationFault = reconciliationFault
     }
 
@@ -156,6 +179,7 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                     flushBeforeClose: true
                 )
                 try confined.flush(partialDescriptor)
+                try reconciliationFault(.beforeJobMutationCommit)
                 try revalidate(authority)
                 try confined.renameNoReplace(
                     from: partial,
@@ -241,6 +265,7 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                     maximumBytes: Self.maximumJobBytes
                 )
                 guard reread == currentData else { return .stale }
+                try reconciliationFault(.beforeJobMutationCommit)
                 try revalidate(authority)
                 try revalidateJob(
                     named: job.jobID.rawValue,
@@ -463,6 +488,11 @@ private extension PortableSessionProcessingJobRepository {
             throw JobPersistenceError.unavailable
         }
         do {
+            let rootIdentity = try identity(rootDescriptor)
+            guard let expectedRootIdentity,
+                  rootIdentity.device == expectedRootIdentity.device,
+                  rootIdentity.inode == expectedRootIdentity.inode
+            else { throw JobPersistenceError.unavailable }
             let loaded = try PortableLibraryPersistence().load(
                 from: rootDescriptor,
                 reconcileAbandonedImports: false
@@ -479,7 +509,7 @@ private extension PortableSessionProcessingJobRepository {
                     parentDescriptor: parentDescriptor,
                     rootDescriptor: rootDescriptor,
                     rootName: rootName,
-                    rootIdentity: try identity(rootDescriptor),
+                    rootIdentity: rootIdentity,
                     jobsDescriptor: jobsDescriptor,
                     jobsIdentity: try identity(jobsDescriptor)
                 )

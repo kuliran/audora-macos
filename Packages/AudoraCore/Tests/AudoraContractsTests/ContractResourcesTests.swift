@@ -306,6 +306,12 @@ final class ContractResourcesTests: XCTestCase {
             queuedInitial["jobId"] as? String
         )
         XCTAssertEqual(queuedExpected["actions"] as? [String], ["retry"])
+        let queuedCommands = try XCTUnwrap(
+            queuedRelaunch["commands"] as? [[String: Any]]
+        )
+        XCTAssertEqual(queuedCommands.compactMap { $0["kind"] as? String }, [
+            "activateLibrary",
+        ])
 
         let queuedTrace = try XCTUnwrap(
             queuedRelaunch["dependencyTrace"] as? [[String: Any]]
@@ -325,16 +331,21 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertFalse(queuedTrace.contains { $0["effect"] as? String == "transcribe" })
         XCTAssertTrue(
             queuedTrace.contains {
-                $0["port"] as? String == "source" &&
-                    $0["outcome"] as? String == "available-sealed-audio-retained"
+                $0["port"] as? String == "jobs" &&
+                    $0["effect"] as? String == "inventory" &&
+                    $0["outcome"] as? String == "all-durable-jobs-bounded"
             }
         )
+        XCTAssertFalse(queuedTrace.contains { $0["port"] as? String == "source" })
         let queuedEffects = try XCTUnwrap(
             queuedRelaunch["expectedEffects"] as? [[String: Any]]
         )
         XCTAssertEqual(
             Set(queuedEffects.compactMap { $0["kind"] as? String }),
-            ["queuedInterrupted", "sessionRetained", "noEngineLaunch", "noPublication"]
+            [
+                "allDurableJobsReconciled", "queuedInterrupted", "sessionRetained",
+                "noEngineLaunch", "noPublication",
+            ]
         )
         let stale = try jsonObject(
             .sessionProcessingRelaunchStaleSelectionScenario
@@ -353,6 +364,80 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(measured["completedWindows"] as? Int, 2)
         XCTAssertEqual(measured["totalWindows"] as? Int, 4)
         XCTAssertEqual(measured["approximateEtaSeconds"] as? Int, 5)
+
+        let feature = try jsonObject(.sessionProcessingFeatureScenarioSchema)
+        let featureDefinitions = try XCTUnwrap(feature["$defs"] as? [String: Any])
+        let commandSchema = try XCTUnwrap(
+            featureDefinitions["SessionProcessingScenarioCommand"] as? [String: Any]
+        )
+        let commandSchemaData = try JSONSerialization.data(withJSONObject: commandSchema)
+        let commandSchemaText = try XCTUnwrap(
+            String(data: commandSchemaData, encoding: .utf8)
+        )
+        XCTAssertTrue(commandSchemaText.contains("activateLibrary"))
+
+        let completedSchema = try XCTUnwrap(
+            featureDefinitions["SessionProcessingScenarioCompletedState"]
+                as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(completedSchema["required"] as? [String] ?? []),
+            ["status", "revisionId", "selectedRevisionId"]
+        )
+        let completedSchemaData = try JSONSerialization.data(withJSONObject: completedSchema)
+        let completedSchemaText = try XCTUnwrap(
+            String(data: completedSchemaData, encoding: .utf8)
+        )
+        XCTAssertTrue(completedSchemaText.contains("\"type\":\"null\""))
+
+        let validationRelaunch = try jsonObject(
+            .sessionProcessingRelaunchValidationScenario
+        )
+        let relaunchCommands = try XCTUnwrap(
+            validationRelaunch["commands"] as? [[String: Any]]
+        )
+        XCTAssertEqual(relaunchCommands.compactMap { $0["kind"] as? String }, [
+            "activateLibrary",
+        ])
+        let relaunchTrace = try XCTUnwrap(
+            validationRelaunch["dependencyTrace"] as? [[String: Any]]
+        )
+        XCTAssertTrue(
+            relaunchTrace.contains {
+                $0["port"] as? String == "jobs" &&
+                    $0["effect"] as? String == "inventory" &&
+                    $0["outcome"] as? String == "all-durable-jobs-bounded"
+            }
+        )
+        XCTAssertTrue(
+            relaunchTrace.contains {
+                $0["port"] as? String == "publisher" &&
+                    $0["effect"] as? String == "reopenRevision" &&
+                    $0["outcome"] as? String == "exact-job-revision"
+            }
+        )
+        XCTAssertFalse(
+            relaunchTrace.contains { $0["effect"] as? String == "reopenSelected" }
+        )
+        let relaunchExpected = try XCTUnwrap(
+            validationRelaunch["expectedState"] as? [String: Any]
+        )
+        XCTAssertNotNil(relaunchExpected["revisionId"] as? String)
+        XCTAssertNotEqual(
+            relaunchExpected["revisionId"] as? String,
+            relaunchExpected["selectedRevisionId"] as? String
+        )
+        let relaunchEffects = try XCTUnwrap(
+            validationRelaunch["expectedEffects"] as? [[String: Any]]
+        )
+        XCTAssertFalse(
+            relaunchEffects.contains { $0["kind"] as? String == "selectedAtomically" }
+        )
+        XCTAssertTrue(
+            relaunchEffects.contains {
+                $0["kind"] as? String == "allDurableJobsReconciled"
+            }
+        )
     }
 
     func testImportedSessionGoldensPreservePortableV1Fields() throws {

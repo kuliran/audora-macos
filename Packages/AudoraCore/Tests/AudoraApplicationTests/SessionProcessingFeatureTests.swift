@@ -680,6 +680,60 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(persistedStates, [.interrupted])
     }
 
+    func testSelectingValidatingJobWithUnavailableCorruptOrMismatchedSourceInterruptsIt()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let validating = fixture.job(
+            state: .validating,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+        let otherSelection = SessionProcessingSelection(
+            scope: fixture.selection.scope,
+            sessionID: try SessionID("ses-20260830T121000000Z-0RST")
+        )
+        let mismatchedSource = SessionTranscriptionSource(
+            selection: otherSelection,
+            audioCapabilityID: fixture.source.audioCapabilityID,
+            durationMilliseconds: fixture.source.durationMilliseconds,
+            audioFingerprint: fixture.source.audioFingerprint,
+            sourceFingerprints: fixture.source.sourceFingerprints,
+            expectedSelectedRevisionID: nil
+        )
+        let cases: [(SessionTranscriptionSourceResult, SessionProcessingUnavailableReason)] = [
+            (.unavailable, .sourceUnavailable),
+            (.integrityMismatch, .sourceIntegrityMismatch),
+            (.available(mismatchedSource), .sourceIntegrityMismatch),
+        ]
+
+        for (result, expectedReason) in cases {
+            let jobs = JobProbe(latest: validating)
+            let feature = DefaultSessionProcessingFeature(
+                source: SourceProbe(result),
+                runtime: RuntimeProbe(.qualified(fixture.profile)),
+                model: ModelProbe(.ready),
+                acoustics: AcousticProbe(fixture.evidence),
+                jobs: jobs,
+                engine: EngineProbe(result: .failure(.launchFailed)),
+                publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+                clock: FixedProcessingClock(fixture.createdAt),
+                identifiers: FixedProcessingIdentifiers(
+                    jobID: fixture.jobID,
+                    revisionID: fixture.revisionID
+                )
+            )
+
+            await feature.send(.selectSession(fixture.selection))
+
+            let persisted = await jobs.snapshots
+            guard case let .unavailable(snapshot) = await feature.currentState else {
+                return XCTFail("expected source failure to remain visible")
+            }
+            XCTAssertEqual(snapshot.reason, expectedReason)
+            XCTAssertEqual(persisted.map(\.state), [.interrupted])
+        }
+    }
+
     func testLibraryActivationReconcilesEveryQueuedJobWithoutSelectingASession()
         async throws
     {
@@ -823,6 +877,118 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(presenceQueries, [running.executionReference])
         XCTAssertEqual(cancellations, [running.executionReference])
         XCTAssertEqual(sourceLoads, [])
+    }
+
+    func testLibraryActivationInterruptsValidatingJobWhenSealedSourceIsUnavailable()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let validating = fixture.job(
+            state: .validating,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+        let reconciliationID = try SessionProcessingReconciliationID(
+            "reconcile-missing-validating-source"
+        )
+        let source = ReconciliationSourceProbe(
+            sources: [],
+            reconciliationID: reconciliationID
+        )
+        let jobs = JobProbe(
+            inventoryResult: .available(
+                SessionProcessingJobInventory(
+                    reconciliationID: reconciliationID,
+                    scope: fixture.selection.scope,
+                    jobs: [validating]
+                )
+            )
+        )
+        let engine = EngineProbe(result: .failure(.launchFailed))
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.activateLibrary(fixture.selection.scope))
+
+        let persisted = await jobs.snapshots
+        let sourceLoads = await source.selections
+        XCTAssertEqual(persisted.map(\.state), [.interrupted])
+        XCTAssertEqual(sourceLoads, [fixture.selection])
+    }
+
+    func testLibraryActivationInterruptsValidatingJobWhenSealedSourceIsCorruptOrMismatched()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let validating = fixture.job(
+            state: .validating,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+        let otherSelection = SessionProcessingSelection(
+            scope: fixture.selection.scope,
+            sessionID: try SessionID("ses-20260830T120900000Z-9QRS")
+        )
+        let mismatchedSource = SessionTranscriptionSource(
+            selection: otherSelection,
+            audioCapabilityID: fixture.source.audioCapabilityID,
+            durationMilliseconds: fixture.source.durationMilliseconds,
+            audioFingerprint: fixture.source.audioFingerprint,
+            sourceFingerprints: fixture.source.sourceFingerprints,
+            expectedSelectedRevisionID: nil
+        )
+        let cases: [SessionTranscriptionSourceResult] = [
+            .integrityMismatch,
+            .available(mismatchedSource),
+        ]
+
+        for (index, result) in cases.enumerated() {
+            let reconciliationID = try SessionProcessingReconciliationID(
+                "reconcile-invalid-validating-source-\(index)"
+            )
+            let source = ReconciliationSourceProbe(
+                result: result,
+                reconciliationID: reconciliationID
+            )
+            let jobs = JobProbe(
+                inventoryResult: .available(
+                    SessionProcessingJobInventory(
+                        reconciliationID: reconciliationID,
+                        scope: fixture.selection.scope,
+                        jobs: [validating]
+                    )
+                )
+            )
+            let feature = DefaultSessionProcessingFeature(
+                source: source,
+                runtime: RuntimeProbe(.qualified(fixture.profile)),
+                model: ModelProbe(.ready),
+                acoustics: AcousticProbe(fixture.evidence),
+                jobs: jobs,
+                engine: EngineProbe(result: .failure(.launchFailed)),
+                publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+                clock: FixedProcessingClock(fixture.createdAt),
+                identifiers: FixedProcessingIdentifiers(
+                    jobID: fixture.jobID,
+                    revisionID: fixture.revisionID
+                )
+            )
+
+            await feature.send(.activateLibrary(fixture.selection.scope))
+
+            let persisted = await jobs.snapshots
+            XCTAssertEqual(persisted.map(\.state), [.interrupted])
+        }
     }
 
     func testLibraryActivationLeavesManyTerminalJobsWithoutAudioOrRevisionIO()
@@ -1507,16 +1673,13 @@ final class SessionProcessingFeatureTests: XCTestCase {
             candidateArtifactSHA256: fixture.candidateFingerprint.sha256
         )
         let invalidCandidate = fixture.candidate.replacing(sessionID: "ses-wrong")
-        let source = SourceProbe([
-            .unavailable,
-            .available(fixture.source),
-        ])
+        let source = SourceProbe(.available(fixture.source))
         let runtime = RuntimeProbe(.qualified(fixture.profile))
         let model = ModelProbe(.ready)
         let jobs = JobProbe(
             latest: validating,
             failingTransitionState: .failed,
-            transitionFailureCount: 1
+            transitionFailureCount: 2
         )
         let revisions = RevisionProbe()
         let engine = EngineProbe(
@@ -1560,11 +1723,11 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(failure.reason, .jobPersistenceFailed)
         XCTAssertEqual(failure.actions, [.retry])
         XCTAssertEqual(sourceLoadCount, 2)
-        XCTAssertEqual(runtimeResolutionCount, 1)
+        XCTAssertEqual(runtimeResolutionCount, 2)
         XCTAssertEqual(modelVerificationCount, 0)
-        XCTAssertEqual(persistedStates, [.failed])
+        XCTAssertEqual(persistedStates, [.failed, .failed])
         XCTAssertEqual(engineRequestCount, 0)
-        XCTAssertEqual(recoveryCount, 1)
+        XCTAssertEqual(recoveryCount, 2)
         XCTAssertEqual(publishCount, 0)
     }
 
@@ -2343,6 +2506,7 @@ private actor SourceProbe: SessionTranscriptionSourcePort {
 
 private actor ReconciliationSourceProbe: SessionTranscriptionSourcePort {
     private let sources: [SessionTranscriptionSource]
+    private let forcedResult: SessionTranscriptionSourceResult?
     private let reconciliationID: SessionProcessingReconciliationID
     private(set) var selections: [SessionProcessingSelection] = []
 
@@ -2351,6 +2515,16 @@ private actor ReconciliationSourceProbe: SessionTranscriptionSourcePort {
         reconciliationID: SessionProcessingReconciliationID
     ) {
         self.sources = sources
+        forcedResult = nil
+        self.reconciliationID = reconciliationID
+    }
+
+    init(
+        result: SessionTranscriptionSourceResult,
+        reconciliationID: SessionProcessingReconciliationID
+    ) {
+        sources = []
+        forcedResult = result
         self.reconciliationID = reconciliationID
     }
 
@@ -2365,7 +2539,11 @@ private actor ReconciliationSourceProbe: SessionTranscriptionSourcePort {
         reconciliationID: SessionProcessingReconciliationID
     ) async -> SessionTranscriptionSourceResult {
         selections.append(selection)
-        guard reconciliationID == self.reconciliationID,
+        guard reconciliationID == self.reconciliationID else {
+            return .unavailable
+        }
+        if let forcedResult { return forcedResult }
+        guard
               let source = sources.first(where: { $0.selection == selection })
         else { return .unavailable }
         return .available(source)

@@ -7,15 +7,10 @@
     "actions": []
   },
   "commands": [
-    { "kind": "selectSession" }
+    { "kind": "activateLibrary" }
   ],
   "dependencyTrace": [
-    {
-      "port": "source",
-      "effect": "load",
-      "outcome": "available-sealed-audio-retained"
-    },
-    { "port": "jobs", "effect": "latest", "outcome": "queued" },
+    { "port": "jobs", "effect": "inventory", "outcome": "all-durable-jobs-bounded" },
     {
       "port": "jobs",
       "effect": "transitionInterrupted",
@@ -28,6 +23,7 @@
     "actions": ["retry"]
   },
   "expectedEffects": [
+    { "kind": "allDurableJobsReconciled" },
     { "kind": "queuedInterrupted" },
     { "kind": "sessionRetained" },
     { "kind": "noEngineLaunch" },

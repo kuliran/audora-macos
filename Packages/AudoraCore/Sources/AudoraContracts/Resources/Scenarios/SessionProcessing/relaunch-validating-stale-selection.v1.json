@@ -6,11 +6,11 @@
     "jobId": "job-20260830T120500000Z-5GHJ"
   },
   "commands": [
-    { "kind": "selectSession" }
+    { "kind": "activateLibrary" }
   ],
   "dependencyTrace": [
+    { "port": "jobs", "effect": "inventory", "outcome": "all-durable-jobs-bounded" },
     { "port": "source", "effect": "load", "outcome": "newer-selection" },
-    { "port": "jobs", "effect": "latest", "outcome": "validating-with-empty-start-baseline" },
     { "port": "engine", "effect": "recoverCandidate", "outcome": "confined-complete-hash-valid" },
     { "port": "runtime", "effect": "resolve", "outcome": "qualified" },
     { "port": "acousticEvidence", "effect": "resolve", "outcome": "qualified" },
@@ -23,6 +23,7 @@
     "actions": ["retry"]
   },
   "expectedEffects": [
+    { "kind": "allDurableJobsReconciled" },
     { "kind": "stagedCandidateRevalidated" },
     { "kind": "startSelectionBaselinePreserved" },
     { "kind": "staleSelectionRejected" },

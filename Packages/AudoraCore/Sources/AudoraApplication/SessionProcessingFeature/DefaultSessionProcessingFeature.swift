@@ -180,10 +180,15 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 scope: scope,
                 sessionID: job.sessionID
             )
-            guard case let .available(source) = await sourcePort.load(
+            let sourceResult = await sourcePort.load(
                 selection,
                 reconciliationID: reconciliationID
-            ), source.selection == selection, source.isValid else {
+            )
+            guard case let .available(source) = sourceResult,
+                  source.selection == selection,
+                  source.isValid
+            else {
+                await persistBackgroundTerminal(job, as: .interrupted)
                 continue
             }
             await reconcile(job, source: source)
@@ -238,6 +243,9 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         switch await sourcePort.load(selection) {
         case let .available(source):
             guard source.selection == selection, source.isValid else {
+                guard await interruptValidatingJobWithoutSource(for: selection) else {
+                    return
+                }
                 transition(
                     to: .unavailable(
                         unavailable(selection, .sourceIntegrityMismatch)
@@ -266,11 +274,55 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             }
             transition(to: .ready(SessionProcessingReadySnapshot(source: source)))
         case .unavailable:
+            guard await interruptValidatingJobWithoutSource(for: selection) else {
+                return
+            }
             transition(to: .unavailable(unavailable(selection, .sourceUnavailable)))
         case .integrityMismatch:
+            guard await interruptValidatingJobWithoutSource(for: selection) else {
+                return
+            }
             transition(
                 to: .unavailable(unavailable(selection, .sourceIntegrityMismatch))
             )
+        }
+    }
+
+    private func interruptValidatingJobWithoutSource(
+        for selection: SessionProcessingSelection
+    ) async -> Bool {
+        switch await jobs.latest(for: selection) {
+        case let .loaded(job) where job.state == .validating:
+            let interrupted = job.transitioning(to: .interrupted)
+            guard case .written = await jobs.transition(
+                interrupted,
+                from: .validating
+            ) else {
+                transition(
+                    to: .failed(
+                        SessionProcessingFailedSnapshot(
+                            job: job,
+                            reason: .jobPersistenceFailed,
+                            actions: [.retry]
+                        )
+                    )
+                )
+                return false
+            }
+            return true
+        case .loaded, .none:
+            return true
+        case .unavailable, .integrityMismatch:
+            transition(
+                to: .failed(
+                    SessionProcessingFailedSnapshot(
+                        job: nil,
+                        reason: .jobPersistenceFailed,
+                        actions: [.retry]
+                    )
+                )
+            )
+            return false
         }
     }
 

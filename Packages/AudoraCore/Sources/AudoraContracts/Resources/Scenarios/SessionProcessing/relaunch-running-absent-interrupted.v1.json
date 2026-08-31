@@ -8,11 +8,10 @@
     "actions": ["cancel"]
   },
   "commands": [
-    { "kind": "selectSession" }
+    { "kind": "activateLibrary" }
   ],
   "dependencyTrace": [
-    { "port": "source", "effect": "load", "outcome": "available" },
-    { "port": "jobs", "effect": "latest", "outcome": "running" },
+    { "port": "jobs", "effect": "inventory", "outcome": "all-durable-jobs-bounded" },
     { "port": "engine", "effect": "workerPresence", "outcome": "absent" },
     { "port": "jobs", "effect": "transitionInterrupted", "outcome": "written" }
   ],
@@ -22,6 +21,7 @@
     "actions": ["retry"]
   },
   "expectedEffects": [
+    { "kind": "allDurableJobsReconciled" },
     { "kind": "processAbsenceConfirmed" },
     { "kind": "sessionRetained" },
     { "kind": "noEngineLaunch" },

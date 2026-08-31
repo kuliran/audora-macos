@@ -5,6 +5,105 @@ import Foundation
 import XCTest
 
 final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
+    func testRootReplacementWithSameLibraryIDCannotReceivePreexistingAuthorityMutation()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let parent = root.deletingLastPathComponent()
+            let displaced = parent.appendingPathComponent(
+                "Original.audoralibrary",
+                isDirectory: true
+            )
+            try FileManager.default.moveItem(at: root, to: displaced)
+            let instant = try UTCInstant("2026-08-30T12:00:00.000Z")
+            _ = try PortableLibraryPersistence().create(
+                at: root,
+                seed: NewLibrarySeed(
+                    libraryID: libraryID,
+                    createdAt: instant,
+                    preferences: .defaults,
+                    profileHead: ProfileHead(
+                        generation: 0,
+                        statementGeneration: 0,
+                        selection: .null,
+                        updatedAt: instant
+                    )
+                )
+            )
+            let queued = try makeJob(state: .queued)
+
+            let result = await repository.create(queued)
+
+            XCTAssertEqual(result, .failed)
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: root.appendingPathComponent("jobs").path
+                ),
+                []
+            )
+        }
+    }
+
+    func testRootSwapImmediatelyBeforeCreateCommitCannotRedirectMutation()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let parent = root.deletingLastPathComponent()
+            let replacement = parent.appendingPathComponent(
+                "Replacement.audoralibrary",
+                isDirectory: true
+            )
+            let displaced = parent.appendingPathComponent(
+                "Displaced.audoralibrary",
+                isDirectory: true
+            )
+            let instant = try UTCInstant("2026-08-30T12:00:00.000Z")
+            _ = try PortableLibraryPersistence().create(
+                at: replacement,
+                seed: NewLibrarySeed(
+                    libraryID: libraryID,
+                    createdAt: instant,
+                    preferences: .defaults,
+                    profileHead: ProfileHead(
+                        generation: 0,
+                        statementGeneration: 0,
+                        selection: .null,
+                        updatedAt: instant
+                    )
+                )
+            )
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID,
+                reconciliationFault: { point in
+                    guard point == .beforeJobMutationCommit else { return }
+                    try FileManager.default.moveItem(at: root, to: displaced)
+                    try FileManager.default.moveItem(at: replacement, to: root)
+                }
+            )
+
+            let result = await repository.create(try makeJob(state: .queued))
+
+            XCTAssertEqual(result, .failed)
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: root.appendingPathComponent("jobs").path
+                ),
+                []
+            )
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: displaced.appendingPathComponent("jobs").path
+                ),
+                []
+            )
+        }
+    }
+
     func testQueuedJobAndCASStateAreDurableAcrossRepositoryInstances() async throws {
         try await withLibrary { root, libraryID in
             let repository = PortableSessionProcessingJobRepository(

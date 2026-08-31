@@ -388,7 +388,12 @@ namespace Audora.Contracts {
 
   model SessionProcessingScenarioCompletedState {
     status: "completed";
-    selectedRevisionId: TranscriptRevisionId;
+
+    /** Exact immutable Revision owned by the completed Job. */
+    revisionId: TranscriptRevisionId;
+
+    /** Current Session selection, which may be absent or point at another Revision. */
+    selectedRevisionId: TranscriptRevisionId | null;
   }
 
   model SessionProcessingScenarioFailedState {
@@ -438,6 +443,7 @@ namespace Audora.Contracts {
 
   model SessionProcessingScenarioCommand {
     kind:
+      | "activateLibrary"
       | "selectSession"
       | "clearSelection"
       | "start"
@@ -460,6 +466,7 @@ namespace Audora.Contracts {
       | "publisher";
     effect:
       | "load"
+      | "inventory"
       | "latest"
       | "resolve"
       | "prepare"
@@ -477,7 +484,7 @@ namespace Audora.Contracts {
       | "transcribe"
       | "transitionValidating"
       | "publish"
-      | "reopenSelected"
+      | "reopenRevision"
       | "transitionCompleted"
       | "transitionFailed"
       | "transitionCancelled"
@@ -508,6 +515,7 @@ namespace Audora.Contracts {
       | "stagedCandidateRevalidated"
       | "publicationIdempotent"
       | "canonicalRevisionReopened"
+      | "allDurableJobsReconciled"
       | "startSelectionBaselinePreserved"
       | "staleSelectionRejected"
       | "progressMonotonic"

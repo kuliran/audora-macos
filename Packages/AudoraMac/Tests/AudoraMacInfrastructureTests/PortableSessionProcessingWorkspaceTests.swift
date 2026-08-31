@@ -5,6 +5,105 @@ import Foundation
 import XCTest
 
 final class PortableSessionProcessingWorkspaceTests: XCTestCase {
+    func testSelectingValidatingJobWithMissingSourceRetainsJobAuthorityToInterrupt()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let scope = LibraryScope(libraryID: libraryID)
+            let selection = SessionProcessingSelection(
+                scope: scope,
+                sessionID: try SessionID("ses-20260830T121500000Z-5GHJ")
+            )
+            let jobID = try TranscriptionJobID("job-20260830T121600000Z-6JKM")
+            let revisionID = try TranscriptRevisionID(
+                "trv-20260830T121600000Z-7MNP"
+            )
+            let authorityID = try TranscriptionCancellationAuthorityID(
+                "cancel-missing-source-workspace"
+            )
+            let createdAt = try UTCInstant("2026-08-30T12:16:00.000Z")
+            let queued = SessionProcessingJob(
+                jobID: jobID,
+                sessionID: selection.sessionID,
+                revisionID: revisionID,
+                profileID: "synthetic-qualified-v1",
+                createdAt: createdAt,
+                state: .queued,
+                cancellationAuthorityID: authorityID
+            )
+            let running = SessionProcessingJob(
+                jobID: jobID,
+                sessionID: selection.sessionID,
+                revisionID: revisionID,
+                profileID: queued.profileID,
+                createdAt: createdAt,
+                state: .running,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: authorityID
+            )
+            let validating = SessionProcessingJob(
+                jobID: jobID,
+                sessionID: selection.sessionID,
+                revisionID: revisionID,
+                profileID: queued.profileID,
+                createdAt: createdAt,
+                state: .validating,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: authorityID,
+                candidateArtifactSHA256: String(repeating: "a", count: 64)
+            )
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let created = await repository.create(queued)
+            let started = await repository.transition(running, from: .queued)
+            let staged = await repository.transition(validating, from: .running)
+            XCTAssertEqual(created, .written(queued))
+            XCTAssertEqual(started, .written(running))
+            XCTAssertEqual(staged, .written(validating))
+            let active = ActiveLibraryProcessingScope(
+                identity: SessionProcessingScopeIdentity(
+                    libraryID: libraryID,
+                    workspaceGeneration: 1,
+                    rootIdentity: try XCTUnwrap(
+                        SessionProcessingRootIdentity.capture(root)
+                    )
+                ),
+                root: root,
+                lease: WorkspaceTestLease(url: root)
+            )
+            let workspace = PortableSessionProcessingWorkspace(
+                scopes: FixedProcessingScopeProvider(active: active)
+            )
+            let profile = try qualifiedProfile()
+            let feature = DefaultSessionProcessingFeature(
+                source: workspace,
+                runtime: WorkspaceRuntime(profile: profile),
+                model: WorkspaceModel(),
+                acoustics: WorkspaceAcoustics(),
+                jobs: workspace,
+                engine: WorkspaceFailingEngine(),
+                publisher: TranscriptRevisionPublisher(repository: workspace),
+                clock: WorkspaceClock(instant: createdAt),
+                identifiers: WorkspaceIdentifiers(
+                    jobID: jobID,
+                    revisionID: revisionID
+                )
+            )
+
+            await feature.send(.selectSession(selection))
+
+            guard case let .unavailable(snapshot) = await feature.currentState else {
+                return XCTFail("expected missing sealed source to remain visible")
+            }
+            XCTAssertEqual(snapshot.reason, .sourceUnavailable)
+            guard case let .loaded(reloaded) = await repository.latest(for: selection)
+            else { return XCTFail("expected durable Job") }
+            XCTAssertEqual(reloaded.state, .interrupted)
+        }
+    }
+
     func testActivationReconcilesPersistedJobAndPreservesReadySessionBinding()
         async throws
     {

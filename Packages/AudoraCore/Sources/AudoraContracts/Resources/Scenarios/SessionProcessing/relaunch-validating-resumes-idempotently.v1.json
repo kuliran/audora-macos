@@ -6,22 +6,23 @@
     "jobId": "job-20260830T120500000Z-5GHJ"
   },
   "commands": [
-    { "kind": "selectSession" }
+    { "kind": "activateLibrary" }
   ],
   "dependencyTrace": [
+    { "port": "jobs", "effect": "inventory", "outcome": "all-durable-jobs-bounded" },
     { "port": "source", "effect": "load", "outcome": "available" },
-    { "port": "jobs", "effect": "latest", "outcome": "validating" },
-    { "port": "publisher", "effect": "reopenSelected", "outcome": "exact-job-revision" },
+    { "port": "publisher", "effect": "reopenRevision", "outcome": "exact-job-revision" },
     { "port": "jobs", "effect": "transitionCompleted", "outcome": "written" }
   ],
   "expectedState": {
     "status": "completed",
-    "selectedRevisionId": "trv-20260830T120600000Z-6JKM"
+    "revisionId": "trv-20260830T120600000Z-6JKM",
+    "selectedRevisionId": "trv-20260830T115900000Z-4BCD"
   },
   "expectedEffects": [
     { "kind": "canonicalRevisionReopened" },
+    { "kind": "allDurableJobsReconciled" },
     { "kind": "publicationIdempotent" },
-    { "kind": "selectedAtomically" },
     { "kind": "noPublication" }
   ]
 }
