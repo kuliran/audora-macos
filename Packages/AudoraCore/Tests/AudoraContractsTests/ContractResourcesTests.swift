@@ -290,6 +290,52 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(
             cancellationEffects.contains { $0["kind"] as? String == "lateCandidateRejected" }
         )
+        let queuedRelaunch = try jsonObject(
+            .sessionProcessingRelaunchQueuedInterruptedScenario
+        )
+        let queuedInitial = try XCTUnwrap(
+            queuedRelaunch["initialState"] as? [String: Any]
+        )
+        let queuedExpected = try XCTUnwrap(
+            queuedRelaunch["expectedState"] as? [String: Any]
+        )
+        XCTAssertEqual(queuedInitial["status"] as? String, "queued")
+        XCTAssertEqual(queuedExpected["status"] as? String, "interrupted")
+        XCTAssertEqual(
+            queuedExpected["jobId"] as? String,
+            queuedInitial["jobId"] as? String
+        )
+        XCTAssertEqual(queuedExpected["actions"] as? [String], ["retry"])
+
+        let queuedTrace = try XCTUnwrap(
+            queuedRelaunch["dependencyTrace"] as? [[String: Any]]
+        )
+        XCTAssertEqual(
+            queuedTrace.filter { $0["effect"] as? String == "transitionInterrupted" }
+                .count,
+            1
+        )
+        let queuedTransition = queuedTrace.first {
+            $0["effect"] as? String == "transitionInterrupted"
+        }
+        XCTAssertEqual(queuedTransition?["outcome"] as? String, "cas-written-once")
+        XCTAssertFalse(
+            queuedTrace.contains { $0["effect"] as? String == "workerPresence" }
+        )
+        XCTAssertFalse(queuedTrace.contains { $0["effect"] as? String == "transcribe" })
+        XCTAssertTrue(
+            queuedTrace.contains {
+                $0["port"] as? String == "source" &&
+                    $0["outcome"] as? String == "available-sealed-audio-retained"
+            }
+        )
+        let queuedEffects = try XCTUnwrap(
+            queuedRelaunch["expectedEffects"] as? [[String: Any]]
+        )
+        XCTAssertEqual(
+            Set(queuedEffects.compactMap { $0["kind"] as? String }),
+            ["queuedInterrupted", "sessionRetained", "noEngineLaunch", "noPublication"]
+        )
         let stale = try jsonObject(
             .sessionProcessingRelaunchStaleSelectionScenario
         )

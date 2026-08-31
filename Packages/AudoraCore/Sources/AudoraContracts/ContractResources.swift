@@ -78,6 +78,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case sessionProcessingCandidateRejectedScenario
     case sessionProcessingModelPrepareRetryScenario
     case sessionProcessingCancellationScenario
+    case sessionProcessingRelaunchQueuedInterruptedScenario
     case sessionProcessingRelaunchInterruptedScenario
     case sessionProcessingRelaunchValidationScenario
     case sessionProcessingRelaunchStaleSelectionScenario
@@ -298,6 +299,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "model-prepare-retry.v1.json"
         case .sessionProcessingCancellationScenario:
             "cancel-reaps-retains-session.v1.json"
+        case .sessionProcessingRelaunchQueuedInterruptedScenario:
+            "relaunch-queued-interrupted.v1.json"
         case .sessionProcessingRelaunchInterruptedScenario:
             "relaunch-running-absent-interrupted.v1.json"
         case .sessionProcessingRelaunchValidationScenario:
@@ -467,6 +470,7 @@ public enum ContractResource: CaseIterable, Sendable {
              .sessionProcessingCandidateRejectedScenario,
              .sessionProcessingModelPrepareRetryScenario,
              .sessionProcessingCancellationScenario,
+             .sessionProcessingRelaunchQueuedInterruptedScenario,
              .sessionProcessingRelaunchInterruptedScenario,
              .sessionProcessingRelaunchValidationScenario,
              .sessionProcessingRelaunchStaleSelectionScenario,

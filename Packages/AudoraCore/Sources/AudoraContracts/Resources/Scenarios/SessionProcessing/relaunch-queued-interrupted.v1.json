@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.relaunch-queued-interrupted",
+  "initialState": {
+    "status": "queued",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "actions": []
+  },
+  "commands": [
+    { "kind": "selectSession" }
+  ],
+  "dependencyTrace": [
+    {
+      "port": "source",
+      "effect": "load",
+      "outcome": "available-sealed-audio-retained"
+    },
+    { "port": "jobs", "effect": "latest", "outcome": "queued" },
+    {
+      "port": "jobs",
+      "effect": "transitionInterrupted",
+      "outcome": "cas-written-once"
+    }
+  ],
+  "expectedState": {
+    "status": "interrupted",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "actions": ["retry"]
+  },
+  "expectedEffects": [
+    { "kind": "queuedInterrupted" },
+    { "kind": "sessionRetained" },
+    { "kind": "noEngineLaunch" },
+    { "kind": "noPublication" }
+  ]
+}

@@ -504,7 +504,7 @@ namespace Audora.Contracts {
       | "lateCandidateRejected"
       | "sessionRetained"
       | "processAbsenceConfirmed"
-      | "queuedPreserved"
+      | "queuedInterrupted"
       | "stagedCandidateRevalidated"
       | "publicationIdempotent"
       | "canonicalRevisionReopened"

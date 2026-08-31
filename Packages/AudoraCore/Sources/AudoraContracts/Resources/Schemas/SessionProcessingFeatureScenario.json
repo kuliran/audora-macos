@@ -352,7 +352,7 @@
                         },
                         {
                             "type": "string",
-                            "const": "queuedPreserved"
+                            "const": "queuedInterrupted"
                         },
                         {
                             "type": "string",

@@ -188,7 +188,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private func prepare(_ action: SessionProcessingRecoveryAction) async {
         guard action == .prepare || action == .reinstall,
               let source = selectedSource,
-              canRecover
+              advertisedRecoveryActions.contains(action)
         else { return }
         transition(
             to: .preparing(
@@ -951,11 +951,15 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         }
     }
 
-    private var canRecover: Bool {
+    private var advertisedRecoveryActions: [SessionProcessingRecoveryAction] {
         switch state {
-        case .unavailable, .failed, .ready, .cancelled, .interrupted: true
-        case .preparing, .queued, .running, .cancelling, .validating, .completed,
-             .recoveryRequired: false
+        case let .unavailable(snapshot): snapshot.actions
+        case let .queued(snapshot), let .cancelled(snapshot), let .interrupted(snapshot):
+            snapshot.actions
+        case let .failed(snapshot): snapshot.actions
+        case .ready, .preparing, .running, .cancelling, .validating, .completed,
+             .recoveryRequired:
+            []
         }
     }
 

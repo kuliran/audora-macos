@@ -797,6 +797,47 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(afterCommands.reason, .canonicalRevisionIntegrityFailed)
     }
 
+    func testRepairCommandsCannotRecoverMissingCanonicalRevision() async throws {
+        let fixture = try ProcessingFixture(selectedRevisionID: true)
+        let completed = fixture.job(
+            state: .completed,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+
+        for command in [SessionProcessingCommand.prepare, .reinstall] {
+            let runtime = RuntimeProbe(.qualified(fixture.profile))
+            let engine = EngineProbe(result: .failure(.launchFailed))
+            let feature = DefaultSessionProcessingFeature(
+                source: SourceProbe(.available(fixture.source)),
+                runtime: runtime,
+                model: ModelProbe(.ready),
+                acoustics: AcousticProbe(fixture.evidence),
+                jobs: JobProbe(latest: completed),
+                engine: engine,
+                publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+                clock: FixedProcessingClock(fixture.createdAt),
+                identifiers: FixedProcessingIdentifiers(
+                    jobID: fixture.jobID,
+                    revisionID: fixture.revisionID
+                )
+            )
+
+            await feature.send(.selectSession(fixture.selection))
+            await feature.send(command)
+
+            let preparationActions = await runtime.preparationActions
+            let requestCount = await engine.requestCount()
+            XCTAssertEqual(preparationActions, [], "\(command)")
+            XCTAssertEqual(requestCount, 0, "\(command)")
+            guard case let .failed(failure) = await feature.currentState else {
+                XCTFail("\(command) must preserve the integrity failure")
+                continue
+            }
+            XCTAssertEqual(failure.reason, .canonicalRevisionIntegrityFailed)
+            XCTAssertEqual(failure.actions, [])
+        }
+    }
+
     func testRetryRereadsPreviouslyUnavailableSealedSourceBeforeStarting() async throws {
         let fixture = try ProcessingFixture()
         let source = SourceProbe([.unavailable, .available(fixture.source)])
@@ -1260,6 +1301,7 @@ private struct ProcessingFixture {
 
 private actor RuntimeProbe: TranscriptionRuntimePort {
     private let resolution: TranscriptionRuntimeResolution
+    private(set) var preparationActions: [SessionProcessingRecoveryAction] = []
 
     init(_ resolution: TranscriptionRuntimeResolution) {
         self.resolution = resolution
@@ -1270,7 +1312,8 @@ private actor RuntimeProbe: TranscriptionRuntimePort {
     func prepare(_ action: SessionProcessingRecoveryAction) async
         -> TranscriptionRuntimeResolution
     {
-        resolution
+        preparationActions.append(action)
+        return resolution
     }
 
     func executionCapability(
