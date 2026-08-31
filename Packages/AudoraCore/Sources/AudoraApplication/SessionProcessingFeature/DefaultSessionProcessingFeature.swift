@@ -230,11 +230,11 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private func start() async {
         guard let source = selectedSource else { return }
         switch state {
-        case .ready, .unavailable, .cancelled, .interrupted:
+        case .ready, .unavailable, .completed, .cancelled, .interrupted:
             break
         case let .failed(failure):
             guard failure.actions.contains(.retry) else { return }
-        case .preparing, .queued, .running, .cancelling, .validating, .completed,
+        case .preparing, .queued, .running, .cancelling, .validating,
              .recoveryRequired:
             return
         }
@@ -449,7 +449,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         case .validating:
             await resumeValidation(job, source: source)
         case .completed:
-            guard await canonicalRevisionMatches(job, source: source) else {
+            guard await completedRevisionMatches(job, source: source) else {
                 transition(
                     to: .failed(
                         SessionProcessingFailedSnapshot(
@@ -466,7 +466,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                     SessionProcessingCompletedSnapshot(
                         sessionID: job.sessionID,
                         jobID: job.jobID,
-                        selectedRevisionID: job.revisionID
+                        selectedRevisionID:
+                            source.expectedSelectedRevisionID ?? job.revisionID
                     )
                 )
             )
@@ -508,7 +509,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         source: SessionTranscriptionSource
     ) async {
         if source.expectedSelectedRevisionID == job.revisionID {
-            guard await canonicalRevisionMatches(job, source: source) else {
+            guard await selectedRevisionMatches(job, source: source) else {
                 transition(
                     to: .failed(
                         SessionProcessingFailedSnapshot(
@@ -639,7 +640,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         }
     }
 
-    private func canonicalRevisionMatches(
+    private func selectedRevisionMatches(
         _ job: SessionProcessingJob,
         source: SessionTranscriptionSource
     ) async -> Bool {
@@ -655,6 +656,25 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
               reopened.selectedRevision.audioFingerprint == source.audioFingerprint,
               reopened.selectedRevision.sourceFingerprints == source.sourceFingerprints,
               reopened.selectedRevision.candidateArtifactFingerprint.sha256 ==
+                job.candidateArtifactSHA256
+        else { return false }
+        return true
+    }
+
+    private func completedRevisionMatches(
+        _ job: SessionProcessingJob,
+        source: SessionTranscriptionSource
+    ) async -> Bool {
+        guard case let .available(revision) = await publisher.reopenRevision(
+            sessionID: job.sessionID,
+            revisionID: job.revisionID
+        ),
+              revision.revisionID == job.revisionID,
+              revision.sessionID == job.sessionID,
+              revision.jobID == job.jobID,
+              revision.audioFingerprint == source.audioFingerprint,
+              revision.sourceFingerprints == source.sourceFingerprints,
+              revision.candidateArtifactFingerprint.sha256 ==
                 job.candidateArtifactSHA256
         else { return false }
         return true

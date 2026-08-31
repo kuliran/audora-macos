@@ -672,8 +672,92 @@ final class SessionProcessingFeatureTests: XCTestCase {
         }
         XCTAssertEqual(snapshot.jobID, fixture.jobID)
         XCTAssertEqual(snapshot.selectedRevisionID, fixture.revisionID)
-        let reopenCount = await revisions.reopenCount
-        XCTAssertEqual(reopenCount, 1)
+        let exactReopenCount = await revisions.exactReopenCount
+        XCTAssertEqual(exactReopenCount, 1)
+    }
+
+    func testCompletedJobRemainsValidAfterAnotherRevisionIsSelectedAndCanRetranscribe()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let completed = fixture.job(
+            state: .completed,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+        let completedRevision = try fixture.validatedRevision()
+        let selectedRevisionID = try TranscriptRevisionID(
+            "trv-20260830T120700000Z-7MNP"
+        )
+        let selectedRevision = try TranscriptRevision(
+            revisionID: selectedRevisionID,
+            sessionID: completedRevision.sessionID,
+            jobID: try TranscriptionJobID("job-20260830T120700000Z-7MNP"),
+            createdAt: try UTCInstant("2026-08-30T12:07:00.000Z"),
+            durationMilliseconds: completedRevision.durationMilliseconds,
+            audioFingerprint: completedRevision.audioFingerprint,
+            sourceFingerprints: completedRevision.sourceFingerprints,
+            candidateArtifactFingerprint: try AudioFingerprint(
+                sha256: String(repeating: "7", count: 64)
+            ),
+            engine: completedRevision.engine,
+            lines: completedRevision.lines,
+            audioEvents: completedRevision.audioEvents
+        )
+        let currentSource = SessionTranscriptionSource(
+            selection: fixture.source.selection,
+            audioCapabilityID: fixture.source.audioCapabilityID,
+            durationMilliseconds: fixture.source.durationMilliseconds,
+            audioFingerprint: fixture.source.audioFingerprint,
+            sourceFingerprints: fixture.source.sourceFingerprints,
+            expectedSelectedRevisionID: selectedRevisionID
+        )
+        let jobs = JobProbe(latest: completed)
+        let revisions = RevisionProbe(
+            selected: selectedRevision,
+            retained: [completedRevision]
+        )
+        let engine = EngineProbe(result: .failure(.launchFailed))
+        let retranscriptionJobID = try TranscriptionJobID(
+            "job-20260830T120800000Z-8NPQ"
+        )
+        let retranscriptionRevisionID = try TranscriptRevisionID(
+            "trv-20260830T120800000Z-8NPQ"
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: SourceProbe(.available(currentSource)),
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: retranscriptionJobID,
+                revisionID: retranscriptionRevisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+
+        guard case let .completed(reconciled) = await feature.currentState else {
+            return XCTFail("expected retained completed Revision to stay valid")
+        }
+        XCTAssertEqual(reconciled.selectedRevisionID, selectedRevisionID)
+
+        await feature.send(.start)
+
+        let requests = await engine.requests
+        let snapshots = await jobs.snapshots
+        let selectedAfterStart = await revisions.selected?.revisionID
+        let publishCount = await revisions.publishCount
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.jobID, retranscriptionJobID)
+        XCTAssertEqual(requests.first?.revisionID, retranscriptionRevisionID)
+        XCTAssertNotEqual(requests.first?.jobID, completed.jobID)
+        XCTAssertEqual(snapshots.first?.expectedSelectedRevisionID, selectedRevisionID)
+        XCTAssertEqual(selectedAfterStart, selectedRevisionID)
+        XCTAssertEqual(publishCount, 0)
     }
 
     func testRelaunchCompletedJobWithMissingCanonicalRevisionIsNotRerunnable()
@@ -1515,12 +1599,21 @@ private actor CancellableEngineProbe: TranscriptionEngine {
 
 private actor RevisionProbe: TranscriptRevisionRepository {
     private(set) var selected: TranscriptRevision?
+    private var retained: [TranscriptRevisionID: TranscriptRevision]
     private(set) var publishCount = 0
     private(set) var reopenCount = 0
+    private(set) var exactReopenCount = 0
     private(set) var expectedSelectedRevisionIDs: [TranscriptRevisionID?] = []
 
-    init(selected: TranscriptRevision? = nil) {
+    init(
+        selected: TranscriptRevision? = nil,
+        retained: [TranscriptRevision] = []
+    ) {
         self.selected = selected
+        self.retained = Dictionary(
+            uniqueKeysWithValues: retained.map { ($0.revisionID, $0) }
+        )
+        if let selected { self.retained[selected.revisionID] = selected }
     }
 
     func publishAndSelect(
@@ -1530,8 +1623,9 @@ private actor RevisionProbe: TranscriptRevisionRepository {
         publishCount += 1
         expectedSelectedRevisionIDs.append(expectedSelectedRevisionID)
         selected = revision
+        retained[revision.revisionID] = revision
         return ReopenedTranscriptRevisionSnapshot(
-            revisionIDs: [revision.revisionID],
+            revisionIDs: Array(retained.keys),
             selectedRevisionID: revision.revisionID,
             selectedRevision: revision
         )
@@ -1545,10 +1639,21 @@ private actor RevisionProbe: TranscriptRevisionRepository {
             throw TranscriptRevisionRepositoryFailure.sessionUnavailable
         }
         return ReopenedTranscriptRevisionSnapshot(
-            revisionIDs: [selected.revisionID],
+            revisionIDs: Array(retained.keys),
             selectedRevisionID: selected.revisionID,
             selectedRevision: selected
         )
+    }
+
+    func reopenRevision(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID
+    ) async throws -> TranscriptRevision {
+        exactReopenCount += 1
+        guard let revision = retained[revisionID], revision.sessionID == sessionID else {
+            throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+        }
+        return revision
     }
 
     func publishCountValue() -> Int { publishCount }
@@ -1581,6 +1686,13 @@ private actor SelectionCASRevisionProbe: TranscriptRevisionRepository {
     func reopenSelected(
         sessionID: SessionID
     ) async throws -> ReopenedTranscriptRevisionSnapshot {
+        throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+    }
+
+    func reopenRevision(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID
+    ) async throws -> TranscriptRevision {
         throw TranscriptRevisionRepositoryFailure.sessionUnavailable
     }
 }

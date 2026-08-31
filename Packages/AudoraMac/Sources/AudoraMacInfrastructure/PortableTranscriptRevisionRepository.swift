@@ -217,6 +217,36 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         }
     }
 
+    public func reopenRevision(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID
+    ) async throws -> TranscriptRevision {
+        try reopenRevisionSynchronously(
+            sessionID: sessionID,
+            revisionID: revisionID
+        )
+    }
+
+    func reopenRevisionSynchronously(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID
+    ) throws -> TranscriptRevision {
+        try withLockedSession(sessionID: sessionID, exclusive: false) {
+            let loaded = try loadSession(
+                sessionID: sessionID,
+                sessionDescriptor: $0.sessionDescriptor
+            )
+            let revision = try reopenRevisionLocked(
+                sessionID: sessionID,
+                revisionID: revisionID,
+                loaded: loaded,
+                sessionDescriptor: $0.sessionDescriptor
+            )
+            try revalidate($0, expectedSessionID: sessionID)
+            return revision
+        }
+    }
+
     /// Reconstructs trusted processing input from the same descriptor-confined
     /// Session boundary used for Revision publication. Canonical bytes remain
     /// in Infrastructure and are copied into an opaque execution capability by
@@ -288,13 +318,35 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         guard let selected = loaded.manifest.selectedTranscriptRevision else {
             throw TranscriptRevisionRepositoryFailure.sessionUnavailable
         }
+        let revision = try reopenRevisionLocked(
+            sessionID: sessionID,
+            revisionID: selected.revisionID,
+            loaded: loaded,
+            sessionDescriptor: sessionDescriptor
+        )
+        return ReopenedTranscriptRevisionSnapshot(
+            revisionIDs: loaded.manifest.transcriptRevisionIDs,
+            selectedRevisionID: selected.revisionID,
+            selectedRevision: revision
+        )
+    }
+
+    private func reopenRevisionLocked(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID,
+        loaded: LoadedSession,
+        sessionDescriptor: Int32
+    ) throws -> TranscriptRevision {
+        guard loaded.manifest.transcriptRevisionIDs.contains(revisionID) else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
         let transcriptsDescriptor = try readConfined.openDirectory(
             named: "transcripts",
             under: sessionDescriptor
         )
         defer { Darwin.close(transcriptsDescriptor) }
         let revisionDescriptor = try readConfined.openDirectory(
-            named: selected.revisionID.rawValue,
+            named: revisionID.rawValue,
             under: transcriptsDescriptor
         )
         defer { Darwin.close(revisionDescriptor) }
@@ -316,23 +368,21 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         )
         guard let detached = String(data: detachedData, encoding: .utf8),
               AudioArtifactFingerprint.isSHA256(detached),
-              detached == selected.revisionSHA256,
-              detached == Self.sha256(revisionData)
+              detached == Self.sha256(revisionData),
+              loaded.manifest.selectedTranscriptRevision.map({
+                  $0.revisionID != revisionID || $0.revisionSHA256 == detached
+              }) ?? true
         else {
             throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
         }
         let revision = try decodeRevision(revisionData)
-        guard revision.revisionID == selected.revisionID,
+        guard revision.revisionID == revisionID,
               revision.sessionID == sessionID
         else {
             throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
         }
         try validate(revision, against: loaded.audio)
-        return ReopenedTranscriptRevisionSnapshot(
-            revisionIDs: loaded.manifest.transcriptRevisionIDs,
-            selectedRevisionID: selected.revisionID,
-            selectedRevision: revision
-        )
+        return revision
     }
 
     private func withLockedSession<T>(

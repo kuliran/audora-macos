@@ -518,6 +518,96 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
         }
     }
 
+    func testReopensInventoriedRevisionByIDWithoutChangingNewerSelection()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revisionA = try transcriptRevision(for: receipt)
+            let revisionB = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121100000Z-6HJK"
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revisionA,
+                expectedSelectedRevisionID: nil
+            )
+            _ = try await repository.publishAndSelect(
+                revisionB,
+                expectedSelectedRevisionID: revisionA.revisionID
+            )
+
+            let reopenedA = try await repository.reopenRevision(
+                sessionID: receipt.sessionID,
+                revisionID: revisionA.revisionID
+            )
+            let selected = try await repository.reopenSelected(
+                sessionID: receipt.sessionID
+            )
+
+            XCTAssertEqual(reopenedA, revisionA)
+            XCTAssertEqual(selected.selectedRevision, revisionB)
+            XCTAssertEqual(
+                selected.revisionIDs,
+                [revisionA.revisionID, revisionB.revisionID]
+            )
+        }
+    }
+
+    func testExactReopenRejectsMissingAndCorruptRetainedRevision() async throws {
+        for corruptInsteadOfRemove in [false, true] {
+            try await withRecordedSession { root, receipt in
+                let revisionA = try transcriptRevision(for: receipt)
+                let revisionB = try transcriptRevision(
+                    for: receipt,
+                    revisionID: "trv-20260830T121100000Z-6HJK"
+                )
+                let repository = PortableTranscriptRevisionRepository(
+                    root: root,
+                    libraryID: receipt.libraryID
+                )
+                _ = try await repository.publishAndSelect(
+                    revisionA,
+                    expectedSelectedRevisionID: nil
+                )
+                _ = try await repository.publishAndSelect(
+                    revisionB,
+                    expectedSelectedRevisionID: revisionA.revisionID
+                )
+                let retainedRoot = root.appendingPathComponent(
+                    "sessions/\(receipt.sessionID.rawValue)/transcripts/\(revisionA.revisionID.rawValue)"
+                )
+                if corruptInsteadOfRemove {
+                    try Data("{}".utf8).write(
+                        to: retainedRoot.appendingPathComponent("revision.json")
+                    )
+                } else {
+                    try FileManager.default.removeItem(at: retainedRoot)
+                }
+
+                do {
+                    _ = try await repository.reopenRevision(
+                        sessionID: receipt.sessionID,
+                        revisionID: revisionA.revisionID
+                    )
+                    XCTFail("expected invalid retained Revision rejection")
+                } catch {
+                    XCTAssertEqual(
+                        error as? TranscriptRevisionRepositoryFailure,
+                        .sessionIntegrityMismatch
+                    )
+                }
+                let selected = try await repository.reopenSelected(
+                    sessionID: receipt.sessionID
+                )
+                XCTAssertEqual(selected.selectedRevision, revisionB)
+            }
+        }
+    }
+
     func testInventoriedRevisionIDCannotBeReincarnatedAfterItsBundleIsDeleted() async throws {
         try await withRecordedSession { root, receipt in
             let revisionA = try transcriptRevision(for: receipt)

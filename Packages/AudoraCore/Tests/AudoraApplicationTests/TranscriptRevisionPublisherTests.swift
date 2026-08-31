@@ -146,6 +146,14 @@ private actor ScriptedTranscriptRevisionRepository: TranscriptRevisionRepository
         if let reopenFailure { throw reopenFailure }
         throw TranscriptRevisionRepositoryFailure.sessionUnavailable
     }
+
+    func reopenRevision(
+        sessionID _: SessionID,
+        revisionID _: TranscriptRevisionID
+    ) async throws -> TranscriptRevision {
+        if let reopenFailure { throw reopenFailure }
+        throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+    }
 }
 
 private extension TranscriptionCandidate {

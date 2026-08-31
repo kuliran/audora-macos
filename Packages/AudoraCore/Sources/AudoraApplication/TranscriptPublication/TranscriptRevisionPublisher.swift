@@ -38,6 +38,14 @@ public protocol TranscriptRevisionRepository: Sendable {
     func reopenSelected(
         sessionID: SessionID
     ) async throws -> ReopenedTranscriptRevisionSnapshot
+
+    /// Reopens one exact inventoried immutable Revision without requiring it to
+    /// remain the Session's current selection. The repository verifies the
+    /// Revision bundle and its detached content hash before returning it.
+    func reopenRevision(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID
+    ) async throws -> TranscriptRevision
 }
 
 public enum TranscriptPublicationFailure: Error, Equatable, Sendable {
@@ -59,6 +67,12 @@ public enum TranscriptPublicationOutcome: Equatable, Sendable {
 
 public enum TranscriptRevisionReferenceResult: Equatable, Sendable {
     case available(ReopenedTranscriptRevisionSnapshot)
+    case unavailable
+    case unsupportedSchema
+}
+
+public enum TranscriptRevisionLookupResult: Equatable, Sendable {
+    case available(TranscriptRevision)
     case unavailable
     case unsupportedSchema
 }
@@ -135,6 +149,26 @@ public struct TranscriptRevisionPublisher: Sendable {
     ) async -> TranscriptRevisionReferenceResult {
         await TranscriptRevisionReferenceReader(repository: repository)
             .reopenSelected(sessionID: sessionID)
+    }
+
+    /// Reopens one exact inventoried Revision without consulting or changing
+    /// the Session's current selection.
+    public func reopenRevision(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID
+    ) async -> TranscriptRevisionLookupResult {
+        do {
+            return .available(
+                try await repository.reopenRevision(
+                    sessionID: sessionID,
+                    revisionID: revisionID
+                )
+            )
+        } catch TranscriptRevisionRepositoryFailure.unsupportedSchema {
+            return .unsupportedSchema
+        } catch {
+            return .unavailable
+        }
     }
 
     private static func map(

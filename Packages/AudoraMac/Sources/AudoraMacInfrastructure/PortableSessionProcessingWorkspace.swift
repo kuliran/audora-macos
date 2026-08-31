@@ -409,6 +409,26 @@ public actor PortableSessionProcessingWorkspace:
         return result
     }
 
+    public func reopenRevision(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID
+    ) async throws -> TranscriptRevision {
+        guard let binding, binding.selection.sessionID == sessionID,
+              await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
+        else { throw TranscriptRevisionRepositoryFailure.sessionUnavailable }
+        let result = try await scopes.withCurrentSessionProcessingScope(
+            binding.scope.identity
+        ) {
+            try binding.revisions.reopenRevisionSynchronously(
+                sessionID: sessionID,
+                revisionID: revisionID
+            )
+        }
+        guard await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
+        else { throw TranscriptRevisionRepositoryFailure.sessionUnavailable }
+        return result
+    }
+
     public func resolveAudio(
         capabilityID: SessionTranscriptionAudioCapabilityID,
         selection: SessionProcessingSelection,
