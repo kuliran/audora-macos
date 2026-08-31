@@ -245,19 +245,29 @@ public struct SealedSession: Equatable, Sendable {
     public let createdAt: UTCInstant
     public let audioManifestPath: LibraryRelativePath
     public let audio: SealedAudioAsset
+    public let transcriptRevisionIDs: [TranscriptRevisionID]
+    public let selectedTranscriptRevision: SelectedTranscriptRevision?
 
     public init(
         sessionID: SessionID,
         createdAt: UTCInstant,
         audioManifestPath: LibraryRelativePath,
-        audio: SealedAudioAsset
+        audio: SealedAudioAsset,
+        transcriptRevisionIDs: [TranscriptRevisionID] = [],
+        selectedTranscriptRevision: SelectedTranscriptRevision? = nil
     ) throws {
         guard audioManifestPath.description == "audio/audio.json" else {
             throw SealedSessionError.invalidAudioReference
         }
+        try SessionTranscriptSelectionValidator.validate(
+            revisionIDs: transcriptRevisionIDs,
+            selected: selectedTranscriptRevision
+        )
         self.sessionID = sessionID
         self.createdAt = createdAt
         self.audioManifestPath = audioManifestPath
         self.audio = audio
+        self.transcriptRevisionIDs = transcriptRevisionIDs
+        self.selectedTranscriptRevision = selectedTranscriptRevision
     }
 }

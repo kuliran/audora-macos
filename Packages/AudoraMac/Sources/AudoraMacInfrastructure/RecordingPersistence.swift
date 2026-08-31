@@ -1368,15 +1368,32 @@ private extension RecordingPersistence {
                   under: sessionFD,
                   maximumBytes: 16_384
               ),
-              (try? requireExactKeys(
-                  sessionData,
-                  ["schemaVersion", "sessionId", "createdAt", "audioManifestPath"]
-              )) != nil,
+              let sessionDictionary = try? jsonDictionary(sessionData),
+              Set([
+                  "schemaVersion", "sessionId", "createdAt", "audioManifestPath",
+                  "transcriptRevisionIds",
+              ]).isSubset(of: Set(sessionDictionary.keys)),
+              Set(sessionDictionary.keys).isSubset(of: Set([
+                  "schemaVersion", "sessionId", "createdAt", "audioManifestPath",
+                  "transcriptRevisionIds", "selectedTranscriptRevision",
+              ])),
+              validSelectedTranscriptRevisionShape(sessionDictionary),
               let sessionDTO = try? decode(SessionManifestDTO.self, sessionData),
               sessionDTO.schemaVersion == 1,
               sessionDTO.sessionId == manifest.sessionId,
               sessionDTO.createdAt == manifest.startedAt,
               sessionDTO.audioManifestPath == "audio/audio.json",
+              (try? SessionTranscriptSelectionValidator.validate(
+                  revisionIDs: sessionDTO.transcriptRevisionIds.map(
+                      TranscriptRevisionID.init
+                  ),
+                  selected: sessionDTO.selectedTranscriptRevision.map {
+                      try SelectedTranscriptRevision(
+                          revisionID: TranscriptRevisionID($0.revisionId),
+                          revisionSHA256: $0.revisionSha256
+                      )
+                  }
+              )) != nil,
               let audioFD = try? openDirectory(components: ["audio"], under: sessionFD)
         else {
             return false
@@ -1408,6 +1425,20 @@ private extension RecordingPersistence {
             return false
         }
         return digest == expectedSHA
+    }
+
+    func validSelectedTranscriptRevisionShape(
+        _ dictionary: [String: Any]
+    ) -> Bool {
+        guard dictionary.keys.contains("selectedTranscriptRevision") else {
+            return true
+        }
+        guard let selected = dictionary["selectedTranscriptRevision"]
+            as? [String: Any]
+        else {
+            return false
+        }
+        return Set(selected.keys) == ["revisionId", "revisionSha256"]
     }
 
     func publicationMatches(
@@ -1562,6 +1593,51 @@ private extension RecordingPersistence {
             throw RecordingPersistenceError.invalidStaging
         }
         return dto
+    }
+
+    /// Reuses the Recording aggregate's complete v1 trust boundary for
+    /// downstream immutable artifacts such as Transcript Revisions.
+    func loadValidatedSealedAudioWithinFile(
+        under sessionDescriptor: Int32
+    ) throws -> SealedAudioAsset {
+        let audioDescriptor = try openDirectory(
+            components: ["audio"],
+            under: sessionDescriptor
+        )
+        defer { Darwin.close(audioDescriptor) }
+        let manifestData = try readBoundedRegular(
+            named: "audio.json",
+            under: audioDescriptor,
+            maximumBytes: 1_048_576
+        )
+        let dto = try decodeAndValidateAudioManifest(manifestData)
+        let wavDescriptor = try openRegular(
+            named: "audio.wav",
+            under: audioDescriptor,
+            flags: O_RDONLY
+        )
+        defer { Darwin.close(wavDescriptor) }
+        guard validateCanonicalWAV(
+            descriptor: wavDescriptor,
+            frameCount: dto.frameCount
+        ),
+            try sha256OfRegular(
+                descriptor: wavDescriptor,
+                maximumBytes: CanonicalRecordingLimits.maximumFrames * 2 + 44
+            ) == dto.canonicalSha256
+        else {
+            throw RecordingPersistenceError.invalidStaging
+        }
+        return try SealedAudioAsset(
+            source: .microphone,
+            format: .versionOne,
+            frameCount: dto.frameCount,
+            canonicalAudioPath: LibraryRelativePath("audio/audio.wav"),
+            fingerprint: AudioFingerprint(sha256: dto.canonicalSha256),
+            unavailableIntervals: try dto.unavailableIntervals.map {
+                try $0.domain(duration: dto.frameCount)
+            }
+        )
     }
 
     func validateLibraryIdentity(_ expected: LibraryID, under rootDescriptor: Int32) throws {
@@ -2141,6 +2217,13 @@ private extension RecordingPersistence {
     }
 }
 
+extension RecordingPersistence {
+    /// Shared descriptor-confined Recording audio trust boundary.
+    func loadValidatedSealedAudio(under sessionDescriptor: Int32) throws -> SealedAudioAsset {
+        try loadValidatedSealedAudioWithinFile(under: sessionDescriptor)
+    }
+}
+
 private struct CanonicalAudioFormatDTO: Codable, Equatable {
     let sampleRateHz: UInt32
     let channelCount: UInt8
@@ -2299,12 +2382,28 @@ private struct SessionManifestDTO: Codable {
     let sessionId: String
     let createdAt: String
     let audioManifestPath: String
+    let transcriptRevisionIds: [String]
+    let selectedTranscriptRevision: RecordingSelectedTranscriptRevisionDTO?
 
     init(session: SealedSession) {
         schemaVersion = 1
         sessionId = session.sessionID.rawValue
         createdAt = session.createdAt.rawValue
         audioManifestPath = session.audioManifestPath.description
+        transcriptRevisionIds = session.transcriptRevisionIDs.map(\.rawValue)
+        selectedTranscriptRevision = session.selectedTranscriptRevision.map(
+            RecordingSelectedTranscriptRevisionDTO.init
+        )
+    }
+}
+
+private struct RecordingSelectedTranscriptRevisionDTO: Codable {
+    let revisionId: String
+    let revisionSha256: String
+
+    init(_ selected: SelectedTranscriptRevision) {
+        revisionId = selected.revisionID.rawValue
+        revisionSha256 = selected.revisionSHA256
     }
 }
 

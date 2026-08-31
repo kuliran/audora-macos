@@ -30,6 +30,10 @@ const recordingScenariosDirectory = path.join(
   resourcesDirectory,
   "Scenarios/Recording",
 );
+const transcriptRevisionExamplesDirectory = path.join(
+  resourcesDirectory,
+  "Examples/TranscriptRevision/v1",
+);
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 
@@ -113,6 +117,7 @@ const audioImportScenario = await validator("AudioImportFeatureScenario.json");
 await registerSchema("RecordingStagingIdentityManifest.json");
 const recordingStagingManifest = await validator("RecordingStagingManifest.json");
 const recordingScenario = await validator("RecordingFeatureScenario.json");
+const transcriptRevision = await validator("TranscriptRevision.json");
 
 const importedAudio = await loadFixture(
   path.join(audioImportExamplesDirectory, "audio.json"),
@@ -226,6 +231,55 @@ for (const name of expectedRecordingScenarios) {
     true,
     `recording/scenario/${name}`,
   );
+}
+
+const canonicalTranscriptRevision = await loadJSON(
+  path.join(transcriptRevisionExamplesDirectory, "revision.json"),
+);
+assertValidation(
+  transcriptRevision,
+  canonicalTranscriptRevision,
+  true,
+  "transcript-revision/revision.json",
+);
+const transcriptRevisionRejectedDirectory = path.join(
+  transcriptRevisionExamplesDirectory,
+  "rejected",
+);
+const runtimeRejectedTranscriptRevisionFixtures = [
+  "punctuation-as-word.json",
+  "utf8-range-split.json",
+];
+await assertInventory(
+  transcriptRevisionRejectedDirectory,
+  runtimeRejectedTranscriptRevisionFixtures,
+  "runtime-rejected transcript-revision fixture",
+);
+for (const name of runtimeRejectedTranscriptRevisionFixtures) {
+  assertValidation(
+    transcriptRevision,
+    await loadJSON(path.join(transcriptRevisionRejectedDirectory, name)),
+    true,
+    `transcript-revision/runtime-rejected/${name}`,
+  );
+}
+const punctuationWordRevision = await loadJSON(
+  path.join(transcriptRevisionRejectedDirectory, "punctuation-as-word.json"),
+);
+if (punctuationWordRevision.lines[0].words[0].text !== ".") {
+  throw new Error("punctuation runtime fixture no longer isolates punctuation as a Word");
+}
+const splitRangeRevision = await loadJSON(
+  path.join(transcriptRevisionRejectedDirectory, "utf8-range-split.json"),
+);
+const splitLine = splitRangeRevision.lines[0];
+const splitWord = splitLine.words[0];
+const splitBytes = Buffer.from(splitLine.text, "utf8").subarray(
+  splitWord.displayRange.startUtf8Byte,
+  splitWord.displayRange.endUtf8Byte,
+);
+if (splitBytes.toString("utf8") === splitWord.text) {
+  throw new Error("UTF-8 range runtime fixture unexpectedly maps to its Word text");
 }
 
 const closedUnionProbe = await loadJSON(

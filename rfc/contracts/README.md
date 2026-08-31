@@ -12,7 +12,9 @@ shared Session identity and the imported/microphone audio and Session manifest
 variants. Imported-audio normalization and feature behavior live in
 [`audio-import.tsp`](audio-import.tsp) and
 [`audio-import-scenario.tsp`](audio-import-scenario.tsp); Recording staging and
-feature behavior live in [`recording.tsp`](recording.tsp).
+feature behavior live in [`recording.tsp`](recording.tsp). The complete immutable
+transcription root and its stable evidence anchors live in
+[`transcript-revision.tsp`](transcript-revision.tsp).
 
 The provider source is separated by audience:
 
@@ -46,6 +48,7 @@ at runtime.
 - [`RecordingStagingIdentityManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingIdentityManifest.json)
 - [`RecordingStagingManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingManifest.json)
 - [`SessionManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionManifest.json)
+- [`TranscriptRevision.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptRevision.json)
 
 | Root schema | Direction | Coach-visible instance? |
 | --- | --- | --- |
@@ -67,6 +70,7 @@ at runtime.
 | `RecordingStagingIdentityManifest` | Recording staging storage | No |
 | `RecordingStagingManifest` | Recording staging storage | No |
 | `SessionManifest` | Imported or recorded Session storage | No |
+| `TranscriptRevision` | Immutable canonical Session transcription storage | No |
 
 Invocation and Attempt identities, provider idempotency, admission state, token
 estimator identity, Profile integrity hashes, and persisted-record schema versions
@@ -91,6 +95,12 @@ consume all scenarios through their package resources.
 `ImportedSessionManifest` and `RecordedSessionManifest`. Every concrete model is
 sealed, so an object that combines fields from both variants is rejected rather
 than being treated as a future-compatible shape.
+
+Both Session variants carry an ordered `transcriptRevisionIds` inventory and an
+optional complete selected pointer containing both Revision identity and the
+exact Revision SHA-256. Selection is valid only when the pointed Revision is in
+the inventory; Infrastructure switches both values in one locked Session
+manifest replacement after installing the immutable Revision bundle.
 
 The runtime pair boundary accepts only imported audio with an imported Session,
 or microphone audio with a recorded Session. Imported Sessions additionally bind
@@ -137,6 +147,31 @@ fixtures remain schema-valid and are routed through the production validators.
 Recording scenarios cover live state, mute gaps, duration warnings and limits,
 stop races, cancellation, recovery, repeated takes, late-event fencing, and
 Library-switch serialization.
+
+## Transcript Revision contract
+
+`TranscriptRevision` is the complete immutable result of accepting one
+semantically untrusted transcription Candidate. It binds the Session, Job,
+canonical audio and source fingerprints, Candidate artifact, pinned engine and
+use policy, ordered Lines and Words, and Audio Events. Stable `lineId`, `wordId`,
+and `audioEventId` values occupy distinct anchor namespaces.
+
+Line text is display syntax and retains punctuation. Words are lexical evidence
+tokens mapped by exact UTF-8 byte ranges; punctuation and surrounding whitespace
+remain only in the gaps between mapped Words. Domain validation additionally
+enforces source-set equality, identity and provenance integrity, contiguous
+ordering, timing bounds, UTF-8 boundary/text equality, voiced-interval coverage,
+anti-collapse and bounded repetition. Runtime byte limits are 131,072 per Line,
+1,024 per Word, and 16 MiB across all Line and Word text; the persisted Revision
+is capped at 256 MiB. These cross-field and byte-count rules are intentionally
+stricter than JSON Schema and run again on reopen.
+
+Publication first installs `transcripts/<revision-id>/revision.json` plus its
+detached SHA-256 as an immutable bundle, then replaces `session.json` under the
+shared Session writer lock. A malformed or pathological Candidate never reaches
+this repository boundary, exposes no partial Revision for review, and cannot
+change the selected Revision. Checked-in runtime-rejected fixtures lock the
+punctuation-as-Word and split-UTF-8-range cases while remaining schema-valid.
 
 ## Development Chat roots and scenarios
 
@@ -200,10 +235,11 @@ The compiler and JSON Schema emitter are pinned in `package.json`. The resolved
 dependency graph is committed in `pnpm-lock.yaml`. `generated-json-files.txt`
 enumerates the canonical package-resource schemas and makes the check fail when
 generated roots change unexpectedly or their committed bytes drift. The same
-check runs every checked-in audio-import, Recording, and Development Chat
-scenario and golden through the generated Draft 2020-12 schemas. It also checks exact imported
-cross-root hashes, rejects mixed manifest families, and keeps runtime-only
-Recording rejection fixtures schema-valid for the production Swift validators.
+check runs every checked-in audio-import, Recording, Transcript Revision, and
+Development Chat scenario or golden through the generated Draft 2020-12 schemas.
+It also checks exact imported cross-root hashes, rejects mixed manifest families,
+and keeps runtime-only Recording and Transcript Revision rejection fixtures
+schema-valid for the production Swift validators.
 
 ## Request context
 

@@ -4,7 +4,21 @@ public enum LibraryIdentityError: Error, Equatable, Sendable {
     case invalidProfileRevisionID
     case invalidRecordingID
     case invalidTranscriptRevisionID
+    case invalidTranscriptionJobID
     case invalidInstant
+}
+
+public struct TranscriptionJobID: Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard TypedIdentifierValidator.isValid(rawValue, prefix: "job-") else {
+            throw LibraryIdentityError.invalidTranscriptionJobID
+        }
+        self.rawValue = rawValue
+    }
+
+    public var description: String { rawValue }
 }
 
 public struct LibraryID: Hashable, Sendable, CustomStringConvertible {

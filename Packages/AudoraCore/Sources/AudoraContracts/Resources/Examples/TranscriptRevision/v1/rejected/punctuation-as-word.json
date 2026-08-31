@@ -1,0 +1,54 @@
+{
+  "audioEvents": [],
+  "audioFingerprintSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "candidateArtifactSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "createdAt": "2026-08-30T12:10:00.000Z",
+  "durationMs": 1000,
+  "engine": {
+    "decodingOptionsSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "language": "en",
+    "mode": "verbatim",
+    "model": "small",
+    "provider": "crisperwhisper",
+    "revision": "pinned-revision",
+    "usePolicy": {
+      "commercialUseAllowed": false,
+      "coveredArtifacts": ["transcriptRevision"],
+      "externalProcessingAllowed": false,
+      "licenseReference": "pinned-license-reference",
+      "licenseSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "policyId": "crisper-evaluation-v1",
+      "privateExportAllowed": true,
+      "privateLocalUseAllowed": true,
+      "publicDistributionAllowed": false
+    }
+  },
+  "jobId": "job-20260830T120500000Z-5GHJ",
+  "lines": [
+    {
+      "audioSourceId": "src-0001",
+      "lineId": "l000000",
+      "order": 0,
+      "text": "Hi.",
+      "timeRange": {"endMs": 1000, "startMs": 0},
+      "words": [
+        {
+          "displayRange": {"endUtf8Byte": 3, "startUtf8Byte": 2},
+          "ordinal": 0,
+          "text": ".",
+          "wordId": "w000000",
+          "wordKind": "lexical"
+        }
+      ]
+    }
+  ],
+  "revisionId": "trv-20260830T121000000Z-4FGH",
+  "schemaVersion": 1,
+  "sessionId": "ses-20260830T120000000Z-3DEF",
+  "sourceFingerprints": [
+    {
+      "audioSourceId": "src-0001",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

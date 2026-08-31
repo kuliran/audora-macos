@@ -18,7 +18,11 @@ public struct AudioSourceID: Hashable, Sendable, CustomStringConvertible {
     public let rawValue: String
 
     public init(_ rawValue: String) throws {
-        guard rawValue == "src-0001" else {
+        let suffix = rawValue.dropFirst(4)
+        guard rawValue.hasPrefix("src-"),
+              suffix.count == 4,
+              suffix.allSatisfy({ $0.asciiValue.map { (48...57).contains($0) } == true })
+        else {
             throw ImportedSessionValidationError.invalidAudioSourceID
         }
         self.rawValue = rawValue
@@ -224,13 +228,17 @@ public struct ImportedSession: Equatable, Sendable {
     public let durationMilliseconds: UInt64
     public let audioManifestSHA256: String
     public let audio: ImportedAudioAsset
+    public let transcriptRevisionIDs: [TranscriptRevisionID]
+    public let selectedTranscriptRevision: SelectedTranscriptRevision?
 
     public init(
         sessionID: SessionID,
         createdAt: UTCInstant,
         durationMilliseconds: UInt64,
         audioManifestSHA256: String,
-        audio: ImportedAudioAsset
+        audio: ImportedAudioAsset,
+        transcriptRevisionIDs: [TranscriptRevisionID] = [],
+        selectedTranscriptRevision: SelectedTranscriptRevision? = nil
     ) throws {
         guard durationMilliseconds == audio.canonical.durationMilliseconds else {
             throw ImportedSessionValidationError.invalidDuration
@@ -238,11 +246,17 @@ public struct ImportedSession: Equatable, Sendable {
         guard AudioArtifactFingerprint.isSHA256(audioManifestSHA256) else {
             throw ImportedSessionValidationError.audioManifestMismatch
         }
+        try SessionTranscriptSelectionValidator.validate(
+            revisionIDs: transcriptRevisionIDs,
+            selected: selectedTranscriptRevision
+        )
         self.sessionID = sessionID
         self.createdAt = createdAt
         self.durationMilliseconds = durationMilliseconds
         self.audioManifestSHA256 = audioManifestSHA256
         self.audio = audio
+        self.transcriptRevisionIDs = transcriptRevisionIDs
+        self.selectedTranscriptRevision = selectedTranscriptRevision
     }
 }
 

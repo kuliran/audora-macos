@@ -1,4 +1,5 @@
 import AudoraContracts
+import AudoraDomain
 import Foundation
 import XCTest
 
@@ -132,7 +133,69 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertNil(importedSessionProperties["audioManifestPath"])
         XCTAssertNotNil(recordedSessionProperties["audioManifestPath"])
         XCTAssertNil(recordedSessionProperties["audioManifestSha256"])
-        XCTAssertNil(importedSessionProperties["selectedTranscriptRevisionId"])
+        for properties in [importedSessionProperties, recordedSessionProperties] {
+            XCTAssertNotNil(properties["transcriptRevisionIds"])
+            XCTAssertNotNil(properties["selectedTranscriptRevision"])
+            XCTAssertNil(properties["selectedTranscriptRevisionId"])
+            XCTAssertEqual(
+                (properties["transcriptRevisionIds"] as? [String: Any])?["maxItems"]
+                    as? Int,
+                TranscriptRevisionLimits.maximumSessionRevisionCount
+            )
+        }
+    }
+
+    func testTranscriptRevisionSchemaAndGoldenPreserveDisplayAndEvidenceSyntax() throws {
+        let schema = try jsonObject(.transcriptRevisionSchema)
+        let definitions = try XCTUnwrap(schema["$defs"] as? [String: Any])
+        XCTAssertNotNil(schema["unevaluatedProperties"])
+        let lineProperties = try schemaProperties(
+            "PersistedTranscriptLine",
+            in: definitions
+        )
+        let wordProperties = try schemaProperties(
+            "PersistedTranscriptWord",
+            in: definitions
+        )
+        XCTAssertEqual(
+            (lineProperties["text"] as? [String: Any])?["maxLength"] as? Int,
+            131_072
+        )
+        XCTAssertEqual(
+            (wordProperties["text"] as? [String: Any])?["maxLength"] as? Int,
+            1_024
+        )
+        XCTAssertEqual(
+            (wordProperties["confidence"] as? [String: Any])?["type"] as? String,
+            "number"
+        )
+
+        let revision = try jsonObject(.transcriptRevisionExample)
+        let lines = try XCTUnwrap(revision["lines"] as? [[String: Any]])
+        let words = try XCTUnwrap(lines.first?["words"] as? [[String: Any]])
+        let events = try XCTUnwrap(revision["audioEvents"] as? [[String: Any]])
+        XCTAssertEqual(lines.first?["lineId"] as? String, "l000000")
+        XCTAssertEqual(lines.first?["text"] as? String, "Hello, wörld.")
+        XCTAssertEqual(words.compactMap { $0["wordId"] as? String }, [
+            "w000000", "w000001",
+        ])
+        XCTAssertEqual(words.compactMap { $0["text"] as? String }, ["Hello", "wörld"])
+        XCTAssertEqual(events.first?["audioEventId"] as? String, "a000000")
+
+        let punctuation = try jsonObject(.rejectedTranscriptPunctuationWord)
+        let punctuationLines = try XCTUnwrap(punctuation["lines"] as? [[String: Any]])
+        let punctuationWords = try XCTUnwrap(
+            punctuationLines.first?["words"] as? [[String: Any]]
+        )
+        XCTAssertEqual(punctuationWords.first?["text"] as? String, ".")
+
+        let split = try jsonObject(.rejectedTranscriptUTF8Range)
+        let splitLines = try XCTUnwrap(split["lines"] as? [[String: Any]])
+        let splitWords = try XCTUnwrap(splitLines.first?["words"] as? [[String: Any]])
+        let splitRange = try XCTUnwrap(
+            splitWords.first?["displayRange"] as? [String: Any]
+        )
+        XCTAssertEqual(splitRange["endUtf8Byte"] as? Int, 2)
     }
 
     func testImportedSessionGoldensPreservePortableV1Fields() throws {

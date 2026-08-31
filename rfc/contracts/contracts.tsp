@@ -6,3 +6,4 @@ import "./session-audio.tsp";
 import "./audio-import.tsp";
 import "./audio-import-scenario.tsp";
 import "./recording.tsp";
+import "./transcript-revision.tsp";

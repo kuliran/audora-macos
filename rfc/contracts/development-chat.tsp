@@ -61,9 +61,6 @@ namespace Audora.Contracts {
   @pattern("^msg-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
   scalar ChatMessageId extends string;
 
-  @pattern("^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
-  scalar TranscriptRevisionId extends string;
-
   @minLength(1)
   @maxLength(64)
   @pattern("^[0-9A-Za-z_-]+$")

@@ -34,7 +34,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AudoraContractsTests",
-            dependencies: ["AudoraContracts"]
+            dependencies: ["AudoraContracts", "AudoraDomain"]
         ),
         .testTarget(
             name: "AudoraFeatureScenarioTests",

@@ -108,11 +108,24 @@ struct ConfinedPersistencePrimitives<Failure: Error> {
         defer { Darwin.close(descriptor) }
         var metadata = stat()
         guard fstat(descriptor, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG
+              (metadata.st_mode & S_IFMT) == S_IFREG,
+              maximumBytes >= 0,
+              metadata.st_size >= 0,
+              UInt64(metadata.st_size) <= UInt64(maximumBytes),
+              UInt64(metadata.st_size) < UInt64(Int.max)
         else {
+            if maximumBytes >= 0,
+               metadata.st_size >= 0,
+               UInt64(metadata.st_size) > UInt64(maximumBytes)
+            {
+                throw rootTooLarge
+            }
             throw invalidLayout
         }
-        var data = Data(count: maximumBytes + 1)
+        // Allocate from the trusted regular-file size, not from the policy ceiling.
+        // The extra byte detects growth between `fstat` and `read` without making a
+        // tiny file pay the cost of a potentially large aggregate limit.
+        var data = Data(count: Int(metadata.st_size) + 1)
         let count = data.withUnsafeMutableBytes { buffer -> Int in
             guard let base = buffer.baseAddress else { return 0 }
             var offset = 0
@@ -134,6 +147,7 @@ struct ConfinedPersistencePrimitives<Failure: Error> {
         guard count >= 0 else { throw ioFailure }
         data.removeSubrange(count ..< data.count)
         guard data.count <= maximumBytes else { throw rootTooLarge }
+        guard data.count == Int(metadata.st_size) else { throw invalidLayout }
         return data
     }
 
@@ -215,10 +229,17 @@ struct ConfinedPersistencePrimitives<Failure: Error> {
         under descriptor: Int32,
         maximumCount: Int? = nil
     ) throws -> [String] {
-        let duplicate = Darwin.dup(descriptor)
-        guard duplicate >= 0 else { throw ioFailure }
-        guard let directory = fdopendir(duplicate) else {
-            Darwin.close(duplicate)
+        // `dup` would share the directory stream offset with the authority FD,
+        // making a second integrity check observe an empty suffix. Reopen `.`
+        // relative to the pinned directory so each enumeration is independent.
+        let enumerationDescriptor = Darwin.openat(
+            descriptor,
+            ".",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard enumerationDescriptor >= 0 else { throw ioFailure }
+        guard let directory = fdopendir(enumerationDescriptor) else {
+            Darwin.close(enumerationDescriptor)
             throw ioFailure
         }
         defer { closedir(directory) }

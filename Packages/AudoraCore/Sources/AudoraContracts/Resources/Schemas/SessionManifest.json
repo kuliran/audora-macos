@@ -33,9 +33,12 @@
                 "transcriptRevisionIds": {
                     "type": "array",
                     "items": {
-                        "type": "string"
+                        "$ref": "#/$defs/TranscriptRevisionId"
                     },
-                    "maxItems": 0
+                    "maxItems": 256
+                },
+                "selectedTranscriptRevision": {
+                    "$ref": "#/$defs/SelectedTranscriptRevision"
                 }
             },
             "required": [
@@ -67,13 +70,24 @@
                 "audioManifestPath": {
                     "type": "string",
                     "const": "audio/audio.json"
+                },
+                "transcriptRevisionIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/TranscriptRevisionId"
+                    },
+                    "maxItems": 256
+                },
+                "selectedTranscriptRevision": {
+                    "$ref": "#/$defs/SelectedTranscriptRevision"
                 }
             },
             "required": [
                 "schemaVersion",
                 "sessionId",
                 "createdAt",
-                "audioManifestPath"
+                "audioManifestPath",
+                "transcriptRevisionIds"
             ],
             "unevaluatedProperties": {
                 "not": {}
@@ -96,6 +110,28 @@
         "Sha256Hex": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
+        },
+        "TranscriptRevisionId": {
+            "type": "string",
+            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "SelectedTranscriptRevision": {
+            "type": "object",
+            "properties": {
+                "revisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId"
+                },
+                "revisionSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                }
+            },
+            "required": [
+                "revisionId",
+                "revisionSha256"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
         }
     }
 }
