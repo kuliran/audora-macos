@@ -244,7 +244,8 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
     public func atomicallyReplaceRoot(
         _ data: Data,
         relativePath: LibraryRelativePath,
-        under root: URL
+        under root: URL,
+        reconcileAbandonedImports: Bool = true
     ) throws {
         let relative = relativePath.description
         guard relative == "preferences.json" || relative == "profile/head.json" else {
@@ -258,7 +259,10 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
 
         let rootDescriptor = try openDirectoryDescriptor(at: root)
         defer { Darwin.close(rootDescriptor) }
-        guard case .readWrite = try load(from: rootDescriptor) else {
+        guard case .readWrite = try load(
+            from: rootDescriptor,
+            reconcileAbandonedImports: reconcileAbandonedImports
+        ) else {
             throw PortableLibraryPersistenceError.readOnlyLibrary
         }
 

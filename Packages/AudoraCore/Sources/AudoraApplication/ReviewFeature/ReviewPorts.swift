@@ -48,3 +48,13 @@ public enum ReviewRetranscriptionResult: Equatable, Sendable {
 public protocol ReviewRetranscriptionPort: Sendable {
     func retranscribe(_ selection: ReviewSelection) async -> ReviewRetranscriptionResult
 }
+
+/// Global portable preference seam. The selected Review remains authoritative
+/// when this preference cannot be read or written.
+public protocol ReviewAnnotationVisibilityPort: Sendable {
+    func annotationsVisible(in scope: LibraryScope) async -> Bool?
+    func setAnnotationsVisible(
+        _ visible: Bool,
+        in scope: LibraryScope
+    ) async -> Bool
+}

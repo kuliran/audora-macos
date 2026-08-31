@@ -129,6 +129,56 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
         }
     }
 
+    func testReviewCarriesRecordedUnavailableIntervalsAsLocalEvidence() async throws {
+        try await withRecordedSession(unavailableReasons: [.muted]) { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            let workspace = PortableReviewWorkspace(
+                scopes: StaticReviewScopeProvider(
+                    root: root,
+                    libraryID: receipt.libraryID
+                )
+            )
+            let loaded = await workspace.load(
+                ReviewSelection(
+                    scope: LibraryScope(libraryID: receipt.libraryID),
+                    sessionID: receipt.sessionID
+                )
+            )
+
+            guard case let .available(snapshot) = loaded else {
+                return XCTFail("expected recorded Review evidence")
+            }
+            XCTAssertEqual(
+                snapshot.annotationEvidence.sources,
+                [
+                    SpeechAcousticEvidence(
+                        audioSourceID: .microphone,
+                        observedRanges: [],
+                        voicedRanges: [],
+                        unavailableIntervals: [
+                            SpeechUnavailableInterval(
+                                timeRange: try SessionTimeRange(
+                                    startMilliseconds: 0,
+                                    endMilliseconds: 100,
+                                    sessionDurationMilliseconds: 100
+                                ),
+                                reasons: [.muted]
+                            ),
+                        ]
+                    ),
+                ]
+            )
+        }
+    }
+
     func testSelectingInventoriedRevisionIsPointerOnlyAndChatPinDoesNotFollow() async throws {
         try await withRecordedSession { root, receipt in
             let first = try transcriptRevision(
@@ -1671,6 +1721,7 @@ private final class StaticReviewLease: LibraryAccessLease, @unchecked Sendable {
 }
 
 private func withRecordedSession(
+    unavailableReasons: Set<UnavailableReason> = [],
     _ body: (URL, SessionSealedReceipt) async throws -> Void
 ) async throws {
     let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -1704,12 +1755,15 @@ private func withRecordedSession(
     )
     let persistence = RecordingPersistence()
     let handle = try persistence.prepare(request, under: root)
+    let frameCount: UInt64 = unavailableReasons.isEmpty ? 4 : 1_600
     try persistence.append(
         CanonicalPCMSpan(
-            frameCount: 4,
-            pcmLittleEndian: Data(repeating: 1, count: 8),
-            reasons: [],
-            level: 0.2
+            frameCount: frameCount,
+            pcmLittleEndian: unavailableReasons.isEmpty
+                ? Data(repeating: 1, count: Int(frameCount * 2))
+                : nil,
+            reasons: unavailableReasons,
+            level: unavailableReasons.isEmpty ? 0.2 : nil
         ),
         to: handle
     )
@@ -1806,7 +1860,9 @@ private func transcriptRevision(
 ) throws -> TranscriptRevision {
     try transcriptRevision(
         sessionID: receipt.sessionID,
-        durationMilliseconds: 1,
+        durationMilliseconds: CanonicalAudioFormat.durationMilliseconds(
+            forFrameCount: receipt.frameCount
+        ),
         audioFingerprint: receipt.fingerprint,
         revisionID: revisionID,
         word: word,

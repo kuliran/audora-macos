@@ -485,3 +485,61 @@ public enum ActiveLibraryOperationResult<Value: Sendable>: Sendable {
     case readOnly
     case unavailable
 }
+
+extension PortableLibraryWorkspace: ReviewAnnotationVisibilityPort {
+    public func annotationsVisible(in scope: LibraryScope) -> Bool? {
+        guard reserveOperation() else { return nil }
+        defer { operationInFlight = false }
+        guard let activeScope,
+              activeScope.libraryID == scope.libraryID,
+              case let .readWrite(authority) = try? persistence
+                .openWithoutReconcilingImports(at: activeScope.root),
+              authority.manifest.libraryID == scope.libraryID
+        else { return nil }
+        self.activeScope = ActiveScope(
+            lease: activeScope.lease,
+            loaded: .readWrite(authority)
+        )
+        return authority.preferences.annotationsVisible
+    }
+
+    public func setAnnotationsVisible(
+        _ visible: Bool,
+        in scope: LibraryScope
+    ) -> Bool {
+        guard reserveOperation() else { return false }
+        defer { operationInFlight = false }
+        guard let activeScope,
+              activeScope.libraryID == scope.libraryID,
+              case let .readWrite(authority) = try? persistence
+                .openWithoutReconcilingImports(at: activeScope.root),
+              authority.manifest.libraryID == scope.libraryID,
+              let preferences = try? LibraryPreferences(
+                  language: authority.preferences.language,
+                  annotationsVisible: visible,
+                  playbackRate: authority.preferences.playbackRate
+              ),
+              let encoded = try? persistence.encodePreferences(preferences)
+        else { return false }
+        do {
+            try persistence.atomicallyReplaceRoot(
+                encoded,
+                relativePath: try LibraryRelativePath("preferences.json"),
+                under: activeScope.root,
+                reconcileAbandonedImports: false
+            )
+            guard case let .readWrite(reopened) = try persistence
+                .openWithoutReconcilingImports(at: activeScope.root),
+                  reopened.manifest.libraryID == scope.libraryID,
+                  reopened.preferences == preferences
+            else { return false }
+            self.activeScope = ActiveScope(
+                lease: activeScope.lease,
+                loaded: .readWrite(reopened)
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+}

@@ -43,6 +43,10 @@ public final class ReviewPresentationModel: ObservableObject {
         send(.pause)
     }
 
+    public func setAnnotationsVisible(_ visible: Bool) {
+        send(.setAnnotationsVisible(visible))
+    }
+
     public func seek(lineID: TranscriptLineID, utf8ByteOffset: Int) {
         send(.seek(lineID: lineID, utf8ByteOffset: utf8ByteOffset))
     }

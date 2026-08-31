@@ -41,13 +41,15 @@ public struct ReviewSessionSnapshot: Equatable, Sendable {
     public let selectedRevision: TranscriptRevision
     public let audioCapabilityID: ReviewAudioCapabilityID
     public let canonicalAudioDurationMilliseconds: UInt64
+    public let annotationEvidence: SpeechAnnotationEvidence
 
     public init(
         selection: ReviewSelection,
         revisionIDs: [TranscriptRevisionID],
         selectedRevision: TranscriptRevision,
         audioCapabilityID: ReviewAudioCapabilityID,
-        canonicalAudioDurationMilliseconds: UInt64
+        canonicalAudioDurationMilliseconds: UInt64,
+        annotationEvidence: SpeechAnnotationEvidence = .none
     ) throws {
         guard canonicalAudioDurationMilliseconds > 0,
               canonicalAudioDurationMilliseconds <= 2_700_000
@@ -65,6 +67,7 @@ public struct ReviewSessionSnapshot: Equatable, Sendable {
         self.selectedRevision = selectedRevision
         self.audioCapabilityID = audioCapabilityID
         self.canonicalAudioDurationMilliseconds = canonicalAudioDurationMilliseconds
+        self.annotationEvidence = annotationEvidence
     }
 
     public var selectedRevisionID: TranscriptRevisionID {
@@ -134,12 +137,33 @@ public enum ReviewNotice: Equatable, Sendable {
     case playbackUnavailable
 }
 
+/// Presentation metadata derived from immutable Revision evidence. Visibility
+/// controls only whether the metadata is drawn; projection anchors remain
+/// available so hiding annotations cannot rewrite transcript or seek state.
+public struct ReviewAnnotations: Equatable, Sendable {
+    public let isVisible: Bool
+    public let projection: TranscriptAnnotationProjection
+
+    public init(
+        isVisible: Bool,
+        projection: TranscriptAnnotationProjection
+    ) {
+        self.isVisible = isVisible
+        self.projection = projection
+    }
+
+    public func settingVisibility(_ isVisible: Bool) -> ReviewAnnotations {
+        ReviewAnnotations(isVisible: isVisible, projection: projection)
+    }
+}
+
 public struct ReviewReadySnapshot: Equatable, Sendable {
     public let selection: ReviewSelection
     public let revisionIDs: [TranscriptRevisionID]
     public let selectedRevision: TranscriptRevision
     public let playback: ReviewPlaybackSnapshot
     public let activeWordID: TranscriptWordID?
+    public let annotations: ReviewAnnotations
     public let activity: ReviewActivity?
     public let notice: ReviewNotice?
 
@@ -149,6 +173,7 @@ public struct ReviewReadySnapshot: Equatable, Sendable {
         selectedRevision: TranscriptRevision,
         playback: ReviewPlaybackSnapshot,
         activeWordID: TranscriptWordID?,
+        annotations: ReviewAnnotations,
         activity: ReviewActivity? = nil,
         notice: ReviewNotice? = nil
     ) {
@@ -157,6 +182,7 @@ public struct ReviewReadySnapshot: Equatable, Sendable {
         self.selectedRevision = selectedRevision
         self.playback = playback
         self.activeWordID = activeWordID
+        self.annotations = annotations
         self.activity = activity
         self.notice = notice
     }
@@ -186,6 +212,7 @@ public enum ReviewCommand: Equatable, Sendable {
     case seek(lineID: TranscriptLineID, utf8ByteOffset: Int)
     case play
     case pause
+    case setAnnotationsVisible(Bool)
     case selectRevision(
         TranscriptRevisionID,
         expectedSelectedRevisionID: TranscriptRevisionID

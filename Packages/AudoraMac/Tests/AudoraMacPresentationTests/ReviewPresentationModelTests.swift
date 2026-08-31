@@ -19,9 +19,10 @@ final class ReviewPresentationModelTests: XCTestCase {
         model.selectSession(selection)
         model.play()
         model.pause()
+        model.setAnnotationsVisible(false)
         model.retranscribe()
         model.clearSelection()
-        await feature.waitForCommandCount(5)
+        await feature.waitForCommandCount(6)
 
         guard case let .unavailable(_, reason) = model.state else {
             return XCTFail("expected initial Review projection")
@@ -34,6 +35,7 @@ final class ReviewPresentationModelTests: XCTestCase {
                 .selectSession(selection),
                 .play,
                 .pause,
+                .setAnnotationsVisible(false),
                 .retranscribe,
                 .clearSelection,
             ]

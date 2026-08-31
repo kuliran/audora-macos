@@ -3,6 +3,182 @@ import AudoraDomain
 import XCTest
 
 final class ReviewFeatureTests: XCTestCase {
+    func testAnnotationVisibilityChangesOnlyOverlayPresentation() async throws {
+        let revision = try reviewRevision(
+            id: "trv-20260830T121000000Z-4FGH",
+            text: "Hello, world!",
+            firstWordKind: .filledPause
+        )
+        let selection = ReviewSelection(
+            scope: LibraryScope(libraryID: revisionFixtureLibraryID),
+            sessionID: revision.sessionID
+        )
+        let stored = try ReviewSessionSnapshot(
+            selection: selection,
+            revisionIDs: [revision.revisionID],
+            selectedRevision: revision,
+            audioCapabilityID: ReviewAudioCapabilityID("review-annotations"),
+            canonicalAudioDurationMilliseconds: revision.durationMilliseconds
+        )
+        let playback = ReviewPlaybackStub()
+        let visibility = ReviewAnnotationVisibilityStub(visible: true)
+        let feature = DefaultReviewFeature(
+            sessions: ReviewSessionStoreStub(snapshot: stored),
+            playback: playback,
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: visibility
+        )
+
+        await feature.send(.selectSession(selection))
+        await feature.send(
+            .seek(
+                lineID: revision.lines[0].lineID,
+                utf8ByteOffset: revision.lines[0].words[0].displayRange.endUTF8Byte
+            )
+        )
+        guard case let .ready(visible) = await feature.currentState else {
+            return XCTFail("expected annotated Ready review")
+        }
+        XCTAssertTrue(visible.annotations.isVisible)
+        XCTAssertEqual(visible.annotations.projection.textualOverlays.count, 1)
+        let selectedReview = visible.selection
+        let copiedText = visible.selectedRevision.lines.map(\.text)
+            .joined(separator: "\n\n")
+        let selectedRevision = visible.selectedRevision
+        let projection = visible.annotations.projection
+
+        await feature.send(.setAnnotationsVisible(false))
+        await feature.send(
+            .seek(
+                lineID: revision.lines[0].lineID,
+                utf8ByteOffset: revision.lines[0].words[0].displayRange.endUTF8Byte
+            )
+        )
+
+        guard case let .ready(hidden) = await feature.currentState else {
+            return XCTFail("visibility must not make Review unavailable")
+        }
+        XCTAssertFalse(hidden.annotations.isVisible)
+        XCTAssertEqual(hidden.selection, selectedReview)
+        XCTAssertEqual(hidden.selectedRevision, selectedRevision)
+        XCTAssertEqual(
+            hidden.selectedRevision.lines.map(\.text).joined(separator: "\n\n"),
+            copiedText
+        )
+        XCTAssertEqual(hidden.annotations.projection, projection)
+        let seekTimes = await playback.seekTimes
+        let writes = await visibility.writes
+        XCTAssertEqual(seekTimes, [100, 100])
+        XCTAssertEqual(writes, [false])
+    }
+
+    func testVisibilityWriteCannotRewindLatestPlaybackState() async throws {
+        let revision = try reviewRevision(
+            id: "trv-20260830T121000000Z-4FGH",
+            text: "Hello, world!"
+        )
+        let selection = ReviewSelection(
+            scope: LibraryScope(libraryID: revisionFixtureLibraryID),
+            sessionID: revision.sessionID
+        )
+        let capability = try ReviewAudioCapabilityID("review-annotation-race")
+        let stored = try ReviewSessionSnapshot(
+            selection: selection,
+            revisionIDs: [revision.revisionID],
+            selectedRevision: revision,
+            audioCapabilityID: capability,
+            canonicalAudioDurationMilliseconds: revision.durationMilliseconds
+        )
+        let playback = AuthorityLossPlaybackStub(failLoadAfter: nil)
+        let visibility = SuspendedReviewAnnotationVisibilityStub()
+        let feature = DefaultReviewFeature(
+            sessions: ReviewSessionStoreStub(snapshot: stored),
+            playback: playback,
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: visibility
+        )
+        await feature.send(.selectSession(selection))
+
+        let toggle = Task { await feature.send(.setAnnotationsVisible(false)) }
+        await visibility.waitUntilWriteStarts()
+        await playback.emit(
+            ReviewPlaybackSnapshot(
+                audioCapabilityID: capability,
+                positionMilliseconds: 500,
+                durationMilliseconds: revision.durationMilliseconds,
+                status: .playing
+            )
+        )
+        for _ in 0..<8 { await Task.yield() }
+        await visibility.resumeWrite()
+        await toggle.value
+
+        guard case let .ready(ready) = await feature.currentState else {
+            return XCTFail("visibility write must preserve Ready review")
+        }
+        XCTAssertEqual(ready.playback.positionMilliseconds, 500)
+        XCTAssertEqual(ready.playback.status, .playing)
+        XCTAssertEqual(ready.activeWordID, revision.lines[0].words[1].wordID)
+        XCTAssertFalse(ready.annotations.isVisible)
+    }
+
+    func testAnnotationRefreshCannotRewindLatestPlaybackState() async throws {
+        let revision = try reviewRevision(
+            id: "trv-20260830T121000000Z-4FGH",
+            text: "Hello, world!"
+        )
+        let selection = ReviewSelection(
+            scope: LibraryScope(libraryID: revisionFixtureLibraryID),
+            sessionID: revision.sessionID
+        )
+        let capability = try ReviewAudioCapabilityID("review-annotation-refresh")
+        let stored = try ReviewSessionSnapshot(
+            selection: selection,
+            revisionIDs: [revision.revisionID],
+            selectedRevision: revision,
+            audioCapabilityID: capability,
+            canonicalAudioDurationMilliseconds: revision.durationMilliseconds
+        )
+        let playback = AuthorityLossPlaybackStub(failLoadAfter: nil)
+        let visibility = SuspendedReviewAnnotationReadStub()
+        let feature = DefaultReviewFeature(
+            sessions: ReviewSessionStoreStub(snapshot: stored),
+            playback: playback,
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: visibility
+        )
+        await feature.send(.selectSession(selection))
+        await playback.emit(
+            ReviewPlaybackSnapshot(
+                audioCapabilityID: capability,
+                positionMilliseconds: 500,
+                durationMilliseconds: revision.durationMilliseconds,
+                status: .playing
+            )
+        )
+        for _ in 0..<8 { await Task.yield() }
+
+        let refresh = Task { await feature.send(.refresh) }
+        await visibility.waitUntilRefreshReadStarts()
+        await playback.emit(
+            ReviewPlaybackSnapshot(
+                audioCapabilityID: capability,
+                positionMilliseconds: 800,
+                durationMilliseconds: revision.durationMilliseconds,
+                status: .playing
+            )
+        )
+        for _ in 0..<8 { await Task.yield() }
+        await visibility.resumeRefreshRead()
+        await refresh.value
+
+        guard case let .ready(ready) = await feature.currentState else {
+            return XCTFail("refresh must preserve Ready review")
+        }
+        XCTAssertEqual(ready.playback.positionMilliseconds, 800)
+        XCTAssertEqual(ready.playback.status, .playing)
+    }
+
     func testReadyReviewSeeksCanonicalAudioAndHighlightsTheResolvedWord() async throws {
         let revision = try reviewRevision(
             id: "trv-20260830T121000000Z-4FGH",
@@ -25,7 +201,8 @@ final class ReviewFeatureTests: XCTestCase {
         let feature = DefaultReviewFeature(
             sessions: sessions,
             playback: playback,
-            retranscriber: ReviewRetranscriberStub()
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: ReviewAnnotationVisibilityStub(visible: true)
         )
 
         await feature.send(.selectSession(selection))
@@ -83,12 +260,14 @@ final class ReviewFeatureTests: XCTestCase {
         let left = DefaultReviewFeature(
             sessions: sessions,
             playback: ReviewPlaybackStub(),
-            retranscriber: ReviewRetranscriberStub()
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: ReviewAnnotationVisibilityStub(visible: true)
         )
         let right = DefaultReviewFeature(
             sessions: sessions,
             playback: ReviewPlaybackStub(),
-            retranscriber: ReviewRetranscriberStub()
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: ReviewAnnotationVisibilityStub(visible: true)
         )
         await left.send(.selectSession(selection))
         await right.send(.selectSession(selection))
@@ -156,7 +335,8 @@ final class ReviewFeatureTests: XCTestCase {
         let feature = DefaultReviewFeature(
             sessions: sessions,
             playback: ReviewPlaybackStub(),
-            retranscriber: retranscriber
+            retranscriber: retranscriber,
+            annotationVisibility: ReviewAnnotationVisibilityStub(visible: true)
         )
         await feature.send(.selectSession(selection))
 
@@ -226,7 +406,8 @@ final class ReviewFeatureTests: XCTestCase {
         let feature = DefaultReviewFeature(
             sessions: sessions,
             playback: ReviewPlaybackStub(),
-            retranscriber: ReviewRetranscriberStub()
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: ReviewAnnotationVisibilityStub(visible: true)
         )
         await feature.send(.selectSession(selection))
         await sessions.install(.available(snapshot))
@@ -257,7 +438,8 @@ final class ReviewFeatureTests: XCTestCase {
         let feature = DefaultReviewFeature(
             sessions: sessions,
             playback: ReviewPlaybackStub(),
-            retranscriber: ReviewRetranscriberStub()
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: ReviewAnnotationVisibilityStub(visible: true)
         )
         let firstSend = Task { await feature.send(.selectSession(first)) }
         await sessions.waitUntilFirstLoadStarts()
@@ -408,7 +590,8 @@ final class ReviewFeatureTests: XCTestCase {
             let feature = DefaultReviewFeature(
                 sessions: sessions,
                 playback: playback,
-                retranscriber: ReviewRetranscriberStub(result: .completed)
+                retranscriber: ReviewRetranscriberStub(result: .completed),
+                annotationVisibility: ReviewAnnotationVisibilityStub(visible: true)
             )
             await feature.send(.selectSession(selection))
             await feature.send(.play)
@@ -509,7 +692,8 @@ final class ReviewFeatureTests: XCTestCase {
         let feature = DefaultReviewFeature(
             sessions: sessions,
             playback: playback,
-            retranscriber: ReviewRetranscriberStub()
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: ReviewAnnotationVisibilityStub(visible: true)
         )
         await feature.send(.selectSession(firstSelection))
         await feature.send(.play)
@@ -805,6 +989,78 @@ private actor ReviewRetranscriberStub: ReviewRetranscriptionPort {
     }
 }
 
+private actor ReviewAnnotationVisibilityStub: ReviewAnnotationVisibilityPort {
+    private var visible: Bool
+    private(set) var writes: [Bool] = []
+
+    init(visible: Bool) { self.visible = visible }
+
+    func annotationsVisible(in scope: LibraryScope) async -> Bool? { visible }
+
+    func setAnnotationsVisible(
+        _ visible: Bool,
+        in scope: LibraryScope
+    ) async -> Bool {
+        self.visible = visible
+        writes.append(visible)
+        return true
+    }
+}
+
+private actor SuspendedReviewAnnotationVisibilityStub:
+    ReviewAnnotationVisibilityPort
+{
+    private var didStartWrite = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func annotationsVisible(in scope: LibraryScope) async -> Bool? { true }
+
+    func setAnnotationsVisible(
+        _ visible: Bool,
+        in scope: LibraryScope
+    ) async -> Bool {
+        didStartWrite = true
+        await withCheckedContinuation { continuation = $0 }
+        return true
+    }
+
+    func waitUntilWriteStarts() async {
+        while !didStartWrite { await Task.yield() }
+    }
+
+    func resumeWrite() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor SuspendedReviewAnnotationReadStub: ReviewAnnotationVisibilityPort {
+    private var readCount = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func annotationsVisible(in scope: LibraryScope) async -> Bool? {
+        readCount += 1
+        if readCount == 2 {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return true
+    }
+
+    func setAnnotationsVisible(
+        _ visible: Bool,
+        in scope: LibraryScope
+    ) async -> Bool { true }
+
+    func waitUntilRefreshReadStarts() async {
+        while readCount < 2 { await Task.yield() }
+    }
+
+    func resumeRefreshRead() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 private actor SessionProcessingFeatureStub: SessionProcessingFeature {
     private let completedRevisionID: TranscriptRevisionID
     private var state: SessionProcessingFeatureState = .unavailable(
@@ -859,7 +1115,8 @@ private let revisionFixtureLibraryID = try! LibraryID("lib-20260830T120000000Z-1
 private func reviewRevision(
     id: String,
     sessionID: String = "ses-20260830T120000000Z-2ABC",
-    text: String
+    text: String,
+    firstWordKind: TranscriptWordKind = .lexical
 ) throws -> TranscriptRevision {
     let duration: UInt64 = 1_000
     let firstText = "Hello"
@@ -942,7 +1199,7 @@ private func reviewRevision(
                         ),
                         timeRange: firstTime,
                         confidence: nil,
-                        wordKind: .lexical
+                        wordKind: firstWordKind
                     ),
                     TranscriptWord(
                         wordID: try TranscriptWordID("w000001"),
