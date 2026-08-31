@@ -21,7 +21,12 @@ public enum ContractResource: CaseIterable, Sendable {
     case recordingStagingIdentityManifestSchema
     case recordingStagingManifestSchema
     case sessionManifestSchema
+    case sessionProcessingFeatureScenarioSchema
     case transcriptRevisionSchema
+    case transcriptionCandidateArtifactSchema
+    case transcriptionJobManifestSchema
+    case transcriptionWorkerMessageSchema
+    case transcriptionWorkerRequestSchema
 
     case audioImportSuccessScenario
     case audioImportSelectionCancelledScenario
@@ -68,6 +73,10 @@ public enum ContractResource: CaseIterable, Sendable {
     case recordingAnotherTakeScenario
     case recordingLateEventsScenario
     case recordingLibrarySwitchScenario
+    case sessionProcessingQualifiedSuccessScenario
+    case sessionProcessingQualificationBlockedScenario
+    case sessionProcessingCandidateRejectedScenario
+    case sessionProcessingModelPrepareRetryScenario
 
     case portableLibraryManifestExample
     case portableLibraryPreferencesExample
@@ -125,6 +134,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case rejectedRecordingMismatchedFingerprint
 
     case transcriptRevisionExample
+    case legacyTranscriptRevisionExample
     case rejectedTranscriptPunctuationWord
     case rejectedTranscriptUTF8Range
 
@@ -171,8 +181,18 @@ public enum ContractResource: CaseIterable, Sendable {
             "RecordingStagingManifest.json"
         case .sessionManifestSchema:
             "SessionManifest.json"
+        case .sessionProcessingFeatureScenarioSchema:
+            "SessionProcessingFeatureScenario.json"
         case .transcriptRevisionSchema:
             "TranscriptRevision.json"
+        case .transcriptionCandidateArtifactSchema:
+            "TranscriptionCandidateArtifact.json"
+        case .transcriptionJobManifestSchema:
+            "TranscriptionJobManifest.json"
+        case .transcriptionWorkerMessageSchema:
+            "TranscriptionWorkerMessage.json"
+        case .transcriptionWorkerRequestSchema:
+            "TranscriptionWorkerRequest.json"
         case .audioImportSuccessScenario:
             "success-retains-and-reopens.v1.json"
         case .audioImportSelectionCancelledScenario:
@@ -263,6 +283,14 @@ public enum ContractResource: CaseIterable, Sendable {
             "late-events-fenced.v1.json"
         case .recordingLibrarySwitchScenario:
             "library-switch-serialized.v1.json"
+        case .sessionProcessingQualifiedSuccessScenario:
+            "qualified-offline-success.v1.json"
+        case .sessionProcessingQualificationBlockedScenario:
+            "qualification-blocked-no-fallback.v1.json"
+        case .sessionProcessingCandidateRejectedScenario:
+            "candidate-rejected-no-publication.v1.json"
+        case .sessionProcessingModelPrepareRetryScenario:
+            "model-prepare-retry.v1.json"
         case .portableLibraryManifestExample:
             "library.json"
         case .portableLibraryPreferencesExample:
@@ -363,6 +391,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "audio-mismatched-fingerprint.json"
         case .transcriptRevisionExample:
             "revision.json"
+        case .legacyTranscriptRevisionExample:
+            "revision.json"
         case .rejectedTranscriptPunctuationWord:
             "punctuation-as-word.json"
         case .rejectedTranscriptUTF8Range:
@@ -382,7 +412,9 @@ public enum ContractResource: CaseIterable, Sendable {
              .readSessionTranscriptsRequestSchema, .readSessionTranscriptsResponseSchema,
              .recordingFeatureScenarioSchema, .recordingStagingIdentityManifestSchema,
              .recordingStagingManifestSchema, .sessionManifestSchema,
-             .transcriptRevisionSchema:
+             .sessionProcessingFeatureScenarioSchema, .transcriptRevisionSchema,
+             .transcriptionCandidateArtifactSchema, .transcriptionJobManifestSchema,
+             .transcriptionWorkerMessageSchema, .transcriptionWorkerRequestSchema:
             "Schemas"
         case .audioImportSuccessScenario, .audioImportSelectionCancelledScenario,
              .audioImportNormalizationFailureScenario, .audioImportCorruptCandidateScenario,
@@ -415,6 +447,11 @@ public enum ContractResource: CaseIterable, Sendable {
              .recordingDiscardOnlyScenario, .recordingAnotherTakeScenario,
              .recordingLateEventsScenario, .recordingLibrarySwitchScenario:
             "Scenarios/Recording"
+        case .sessionProcessingQualifiedSuccessScenario,
+             .sessionProcessingQualificationBlockedScenario,
+             .sessionProcessingCandidateRejectedScenario,
+             .sessionProcessingModelPrepareRetryScenario:
+            "Scenarios/SessionProcessing"
         case .portableLibraryManifestExample, .portableLibraryPreferencesExample,
              .portableProfileNullExample, .portableProfileSelectedExample:
             "Examples/PortableLibrary/v1"
@@ -452,6 +489,8 @@ public enum ContractResource: CaseIterable, Sendable {
              .rejectedRecordingMismatchedFingerprint:
             "Examples/Recording/v1/rejected"
         case .transcriptRevisionExample:
+            "Examples/TranscriptRevision/v2"
+        case .legacyTranscriptRevisionExample:
             "Examples/TranscriptRevision/v1"
         case .rejectedTranscriptPunctuationWord, .rejectedTranscriptUTF8Range:
             "Examples/TranscriptRevision/v1/rejected"

@@ -279,6 +279,59 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
         }
     }
 
+    func testReopensAndBytePreservesLegacyVersionOneRevisionWithoutQualification() async throws {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            let revisionRoot = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/transcripts/\(revision.revisionID.rawValue)"
+            )
+            let revisionURL = revisionRoot.appendingPathComponent("revision.json")
+            let hashURL = revisionRoot.appendingPathComponent("revision.sha256")
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: revisionURL))
+                    as? [String: Any]
+            )
+            object["schemaVersion"] = 1
+            var engine = try XCTUnwrap(object["engine"] as? [String: Any])
+            engine.removeValue(forKey: "qualification")
+            object["engine"] = engine
+            let legacyBytes = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            let legacyDigest = SHA256.hash(data: legacyBytes).hexLowercase
+            try legacyBytes.write(to: revisionURL)
+            try Data(legacyDigest.utf8).write(to: hashURL)
+            let sessionURL = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/session.json"
+            )
+            var session = try sessionJSONObject(root: root, sessionID: receipt.sessionID)
+            session["selectedTranscriptRevision"] = [
+                "revisionId": revision.revisionID.rawValue,
+                "revisionSha256": legacyDigest,
+            ]
+            try JSONSerialization.data(withJSONObject: session, options: [.sortedKeys])
+                .write(to: sessionURL)
+
+            let reopened = try await repository.reopenSelected(
+                sessionID: receipt.sessionID
+            )
+
+            XCTAssertNil(reopened.selectedRevision.engine.qualification)
+            XCTAssertEqual(reopened.selectedRevision.revisionID, revision.revisionID)
+            XCTAssertEqual(try Data(contentsOf: revisionURL), legacyBytes)
+            XCTAssertEqual(try Data(contentsOf: hashURL), Data(legacyDigest.utf8))
+        }
+    }
+
     func testInstalledUnselectedRevisionIsIdempotentlyReusedOnRetry() async throws {
         try await withRecordedSession { root, receipt in
             let revision = try transcriptRevision(for: receipt)
@@ -1063,7 +1116,7 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 JSONSerialization.jsonObject(with: Data(contentsOf: revisionURL))
                     as? [String: Any]
             )
-            object["schemaVersion"] = 2
+            object["schemaVersion"] = 3
             object["newerField"] = ["preserve": true]
             let newerData = try JSONSerialization.data(
                 withJSONObject: object,
@@ -1549,6 +1602,13 @@ private func transcriptRevision(
             language: "en",
             mode: "verbatim",
             decodingOptionsSHA256: String(repeating: "c", count: 64),
+            qualification: try TranscriptEngineQualification(
+                qualificationProfileID: "synthetic-qualified-v1",
+                engineLockSHA256: String(repeating: "f", count: 64),
+                runtimeIdentity: "synthetic-runtime-v1",
+                runtimeLockSHA256: String(repeating: "d", count: 64),
+                compatibilityPatchID: "synthetic-progress-patch-v1"
+            ),
             usePolicy: usePolicy
         ),
         lines: [

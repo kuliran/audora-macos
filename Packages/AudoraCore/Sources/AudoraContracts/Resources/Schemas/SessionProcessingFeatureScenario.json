@@ -1,0 +1,430 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/SessionProcessingFeatureScenario.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "scenarioId": {
+            "$ref": "#/$defs/SessionProcessingScenarioId"
+        },
+        "initialState": {
+            "$ref": "#/$defs/SessionProcessingScenarioState"
+        },
+        "commands": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SessionProcessingScenarioCommand"
+            },
+            "minItems": 1
+        },
+        "dependencyTrace": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SessionProcessingScenarioDependencyEvent"
+            }
+        },
+        "expectedState": {
+            "$ref": "#/$defs/SessionProcessingScenarioState"
+        },
+        "expectedEffects": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SessionProcessingScenarioEffect"
+            },
+            "minItems": 1
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "scenarioId",
+        "initialState",
+        "commands",
+        "dependencyTrace",
+        "expectedState",
+        "expectedEffects"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "Portable processing behavior and trust-boundary effects.",
+    "$defs": {
+        "SessionProcessingScenarioId": {
+            "type": "string",
+            "pattern": "^session-processing\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "SessionProcessingScenarioState": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioUnavailableState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioReadyState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioCompletedState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioFailedState"
+                }
+            ]
+        },
+        "SessionProcessingScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "selectSession"
+                        },
+                        {
+                            "type": "string",
+                            "const": "clearSelection"
+                        },
+                        {
+                            "type": "string",
+                            "const": "start"
+                        },
+                        {
+                            "type": "string",
+                            "const": "prepare"
+                        },
+                        {
+                            "type": "string",
+                            "const": "reinstall"
+                        },
+                        {
+                            "type": "string",
+                            "const": "retry"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioDependencyEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "source"
+                        },
+                        {
+                            "type": "string",
+                            "const": "jobs"
+                        },
+                        {
+                            "type": "string",
+                            "const": "runtime"
+                        },
+                        {
+                            "type": "string",
+                            "const": "model"
+                        },
+                        {
+                            "type": "string",
+                            "const": "acousticEvidence"
+                        },
+                        {
+                            "type": "string",
+                            "const": "clock"
+                        },
+                        {
+                            "type": "string",
+                            "const": "identifiers"
+                        },
+                        {
+                            "type": "string",
+                            "const": "engine"
+                        },
+                        {
+                            "type": "string",
+                            "const": "publisher"
+                        }
+                    ]
+                },
+                "effect": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "load"
+                        },
+                        {
+                            "type": "string",
+                            "const": "latest"
+                        },
+                        {
+                            "type": "string",
+                            "const": "resolve"
+                        },
+                        {
+                            "type": "string",
+                            "const": "prepare"
+                        },
+                        {
+                            "type": "string",
+                            "const": "verify"
+                        },
+                        {
+                            "type": "string",
+                            "const": "now"
+                        },
+                        {
+                            "type": "string",
+                            "const": "generateJobId"
+                        },
+                        {
+                            "type": "string",
+                            "const": "generateRevisionId"
+                        },
+                        {
+                            "type": "string",
+                            "const": "create"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transitionRunning"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transcribe"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transitionValidating"
+                        },
+                        {
+                            "type": "string",
+                            "const": "publish"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transitionCompleted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transitionFailed"
+                        }
+                    ]
+                },
+                "outcome": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioEffect": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "networkDisabled"
+                        },
+                        {
+                            "type": "string",
+                            "const": "exactProfileOnly"
+                        },
+                        {
+                            "type": "string",
+                            "const": "oneUntrustedCandidate"
+                        },
+                        {
+                            "type": "string",
+                            "const": "publishedThroughValidator"
+                        },
+                        {
+                            "type": "string",
+                            "const": "selectedAtomically"
+                        },
+                        {
+                            "type": "string",
+                            "const": "noJobCreated"
+                        },
+                        {
+                            "type": "string",
+                            "const": "noEngineLaunch"
+                        },
+                        {
+                            "type": "string",
+                            "const": "noPublication"
+                        },
+                        {
+                            "type": "string",
+                            "const": "noFallback"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioUnavailableState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "unavailable"
+                },
+                "reason": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "noSession"
+                        },
+                        {
+                            "type": "string",
+                            "const": "qualificationBlocked"
+                        },
+                        {
+                            "type": "string",
+                            "const": "runtimeMissing"
+                        },
+                        {
+                            "type": "string",
+                            "const": "runtimeLockMismatch"
+                        },
+                        {
+                            "type": "string",
+                            "const": "modelMissing"
+                        },
+                        {
+                            "type": "string",
+                            "const": "modelCorrupt"
+                        },
+                        {
+                            "type": "string",
+                            "const": "modelLockMismatch"
+                        },
+                        {
+                            "type": "string",
+                            "const": "acousticEvidenceUnavailable"
+                        }
+                    ]
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingRecoveryAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "reason",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioReadyState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "ready"
+                }
+            },
+            "required": [
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioCompletedState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "completed"
+                },
+                "selectedRevisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId"
+                }
+            },
+            "required": [
+                "status",
+                "selectedRevisionId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioFailedState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "failed"
+                },
+                "reason": {
+                    "$ref": "#/$defs/SessionProcessingFailure"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingRecoveryAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "reason",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingRecoveryAction": {
+            "type": "string",
+            "enum": [
+                "prepare",
+                "reinstall",
+                "retry"
+            ]
+        },
+        "TranscriptRevisionId": {
+            "type": "string",
+            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "SessionProcessingFailure": {
+            "type": "string",
+            "enum": [
+                "sourceUnavailable",
+                "jobPersistenceFailed",
+                "engineUnavailable",
+                "engineFailed",
+                "candidateRejected",
+                "publicationFailed",
+                "installedNeedsRefresh"
+            ]
+        }
+    }
+}

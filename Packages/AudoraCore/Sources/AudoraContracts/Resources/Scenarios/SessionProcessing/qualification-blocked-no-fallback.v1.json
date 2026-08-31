@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.qualification-blocked-no-fallback",
+  "initialState": {
+    "status": "unavailable",
+    "reason": "noSession",
+    "actions": []
+  },
+  "commands": [
+    { "kind": "selectSession" },
+    { "kind": "start" }
+  ],
+  "dependencyTrace": [
+    { "port": "source", "effect": "load", "outcome": "available" },
+    { "port": "jobs", "effect": "latest", "outcome": "none" },
+    { "port": "runtime", "effect": "resolve", "outcome": "qualificationBlocked" }
+  ],
+  "expectedState": {
+    "status": "unavailable",
+    "reason": "qualificationBlocked",
+    "actions": []
+  },
+  "expectedEffects": [
+    { "kind": "noJobCreated" },
+    { "kind": "noEngineLaunch" },
+    { "kind": "noPublication" },
+    { "kind": "noFallback" }
+  ]
+}

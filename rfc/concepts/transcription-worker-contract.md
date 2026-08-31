@@ -71,7 +71,8 @@ privacy alone:
   flow that fails if the model is missing;
 - bounded CPU time, output size, stderr, open files, and termination grace;
 - a startup `hello` that identifies protocol/runtime/model/patch versions before
-  audio is accepted.
+  any Job metadata, model capability, or audio capability is accepted. The
+  post-hello `transcribe` request begins Job correlation.
 
 The chosen worker-confinement mechanism must prove these properties in an
 adversarial integration test; the JSONL transport by itself does not enforce them.

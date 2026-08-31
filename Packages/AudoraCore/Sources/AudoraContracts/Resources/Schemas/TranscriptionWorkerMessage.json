@@ -1,0 +1,253 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/TranscriptionWorkerMessage.json",
+    "anyOf": [
+        {
+            "$ref": "#/$defs/TranscriptionWorkerHello"
+        },
+        {
+            "$ref": "#/$defs/TranscriptionWorkerPhase"
+        },
+        {
+            "$ref": "#/$defs/TranscriptionWorkerProgress"
+        },
+        {
+            "$ref": "#/$defs/TranscriptionWorkerCandidateReady"
+        },
+        {
+            "$ref": "#/$defs/TranscriptionWorkerFailed"
+        }
+    ],
+    "description": "Closed set of bounded JSONL messages emitted on worker stdout.",
+    "$defs": {
+        "TranscriptionWorkerHello": {
+            "type": "object",
+            "properties": {
+                "v": {
+                    "type": "number",
+                    "const": 1
+                },
+                "type": {
+                    "type": "string",
+                    "const": "hello"
+                },
+                "qualificationProfileId": {
+                    "$ref": "#/$defs/TranscriptionProfileId"
+                },
+                "engineLockSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                },
+                "runtimeIdentity": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[0-9A-Za-z._-]+$"
+                },
+                "runtimeLockSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                },
+                "modelRevision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[0-9A-Za-z._-]+$"
+                },
+                "compatibilityPatchId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[0-9A-Za-z._-]+$"
+                }
+            },
+            "required": [
+                "v",
+                "type",
+                "qualificationProfileId",
+                "engineLockSha256",
+                "runtimeIdentity",
+                "runtimeLockSha256",
+                "modelRevision",
+                "compatibilityPatchId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "Startup identity emitted before any Job or private input is granted."
+        },
+        "TranscriptionWorkerPhase": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "const": "phase"
+                },
+                "phase": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "loading_model"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transcribing"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "type",
+                "phase"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/TranscriptionWorkerMessageBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptionWorkerProgress": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "const": "progress"
+                },
+                "completed": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "total": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "unit": {
+                    "type": "string",
+                    "const": "window"
+                },
+                "etaSeconds": {
+                    "type": "integer",
+                    "minimum": 0
+                }
+            },
+            "required": [
+                "type",
+                "completed",
+                "total",
+                "unit"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/TranscriptionWorkerMessageBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptionWorkerCandidateReady": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "const": "candidate_ready"
+                },
+                "result": {
+                    "type": "string",
+                    "const": "result.json"
+                },
+                "sha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                }
+            },
+            "required": [
+                "type",
+                "result",
+                "sha256"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/TranscriptionWorkerMessageBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptionWorkerFailed": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "const": "failed"
+                },
+                "error": {
+                    "$ref": "#/$defs/TranscriptionWorkerError"
+                }
+            },
+            "required": [
+                "type",
+                "error"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/TranscriptionWorkerMessageBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptionProfileId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[0-9A-Za-z._-]+$"
+        },
+        "Sha256Hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+        },
+        "TranscriptionWorkerMessageBase": {
+            "type": "object",
+            "properties": {
+                "v": {
+                    "type": "number",
+                    "const": 1
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                }
+            },
+            "required": [
+                "v",
+                "jobId"
+            ]
+        },
+        "TranscriptionWorkerError": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                },
+                "retryable": {
+                    "type": "boolean"
+                }
+            },
+            "required": [
+                "code",
+                "retryable"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptionJobId": {
+            "type": "string",
+            "pattern": "^job-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        }
+    }
+}

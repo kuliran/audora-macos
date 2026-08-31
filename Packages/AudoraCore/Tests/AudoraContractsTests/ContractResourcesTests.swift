@@ -148,7 +148,11 @@ final class ContractResourcesTests: XCTestCase {
     func testTranscriptRevisionSchemaAndGoldenPreserveDisplayAndEvidenceSyntax() throws {
         let schema = try jsonObject(.transcriptRevisionSchema)
         let definitions = try XCTUnwrap(schema["$defs"] as? [String: Any])
-        XCTAssertNotNil(schema["unevaluatedProperties"])
+        XCTAssertEqual((schema["anyOf"] as? [[String: Any]])?.count, 2)
+        for name in ["LegacyTranscriptRevision", "QualifiedTranscriptRevision"] {
+            let variant = try XCTUnwrap(definitions[name] as? [String: Any])
+            XCTAssertNotNil(variant["unevaluatedProperties"], name)
+        }
         let lineProperties = try schemaProperties(
             "PersistedTranscriptLine",
             in: definitions
@@ -171,6 +175,10 @@ final class ContractResourcesTests: XCTestCase {
         )
 
         let revision = try jsonObject(.transcriptRevisionExample)
+        let legacyRevision = try jsonObject(.legacyTranscriptRevisionExample)
+        XCTAssertEqual(revision["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(legacyRevision["schemaVersion"] as? Int, 1)
+        XCTAssertNil((legacyRevision["engine"] as? [String: Any])?["qualification"])
         let lines = try XCTUnwrap(revision["lines"] as? [[String: Any]])
         let words = try XCTUnwrap(lines.first?["words"] as? [[String: Any]])
         let events = try XCTUnwrap(revision["audioEvents"] as? [[String: Any]])
@@ -196,6 +204,67 @@ final class ContractResourcesTests: XCTestCase {
             splitWords.first?["displayRange"] as? [String: Any]
         )
         XCTAssertEqual(splitRange["endUtf8Byte"] as? Int, 2)
+    }
+
+    func testSessionProcessingContractsSealOfflineQualificationBoundary() throws {
+        let request = try jsonObject(.transcriptionWorkerRequestSchema)
+        let requestProperties = try XCTUnwrap(request["properties"] as? [String: Any])
+        XCTAssertEqual(
+            (requestProperties["networkAccess"] as? [String: Any])?["const"] as? String,
+            "disabled"
+        )
+        XCTAssertEqual(
+            (requestProperties["sources"] as? [String: Any])?["maxItems"] as? Int,
+            1
+        )
+        let requestDefinitions = try XCTUnwrap(request["$defs"] as? [String: Any])
+        let qualification = try schemaProperties(
+            "TranscriptionWorkerQualification",
+            in: requestDefinitions
+        )
+        XCTAssertNotNil(qualification["engineLockSha256"])
+        XCTAssertNotNil(qualification["runtimeIdentity"])
+        XCTAssertNotNil(qualification["runtimeLockSha256"])
+        XCTAssertNotNil(qualification["compatibilityPatchId"])
+
+        let candidate = try jsonObject(.transcriptionCandidateArtifactSchema)
+        let candidateDefinitions = try XCTUnwrap(candidate["$defs"] as? [String: Any])
+        let candidateEngine = try schemaProperties(
+            "CandidateEngineProvenance",
+            in: candidateDefinitions
+        )
+        XCTAssertNotNil(candidateEngine["qualification"])
+        XCTAssertNil(candidateEngine["usePolicy"])
+
+        let job = try jsonObject(.transcriptionJobManifestSchema)
+        let jobDefinitions = try XCTUnwrap(job["$defs"] as? [String: Any])
+        let jobState = try XCTUnwrap(
+            jobDefinitions["TranscriptionJobState"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(jobState["enum"] as? [String] ?? []),
+            [
+                "queued", "preparing", "running", "validating", "completed",
+                "failed", "cancelled", "interrupted",
+            ]
+        )
+
+        let blocked = try jsonObject(.sessionProcessingQualificationBlockedScenario)
+        let blockedEffects = try XCTUnwrap(
+            blocked["expectedEffects"] as? [[String: Any]]
+        )
+        XCTAssertEqual(
+            Set(blockedEffects.compactMap { $0["kind"] as? String }),
+            ["noJobCreated", "noEngineLaunch", "noPublication", "noFallback"]
+        )
+        let success = try jsonObject(.sessionProcessingQualifiedSuccessScenario)
+        let successEffects = try XCTUnwrap(
+            success["expectedEffects"] as? [[String: Any]]
+        )
+        XCTAssertTrue(successEffects.contains { $0["kind"] as? String == "networkDisabled" })
+        XCTAssertTrue(
+            successEffects.contains { $0["kind"] as? String == "publishedThroughValidator" }
+        )
     }
 
     func testImportedSessionGoldensPreservePortableV1Fields() throws {

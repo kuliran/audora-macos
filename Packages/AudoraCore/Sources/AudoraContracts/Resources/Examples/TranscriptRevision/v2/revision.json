@@ -1,0 +1,100 @@
+{
+  "audioEvents": [
+    {
+      "audioEventId": "a000000",
+      "audioSourceId": "src-0001",
+      "category": "silentPause",
+      "timeRange": {
+        "endMs": 4900,
+        "startMs": 1500
+      }
+    }
+  ],
+  "audioFingerprintSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "candidateArtifactSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "createdAt": "2026-08-30T12:10:00.000Z",
+  "durationMs": 12000,
+  "engine": {
+    "decodingOptionsSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "language": "en",
+    "mode": "verbatim",
+    "model": "small",
+    "provider": "crisperwhisper",
+    "qualification": {
+      "compatibilityPatchId": "synthetic-progress-patch-v1",
+      "engineLockSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "qualificationProfileId": "synthetic-qualified-v1",
+      "runtimeIdentity": "synthetic-runtime-v1",
+      "runtimeLockSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schemaVersion": 1
+    },
+    "revision": "pinned-revision",
+    "usePolicy": {
+      "commercialUseAllowed": false,
+      "coveredArtifacts": [
+        "transcriptRevision"
+      ],
+      "externalProcessingAllowed": false,
+      "licenseReference": "pinned-license-reference",
+      "licenseSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "policyId": "crisper-evaluation-v1",
+      "privateExportAllowed": true,
+      "privateLocalUseAllowed": true,
+      "publicDistributionAllowed": false
+    }
+  },
+  "jobId": "job-20260830T120500000Z-5GHJ",
+  "lines": [
+    {
+      "audioSourceId": "src-0001",
+      "lineId": "l000000",
+      "order": 0,
+      "text": "Hello, wörld.",
+      "timeRange": {
+        "endMs": 1500,
+        "startMs": 0
+      },
+      "words": [
+        {
+          "confidence": 0.98,
+          "displayRange": {
+            "endUtf8Byte": 5,
+            "startUtf8Byte": 0
+          },
+          "ordinal": 0,
+          "text": "Hello",
+          "timeRange": {
+            "endMs": 500,
+            "startMs": 100
+          },
+          "wordId": "w000000",
+          "wordKind": "lexical"
+        },
+        {
+          "confidence": 0.97,
+          "displayRange": {
+            "endUtf8Byte": 13,
+            "startUtf8Byte": 7
+          },
+          "ordinal": 1,
+          "text": "wörld",
+          "timeRange": {
+            "endMs": 1200,
+            "startMs": 600
+          },
+          "wordId": "w000001",
+          "wordKind": "lexical"
+        }
+      ]
+    }
+  ],
+  "revisionId": "trv-20260830T121000000Z-4FGH",
+  "schemaVersion": 2,
+  "sessionId": "ses-20260830T120000000Z-3DEF",
+  "sourceFingerprints": [
+    {
+      "audioSourceId": "src-0001",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

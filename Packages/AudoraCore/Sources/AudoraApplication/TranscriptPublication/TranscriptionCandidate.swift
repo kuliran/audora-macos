@@ -115,6 +115,7 @@ public struct CandidateTranscriptEngineProvenance: Equatable, Sendable {
     public let language: String
     public let mode: String
     public let decodingOptionsSHA256: String
+    public let qualification: CandidateTranscriptEngineQualification
 
     public init(
         provider: String,
@@ -122,7 +123,8 @@ public struct CandidateTranscriptEngineProvenance: Equatable, Sendable {
         revision: String,
         language: String,
         mode: String,
-        decodingOptionsSHA256: String
+        decodingOptionsSHA256: String,
+        qualification: CandidateTranscriptEngineQualification
     ) {
         self.provider = provider
         self.model = model
@@ -130,6 +132,34 @@ public struct CandidateTranscriptEngineProvenance: Equatable, Sendable {
         self.language = language
         self.mode = mode
         self.decodingOptionsSHA256 = decodingOptionsSHA256
+        self.qualification = qualification
+    }
+}
+
+/// Semantically untrusted echo of the worker startup identity. Application
+/// compares every field against the trusted qualified profile before promotion.
+public struct CandidateTranscriptEngineQualification: Equatable, Sendable {
+    public let schemaVersion: UInt32
+    public let qualificationProfileID: String
+    public let engineLockSHA256: String
+    public let runtimeIdentity: String
+    public let runtimeLockSHA256: String
+    public let compatibilityPatchID: String
+
+    public init(
+        schemaVersion: UInt32,
+        qualificationProfileID: String,
+        engineLockSHA256: String,
+        runtimeIdentity: String,
+        runtimeLockSHA256: String,
+        compatibilityPatchID: String
+    ) {
+        self.schemaVersion = schemaVersion
+        self.qualificationProfileID = qualificationProfileID
+        self.engineLockSHA256 = engineLockSHA256
+        self.runtimeIdentity = runtimeIdentity
+        self.runtimeLockSHA256 = runtimeLockSHA256
+        self.compatibilityPatchID = compatibilityPatchID
     }
 }
 

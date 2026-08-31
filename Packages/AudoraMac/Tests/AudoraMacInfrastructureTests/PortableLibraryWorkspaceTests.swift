@@ -6,6 +6,60 @@ import Foundation
 import XCTest
 
 final class PortableLibraryWorkspaceTests: XCTestCase {
+    func testProcessingScopeDoesNotReviveAfterSwitchingAwayAndBack() async throws {
+        try await withTwoLibraries { first, second, firstAuthority, _ in
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [first, second, first]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let acquired = await workspace.acquireSessionProcessingScope(
+                for: LibraryScope(libraryID: firstAuthority.manifest.libraryID)
+            )
+            let scope = try XCTUnwrap(acquired)
+
+            _ = await workspace.chooseLibrary()
+            _ = await workspace.chooseLibrary()
+
+            let current = await workspace.isCurrentSessionProcessingScope(
+                scope.identity
+            )
+            XCTAssertFalse(current)
+        }
+    }
+
+    func testProcessingScopeRejectsSamePathRootReplacement() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Root.audoralibrary")
+            let moved = parent.appendingPathComponent("Original.audoralibrary")
+            let seed = try makeSeed()
+            let authority = try PortableLibraryPersistence().create(at: root, seed: seed)
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let acquired = await workspace.acquireSessionProcessingScope(
+                for: LibraryScope(libraryID: authority.manifest.libraryID)
+            )
+            let scope = try XCTUnwrap(acquired)
+
+            try FileManager.default.moveItem(at: root, to: moved)
+            _ = try PortableLibraryPersistence().create(at: root, seed: seed)
+
+            let current = await workspace.isCurrentSessionProcessingScope(
+                scope.identity
+            )
+            XCTAssertFalse(current)
+        }
+    }
+
     func testSuccessfulSwitchAcquiresCandidateBeforeReleasingOldLease() async throws {
         try await withTwoLibraries { first, second, firstAuthority, secondAuthority in
             let access = RecordingAccessGrantor()

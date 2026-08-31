@@ -7,6 +7,7 @@ public struct LibraryRootView: View {
     @StateObject private var audioImportModel: AudioImportPresentationModel
     @StateObject private var recordingModel: RecordingPresentationModel
     @ObservedObject private var chatDispatcher: ChatCommandDispatcher
+    @StateObject private var sessionProcessingModel: SessionProcessingPresentationModel
     @Environment(\.openWindow) private var openWindow
     private let librarySelectionDispatcher: LibrarySelectionCommandDispatcher
     private let windowCoordinator: MainWindowCoordinator
@@ -15,6 +16,7 @@ public struct LibraryRootView: View {
         feature: any LibraryFeature,
         audioImportFeature: any AudioImportFeature,
         recordingFeature: any RecordingFeature,
+        sessionProcessingFeature: any SessionProcessingFeature,
         chatDispatcher: ChatCommandDispatcher,
         librarySelectionDispatcher: LibrarySelectionCommandDispatcher,
         windowCoordinator: MainWindowCoordinator
@@ -25,6 +27,11 @@ public struct LibraryRootView: View {
         )
         _recordingModel = StateObject(
             wrappedValue: RecordingPresentationModel(feature: recordingFeature)
+        )
+        _sessionProcessingModel = StateObject(
+            wrappedValue: SessionProcessingPresentationModel(
+                feature: sessionProcessingFeature
+            )
         )
         _chatDispatcher = ObservedObject(wrappedValue: chatDispatcher)
         self.librarySelectionDispatcher = librarySelectionDispatcher
@@ -70,6 +77,7 @@ public struct LibraryRootView: View {
                     .disabled(!interactionAvailability.canUseAudioImportControls)
                 RecordingView(model: recordingModel)
                     .disabled(!interactionAvailability.canUseRecordingControls)
+                SessionProcessingView(model: sessionProcessingModel)
                 Divider()
                 ChatRootView(
                     dispatcher: chatDispatcher,
@@ -119,6 +127,9 @@ public struct LibraryRootView: View {
         .task {
             await recordingModel.start()
         }
+        .task {
+            await sessionProcessingModel.start()
+        }
         .onChange(of: activeLibraryID) {
             audioImportModel.send(.clearResult)
         }
@@ -132,6 +143,13 @@ public struct LibraryRootView: View {
                 recordingModel.selectLibrary(.readOnly)
             case .awaitingBootstrap, .noLibrarySelected, nil:
                 recordingModel.selectLibrary(.none)
+            }
+        }
+        .onChange(of: processingSelection, initial: true) { _, selection in
+            if let selection {
+                sessionProcessingModel.selectSession(selection)
+            } else {
+                sessionProcessingModel.clearSelection()
             }
         }
     }
@@ -189,6 +207,26 @@ public struct LibraryRootView: View {
     private var activeLibraryID: String? {
         guard case let .active(library) = model.snapshot?.selection else { return nil }
         return library.libraryID.rawValue
+    }
+
+    private var processingSelection: SessionProcessingSelection? {
+        guard case let .active(library) = model.snapshot?.selection else { return nil }
+        let scope = LibraryScope(libraryID: library.libraryID)
+        if case let .succeeded(snapshot) = audioImportModel.snapshot?.status {
+            return SessionProcessingSelection(
+                scope: scope,
+                sessionID: snapshot.session.sessionID
+            )
+        }
+        if case let .completed(snapshot, _) = recordingModel.featureState,
+           snapshot.receipt.libraryID == library.libraryID
+        {
+            return SessionProcessingSelection(
+                scope: scope,
+                sessionID: snapshot.receipt.sessionID
+            )
+        }
+        return nil
     }
 
     private var interactionAvailability: LibraryInteractionAvailability {

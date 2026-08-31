@@ -7,8 +7,22 @@ namespace Audora.Contracts {
   /** Complete immutable canonical transcription selected only after validation. */
   @jsonSchema
   @id("TranscriptRevision.json")
-  model TranscriptRevision {
+  union TranscriptRevision {
+    legacyV1: LegacyTranscriptRevision,
+    qualifiedV2: QualifiedTranscriptRevision,
+  }
+
+  model LegacyTranscriptRevision extends TranscriptRevisionBody {
     schemaVersion: 1;
+    engine: LegacyTranscriptEngineProvenance;
+  }
+
+  model QualifiedTranscriptRevision extends TranscriptRevisionBody {
+    schemaVersion: 2;
+    engine: QualifiedTranscriptEngineProvenance;
+  }
+
+  model TranscriptRevisionBody {
     revisionId: TranscriptRevisionId;
     sessionId: SessionId;
     jobId: TranscriptionJobId;
@@ -21,7 +35,6 @@ namespace Audora.Contracts {
     sourceFingerprints: TranscriptSourceFingerprint[];
 
     candidateArtifactSha256: Sha256Hex;
-    engine: TranscriptEngineProvenance;
 
     @minItems(1)
     @maxItems(100000)
@@ -36,7 +49,16 @@ namespace Audora.Contracts {
     sha256: Sha256Hex;
   }
 
-  model TranscriptEngineProvenance {
+  model LegacyTranscriptEngineProvenance {
+    ...TranscriptEngineProvenanceBody;
+  }
+
+  model QualifiedTranscriptEngineProvenance {
+    ...TranscriptEngineProvenanceBody;
+    qualification: TranscriptEngineQualification;
+  }
+
+  model TranscriptEngineProvenanceBody {
     provider: "crisperwhisper";
     `model`: "small";
 
@@ -49,6 +71,30 @@ namespace Audora.Contracts {
     mode: "verbatim";
     decodingOptionsSha256: Sha256Hex;
     usePolicy: TranscriptEngineUsePolicy;
+  }
+
+  /** Exact qualified runtime identity retained with immutable derivation evidence. */
+  model TranscriptEngineQualification {
+    schemaVersion: 1;
+
+    @minLength(1)
+    @maxLength(128)
+    @pattern("^[0-9A-Za-z._-]+$")
+    qualificationProfileId: string;
+
+    engineLockSha256: Sha256Hex;
+
+    @minLength(1)
+    @maxLength(128)
+    @pattern("^[0-9A-Za-z._-]+$")
+    runtimeIdentity: string;
+
+    runtimeLockSha256: Sha256Hex;
+
+    @minLength(1)
+    @maxLength(128)
+    @pattern("^[0-9A-Za-z._-]+$")
+    compatibilityPatchId: string;
   }
 
   model PersistedTranscriptLine {

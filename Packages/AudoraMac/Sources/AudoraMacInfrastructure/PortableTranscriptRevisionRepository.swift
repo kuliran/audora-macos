@@ -17,6 +17,20 @@ public enum TranscriptRevisionPersistenceFaultPoint: Equatable, Sendable {
     case afterSessionDirectoryFlush
 }
 
+enum PortableSessionTranscriptionRead: Sendable {
+    case available(PortableVerifiedSessionAudio)
+    case unavailable
+    case integrityMismatch
+}
+
+struct PortableVerifiedSessionAudio: Sendable {
+    let durationMilliseconds: UInt64
+    let audioFingerprint: AudioFingerprint
+    let sourceFingerprints: [TranscriptSourceFingerprint]
+    let expectedSelectedRevisionID: TranscriptRevisionID?
+    let canonicalWAV: Data
+}
+
 /// The one persistence boundary that turns a validated Transcript Revision into
 /// selected portable Session state. Revision bytes are installed immutably before
 /// the Session manifest's logical compare-and-swap commit. All Audora Session
@@ -50,6 +64,16 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         _ revision: TranscriptRevision,
         expectedSelectedRevisionID: TranscriptRevisionID?
     ) async throws -> ReopenedTranscriptRevisionSnapshot {
+        try publishAndSelectSynchronously(
+            revision,
+            expectedSelectedRevisionID: expectedSelectedRevisionID
+        )
+    }
+
+    func publishAndSelectSynchronously(
+        _ revision: TranscriptRevision,
+        expectedSelectedRevisionID: TranscriptRevisionID?
+    ) throws -> ReopenedTranscriptRevisionSnapshot {
         try withLockedSession(sessionID: revision.sessionID, exclusive: true) {
             authority in
             let sessionDescriptor = authority.sessionDescriptor
@@ -65,7 +89,7 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                 try validate(revision, against: loaded.audio)
 
                 let revisionData = try Self.deterministicJSON(
-                    TranscriptRevisionDTO(revision)
+                    try TranscriptRevisionDTO(revision)
                 )
                 guard revisionData.count <= Self.maximumRevisionBytes else {
                     throw TranscriptRevisionRepositoryFailure.writeFailed
@@ -177,6 +201,12 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
     public func reopenSelected(
         sessionID: SessionID
     ) async throws -> ReopenedTranscriptRevisionSnapshot {
+        try reopenSelectedSynchronously(sessionID: sessionID)
+    }
+
+    func reopenSelectedSynchronously(
+        sessionID: SessionID
+    ) throws -> ReopenedTranscriptRevisionSnapshot {
         try withLockedSession(sessionID: sessionID, exclusive: false) {
             let snapshot = try reopenSelectedLocked(
                 sessionID: sessionID,
@@ -184,6 +214,66 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             )
             try revalidate($0, expectedSessionID: sessionID)
             return snapshot
+        }
+    }
+
+    /// Reconstructs trusted processing input from the same descriptor-confined
+    /// Session boundary used for Revision publication. Canonical bytes remain
+    /// in Infrastructure and are copied into an opaque execution capability by
+    /// `PortableSessionProcessingWorkspace`.
+    func loadTranscriptionAudio(
+        for selection: SessionProcessingSelection
+    ) async -> PortableSessionTranscriptionRead {
+        loadTranscriptionAudioSynchronously(for: selection)
+    }
+
+    func loadTranscriptionAudioSynchronously(
+        for selection: SessionProcessingSelection
+    ) -> PortableSessionTranscriptionRead {
+        guard selection.scope.libraryID == libraryID else { return .unavailable }
+        do {
+            return try withLockedSession(
+                sessionID: selection.sessionID,
+                exclusive: false
+            ) { authority in
+                let loaded = try loadSession(
+                    sessionID: selection.sessionID,
+                    sessionDescriptor: authority.sessionDescriptor
+                )
+                let audioDescriptor = try readConfined.openDirectory(
+                    named: "audio",
+                    under: authority.sessionDescriptor
+                )
+                defer { Darwin.close(audioDescriptor) }
+                let wav = try readConfined.boundedData(
+                    named: "audio.wav",
+                    under: audioDescriptor,
+                    maximumBytes: Int(CanonicalAudioFormat.maximumFrameCount * 2 + 44)
+                )
+                guard Self.sha256(wav) == loaded.audio.audioFingerprint.sha256,
+                      let frameCount = Self.validateCanonicalWAV(wav),
+                      try CanonicalAudioFormat.durationMilliseconds(
+                        forFrameCount: frameCount
+                      ) == loaded.audio.durationMilliseconds
+                else {
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                }
+                try revalidate(authority, expectedSessionID: selection.sessionID)
+                return .available(
+                    PortableVerifiedSessionAudio(
+                        durationMilliseconds: loaded.audio.durationMilliseconds,
+                        audioFingerprint: loaded.audio.audioFingerprint,
+                        sourceFingerprints: loaded.audio.sourceFingerprints,
+                        expectedSelectedRevisionID: loaded.manifest.selectedRevisionID,
+                        canonicalWAV: wav
+                    )
+                )
+            }
+        } catch TranscriptRevisionRepositoryFailure.sessionUnavailable,
+                TranscriptRevisionRepositoryFailure.unsupportedSchema {
+            return .unavailable
+        } catch {
+            return .integrityMismatch
         }
     }
 
@@ -1119,6 +1209,44 @@ private extension PortableTranscriptRevisionRepository {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
+    static func validateCanonicalWAV(_ data: Data) -> UInt64? {
+        guard data.count >= 46,
+              Array(data[0..<4]) == Array("RIFF".utf8),
+              Array(data[8..<12]) == Array("WAVE".utf8),
+              Array(data[12..<16]) == Array("fmt ".utf8),
+              littleEndianUInt32(data, at: 4) == UInt32(data.count - 8),
+              littleEndianUInt32(data, at: 16) == 16,
+              littleEndianUInt16(data, at: 20) == 1,
+              littleEndianUInt16(data, at: 22) == 1,
+              littleEndianUInt32(data, at: 24) == CanonicalAudioFormat.sampleRateHz,
+              littleEndianUInt32(data, at: 28) == 32_000,
+              littleEndianUInt16(data, at: 32) == 2,
+              littleEndianUInt16(data, at: 34) == 16,
+              Array(data[36..<40]) == Array("data".utf8),
+              let payloadBytes = littleEndianUInt32(data, at: 40),
+              Int(payloadBytes) == data.count - 44,
+              payloadBytes.isMultiple(of: 2)
+        else { return nil }
+        let frameCount = UInt64(payloadBytes / 2)
+        guard frameCount > 0, frameCount <= CanonicalAudioFormat.maximumFrameCount else {
+            return nil
+        }
+        return frameCount
+    }
+
+    static func littleEndianUInt16(_ data: Data, at offset: Int) -> UInt16? {
+        guard offset >= 0, offset + 2 <= data.count else { return nil }
+        return UInt16(data[offset]) | UInt16(data[offset + 1]) << 8
+    }
+
+    static func littleEndianUInt32(_ data: Data, at offset: Int) -> UInt32? {
+        guard offset >= 0, offset + 4 <= data.count else { return nil }
+        return UInt32(data[offset]) |
+            UInt32(data[offset + 1]) << 8 |
+            UInt32(data[offset + 2]) << 16 |
+            UInt32(data[offset + 3]) << 24
+    }
+
     static func flush(_ descriptor: Int32) throws {
         while fsync(descriptor) != 0 {
             if errno == EINTR { continue }
@@ -1137,10 +1265,10 @@ private extension PortableTranscriptRevisionRepository {
         else {
             throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
         }
-        if schemaVersion.doubleValue > 1 {
+        if schemaVersion.doubleValue > 2 {
             throw TranscriptRevisionRepositoryFailure.unsupportedSchema
         }
-        guard schemaVersion.doubleValue == 1 else {
+        guard schemaVersion.doubleValue == 1 || schemaVersion.doubleValue == 2 else {
             throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
         }
         try requireExactKeys(root, [
@@ -1156,10 +1284,20 @@ private extension PortableTranscriptRevisionRepository {
             try requireExactKeys(source, ["audioSourceId", "sha256"])
         }
         let engine = try dictionary(root["engine"])
-        try requireExactKeys(engine, [
+        let commonEngineKeys: Set<String> = [
             "provider", "model", "revision", "language", "mode",
             "decodingOptionsSha256", "usePolicy",
-        ])
+        ]
+        if schemaVersion.doubleValue == 1 {
+            try requireExactKeys(engine, commonEngineKeys)
+        } else {
+            try requireExactKeys(engine, commonEngineKeys.union(["qualification"]))
+            let qualification = try dictionary(engine["qualification"])
+            try requireExactKeys(qualification, [
+                "schemaVersion", "qualificationProfileId", "engineLockSha256",
+                "runtimeIdentity", "runtimeLockSha256", "compatibilityPatchId",
+            ])
+        }
         let usePolicy = try dictionary(engine["usePolicy"])
         try requireExactKeys(usePolicy, [
             "policyId", "coveredArtifacts", "privateLocalUseAllowed",
@@ -1259,8 +1397,11 @@ private struct TranscriptRevisionDTO: Codable {
     let lines: [PersistedTranscriptLineDTO]
     let audioEvents: [PersistedTranscriptAudioEventDTO]
 
-    init(_ revision: TranscriptRevision) {
-        schemaVersion = 1
+    init(_ revision: TranscriptRevision) throws {
+        guard revision.engine.qualification != nil else {
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
+        schemaVersion = 2
         revisionId = revision.revisionID.rawValue
         sessionId = revision.sessionID.rawValue
         jobId = revision.jobID.rawValue
@@ -1271,7 +1412,7 @@ private struct TranscriptRevisionDTO: Codable {
             TranscriptSourceFingerprintDTO.init
         )
         candidateArtifactSha256 = revision.candidateArtifactFingerprint.sha256
-        engine = TranscriptEngineProvenanceDTO(revision.engine)
+        engine = try TranscriptEngineProvenanceDTO(revision.engine)
         lines = revision.lines.map(PersistedTranscriptLineDTO.init)
         audioEvents = revision.audioEvents.map(PersistedTranscriptAudioEventDTO.init)
     }
@@ -1294,16 +1435,39 @@ private struct TranscriptEngineProvenanceDTO: Codable {
     let language: String
     let mode: String
     let decodingOptionsSha256: String
+    let qualification: TranscriptEngineQualificationDTO?
     let usePolicy: TranscriptEngineUsePolicyDTO
 
-    init(_ engine: TranscriptEngineProvenance) {
+    init(_ engine: TranscriptEngineProvenance) throws {
+        guard let exactQualification = engine.qualification else {
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
         provider = engine.provider
         model = engine.model
         revision = engine.revision
         language = engine.language
         mode = engine.mode
         decodingOptionsSha256 = engine.decodingOptionsSHA256
+        qualification = TranscriptEngineQualificationDTO(exactQualification)
         usePolicy = TranscriptEngineUsePolicyDTO(engine.usePolicy)
+    }
+}
+
+private struct TranscriptEngineQualificationDTO: Codable {
+    let schemaVersion: UInt32
+    let qualificationProfileId: String
+    let engineLockSha256: String
+    let runtimeIdentity: String
+    let runtimeLockSha256: String
+    let compatibilityPatchId: String
+
+    init(_ qualification: TranscriptEngineQualification) {
+        schemaVersion = TranscriptEngineQualification.schemaVersion
+        qualificationProfileId = qualification.qualificationProfileID
+        engineLockSha256 = qualification.engineLockSHA256
+        runtimeIdentity = qualification.runtimeIdentity
+        runtimeLockSha256 = qualification.runtimeLockSHA256
+        compatibilityPatchId = qualification.compatibilityPatchID
     }
 }
 
@@ -1408,7 +1572,7 @@ private extension PortableTranscriptRevisionRepository {
         do {
             try validateRevisionJSONShape(data)
             let dto = try JSONDecoder().decode(TranscriptRevisionDTO.self, from: data)
-            guard dto.schemaVersion == 1 else {
+            guard dto.schemaVersion == 1 || dto.schemaVersion == 2 else {
                 throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
             }
             let usePolicyDTO = dto.engine.usePolicy
@@ -1431,15 +1595,45 @@ private extension PortableTranscriptRevisionRepository {
                 licenseReference: usePolicyDTO.licenseReference,
                 licenseSHA256: usePolicyDTO.licenseSha256
             )
-            let engine = try TranscriptEngineProvenance(
-                provider: dto.engine.provider,
-                model: dto.engine.model,
-                revision: dto.engine.revision,
-                language: dto.engine.language,
-                mode: dto.engine.mode,
-                decodingOptionsSHA256: dto.engine.decodingOptionsSha256,
-                usePolicy: usePolicy
-            )
+            let engine: TranscriptEngineProvenance
+            if dto.schemaVersion == 1 {
+                guard dto.engine.qualification == nil else {
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                }
+                engine = try TranscriptEngineProvenance.reopeningLegacyV1(
+                    provider: dto.engine.provider,
+                    model: dto.engine.model,
+                    revision: dto.engine.revision,
+                    language: dto.engine.language,
+                    mode: dto.engine.mode,
+                    decodingOptionsSHA256: dto.engine.decodingOptionsSha256,
+                    usePolicy: usePolicy
+                )
+            } else {
+                guard let qualificationDTO = dto.engine.qualification,
+                      qualificationDTO.schemaVersion ==
+                        TranscriptEngineQualification.schemaVersion
+                else {
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                }
+                let qualification = try TranscriptEngineQualification(
+                    qualificationProfileID: qualificationDTO.qualificationProfileId,
+                    engineLockSHA256: qualificationDTO.engineLockSha256,
+                    runtimeIdentity: qualificationDTO.runtimeIdentity,
+                    runtimeLockSHA256: qualificationDTO.runtimeLockSha256,
+                    compatibilityPatchID: qualificationDTO.compatibilityPatchId
+                )
+                engine = try TranscriptEngineProvenance(
+                    provider: dto.engine.provider,
+                    model: dto.engine.model,
+                    revision: dto.engine.revision,
+                    language: dto.engine.language,
+                    mode: dto.engine.mode,
+                    decodingOptionsSHA256: dto.engine.decodingOptionsSha256,
+                    qualification: qualification,
+                    usePolicy: usePolicy
+                )
+            }
             return try TranscriptRevision(
                 revisionID: TranscriptRevisionID(dto.revisionId),
                 sessionID: SessionID(dto.sessionId),

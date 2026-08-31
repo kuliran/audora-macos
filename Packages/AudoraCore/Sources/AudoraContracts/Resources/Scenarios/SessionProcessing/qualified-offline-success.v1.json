@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.qualified-offline-success",
+  "initialState": {
+    "status": "unavailable",
+    "reason": "noSession",
+    "actions": []
+  },
+  "commands": [
+    { "kind": "selectSession" },
+    { "kind": "start" }
+  ],
+  "dependencyTrace": [
+    { "port": "source", "effect": "load", "outcome": "available" },
+    { "port": "jobs", "effect": "latest", "outcome": "none" },
+    { "port": "runtime", "effect": "resolve", "outcome": "qualified" },
+    { "port": "model", "effect": "verify", "outcome": "ready" },
+    { "port": "acousticEvidence", "effect": "resolve", "outcome": "qualified" },
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:06:00.000Z" },
+    { "port": "identifiers", "effect": "generateJobId", "outcome": "job-20260830T120500000Z-5GHJ" },
+    { "port": "identifiers", "effect": "generateRevisionId", "outcome": "trv-20260830T120600000Z-6JKM" },
+    { "port": "jobs", "effect": "create", "outcome": "written" },
+    { "port": "jobs", "effect": "transitionRunning", "outcome": "written" },
+    { "port": "engine", "effect": "transcribe", "outcome": "candidate" },
+    { "port": "jobs", "effect": "transitionValidating", "outcome": "written" },
+    { "port": "publisher", "effect": "publish", "outcome": "published" },
+    { "port": "jobs", "effect": "transitionCompleted", "outcome": "written" }
+  ],
+  "expectedState": {
+    "status": "completed",
+    "selectedRevisionId": "trv-20260830T120600000Z-6JKM"
+  },
+  "expectedEffects": [
+    { "kind": "networkDisabled" },
+    { "kind": "exactProfileOnly" },
+    { "kind": "oneUntrustedCandidate" },
+    { "kind": "publishedThroughValidator" },
+    { "kind": "selectedAtomically" }
+  ]
+}

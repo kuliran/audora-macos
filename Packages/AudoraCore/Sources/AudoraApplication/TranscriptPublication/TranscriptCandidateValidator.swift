@@ -131,12 +131,25 @@ public struct TranscriptCandidateValidator: Sendable {
         guard candidateSourceIDs == Set(expectedSources.keys) else {
             throw TranscriptCandidateValidationError.integrityMismatch
         }
-        guard candidate.engine.provider == context.engine.provider,
+        guard let trustedQualification = context.engine.qualification,
+              candidate.engine.provider == context.engine.provider,
               candidate.engine.model == context.engine.model,
               candidate.engine.revision == context.engine.revision,
               candidate.engine.language == context.engine.language,
               candidate.engine.mode == context.engine.mode,
-              candidate.engine.decodingOptionsSHA256 == context.engine.decodingOptionsSHA256
+              candidate.engine.decodingOptionsSHA256 == context.engine.decodingOptionsSHA256,
+              candidate.engine.qualification.schemaVersion ==
+                TranscriptEngineQualification.schemaVersion,
+              candidate.engine.qualification.qualificationProfileID ==
+                trustedQualification.qualificationProfileID,
+              candidate.engine.qualification.engineLockSHA256 ==
+                trustedQualification.engineLockSHA256,
+              candidate.engine.qualification.runtimeIdentity ==
+                trustedQualification.runtimeIdentity,
+              candidate.engine.qualification.runtimeLockSHA256 ==
+                trustedQualification.runtimeLockSHA256,
+              candidate.engine.qualification.compatibilityPatchID ==
+                trustedQualification.compatibilityPatchID
         else {
             throw TranscriptCandidateValidationError.engineMismatch
         }
