@@ -80,6 +80,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case sessionProcessingCancellationScenario
     case sessionProcessingRelaunchInterruptedScenario
     case sessionProcessingRelaunchValidationScenario
+    case sessionProcessingRelaunchStaleSelectionScenario
     case sessionProcessingProgressScenario
 
     case portableLibraryManifestExample
@@ -301,6 +302,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "relaunch-running-absent-interrupted.v1.json"
         case .sessionProcessingRelaunchValidationScenario:
             "relaunch-validating-resumes-idempotently.v1.json"
+        case .sessionProcessingRelaunchStaleSelectionScenario:
+            "relaunch-validating-stale-selection.v1.json"
         case .sessionProcessingProgressScenario:
             "progress-monotonic-eta-approximate.v1.json"
         case .portableLibraryManifestExample:
@@ -466,6 +469,7 @@ public enum ContractResource: CaseIterable, Sendable {
              .sessionProcessingCancellationScenario,
              .sessionProcessingRelaunchInterruptedScenario,
              .sessionProcessingRelaunchValidationScenario,
+             .sessionProcessingRelaunchStaleSelectionScenario,
              .sessionProcessingProgressScenario:
             "Scenarios/SessionProcessing"
         case .portableLibraryManifestExample, .portableLibraryPreferencesExample,

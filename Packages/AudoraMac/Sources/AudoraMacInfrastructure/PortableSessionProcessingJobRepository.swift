@@ -256,13 +256,22 @@ private extension PortableSessionProcessingJobRepository {
         let profileId: String
         let createdAt: String
         let state: String
+        let expectedSelectedRevisionId: String?
         let cancellationAuthorityId: String
         let cancellationRequestedAt: String?
         let candidateArtifactSha256: String?
         let failure: String?
 
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion, jobId, sessionId, revisionId, profileId, createdAt
+            case state, expectedSelectedRevisionId, cancellationAuthorityId
+            case cancellationRequestedAt, candidateArtifactSha256, failure
+        }
+
         init(_ job: SessionProcessingJob) throws {
-            guard let cancellationAuthorityID = job.cancellationAuthorityID else {
+            guard let cancellationAuthorityID = job.cancellationAuthorityID,
+                  job.hasCapturedSelectionBaseline
+            else {
                 throw JobPersistenceError.integrityMismatch
             }
             schemaVersion = 2
@@ -272,10 +281,77 @@ private extension PortableSessionProcessingJobRepository {
             profileId = job.profileID
             createdAt = job.createdAt.rawValue
             state = job.state.rawValue
+            expectedSelectedRevisionId = job.expectedSelectedRevisionID?.rawValue
             cancellationAuthorityId = cancellationAuthorityID.rawValue
             cancellationRequestedAt = job.cancellationRequestedAt?.rawValue
             candidateArtifactSha256 = job.candidateArtifactSHA256
             failure = job.failure?.rawValue
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            schemaVersion = try values.decode(UInt32.self, forKey: .schemaVersion)
+            jobId = try values.decode(String.self, forKey: .jobId)
+            sessionId = try values.decode(String.self, forKey: .sessionId)
+            revisionId = try values.decode(String.self, forKey: .revisionId)
+            profileId = try values.decode(String.self, forKey: .profileId)
+            createdAt = try values.decode(String.self, forKey: .createdAt)
+            state = try values.decode(String.self, forKey: .state)
+            guard values.contains(.expectedSelectedRevisionId) else {
+                throw DecodingError.keyNotFound(
+                    CodingKeys.expectedSelectedRevisionId,
+                    DecodingError.Context(
+                        codingPath: values.codingPath,
+                        debugDescription: "missing captured selection baseline"
+                    )
+                )
+            }
+            expectedSelectedRevisionId = try values.decodeIfPresent(
+                String.self,
+                forKey: .expectedSelectedRevisionId
+            )
+            cancellationAuthorityId = try values.decode(
+                String.self,
+                forKey: .cancellationAuthorityId
+            )
+            cancellationRequestedAt = try values.decodeIfPresent(
+                String.self,
+                forKey: .cancellationRequestedAt
+            )
+            candidateArtifactSha256 = try values.decodeIfPresent(
+                String.self,
+                forKey: .candidateArtifactSha256
+            )
+            failure = try values.decodeIfPresent(String.self, forKey: .failure)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            try values.encode(schemaVersion, forKey: .schemaVersion)
+            try values.encode(jobId, forKey: .jobId)
+            try values.encode(sessionId, forKey: .sessionId)
+            try values.encode(revisionId, forKey: .revisionId)
+            try values.encode(profileId, forKey: .profileId)
+            try values.encode(createdAt, forKey: .createdAt)
+            try values.encode(state, forKey: .state)
+            if let expectedSelectedRevisionId {
+                try values.encode(
+                    expectedSelectedRevisionId,
+                    forKey: .expectedSelectedRevisionId
+                )
+            } else {
+                try values.encodeNil(forKey: .expectedSelectedRevisionId)
+            }
+            try values.encode(cancellationAuthorityId, forKey: .cancellationAuthorityId)
+            try values.encodeIfPresent(
+                cancellationRequestedAt,
+                forKey: .cancellationRequestedAt
+            )
+            try values.encodeIfPresent(
+                candidateArtifactSha256,
+                forKey: .candidateArtifactSha256
+            )
+            try values.encodeIfPresent(failure, forKey: .failure)
         }
     }
 
@@ -467,7 +543,9 @@ private extension PortableSessionProcessingJobRepository {
                 failure: try failure(dto.failure)
             )
         case 2:
-            let required = commonRequired.union(["cancellationAuthorityId"])
+            let required = commonRequired.union([
+                "expectedSelectedRevisionId", "cancellationAuthorityId",
+            ])
             let optional: Set<String> = [
                 "cancellationRequestedAt", "candidateArtifactSha256", "failure",
             ]
@@ -485,6 +563,9 @@ private extension PortableSessionProcessingJobRepository {
                 profileID: dto.profileId,
                 createdAt: try UTCInstant(dto.createdAt),
                 state: state,
+                expectedSelectedRevisionID: try dto.expectedSelectedRevisionId.map(
+                    TranscriptRevisionID.init
+                ),
                 cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
                     dto.cancellationAuthorityId
                 ),
@@ -523,7 +604,8 @@ private extension PortableSessionProcessingJobRepository {
                       (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95
               }),
               job.candidateArtifactSHA256.map(AudioArtifactFingerprint.isSHA256) ?? true,
-              job.cancellationRequestedAt == nil || job.cancellationAuthorityID != nil
+              job.cancellationRequestedAt == nil || job.cancellationAuthorityID != nil,
+              job.cancellationAuthorityID == nil || job.hasCapturedSelectionBaseline
         else { return false }
         switch job.state {
         case .queued:
@@ -548,6 +630,8 @@ private extension PortableSessionProcessingJobRepository {
         left.jobID == right.jobID && left.sessionID == right.sessionID &&
             left.revisionID == right.revisionID && left.profileID == right.profileID &&
             left.createdAt == right.createdAt &&
+            left.hasCapturedSelectionBaseline == right.hasCapturedSelectionBaseline &&
+            left.expectedSelectedRevisionID == right.expectedSelectedRevisionID &&
             left.cancellationAuthorityID == right.cancellationAuthorityID
     }
 

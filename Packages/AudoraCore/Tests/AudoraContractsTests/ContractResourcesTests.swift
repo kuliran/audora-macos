@@ -253,8 +253,15 @@ final class ContractResourcesTests: XCTestCase {
         )
         XCTAssertEqual(
             Set(controlledJob["required"] as? [String] ?? []),
-            ["schemaVersion", "cancellationAuthorityId"]
+            [
+                "schemaVersion", "expectedSelectedRevisionId",
+                "cancellationAuthorityId",
+            ]
         )
+        let controlledProperties = try XCTUnwrap(
+            controlledJob["properties"] as? [String: Any]
+        )
+        XCTAssertNotNil(controlledProperties["expectedSelectedRevisionId"])
 
         let blocked = try jsonObject(.sessionProcessingQualificationBlockedScenario)
         let blockedEffects = try XCTUnwrap(
@@ -282,6 +289,17 @@ final class ContractResourcesTests: XCTestCase {
         )
         XCTAssertTrue(
             cancellationEffects.contains { $0["kind"] as? String == "lateCandidateRejected" }
+        )
+        let stale = try jsonObject(
+            .sessionProcessingRelaunchStaleSelectionScenario
+        )
+        let staleState = try XCTUnwrap(stale["expectedState"] as? [String: Any])
+        XCTAssertEqual(staleState["reason"] as? String, "staleSelection")
+        let staleEffects = try XCTUnwrap(stale["expectedEffects"] as? [[String: Any]])
+        XCTAssertTrue(
+            staleEffects.contains {
+                $0["kind"] as? String == "startSelectionBaselinePreserved"
+            }
         )
         let progress = try jsonObject(.sessionProcessingProgressScenario)
         let progressState = try XCTUnwrap(progress["expectedState"] as? [String: Any])

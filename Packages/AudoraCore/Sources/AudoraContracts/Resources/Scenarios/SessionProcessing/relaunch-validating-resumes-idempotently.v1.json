@@ -11,10 +11,7 @@
   "dependencyTrace": [
     { "port": "source", "effect": "load", "outcome": "available" },
     { "port": "jobs", "effect": "latest", "outcome": "validating" },
-    { "port": "engine", "effect": "recoverCandidate", "outcome": "confined-complete-hash-valid" },
-    { "port": "runtime", "effect": "resolve", "outcome": "qualified" },
-    { "port": "acousticEvidence", "effect": "resolve", "outcome": "qualified" },
-    { "port": "publisher", "effect": "publish", "outcome": "published-or-identical" },
+    { "port": "publisher", "effect": "reopenSelected", "outcome": "exact-job-revision" },
     { "port": "jobs", "effect": "transitionCompleted", "outcome": "written" }
   ],
   "expectedState": {
@@ -22,9 +19,9 @@
     "selectedRevisionId": "trv-20260830T120600000Z-6JKM"
   },
   "expectedEffects": [
-    { "kind": "stagedCandidateRevalidated" },
-    { "kind": "publishedThroughValidator" },
+    { "kind": "canonicalRevisionReopened" },
     { "kind": "publicationIdempotent" },
-    { "kind": "selectedAtomically" }
+    { "kind": "selectedAtomically" },
+    { "kind": "noPublication" }
   ]
 }

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.relaunch-validating-stale-selection",
+  "initialState": {
+    "status": "validating",
+    "jobId": "job-20260830T120500000Z-5GHJ"
+  },
+  "commands": [
+    { "kind": "selectSession" }
+  ],
+  "dependencyTrace": [
+    { "port": "source", "effect": "load", "outcome": "newer-selection" },
+    { "port": "jobs", "effect": "latest", "outcome": "validating-with-empty-start-baseline" },
+    { "port": "engine", "effect": "recoverCandidate", "outcome": "confined-complete-hash-valid" },
+    { "port": "runtime", "effect": "resolve", "outcome": "qualified" },
+    { "port": "acousticEvidence", "effect": "resolve", "outcome": "qualified" },
+    { "port": "publisher", "effect": "publish", "outcome": "staleSelection" },
+    { "port": "jobs", "effect": "transitionFailed", "outcome": "written" }
+  ],
+  "expectedState": {
+    "status": "failed",
+    "reason": "staleSelection",
+    "actions": ["retry"]
+  },
+  "expectedEffects": [
+    { "kind": "stagedCandidateRevalidated" },
+    { "kind": "startSelectionBaselinePreserved" },
+    { "kind": "staleSelectionRejected" },
+    { "kind": "noPublication" }
+  ]
+}

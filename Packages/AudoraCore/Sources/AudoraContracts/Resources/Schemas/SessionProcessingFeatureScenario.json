@@ -364,6 +364,18 @@
                         },
                         {
                             "type": "string",
+                            "const": "canonicalRevisionReopened"
+                        },
+                        {
+                            "type": "string",
+                            "const": "startSelectionBaselinePreserved"
+                        },
+                        {
+                            "type": "string",
+                            "const": "staleSelectionRejected"
+                        },
+                        {
+                            "type": "string",
                             "const": "progressMonotonic"
                         },
                         {
@@ -749,7 +761,9 @@
                 "engineFailed",
                 "candidateRejected",
                 "publicationFailed",
-                "installedNeedsRefresh"
+                "installedNeedsRefresh",
+                "canonicalRevisionIntegrityFailed",
+                "staleSelection"
             ]
         }
     }

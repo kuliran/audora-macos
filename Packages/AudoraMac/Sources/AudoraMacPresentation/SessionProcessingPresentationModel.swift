@@ -253,6 +253,10 @@ public enum SessionProcessingPresentationMapper {
             "The validated revision could not be published atomically."
         case .installedNeedsRefresh:
             "The revision was installed, but the refreshed selection could not be confirmed."
+        case .canonicalRevisionIntegrityFailed:
+            "The selected transcript failed integrity checks and cannot be safely replaced. Restore this Library or update Audora."
+        case .staleSelection:
+            "The selected transcript changed while processing. Retry only if you want to process from the newer selection."
         }
     }
 

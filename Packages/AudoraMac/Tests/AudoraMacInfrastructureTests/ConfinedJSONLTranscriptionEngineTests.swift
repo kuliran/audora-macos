@@ -301,6 +301,57 @@ final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
         )
     }
 
+    func testCancelReapsAuthorityWhileStartupIsSuspendedAndRejectsLateHello()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let host = SuspendedStartupWorkerHostProbe(
+            helloLine: try fixture.hello()
+        )
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+        let run = Task {
+            do {
+                _ = try await engine.transcribe(fixture.request) { _ in }
+                return nil as TranscriptionEngineFailure?
+            } catch {
+                return error as? TranscriptionEngineFailure
+            }
+        }
+        await host.waitUntilStartupSuspends()
+
+        let cancellation = Task {
+            await engine.cancel(fixture.request.execution)
+        }
+        var reapedBeforeHello = false
+        for _ in 0..<1_000 {
+            if await host.startupCancellationCount() == 1 {
+                reapedBeforeHello = true
+                break
+            }
+            await Task.yield()
+        }
+        await host.releaseLateHello()
+
+        let cancellationOutcome = await cancellation.value
+        let runFailure = await run.value
+        let cancelledExecutions = await host.cancelledExecutionReferences()
+        let startupExecution = await host.startupExecutionReference()
+        let executionCount = await host.executionCount()
+        let closeCount = await host.closeCountValue()
+        XCTAssertTrue(reapedBeforeHello)
+        XCTAssertEqual(cancellationOutcome, .reaped)
+        XCTAssertEqual(runFailure, .cancelled)
+        XCTAssertEqual(cancelledExecutions, [fixture.request.execution])
+        XCTAssertEqual(startupExecution, fixture.request.execution)
+        XCTAssertEqual(executionCount, 0)
+        XCTAssertEqual(closeCount, 1)
+    }
+
     func testCancelWhileLiveEventIsObservedStillRejectsLaterCandidate() async throws {
         let fixture = try WorkerFixture()
         let artifact = try fixture.candidateArtifact()
@@ -534,6 +585,78 @@ private actor SuspendingWorkerHostProbe:
     func cancelCountValue() -> Int { cancelCount }
     func closeCountValue() -> Int { closeCount }
     func graceValues() -> [UInt32] { terminationGraces }
+}
+
+private actor SuspendedStartupWorkerHostProbe:
+    ConfinedTranscriptionWorkerHost,
+    ConfinedTranscriptionWorkerSession
+{
+    private let helloLine: Data
+    private var startupContinuation: CheckedContinuation<Void, Never>?
+    private var startupSuspended = false
+    private var startupExecution: TranscriptionExecutionReference?
+    private var cancelledExecutions: [TranscriptionExecutionReference] = []
+    private var executions = 0
+    private var closeCount = 0
+
+    init(helloLine: Data) {
+        self.helloLine = helloLine
+    }
+
+    func start(
+        _ invocation: ConfinedTranscriptionWorkerInvocation
+    ) async throws -> ConfinedTranscriptionWorkerStarted {
+        startupExecution = invocation.execution
+        startupSuspended = true
+        await withCheckedContinuation { continuation in
+            startupContinuation = continuation
+        }
+        return ConfinedTranscriptionWorkerStarted(
+            helloLine: helloLine,
+            session: self
+        )
+    }
+
+    func cancelAndReap(
+        _ execution: TranscriptionExecutionReference,
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome {
+        cancelledExecutions.append(execution)
+        return .reaped
+    }
+
+    func execute(
+        _ execution: ConfinedTranscriptionWorkerExecution,
+        receiveStandardOutputLine: @escaping @Sendable (Data) async throws -> Void
+    ) async throws -> ConfinedTranscriptionWorkerResult {
+        executions += 1
+        throw TranscriptionEngineFailure.cancelled
+    }
+
+    func cancelAndReap(
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome { .reaped }
+
+    func close() async { closeCount += 1 }
+
+    func waitUntilStartupSuspends() async {
+        while !startupSuspended { await Task.yield() }
+    }
+
+    func releaseLateHello() {
+        startupContinuation?.resume()
+        startupContinuation = nil
+    }
+
+    func startupCancellationCount() -> Int { cancelledExecutions.count }
+    func cancelledExecutionReferences() -> [TranscriptionExecutionReference] {
+        cancelledExecutions
+    }
+    func startupExecutionReference() -> TranscriptionExecutionReference? {
+        startupExecution
+    }
+    func executionCount() -> Int { executions }
+    func closeCountValue() -> Int { closeCount }
 }
 
 private actor LiveStreamingWorkerHostProbe:

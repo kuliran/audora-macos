@@ -360,6 +360,8 @@ public enum SessionProcessingFailureReason: String, Error, Equatable, Sendable {
     case candidateRejected
     case publicationFailed
     case installedNeedsRefresh
+    case canonicalRevisionIntegrityFailed
+    case staleSelection
 }
 
 public struct SessionProcessingJob: Equatable, Sendable {
@@ -369,6 +371,11 @@ public struct SessionProcessingJob: Equatable, Sendable {
     public let profileID: String
     public let createdAt: UTCInstant
     public let state: SessionProcessingJobState
+    /// The Session selection observed when this v2 Job was admitted. `nil` is
+    /// a captured empty selection; `hasCapturedSelectionBaseline == false` is
+    /// reserved for legacy v1 Jobs whose baseline is unknowable.
+    public let expectedSelectedRevisionID: TranscriptRevisionID?
+    public let hasCapturedSelectionBaseline: Bool
     public let cancellationAuthorityID: TranscriptionCancellationAuthorityID?
     public let cancellationRequestedAt: UTCInstant?
     public let candidateArtifactSHA256: String?
@@ -381,6 +388,7 @@ public struct SessionProcessingJob: Equatable, Sendable {
         profileID: String,
         createdAt: UTCInstant,
         state: SessionProcessingJobState,
+        expectedSelectedRevisionID: TranscriptRevisionID? = nil,
         cancellationAuthorityID: TranscriptionCancellationAuthorityID,
         cancellationRequestedAt: UTCInstant? = nil,
         candidateArtifactSHA256: String? = nil,
@@ -392,6 +400,8 @@ public struct SessionProcessingJob: Equatable, Sendable {
         self.profileID = profileID
         self.createdAt = createdAt
         self.state = state
+        self.expectedSelectedRevisionID = expectedSelectedRevisionID
+        hasCapturedSelectionBaseline = true
         self.cancellationAuthorityID = cancellationAuthorityID
         self.cancellationRequestedAt = cancellationRequestedAt
         self.candidateArtifactSHA256 = candidateArtifactSHA256
@@ -411,6 +421,7 @@ public struct SessionProcessingJob: Equatable, Sendable {
                 profileID: profileID,
                 createdAt: createdAt,
                 state: state,
+                expectedSelectedRevisionID: expectedSelectedRevisionID,
                 cancellationAuthorityID: cancellationAuthorityID,
                 cancellationRequestedAt: cancellationRequestedAt,
                 candidateArtifactSHA256:
@@ -440,6 +451,7 @@ public struct SessionProcessingJob: Equatable, Sendable {
             profileID: profileID,
             createdAt: createdAt,
             state: state,
+            expectedSelectedRevisionID: expectedSelectedRevisionID,
             cancellationAuthorityID: cancellationAuthorityID,
             cancellationRequestedAt: instant,
             candidateArtifactSHA256: candidateArtifactSHA256,
@@ -494,6 +506,8 @@ public struct SessionProcessingJob: Equatable, Sendable {
         self.profileID = profileID
         self.createdAt = createdAt
         self.state = state
+        expectedSelectedRevisionID = nil
+        hasCapturedSelectionBaseline = false
         cancellationAuthorityID = nil
         cancellationRequestedAt = nil
         self.candidateArtifactSHA256 = candidateArtifactSHA256

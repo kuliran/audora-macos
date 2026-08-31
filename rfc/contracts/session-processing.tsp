@@ -19,6 +19,7 @@ namespace Audora.Contracts {
   model ControlledTranscriptionJobManifest
     extends TranscriptionJobManifestBody {
     schemaVersion: 2;
+    expectedSelectedRevisionId: TranscriptRevisionId | null;
     cancellationAuthorityId: TranscriptionCancellationAuthorityId;
     cancellationRequestedAt?: UTCInstant;
   }
@@ -129,6 +130,8 @@ namespace Audora.Contracts {
     candidateRejected,
     publicationFailed,
     installedNeedsRefresh,
+    canonicalRevisionIntegrityFailed,
+    staleSelection,
   }
 
   @minLength(1)
@@ -504,6 +507,9 @@ namespace Audora.Contracts {
       | "queuedPreserved"
       | "stagedCandidateRevalidated"
       | "publicationIdempotent"
+      | "canonicalRevisionReopened"
+      | "startSelectionBaselinePreserved"
+      | "staleSelectionRejected"
       | "progressMonotonic"
       | "etaApproximate";
   }

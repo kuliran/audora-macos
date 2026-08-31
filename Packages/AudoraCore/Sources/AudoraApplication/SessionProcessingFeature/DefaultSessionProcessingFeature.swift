@@ -230,8 +230,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private func start() async {
         guard let source = selectedSource else { return }
         switch state {
-        case .ready, .failed, .unavailable, .cancelled, .interrupted:
+        case .ready, .unavailable, .cancelled, .interrupted:
             break
+        case let .failed(failure):
+            guard failure.actions.contains(.retry) else { return }
         case .preparing, .queued, .running, .cancelling, .validating, .completed,
              .recoveryRequired:
             return
@@ -295,6 +297,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 profileID: profile.profileID,
                 createdAt: createdAt,
                 state: .queued,
+                expectedSelectedRevisionID: source.expectedSelectedRevisionID,
                 cancellationAuthorityID:
                     await identifiers.generateCancellationAuthorityID(at: createdAt)
             )
@@ -426,35 +429,33 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 )
             )
         case .preparing, .running:
+            guard job.cancellationAuthorityID != nil else {
+                transition(to: .recoveryRequired(job))
+                return
+            }
             switch await engine.workerPresence(for: job.executionReference) {
             case .absent:
-                await interrupt(job, source: source)
-            case .present, .unknown:
+                await finishAbandoned(job, source: source)
+            case .present:
+                let outcome = await engine.cancel(job.executionReference)
+                guard outcome == .reaped || outcome == .alreadyAbsent else {
+                    transition(to: .recoveryRequired(job))
+                    return
+                }
+                await finishAbandoned(job, source: source)
+            case .unknown:
                 transition(to: .recoveryRequired(job))
             }
         case .validating:
             await resumeValidation(job, source: source)
         case .completed:
-            guard source.expectedSelectedRevisionID == job.revisionID,
-                  case let .available(reopened) = await publisher.reopenSelected(
-                      sessionID: job.sessionID
-                  ),
-                  reopened.selectedRevisionID == job.revisionID,
-                  reopened.revisionIDs.contains(job.revisionID),
-                  reopened.selectedRevision.revisionID == job.revisionID,
-                  reopened.selectedRevision.sessionID == job.sessionID,
-                  reopened.selectedRevision.jobID == job.jobID,
-                  reopened.selectedRevision.audioFingerprint == source.audioFingerprint,
-                  reopened.selectedRevision.sourceFingerprints == source.sourceFingerprints,
-                  reopened.selectedRevision.candidateArtifactFingerprint.sha256 ==
-                    job.candidateArtifactSHA256
-            else {
+            guard await canonicalRevisionMatches(job, source: source) else {
                 transition(
                     to: .failed(
                         SessionProcessingFailedSnapshot(
                             job: job,
-                            reason: .installedNeedsRefresh,
-                            actions: [.retry]
+                            reason: .canonicalRevisionIntegrityFailed,
+                            actions: []
                         )
                     )
                 )
@@ -506,6 +507,26 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         _ job: SessionProcessingJob,
         source: SessionTranscriptionSource
     ) async {
+        if source.expectedSelectedRevisionID == job.revisionID {
+            guard await canonicalRevisionMatches(job, source: source) else {
+                transition(
+                    to: .failed(
+                        SessionProcessingFailedSnapshot(
+                            job: job,
+                            reason: .canonicalRevisionIntegrityFailed,
+                            actions: []
+                        )
+                    )
+                )
+                return
+            }
+            await completeInstalledValidation(job, source: source)
+            return
+        }
+        guard job.hasCapturedSelectionBaseline else {
+            await interrupt(job, source: source)
+            return
+        }
         guard let expectedHash = job.candidateArtifactSHA256 else {
             await interrupt(job, source: source)
             return
@@ -557,6 +578,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         evidence: SessionVoicedRangeEvidence,
         job: SessionProcessingJob
     ) async {
+        guard job.hasCapturedSelectionBaseline else {
+            await interrupt(job, source: source)
+            return
+        }
         let context = TranscriptPublicationContext(
             jobID: job.jobID,
             sessionID: source.selection.sessionID,
@@ -572,7 +597,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         switch await publisher.publish(
             verified.candidate,
             context: context,
-            expectedSelectedRevisionID: source.expectedSelectedRevisionID
+            expectedSelectedRevisionID: job.expectedSelectedRevisionID
         ) {
         case let .published(reopened):
             let completed = job.transitioning(to: .completed)
@@ -605,11 +630,62 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 reason = .candidateRejected
             case .installedNeedsRefresh:
                 reason = .installedNeedsRefresh
+            case .staleSelection:
+                reason = .staleSelection
             default:
                 reason = .publicationFailed
             }
             await fail(job: job, expected: .validating, reason: reason)
         }
+    }
+
+    private func canonicalRevisionMatches(
+        _ job: SessionProcessingJob,
+        source: SessionTranscriptionSource
+    ) async -> Bool {
+        guard source.expectedSelectedRevisionID == job.revisionID,
+              case let .available(reopened) = await publisher.reopenSelected(
+                  sessionID: job.sessionID
+              ),
+              reopened.selectedRevisionID == job.revisionID,
+              reopened.revisionIDs.contains(job.revisionID),
+              reopened.selectedRevision.revisionID == job.revisionID,
+              reopened.selectedRevision.sessionID == job.sessionID,
+              reopened.selectedRevision.jobID == job.jobID,
+              reopened.selectedRevision.audioFingerprint == source.audioFingerprint,
+              reopened.selectedRevision.sourceFingerprints == source.sourceFingerprints,
+              reopened.selectedRevision.candidateArtifactFingerprint.sha256 ==
+                job.candidateArtifactSHA256
+        else { return false }
+        return true
+    }
+
+    private func completeInstalledValidation(
+        _ job: SessionProcessingJob,
+        source: SessionTranscriptionSource
+    ) async {
+        let completed = job.transitioning(to: .completed)
+        guard case .written = await jobs.transition(completed, from: .validating) else {
+            transition(
+                to: .failed(
+                    SessionProcessingFailedSnapshot(
+                        job: completed,
+                        reason: .installedNeedsRefresh,
+                        actions: [.retry]
+                    )
+                )
+            )
+            return
+        }
+        transition(
+            to: .completed(
+                SessionProcessingCompletedSnapshot(
+                    sessionID: source.selection.sessionID,
+                    jobID: job.jobID,
+                    selectedRevisionID: job.revisionID
+                )
+            )
+        )
     }
 
     private func interrupt(
@@ -635,6 +711,38 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 SessionProcessingRecoverableSnapshot(
                     source: source,
                     job: interrupted,
+                    actions: [.retry]
+                )
+            )
+        )
+    }
+
+    private func finishAbandoned(
+        _ job: SessionProcessingJob,
+        source: SessionTranscriptionSource
+    ) async {
+        guard job.cancellationRequestedAt != nil else {
+            await interrupt(job, source: source)
+            return
+        }
+        let cancelled = job.transitioning(to: .cancelled)
+        guard case .written = await jobs.transition(cancelled, from: job.state) else {
+            transition(
+                to: .failed(
+                    SessionProcessingFailedSnapshot(
+                        job: job,
+                        reason: .jobPersistenceFailed,
+                        actions: [.retry]
+                    )
+                )
+            )
+            return
+        }
+        transition(
+            to: .cancelled(
+                SessionProcessingRecoverableSnapshot(
+                    source: source,
+                    job: cancelled,
                     actions: [.retry]
                 )
             )

@@ -292,6 +292,7 @@ const expectedSessionProcessingScenarios = [
   "qualification-blocked-no-fallback.v1.json",
   "qualified-offline-success.v1.json",
   "relaunch-running-absent-interrupted.v1.json",
+  "relaunch-validating-stale-selection.v1.json",
   "relaunch-validating-resumes-idempotently.v1.json",
 ];
 await assertInventory(

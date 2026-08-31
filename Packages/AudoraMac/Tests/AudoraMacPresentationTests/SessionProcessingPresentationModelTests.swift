@@ -150,6 +150,22 @@ final class SessionProcessingPresentationModelTests: XCTestCase {
         XCTAssertEqual(presentation.actions, [])
     }
 
+    func testCanonicalRevisionIntegrityFailureOffersNoRetranscriptionAction() {
+        let presentation = SessionProcessingPresentationMapper.map(
+            .failed(
+                SessionProcessingFailedSnapshot(
+                    job: makeJob(state: .completed),
+                    reason: .canonicalRevisionIntegrityFailed,
+                    actions: []
+                )
+            )
+        )
+
+        XCTAssertEqual(presentation.status, .failed)
+        XCTAssertEqual(presentation.actions, [])
+        XCTAssertTrue(presentation.detail?.contains("cannot be safely replaced") == true)
+    }
+
     private func makeSelection() throws -> SessionProcessingSelection {
         SessionProcessingSelection(
             scope: LibraryScope(

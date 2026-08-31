@@ -15,6 +15,16 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
 
             let createResult = await repository.create(queued)
             XCTAssertEqual(createResult, .written(queued))
+            let jobData = try Data(
+                contentsOf: root
+                    .appendingPathComponent("jobs")
+                    .appendingPathComponent(queued.jobID.rawValue)
+                    .appendingPathComponent("job.json")
+            )
+            let jobObject = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: jobData) as? [String: Any]
+            )
+            XCTAssertTrue(jobObject["expectedSelectedRevisionId"] is NSNull)
             let running = queued.replacing(state: .running)
             let transitionResult = await repository.transition(running, from: .queued)
             XCTAssertEqual(transitionResult, .written(running))
@@ -106,6 +116,46 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
         }
     }
 
+    func testV2StartSelectionBaselineIsRequiredAndDurable() async throws {
+        try await withLibrary { root, libraryID in
+            let baseline = try TranscriptRevisionID(
+                "trv-20260830T120400000Z-4EFG"
+            )
+            let queued = try makeJob(
+                state: .queued,
+                expectedSelectedRevisionID: baseline
+            )
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+
+            let createResult = await repository.create(queued)
+            XCTAssertEqual(createResult, .written(queued))
+            let data = try Data(
+                contentsOf: root
+                    .appendingPathComponent("jobs")
+                    .appendingPathComponent(queued.jobID.rawValue)
+                    .appendingPathComponent("job.json")
+            )
+            let object = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            )
+            XCTAssertEqual(
+                object["expectedSelectedRevisionId"] as? String,
+                baseline.rawValue
+            )
+            let reopened = await repository.latest(
+                for: try makeSelection(libraryID: libraryID)
+            )
+            guard case let .loaded(job) = reopened else {
+                return XCTFail("expected v2 baseline reopen")
+            }
+            XCTAssertTrue(job.hasCapturedSelectionBaseline)
+            XCTAssertEqual(job.expectedSelectedRevisionID, baseline)
+        }
+    }
+
     func testLegacyV1JobReopensWithoutInventingCancellationAuthority() async throws {
         try await withLibrary { root, libraryID in
             let jobID = "job-20260830T120500000Z-5GHJ"
@@ -138,8 +188,43 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
                 return XCTFail("expected exact legacy v1 reopen")
             }
             XCTAssertEqual(job.state, .running)
+            XCTAssertFalse(job.hasCapturedSelectionBaseline)
+            XCTAssertNil(job.expectedSelectedRevisionID)
             XCTAssertNil(job.cancellationAuthorityID)
             XCTAssertNil(job.cancellationRequestedAt)
+        }
+    }
+
+    func testV2JobMissingStartSelectionBaselineFailsClosed() async throws {
+        try await withLibrary { root, libraryID in
+            let jobID = "job-20260830T120500000Z-5GHJ"
+            let jobDirectory = root.appendingPathComponent("jobs")
+                .appendingPathComponent(jobID)
+            try FileManager.default.createDirectory(
+                at: jobDirectory,
+                withIntermediateDirectories: false
+            )
+            let incompleteV2: [String: Any] = [
+                "schemaVersion": 2,
+                "jobId": jobID,
+                "sessionId": "ses-20260830T120100000Z-2CDE",
+                "revisionId": "trv-20260830T120600000Z-6JKM",
+                "profileId": "synthetic-qualified-v1",
+                "createdAt": "2026-08-30T12:05:00.000Z",
+                "state": "running",
+                "cancellationAuthorityId": "cancel-job-repository",
+            ]
+            try JSONSerialization.data(
+                withJSONObject: incompleteV2,
+                options: [.sortedKeys]
+            ).write(to: jobDirectory.appendingPathComponent("job.json"))
+
+            let result = await PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            ).latest(for: try makeSelection(libraryID: libraryID))
+
+            XCTAssertEqual(result, .integrityMismatch)
         }
     }
 
@@ -225,7 +310,10 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
         )
     }
 
-    private func makeJob(state: SessionProcessingJobState) throws
+    private func makeJob(
+        state: SessionProcessingJobState,
+        expectedSelectedRevisionID: TranscriptRevisionID? = nil
+    ) throws
         -> SessionProcessingJob
     {
         SessionProcessingJob(
@@ -235,6 +323,7 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
             profileID: "synthetic-qualified-v1",
             createdAt: try UTCInstant("2026-08-30T12:05:00.000Z"),
             state: state,
+            expectedSelectedRevisionID: expectedSelectedRevisionID,
             cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
                 "cancel-job-repository"
             )
@@ -255,6 +344,7 @@ private extension SessionProcessingJob {
             profileID: profileID,
             createdAt: createdAt,
             state: state,
+            expectedSelectedRevisionID: expectedSelectedRevisionID,
             cancellationAuthorityID: cancellationAuthorityID!,
             cancellationRequestedAt: cancellationRequestedAt,
             candidateArtifactSHA256: candidateArtifactSHA256,

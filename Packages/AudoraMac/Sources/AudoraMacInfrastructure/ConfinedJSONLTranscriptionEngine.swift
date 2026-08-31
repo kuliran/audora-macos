@@ -37,22 +37,27 @@ public struct ConfinedTranscriptionWorkerLimits: Equatable, Sendable {
     )
 }
 
-/// Complete input to the OS-specific execution host. A conforming production
-/// host fixes the executable and arguments, uses anonymous pipes, supplies an
-/// allowlisted empty environment/home, confines relative job/model paths, and
-/// applies these bounds before returning any bytes to this adapter.
+/// Startup input to the OS-specific execution host. The durable execution
+/// authority is bound before launch so even a worker stalled before `hello`
+/// remains exactly targetable for bounded termination and reap. A conforming
+/// production host also fixes the executable and arguments, uses anonymous
+/// pipes, supplies an allowlisted empty environment/home, confines relative
+/// job/model paths, and applies these bounds before returning any bytes.
 public struct ConfinedTranscriptionWorkerInvocation: Sendable {
+    public let execution: TranscriptionExecutionReference
     public let profile: QualifiedTranscriptionProfile
     public let runtime: any ConfinedTranscriptionRuntimeExecutionCapability
     public let networkAccess: TranscriptionWorkerNetworkAccess
     public let limits: ConfinedTranscriptionWorkerLimits
 
     public init(
+        execution: TranscriptionExecutionReference,
         profile: QualifiedTranscriptionProfile,
         runtime: any ConfinedTranscriptionRuntimeExecutionCapability,
         networkAccess: TranscriptionWorkerNetworkAccess,
         limits: ConfinedTranscriptionWorkerLimits
     ) {
+        self.execution = execution
         self.profile = profile
         self.runtime = runtime
         self.networkAccess = networkAccess
@@ -294,6 +299,7 @@ public actor ConfinedJSONLTranscriptionEngine: TranscriptionEngine {
         do {
             started = try await host.start(
                 ConfinedTranscriptionWorkerInvocation(
+                    execution: execution,
                     profile: request.profile,
                     runtime: runtimeInput,
                     networkAccess: .disabled,
@@ -302,22 +308,14 @@ public actor ConfinedJSONLTranscriptionEngine: TranscriptionEngine {
             )
         } catch let failure as TranscriptionEngineFailure {
             if cancellationWasRequested(execution) {
-                let outcome = await host.cancelAndReap(
-                    execution,
-                    graceMilliseconds: limits.terminationGraceMilliseconds
-                )
-                finishCancellation(execution, outcome: outcome)
+                _ = await cancel(execution)
                 throw TranscriptionEngineFailure.cancelled
             }
             finishNormally(execution)
             throw failure
         } catch {
             if cancellationWasRequested(execution) {
-                let outcome = await host.cancelAndReap(
-                    execution,
-                    graceMilliseconds: limits.terminationGraceMilliseconds
-                )
-                finishCancellation(execution, outcome: outcome)
+                _ = await cancel(execution)
                 throw TranscriptionEngineFailure.cancelled
             }
             finishNormally(execution)
@@ -325,11 +323,8 @@ public actor ConfinedJSONLTranscriptionEngine: TranscriptionEngine {
         }
         attach(started.session, to: execution)
         if cancellationWasRequested(execution) {
-            let outcome = await started.session.cancelAndReap(
-                graceMilliseconds: limits.terminationGraceMilliseconds
-            )
+            _ = await cancel(execution)
             await started.session.close()
-            finishCancellation(execution, outcome: outcome)
             throw TranscriptionEngineFailure.cancelled
         }
         let helloBytes: UInt64
@@ -452,6 +447,9 @@ public actor ConfinedJSONLTranscriptionEngine: TranscriptionEngine {
     public func cancel(
         _ execution: TranscriptionExecutionReference
     ) async -> TranscriptionCancellationOutcome {
+        guard execution.cancellationAuthorityID != nil else {
+            return .unableToConfirm
+        }
         if let completed = completedCancellations[execution] { return completed }
         guard var active = activeExecutions[execution] else {
             let outcome = await host.cancelAndReap(
@@ -474,12 +472,24 @@ public actor ConfinedJSONLTranscriptionEngine: TranscriptionEngine {
         return await withCheckedContinuation { continuation in
             active.waiters.append(continuation)
             let session = active.session
-            let shouldStartCancellation = session != nil && !active.cancellationStarted
-            if shouldStartCancellation { active.cancellationStarted = true }
+            let shouldCancelSession = session != nil && !active.cancellationStarted
+            let shouldCancelStartup = session == nil && active.hostStartInFlight &&
+                !active.cancellationStarted
+            if shouldCancelSession || shouldCancelStartup {
+                active.cancellationStarted = true
+            }
             activeExecutions[execution] = active
-            if shouldStartCancellation, let session {
+            if shouldCancelSession, let session {
                 Task {
                     let outcome = await session.cancelAndReap(
+                        graceMilliseconds: self.limits.terminationGraceMilliseconds
+                    )
+                    self.finishCancellation(execution, outcome: outcome)
+                }
+            } else if shouldCancelStartup {
+                Task {
+                    let outcome = await self.host.cancelAndReap(
+                        execution,
                         graceMilliseconds: self.limits.terminationGraceMilliseconds
                     )
                     self.finishCancellation(execution, outcome: outcome)
@@ -491,6 +501,7 @@ public actor ConfinedJSONLTranscriptionEngine: TranscriptionEngine {
     public func workerPresence(
         for execution: TranscriptionExecutionReference
     ) async -> TranscriptionWorkerPresence {
+        guard execution.cancellationAuthorityID != nil else { return .unknown }
         if activeExecutions[execution] != nil { return .present }
         if let completed = completedCancellations[execution],
            completed == .reaped || completed == .alreadyAbsent
