@@ -1,20 +1,26 @@
 import AudoraApplication
+import AudoraDomain
 import SwiftUI
 
 public struct LibraryRootView: View {
     @StateObject private var model: LibraryPresentationModel
     @StateObject private var audioImportModel: AudioImportPresentationModel
+    @StateObject private var recordingModel: RecordingPresentationModel
     @Environment(\.openWindow) private var openWindow
     private let windowCoordinator: MainWindowCoordinator
 
     public init(
         feature: any LibraryFeature,
         audioImportFeature: any AudioImportFeature,
+        recordingFeature: any RecordingFeature,
         windowCoordinator: MainWindowCoordinator
     ) {
         _model = StateObject(wrappedValue: LibraryPresentationModel(feature: feature))
         _audioImportModel = StateObject(
             wrappedValue: AudioImportPresentationModel(feature: audioImportFeature)
+        )
+        _recordingModel = StateObject(
+            wrappedValue: RecordingPresentationModel(feature: recordingFeature)
         )
         self.windowCoordinator = windowCoordinator
     }
@@ -55,6 +61,9 @@ public struct LibraryRootView: View {
                     .foregroundStyle(.secondary)
                 libraryActions
                 audioImportActions
+                    .disabled(recordingBlocksOtherLibraryActivities)
+                RecordingView(model: recordingModel)
+                    .disabled(audioImportModel.isImporting)
 
             case .some(.readOnly):
                 ContentUnavailableView(
@@ -80,6 +89,7 @@ public struct LibraryRootView: View {
         }
         .frame(minWidth: 560, minHeight: 360)
         .padding(32)
+        .disabled(model.snapshot?.activity != nil)
         .task {
             windowCoordinator.registerReopenAction {
                 openWindow(id: "library")
@@ -89,8 +99,23 @@ public struct LibraryRootView: View {
         .task {
             await audioImportModel.start()
         }
+        .task {
+            await recordingModel.start()
+        }
         .onChange(of: activeLibraryID) {
             audioImportModel.send(.clearResult)
+        }
+        .onChange(of: model.snapshot?.selection, initial: true) { _, selection in
+            switch selection {
+            case let .active(library):
+                recordingModel.selectLibrary(
+                    .writable(LibraryScope(libraryID: library.libraryID))
+                )
+            case .readOnly:
+                recordingModel.selectLibrary(.readOnly)
+            case .awaitingBootstrap, .noLibrarySelected, nil:
+                recordingModel.selectLibrary(.none)
+            }
         }
     }
 
@@ -100,7 +125,7 @@ public struct LibraryRootView: View {
             Button("Choose Another…") { model.send(.chooseExisting) }
             Button("Close Library") { model.send(.close) }
         }
-        .disabled(model.snapshot?.activity != nil || audioImportModel.isImporting)
+        .disabled(audioImportModel.isImporting || recordingBlocksOtherLibraryActivities)
     }
 
     @ViewBuilder
@@ -143,6 +168,16 @@ public struct LibraryRootView: View {
         return library.libraryID.rawValue
     }
 
+    private var recordingBlocksOtherLibraryActivities: Bool {
+        switch recordingModel.snapshot.status {
+        case .selectingLibrary, .starting, .active, .finishing, .sealing,
+             .recoveryRequired, .resolvingRecovery:
+            true
+        case .unavailable, .idle, .completed, .failed:
+            false
+        }
+    }
+
     private func profileDescription(_ profile: ActiveLibrarySnapshot.ProfileSummary) -> String {
         switch profile {
         case let .nullProfile(statementCount):
@@ -174,6 +209,7 @@ public struct LibraryRootView: View {
         case .locatorUpdateFailed: "The Library is open, but it may need to be selected again later."
         case .revealFailed: "The Library could not be revealed."
         case .closeFailed: "The Library could not be closed safely."
+        case .libraryActivityInProgress: "Finish the current Library activity before changing Libraries."
         case .multipleExternalOpenRequests: "Open one Library at a time."
         case .externalOpenRequestExpired: "That open request is no longer available."
         }
@@ -194,6 +230,7 @@ public struct LibraryRootView: View {
 
     private func audioImportFailureText(_ failure: AudioImportFailure) -> String {
         switch failure {
+        case .anotherLibraryActivity: "Finish the current Library activity before importing audio."
         case .cancelled: "Audio import was cancelled."
         case .unsupportedMedia: "Choose a supported mono or stereo M4A or WAV file."
         case .sourceTooLarge: "The selected audio file is too large to import."

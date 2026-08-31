@@ -12,7 +12,7 @@ public enum AudioImportCandidateValidator {
               candidate.canonicalFrameCount <= policy.maximumCanonicalFrames,
               candidate.originalByteCount <= policy.maximumSourceBytes,
               candidate.canonicalContainer == CanonicalAudioFormat.v1.container,
-              candidate.canonicalEncoding == CanonicalAudioFormat.v1.encoding,
+              candidate.canonicalEncoding == CanonicalAudioFormat.v1.encoding.rawValue,
               candidate.canonicalSampleRateHz == CanonicalAudioFormat.sampleRateHz,
               candidate.canonicalChannelCount == CanonicalAudioFormat.channelCount,
               candidate.canonicalBitsPerSample == CanonicalAudioFormat.bitsPerSample

@@ -4,6 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "AudoraCore",
+    platforms: [.macOS(.v14)],
     products: [
         .library(name: "AudoraDomain", targets: ["AudoraDomain"]),
         .library(name: "AudoraApplication", targets: ["AudoraApplication"]),
@@ -17,7 +18,11 @@ let package = Package(
         ),
         .target(
             name: "AudoraContracts",
-            resources: [.process("Resources")]
+            resources: [
+                .copy("Resources/Examples"),
+                .copy("Resources/Scenarios"),
+                .copy("Resources/Schemas"),
+            ]
         ),
         .testTarget(
             name: "AudoraDomainTests",

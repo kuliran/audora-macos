@@ -843,7 +843,7 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
                     frameCount: canonical.frameCount,
                     durationMs: canonical.durationMilliseconds,
                     container: canonical.format.container,
-                    encoding: canonical.format.encoding,
+                    encoding: canonical.format.encoding.rawValue,
                     sampleRateHz: canonical.format.sampleRateHz,
                     channelCount: canonical.format.channelCount,
                     bitsPerSample: canonical.format.bitsPerSample
@@ -945,15 +945,19 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
             under: rootDescriptor,
             expected: audio.canonical
         )
-        return .readWrite(
-            try ImportedSession(
-                sessionID: expectedSessionID,
-                createdAt: UTCInstant(sessionDTO.createdAt),
-                durationMilliseconds: sessionDTO.durationMs,
-                audioManifestSHA256: sessionDTO.audioManifestSha256,
-                audio: audio
+        do {
+            return .readWrite(
+                try ImportedSession(
+                    sessionID: expectedSessionID,
+                    createdAt: UTCInstant(sessionDTO.createdAt),
+                    durationMilliseconds: sessionDTO.durationMs,
+                    audioManifestSHA256: sessionDTO.audioManifestSha256,
+                    audio: audio
+                )
             )
-        )
+        } catch {
+            throw AudioImportFailure.candidateCorrupt
+        }
     }
 
     private func requireWritableLibrary(_ location: AudioImportStagingLocation) throws {
@@ -1011,6 +1015,16 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
     }
 
     private func decodeAudio(_ data: Data) throws -> ImportedAudioAsset {
+        do {
+            return try decodeAudioValidated(data)
+        } catch let failure as AudioImportFailure {
+            throw failure
+        } catch {
+            throw AudioImportFailure.candidateCorrupt
+        }
+    }
+
+    private func decodeAudioValidated(_ data: Data) throws -> ImportedAudioAsset {
         let dictionary = try jsonDictionary(data)
         guard Set(dictionary.keys) == Set([
             "schemaVersion", "acquisitionKind", "original", "canonical", "sources",
@@ -1053,7 +1067,7 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
                   quantizerVersion: dto.normalization.quantizerVersion
               ),
               dto.canonical.container == CanonicalAudioFormat.v1.container,
-              dto.canonical.encoding == CanonicalAudioFormat.v1.encoding,
+              dto.canonical.encoding == CanonicalAudioFormat.v1.encoding.rawValue,
               dto.canonical.sampleRateHz == CanonicalAudioFormat.sampleRateHz,
               dto.canonical.channelCount == CanonicalAudioFormat.channelCount,
               dto.canonical.bitsPerSample == CanonicalAudioFormat.bitsPerSample

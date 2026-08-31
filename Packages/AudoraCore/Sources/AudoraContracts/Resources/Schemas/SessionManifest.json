@@ -1,44 +1,85 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "https://audora.local/contracts/SessionManifest.json",
-    "type": "object",
-    "properties": {
-        "schemaVersion": {
-            "type": "number",
-            "const": 1
+    "anyOf": [
+        {
+            "$ref": "#/$defs/ImportedSessionManifest"
         },
-        "sessionId": {
-            "$ref": "#/$defs/SessionId"
-        },
-        "createdAt": {
-            "$ref": "#/$defs/UTCInstant"
-        },
-        "durationMs": {
-            "$ref": "#/$defs/CanonicalDurationMilliseconds"
-        },
-        "audioManifestSha256": {
-            "$ref": "#/$defs/Sha256Hex"
-        },
-        "transcriptRevisionIds": {
-            "type": "array",
-            "items": {
-                "type": "string"
-            },
-            "maxItems": 0
+        {
+            "$ref": "#/$defs/RecordedSessionManifest"
         }
-    },
-    "required": [
-        "schemaVersion",
-        "sessionId",
-        "createdAt",
-        "durationMs",
-        "audioManifestSha256",
-        "transcriptRevisionIds"
     ],
-    "unevaluatedProperties": {
-        "not": {}
-    },
+    "description": "Closed union of every persisted Session aggregate-manifest variant.",
     "$defs": {
+        "ImportedSessionManifest": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "sessionId": {
+                    "$ref": "#/$defs/SessionId"
+                },
+                "createdAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "durationMs": {
+                    "$ref": "#/$defs/CanonicalDurationMilliseconds"
+                },
+                "audioManifestSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                },
+                "transcriptRevisionIds": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "maxItems": 0
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "sessionId",
+                "createdAt",
+                "durationMs",
+                "audioManifestSha256",
+                "transcriptRevisionIds"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "Aggregate commit marker for an imported Session."
+        },
+        "RecordedSessionManifest": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "sessionId": {
+                    "$ref": "#/$defs/SessionId"
+                },
+                "createdAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "audioManifestPath": {
+                    "type": "string",
+                    "const": "audio/audio.json"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "sessionId",
+                "createdAt",
+                "audioManifestPath"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "Aggregate commit marker for a microphone-recorded Session."
+        },
         "SessionId": {
             "type": "string",
             "pattern": "^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"

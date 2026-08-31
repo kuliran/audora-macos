@@ -789,14 +789,14 @@ final class PortableAudioImportPersistenceTests: XCTestCase {
     }
 
     func testRejectedContractFixturesRunThroughThePortableRuntimeTrustBoundary() throws {
-        let cases: [(ContractResource, String, Bool)] = [
-            (.rejectedAudioContainerCodecMismatch, "audio/audio.json", true),
-            (.rejectedAudioMachinePath, "audio/audio.json", true),
-            (.rejectedNewerAudioManifest, "audio/audio.json", false),
-            (.rejectedSessionCrossRootHash, "session.json", false),
+        let cases: [(ContractResource, String, Bool, Bool)] = [
+            (.rejectedAudioContainerCodecMismatch, "audio/audio.json", true, false),
+            (.rejectedAudioMachinePath, "audio/audio.json", true, false),
+            (.rejectedNewerAudioManifest, "audio/audio.json", true, true),
+            (.rejectedSessionCrossRootHash, "session.json", false, false),
         ]
 
-        for (resource, relativePath, rebindParent) in cases {
+        for (resource, relativePath, rebindParent, expectsReadOnly) in cases {
             try withTemporaryParent { parent in
                 let root = parent.appendingPathComponent("Synthetic.audoralibrary")
                 try createLibrary(at: root)
@@ -823,14 +823,25 @@ final class PortableAudioImportPersistenceTests: XCTestCase {
                     ).write(to: sessionManifest)
                 }
 
-                XCTAssertThrowsError(
-                    try persistence.openSession(
-                        at: root,
-                        sessionID: prepared.session.sessionID
-                    ),
-                    resource.rawValue
-                ) { error in
-                    XCTAssertEqual(error as? AudioImportFailure, .candidateCorrupt)
+                if expectsReadOnly {
+                    XCTAssertEqual(
+                        try persistence.openSession(
+                            at: root,
+                            sessionID: prepared.session.sessionID
+                        ),
+                        .readOnly(sessionID: prepared.session.sessionID),
+                        resource.rawValue
+                    )
+                } else {
+                    XCTAssertThrowsError(
+                        try persistence.openSession(
+                            at: root,
+                            sessionID: prepared.session.sessionID
+                        ),
+                        resource.rawValue
+                    ) { error in
+                        XCTAssertEqual(error as? AudioImportFailure, .candidateCorrupt)
+                    }
                 }
                 XCTAssertEqual(try Data(contentsOf: manifest), fixture)
             }
@@ -1036,6 +1047,8 @@ final class PortableAudioImportPersistenceTests: XCTestCase {
     }
 
     private func sessionTree(at root: URL) throws -> [String] {
+        let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL
+        let canonicalPrefix = canonicalRoot.path + "/"
         let enumerator = try XCTUnwrap(
             FileManager.default.enumerator(
                 at: root,
@@ -1044,7 +1057,11 @@ final class PortableAudioImportPersistenceTests: XCTestCase {
         )
         var values: [String] = []
         for case let url as URL in enumerator {
-            let relative = String(url.path.dropFirst(root.path.count + 1))
+            let canonicalURL = url.resolvingSymlinksInPath().standardizedFileURL
+            guard canonicalURL.path.hasPrefix(canonicalPrefix) else {
+                throw CocoaError(.fileReadInvalidFileName)
+            }
+            let relative = String(canonicalURL.path.dropFirst(canonicalPrefix.count))
             let isDirectory = try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
             values.append(relative + (isDirectory ? "/" : ""))
         }

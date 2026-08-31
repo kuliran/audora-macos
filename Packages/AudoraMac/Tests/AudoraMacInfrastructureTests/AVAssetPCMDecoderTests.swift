@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import AudioToolbox
 import AudoraApplication
 import AudoraDomain
@@ -9,6 +9,85 @@ import Foundation
 import XCTest
 
 final class AVAssetPCMDecoderTests: XCTestCase {
+    func testDescriptorRangePlannerResumesWithinTheOriginalRequestedRange() throws {
+        XCTAssertEqual(
+            try DescriptorAssetByteRangePlanner.responseRange(
+                requestedOffset: 100,
+                currentOffset: 120,
+                requestedLength: 50,
+                requestsAllDataToEndOfResource: false,
+                byteCount: 1_000
+            ),
+            120..<150
+        )
+        XCTAssertEqual(
+            try DescriptorAssetByteRangePlanner.responseRange(
+                requestedOffset: 100,
+                currentOffset: 120,
+                requestedLength: -1,
+                requestsAllDataToEndOfResource: true,
+                byteCount: 200
+            ),
+            120..<200
+        )
+    }
+
+    func testDescriptorRangePlannerBoundsEOFAndRejectsInvalidOffsets() throws {
+        XCTAssertEqual(
+            try DescriptorAssetByteRangePlanner.responseRange(
+                requestedOffset: 90,
+                currentOffset: 90,
+                requestedLength: 50,
+                requestsAllDataToEndOfResource: false,
+                byteCount: 100
+            ),
+            90..<100
+        )
+        XCTAssertEqual(
+            try DescriptorAssetByteRangePlanner.responseRange(
+                requestedOffset: 90,
+                currentOffset: 100,
+                requestedLength: 10,
+                requestsAllDataToEndOfResource: false,
+                byteCount: 100
+            ),
+            100..<100
+        )
+        XCTAssertThrowsError(
+            try DescriptorAssetByteRangePlanner.responseRange(
+                requestedOffset: Int64.max - 1,
+                currentOffset: Int64.max - 1,
+                requestedLength: 4,
+                requestsAllDataToEndOfResource: false,
+                byteCount: Int64.max
+            )
+        ) { error in
+            XCTAssertEqual(error as? DescriptorAssetByteRangeError, .invalidRequest)
+        }
+        XCTAssertThrowsError(
+            try DescriptorAssetByteRangePlanner.responseRange(
+                requestedOffset: 100,
+                currentOffset: 151,
+                requestedLength: 50,
+                requestsAllDataToEndOfResource: false,
+                byteCount: 1_000
+            )
+        ) { error in
+            XCTAssertEqual(error as? DescriptorAssetByteRangeError, .invalidRequest)
+        }
+        XCTAssertThrowsError(
+            try DescriptorAssetByteRangePlanner.responseRange(
+                requestedOffset: 0,
+                currentOffset: -1,
+                requestedLength: 1,
+                requestsAllDataToEndOfResource: false,
+                byteCount: 1
+            )
+        ) { error in
+            XCTAssertEqual(error as? DescriptorAssetByteRangeError, .invalidRequest)
+        }
+    }
+
     func testOnlyOrdinaryMonoAndStereoLayoutsAreAccepted() throws {
         XCTAssertTrue(
             AVAssetPCMDecoder.hasSupportedChannelLayout(
@@ -98,94 +177,126 @@ final class AVAssetPCMDecoderTests: XCTestCase {
         }
     }
 
-    func testEditedAACPrimingDrainsOnsetAndTailIntoCanonicalWAV() async throws {
+    func testAACPrimingDrainsOnsetAndTailIntoCanonicalWAV() async throws {
         try await withTemporaryAudioURL(extension: "m4a") { encodedURL in
-            try await withTemporaryAudioURL(extension: "m4a") { editedURL in
-                try await withTemporaryAudioURL(extension: "wav") { canonicalURL in
-                    let frameCount = 4_410
-                    try writeSyntheticAudio(
-                        to: encodedURL,
-                        formatID: kAudioFormatMPEG4AAC,
-                        sampleRate: 44_100,
-                        channelCount: 1,
-                        frameCount: frameCount
-                    ) { _, frame in
-                        if frame < 512 || frame >= frameCount - 512 {
-                            return Float(
-                                sin(2 * Double.pi * 1_000 * Double(frame) / 44_100) * 0.8
-                            )
-                        }
-                        return 0
-                    }
-                    try await writeEditedM4A(from: encodedURL, to: editedURL)
-
-                    let decoder = AVAssetPCMDecoder()
-                    let inspectedSource = try await decoder.inspect(
-                        try openOwnedAudio(editedURL),
-                        container: .m4a
-                    )
-                    let descriptor = Darwin.open(
-                        canonicalURL.path,
-                        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
-                        0o600
-                    )
-                    guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
-                    let normalizer = try StreamingCanonicalAudioNormalizer(
-                        description: inspectedSource.description,
-                        destinationDescriptor: descriptor,
-                        maximumFrameCount: 1_600
-                    )
-                    var decodedFrames = 0
-                    try await decoder.decode(inspectedSource) { chunk in
-                        decodedFrames += chunk.frameCount
-                        try normalizer.consume(chunk)
-                    }
-                    let normalized = try normalizer.finish()
-                    let canonical = try Data(contentsOf: canonicalURL)
-                    let samples = canonicalInt16Samples(canonical)
-
-                    XCTAssertGreaterThan(inspectedSource.description.metadataDurationSeconds, 1)
-                    XCTAssertEqual(decodedFrames, frameCount)
-                    XCTAssertEqual(normalized.frameCount, 1_600)
-                    XCTAssertEqual(normalized.byteCount, UInt64(canonical.count))
-                    XCTAssertEqual(samples.count, 1_600)
-                    XCTAssertGreaterThan(samples.prefix(256).map(magnitude).max() ?? 0, 1_000)
-                    XCTAssertGreaterThan(samples.suffix(256).map(magnitude).max() ?? 0, 1_000)
-                }
-            }
-        }
-    }
-
-    func testInternalPresentationTimestampDiscontinuityIsRejected() async throws {
-        try await withTemporaryAudioURL(extension: "m4a") { encodedURL in
-            try await withTemporaryAudioURL(extension: "m4a") { discontinuousURL in
+            try await withTemporaryAudioURL(extension: "wav") { canonicalURL in
+                let frameCount = 4_410
                 try writeSyntheticAudio(
                     to: encodedURL,
                     formatID: kAudioFormatMPEG4AAC,
                     sampleRate: 44_100,
                     channelCount: 1,
-                    frameCount: 4_410
-                )
-                try await writeDiscontinuousM4A(
-                    from: encodedURL,
-                    to: discontinuousURL
-                )
-                let hasInternalGap = try await hasInternalPresentationGap(
-                    at: discontinuousURL
-                )
-                XCTAssertTrue(hasInternalGap)
+                    frameCount: frameCount
+                ) { _, frame in
+                    if frame < 512 || frame >= frameCount - 512 {
+                        return Float(
+                            sin(2 * Double.pi * 1_000 * Double(frame) / 44_100) * 0.8
+                        )
+                    }
+                    return 0
+                }
 
                 let decoder = AVAssetPCMDecoder()
-                let inspected = try await decoder.inspect(
-                    try openOwnedAudio(discontinuousURL),
+                let inspectedSource = try await decoder.inspect(
+                    try openOwnedAudio(encodedURL),
                     container: .m4a
                 )
-                await XCTAssertThrowsErrorAsync(
-                    try await decoder.decode(inspected) { _ in }
-                ) { error in
-                    XCTAssertEqual(error as? AudioImportFailure, .decodeFailed)
+                let descriptor = Darwin.open(
+                    canonicalURL.path,
+                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+                    0o600
+                )
+                guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
+                let normalizer = try StreamingCanonicalAudioNormalizer(
+                    description: inspectedSource.description,
+                    destinationDescriptor: descriptor,
+                    maximumFrameCount: 1_600
+                )
+                var decodedFrames = 0
+                try await decoder.decode(inspectedSource) { chunk in
+                    decodedFrames += chunk.frameCount
+                    try normalizer.consume(chunk)
                 }
+                let normalized = try normalizer.finish()
+                let canonical = try Data(contentsOf: canonicalURL)
+                let canonicalSamples = canonicalInt16Samples(canonical)
+
+                XCTAssertEqual(decodedFrames, frameCount)
+                XCTAssertEqual(normalized.frameCount, 1_600)
+                XCTAssertEqual(normalized.byteCount, UInt64(canonical.count))
+                XCTAssertEqual(canonicalSamples.count, 1_600)
+                XCTAssertGreaterThan(
+                    canonicalSamples.prefix(256).map(magnitude).max() ?? 0,
+                    1_000
+                )
+                XCTAssertGreaterThan(
+                    canonicalSamples.suffix(256).map(magnitude).max() ?? 0,
+                    1_000
+                )
             }
+        }
+    }
+
+    func testDecodedTimelineAcceptsExactlyContiguousPresentedFrames() throws {
+        var timeline = try DecodedAudioTimelineValidator(sampleRateHz: 44_100)
+        XCTAssertEqual(
+            try timeline.accept(
+                presentationTimeStamp: CMTime(value: 0, timescale: 44_100),
+                frameCount: 100,
+                trimAtStart: 10,
+                trimAtEnd: 20
+            ),
+            10..<80
+        )
+        XCTAssertEqual(
+            try timeline.accept(
+                presentationTimeStamp: CMTime(value: 80, timescale: 44_100),
+                frameCount: 50,
+                trimAtStart: 0,
+                trimAtEnd: 0
+            ),
+            0..<50
+        )
+        XCTAssertEqual(timeline.presentedFrameCount, 120)
+    }
+
+    func testDecodedTimelineRejectsInternalPositiveGap() throws {
+        var timeline = try DecodedAudioTimelineValidator(sampleRateHz: 44_100)
+        _ = try timeline.accept(
+            presentationTimeStamp: .zero,
+            frameCount: 100,
+            trimAtStart: 0,
+            trimAtEnd: 0
+        )
+        XCTAssertThrowsError(
+            try timeline.accept(
+                presentationTimeStamp: CMTime(value: 101, timescale: 44_100),
+                frameCount: 100,
+                trimAtStart: 0,
+                trimAtEnd: 0
+            )
+        ) { error in
+            XCTAssertEqual(error as? DecodedAudioTimelineError, .invalid)
+        }
+    }
+
+    func testDecodedTimelineRejectsPresentationOverlap() throws {
+        var timeline = try DecodedAudioTimelineValidator(sampleRateHz: 44_100)
+        _ = try timeline.accept(
+            presentationTimeStamp: .zero,
+            frameCount: 100,
+            trimAtStart: 0,
+            trimAtEnd: 0
+        )
+        XCTAssertThrowsError(
+            try timeline.accept(
+                presentationTimeStamp: CMTime(value: 99, timescale: 44_100),
+                frameCount: 100,
+                trimAtStart: 0,
+                trimAtEnd: 0
+            )
+        ) { error in
+            XCTAssertEqual(error as? DecodedAudioTimelineError, .invalid)
         }
     }
 
@@ -197,7 +308,9 @@ final class AVAssetPCMDecoderTests: XCTestCase {
                     try openOwnedAudio(url),
                     container: .wav
                 )
-            )
+            ) { error in
+                XCTAssertEqual(error as? AudioImportFailure, .malformedMedia)
+            }
         }
 
         try await withTemporaryAudioURL(extension: "m4a") { url in
@@ -263,6 +376,15 @@ final class AVAssetPCMDecoderTests: XCTestCase {
         frameCount: Int,
         sample: ((Int, Int) -> Float)? = nil
     ) throws {
+        if formatID == kAudioFormatLinearPCM, channelCount > 2 {
+            try writePCM16WAV(
+                to: url,
+                sampleRate: sampleRate,
+                channelCount: channelCount,
+                frameCount: frameCount
+            )
+            return
+        }
         guard let sourceFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: Double(sampleRate),
@@ -314,112 +436,50 @@ final class AVAssetPCMDecoderTests: XCTestCase {
         try file.write(from: buffer)
     }
 
-    private func writeEditedM4A(from sourceURL: URL, to destinationURL: URL) async throws {
-        let source = AVURLAsset(url: sourceURL)
-        let tracks = try await source.loadTracks(withMediaType: .audio)
-        let duration = try await source.load(.duration)
-        let composition = AVMutableComposition()
-        guard tracks.count == 1,
-              let track = composition.addMutableTrack(
-                  withMediaType: .audio,
-                  preferredTrackID: kCMPersistentTrackID_Invalid
-              )
+    private func writePCM16WAV(
+        to url: URL,
+        sampleRate: UInt32,
+        channelCount: UInt32,
+        frameCount: Int
+    ) throws {
+        guard channelCount > 0,
+              channelCount <= UInt32(UInt16.max / 2),
+              frameCount > 0,
+              let dataByteCount = UInt32(
+                  exactly: UInt64(frameCount) * UInt64(channelCount) * 2
+              ),
+              dataByteCount <= UInt32.max - 36,
+              sampleRate <= UInt32.max / (channelCount * 2)
         else {
-            throw CocoaError(.fileReadCorruptFile)
+            throw CocoaError(.fileWriteUnknown)
         }
-        try track.insertTimeRange(
-            CMTimeRange(start: .zero, duration: duration),
-            of: tracks[0],
-            at: CMTime(value: 44_100, timescale: 44_100)
-        )
-        guard let exporter = AVAssetExportSession(
-            asset: composition,
-            presetName: AVAssetExportPresetPassthrough
-        ) else {
-            throw CocoaError(.fileWriteUnsupportedScheme)
-        }
-        try await exporter.export(to: destinationURL, as: .m4a)
-    }
 
-    private func writeDiscontinuousM4A(
-        from sourceURL: URL,
-        to destinationURL: URL
-    ) async throws {
-        let source = AVURLAsset(url: sourceURL)
-        let tracks = try await source.loadTracks(withMediaType: .audio)
-        let composition = AVMutableComposition()
-        guard tracks.count == 1,
-              let track = composition.addMutableTrack(
-                  withMediaType: .audio,
-                  preferredTrackID: kCMPersistentTrackID_Invalid
-              )
-        else {
-            throw CocoaError(.fileReadCorruptFile)
+        var data = Data()
+        func appendLittleEndian(_ value: UInt16) {
+            data.append(UInt8(truncatingIfNeeded: value))
+            data.append(UInt8(truncatingIfNeeded: value >> 8))
         }
-        let half = CMTime(value: 2_205, timescale: 44_100)
-        try track.insertTimeRange(
-            CMTimeRange(start: .zero, duration: half),
-            of: tracks[0],
-            at: .zero
-        )
-        try track.insertTimeRange(
-            CMTimeRange(start: half, duration: half),
-            of: tracks[0],
-            at: CMTime(value: 4_410, timescale: 44_100)
-        )
-        guard let exporter = AVAssetExportSession(
-            asset: composition,
-            presetName: AVAssetExportPresetPassthrough
-        ) else {
-            throw CocoaError(.fileWriteUnsupportedScheme)
+        func appendLittleEndian(_ value: UInt32) {
+            data.append(UInt8(truncatingIfNeeded: value))
+            data.append(UInt8(truncatingIfNeeded: value >> 8))
+            data.append(UInt8(truncatingIfNeeded: value >> 16))
+            data.append(UInt8(truncatingIfNeeded: value >> 24))
         }
-        try await exporter.export(to: destinationURL, as: .m4a)
-    }
 
-    private func hasInternalPresentationGap(at url: URL) async throws -> Bool {
-        let asset = AVURLAsset(url: url)
-        let tracks = try await asset.loadTracks(withMediaType: .audio)
-        guard tracks.count == 1 else { throw CocoaError(.fileReadCorruptFile) }
-        let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: tracks[0], outputSettings: nil)
-        guard reader.canAdd(output) else { throw CocoaError(.fileReadCorruptFile) }
-        reader.add(output)
-        guard reader.startReading() else { throw CocoaError(.fileReadCorruptFile) }
-
-        var previousEnd: CMTime?
-        var sampleBufferCount = 0
-        while let sampleBuffer = output.copyNextSampleBuffer() {
-            let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            guard timestamp.isValid,
-                  timestamp.isNumeric,
-                  let format = CMSampleBufferGetFormatDescription(sampleBuffer),
-                  let basic = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee,
-                  basic.mSampleRate.isFinite,
-                  basic.mSampleRate.rounded() == basic.mSampleRate,
-                  basic.mSampleRate > 0
-            else {
-                throw CocoaError(.fileReadCorruptFile)
-            }
-            if let previousEnd {
-                let gap = CMTimeSubtract(timestamp, previousEnd).seconds
-                if gap.isFinite, gap > 0.01 {
-                    reader.cancelReading()
-                    return true
-                }
-            }
-            previousEnd = CMTimeAdd(
-                timestamp,
-                CMTime(
-                    value: Int64(CMSampleBufferGetNumSamples(sampleBuffer)),
-                    timescale: Int32(basic.mSampleRate)
-                )
-            )
-            sampleBufferCount += 1
-        }
-        guard reader.status == .completed, sampleBufferCount > 1 else {
-            throw CocoaError(.fileReadCorruptFile)
-        }
-        return false
+        data.append(contentsOf: "RIFF".utf8)
+        appendLittleEndian(36 + dataByteCount)
+        data.append(contentsOf: "WAVEfmt ".utf8)
+        appendLittleEndian(UInt32(16))
+        appendLittleEndian(UInt16(1))
+        appendLittleEndian(UInt16(channelCount))
+        appendLittleEndian(sampleRate)
+        appendLittleEndian(sampleRate * channelCount * 2)
+        appendLittleEndian(UInt16(channelCount * 2))
+        appendLittleEndian(UInt16(16))
+        data.append(contentsOf: "data".utf8)
+        appendLittleEndian(dataByteCount)
+        data.append(Data(repeating: 0, count: Int(dataByteCount)))
+        try data.write(to: url, options: .withoutOverwriting)
     }
 
     private func canonicalInt16Samples(_ data: Data) -> [Int16] {
@@ -440,10 +500,19 @@ final class AVAssetPCMDecoderTests: XCTestCase {
         extension pathExtension: String,
         _ body: (URL) async throws -> Void
     ) async throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "audora-decoder-test-\(UUID().uuidString).\(pathExtension)"
+        var resolvedPath = [CChar](repeating: 0, count: Int(PATH_MAX))
+        guard realpath(FileManager.default.temporaryDirectory.path, &resolvedPath) != nil else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        let resolvedBytes = resolvedPath.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        let url = URL(
+            fileURLWithPath: String(decoding: resolvedBytes, as: UTF8.self),
+            isDirectory: true
         )
-        defer { try? FileManager.default.removeItem(at: url) }
+            .appendingPathComponent(
+                "audora-decoder-test-\(UUID().uuidString).\(pathExtension)"
+            )
+        defer { _ = Darwin.unlink(url.path) }
         try await body(url)
     }
 

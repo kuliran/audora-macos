@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "recording.recovery-discard-only",
+  "initialState": { "kind": "unavailable" },
+  "commands": [
+    { "kind": "selectLibrary" }
+  ],
+  "dependencyTrace": [
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "discardOnly", "afterCommand": 0, "frameCount": 16000 }
+  ],
+  "expectedState": { "kind": "recoveryRequired" },
+  "expectedEffects": [
+    { "kind": "offerDiscardOnly" }
+  ]
+}

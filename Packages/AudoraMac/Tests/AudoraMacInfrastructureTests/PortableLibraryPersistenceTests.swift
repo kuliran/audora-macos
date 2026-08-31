@@ -522,13 +522,13 @@ final class PortableLibraryPersistenceTests: XCTestCase {
 
     private func tree(at root: URL) throws -> [String] {
         var values: [String] = []
-        try appendTree(at: root, relativeToRoot: "", into: &values)
+        try appendTree(at: root, depth: 0, into: &values)
         return values.sorted()
     }
 
     private func appendTree(
         at directory: URL,
-        relativeToRoot parent: String,
+        depth: Int,
         into values: inout [String]
     ) throws {
         let children = try FileManager.default.contentsOfDirectory(
@@ -537,9 +537,9 @@ final class PortableLibraryPersistenceTests: XCTestCase {
             options: []
         )
         for child in children {
-            let relative = parent.isEmpty
-                ? child.lastPathComponent
-                : "\(parent)/\(child.lastPathComponent)"
+            let relative = child.pathComponents
+                .suffix(depth + 1)
+                .joined(separator: "/")
             let metadata = try child.resourceValues(
                 forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
             )
@@ -548,7 +548,7 @@ final class PortableLibraryPersistenceTests: XCTestCase {
             if isDirectory, metadata.isSymbolicLink != true {
                 try appendTree(
                     at: child,
-                    relativeToRoot: relative,
+                    depth: depth + 1,
                     into: &values
                 )
             }

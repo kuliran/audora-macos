@@ -192,6 +192,7 @@ public enum AudioImportPreparationPhase: String, Equatable, Sendable {
 }
 
 public enum AudioImportFailure: String, Error, Equatable, Sendable {
+    case anotherLibraryActivity
     case unavailable
     case unsupportedMedia
     case sourceChanged

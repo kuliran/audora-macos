@@ -5,11 +5,13 @@ Audora is being rebuilt as a private, local-first macOS speech coach. The
 specification.
 
 The native target provides one singleton Library window and the first vertical
-slice through the new architecture. At launch, Presentation sends a typed start
-command, Application resolves bootstrap state through an injected macOS adapter,
-and SwiftUI renders the immutable no-Library-selected snapshot. The portable
-Domain, Application, and Contracts products remain separate from the macOS-only
-Infrastructure and Presentation products.
+slices through the new architecture. At launch, Presentation sends typed
+commands, Application resolves state through injected macOS adapters, and SwiftUI
+renders immutable Library and Recording snapshots. Recording stages a locked
+16 kHz mono `pcmS16LE` representation, records unavailable intervals explicitly,
+and publishes one immutable Session only after flush, atomic install, and strict
+reread. The portable Domain, Application, and Contracts products remain separate
+from the macOS-only Infrastructure and Presentation products.
 
 ## Requirements
 
@@ -53,6 +55,10 @@ Run the macOS adapter and Presentation tests with:
 ```sh
 swift test --package-path Packages/AudoraMac --parallel
 ```
+
+Those tests use synthetic input buffers and disposable Libraries. They do not
+request microphone permission or qualify physical microphone capture; see the
+[Recording qualification note](Qualification/Recording/README.md).
 
 Contract schemas and fixtures are package resources generated from TypeSpec. With
 the pinned Node 24 and pnpm toolchain installed, verify them with:

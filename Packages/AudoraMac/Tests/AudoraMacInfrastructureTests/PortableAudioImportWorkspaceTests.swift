@@ -401,9 +401,9 @@ final class PortableAudioImportWorkspaceTests: XCTestCase {
                         inspected: fixture.inspected,
                         chunks: [
                             DecodedPCMChunk(
-                                interleavedSamples: [0, 0, 0],
+                                interleavedSamples: [0, 0, 0, 0, 0, 0],
                                 frameCount: 3,
-                                channelCount: 1,
+                                channelCount: 2,
                                 sampleRateHz: 16_000
                             ),
                         ]

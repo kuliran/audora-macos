@@ -22,6 +22,10 @@ final class ImportedSessionTests: XCTestCase {
     }
 
     func testCanonicalFrameAndDurationBoundaryUsesExactIntegerCeiling() throws {
+        XCTAssertEqual(CanonicalAudioFormat.v1, .versionOne)
+        XCTAssertEqual(CanonicalAudioFormat.v1.container, "wav")
+        XCTAssertEqual(CanonicalAudioFormat.v1.encoding.rawValue, "pcmS16LE")
+        XCTAssertEqual(CanonicalAudioFormat.v1.bitsPerSample, 16)
         XCTAssertEqual(
             try CanonicalAudioFormat.durationMilliseconds(forFrameCount: 1),
             1

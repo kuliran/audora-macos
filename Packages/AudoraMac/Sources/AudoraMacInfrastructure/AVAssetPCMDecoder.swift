@@ -35,6 +35,24 @@ final class OwnedAudioFile: @unchecked Sendable {
         return duplicate
     }
 
+    func readPrefix(maximumCount: Int) throws -> [UInt8] {
+        guard maximumCount > 0 else { return [] }
+        let count = min(Int64(maximumCount), byteCount)
+        guard count > 0, count <= Int64(Int.max) else { return [] }
+        var bytes = [UInt8](repeating: 0, count: Int(count))
+        let readCount = bytes.withUnsafeMutableBytes { buffer -> Int in
+            guard let base = buffer.baseAddress else { return -1 }
+            while true {
+                let result = Darwin.pread(descriptor, base, buffer.count, 0)
+                if result < 0, errno == EINTR { continue }
+                return result
+            }
+        }
+        guard readCount >= 0 else { throw AudioImportFailure.unavailable }
+        bytes.removeSubrange(readCount..<bytes.count)
+        return bytes
+    }
+
     deinit { Darwin.close(descriptor) }
 }
 
@@ -71,12 +89,83 @@ protocol AudioPCMDecoding: Sendable {
     ) async throws
 }
 
+enum DecodedAudioTimelineError: Error, Equatable {
+    case invalid
+}
+
+struct DecodedAudioTimelineValidator {
+    let sampleRateHz: UInt32
+    private var origin: CMTime?
+    private(set) var presentedFrameCount: Int64 = 0
+
+    init(sampleRateHz: UInt32) throws {
+        guard sampleRateHz > 0, sampleRateHz <= UInt32(Int32.max) else {
+            throw DecodedAudioTimelineError.invalid
+        }
+        self.sampleRateHz = sampleRateHz
+    }
+
+    mutating func accept(
+        presentationTimeStamp: CMTime,
+        frameCount: Int,
+        trimAtStart: Int,
+        trimAtEnd: Int
+    ) throws -> Range<Int>? {
+        guard frameCount > 0,
+              trimAtStart >= 0,
+              trimAtEnd >= 0,
+              trimAtStart <= frameCount,
+              trimAtEnd <= frameCount - trimAtStart
+        else {
+            throw DecodedAudioTimelineError.invalid
+        }
+        let range = trimAtStart..<(frameCount - trimAtEnd)
+        guard !range.isEmpty else { return nil }
+        guard presentationTimeStamp.isValid,
+              presentationTimeStamp.isNumeric,
+              let trimFrames = Int64(exactly: trimAtStart),
+              let acceptedFrames = Int64(exactly: range.count),
+              presentedFrameCount <= Int64.max - acceptedFrames
+        else {
+            throw DecodedAudioTimelineError.invalid
+        }
+
+        let presentedTimeStamp = CMTimeAdd(
+            presentationTimeStamp,
+            CMTime(value: trimFrames, timescale: Int32(sampleRateHz))
+        )
+        guard presentedTimeStamp.isValid, presentedTimeStamp.isNumeric else {
+            throw DecodedAudioTimelineError.invalid
+        }
+        if origin == nil { origin = presentedTimeStamp }
+        guard let origin else { throw DecodedAudioTimelineError.invalid }
+        let relativeTimeStamp = CMTimeSubtract(presentedTimeStamp, origin)
+        let expectedTimeStamp = CMTime(
+            value: presentedFrameCount,
+            timescale: Int32(sampleRateHz)
+        )
+        guard relativeTimeStamp.isValid,
+              relativeTimeStamp.isNumeric,
+              CMTimeCompare(relativeTimeStamp, expectedTimeStamp) == 0
+        else {
+            throw DecodedAudioTimelineError.invalid
+        }
+        presentedFrameCount += acceptedFrames
+        return range
+    }
+}
+
 struct AVAssetPCMDecoder: AudioPCMDecoding {
     func inspect(
         _ source: OwnedAudioFile,
         container: ImportedAudioContainer
     ) async throws -> InspectedAudioSource {
         do {
+            if let detected = detectedContainer(in: try source.readPrefix(maximumCount: 12)),
+               detected != container
+            {
+                throw AudioImportFailure.unsupportedMedia
+            }
             let (asset, resourceLoader) = try makeAsset(source, container: container)
             async let loadedDuration = asset.load(.duration)
             async let loadedProtected = asset.load(.hasProtectedContent)
@@ -183,8 +272,9 @@ struct AVAssetPCMDecoder: AudioPCMDecoding {
             reader.add(output)
             guard reader.startReading() else { throw AudioImportFailure.decodeFailed }
 
-            var timelineOrigin: CMTime?
-            var nextPresentedFrame: Int64 = 0
+            var timeline = try DecodedAudioTimelineValidator(
+                sampleRateHz: expected.sampleRateHz
+            )
             while let sampleBuffer = output.copyNextSampleBuffer() {
                 try Task.checkCancellation()
                 guard CMSampleBufferIsValid(sampleBuffer),
@@ -205,13 +295,6 @@ struct AVAssetPCMDecoder: AudioPCMDecoding {
                     key: kCMSampleBufferAttachmentKey_TrimDurationAtEnd,
                     sampleRateHz: expected.sampleRateHz
                 )
-                guard trimAtStart <= frameCount,
-                      trimAtEnd <= frameCount - trimAtStart
-                else {
-                    reader.cancelReading()
-                    throw AudioImportFailure.decodeFailed
-                }
-                let presentedFrameCount = frameCount - trimAtStart - trimAtEnd
                 let valueCount = frameCount * Int(expected.channelCount)
                 let requiredBytes = valueCount * MemoryLayout<Float>.size
                 guard frameCount > 0,
@@ -225,33 +308,21 @@ struct AVAssetPCMDecoder: AudioPCMDecoding {
                     reader.cancelReading()
                     throw AudioImportFailure.decodeFailed
                 }
-                if presentedFrameCount == 0 { continue }
-
                 let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                guard timestamp.isValid, timestamp.isNumeric else {
+                let presentedFrames: Range<Int>
+                do {
+                    guard let accepted = try timeline.accept(
+                        presentationTimeStamp: timestamp,
+                        frameCount: frameCount,
+                        trimAtStart: trimAtStart,
+                        trimAtEnd: trimAtEnd
+                    ) else {
+                        continue
+                    }
+                    presentedFrames = accepted
+                } catch {
                     reader.cancelReading()
-                    throw AudioImportFailure.decodeFailed
-                }
-                let presentedTimestamp = CMTimeAdd(
-                    timestamp,
-                    CMTime(
-                        value: Int64(trimAtStart),
-                        timescale: Int32(expected.sampleRateHz)
-                    )
-                )
-                if timelineOrigin == nil { timelineOrigin = presentedTimestamp }
-                guard let timelineOrigin else {
-                    reader.cancelReading()
-                    throw AudioImportFailure.decodeFailed
-                }
-                let relativeTimestamp = CMTimeSubtract(presentedTimestamp, timelineOrigin)
-                let frameTimestamp = CMTime(
-                    value: nextPresentedFrame,
-                    timescale: Int32(expected.sampleRateHz)
-                )
-                guard CMTimeCompare(relativeTimestamp, frameTimestamp) == 0 else {
-                    reader.cancelReading()
-                    throw AudioImportFailure.decodeFailed
+                    throw error
                 }
 
                 var samples = [Float](repeating: 0, count: valueCount)
@@ -268,23 +339,22 @@ struct AVAssetPCMDecoder: AudioPCMDecoding {
                     throw AudioImportFailure.decodeFailed
                 }
                 let channelCount = Int(expected.channelCount)
-                let firstValue = trimAtStart * channelCount
-                let presentedValueCount = presentedFrameCount * channelCount
+                let firstValue = presentedFrames.lowerBound * channelCount
+                let presentedValueCount = presentedFrames.count * channelCount
                 let presentedSamples = Array(
                     samples[firstValue..<(firstValue + presentedValueCount)]
                 )
                 try consume(
                     DecodedPCMChunk(
                         interleavedSamples: presentedSamples,
-                        frameCount: presentedFrameCount,
+                        frameCount: presentedFrames.count,
                         channelCount: channelCount,
                         sampleRateHz: expected.sampleRateHz
                     )
                 )
-                nextPresentedFrame += Int64(presentedFrameCount)
             }
             try Task.checkCancellation()
-            guard reader.status == .completed, nextPresentedFrame > 0 else {
+            guard reader.status == .completed, timeline.presentedFrameCount > 0 else {
                 throw AudioImportFailure.decodeFailed
             }
         } catch is CancellationError {
@@ -386,6 +456,26 @@ struct AVAssetPCMDecoder: AudioPCMDecoding {
         }
     }
 
+    private func detectedContainer(in prefix: [UInt8]) -> ImportedAudioContainer? {
+        if prefix.count >= 12,
+           prefix[0..<4].elementsEqual("RIFF".utf8),
+           prefix[8..<12].elementsEqual("WAVE".utf8)
+        {
+            return .wav
+        }
+        if prefix.count >= 8,
+           prefix[4..<8].elementsEqual("ftyp".utf8)
+        {
+            let boxSize = prefix[0..<4].reduce(UInt32(0)) {
+                ($0 << 8) | UInt32($1)
+            }
+            if boxSize == 0 || boxSize >= 8 {
+                return .m4a
+            }
+        }
+        return nil
+    }
+
     static func hasSupportedChannelLayout(
         _ description: CMAudioFormatDescription,
         channelCount: UInt32
@@ -436,8 +526,47 @@ struct AVAssetPCMDecoder: AudioPCMDecoding {
     }
 }
 
-private enum DescriptorAssetResourceError: Error {
+enum DescriptorAssetByteRangeError: Error, Equatable {
     case invalidRequest
+}
+
+enum DescriptorAssetByteRangePlanner {
+    static func responseRange(
+        requestedOffset: Int64,
+        currentOffset: Int64,
+        requestedLength: Int,
+        requestsAllDataToEndOfResource: Bool,
+        byteCount: Int64
+    ) throws -> Range<Int64> {
+        guard requestedOffset >= 0,
+              currentOffset >= 0,
+              byteCount >= 0
+        else {
+            throw DescriptorAssetByteRangeError.invalidRequest
+        }
+        let start = max(requestedOffset, currentOffset)
+        guard start <= byteCount else {
+            throw DescriptorAssetByteRangeError.invalidRequest
+        }
+        if requestsAllDataToEndOfResource {
+            return start..<byteCount
+        }
+        guard requestedLength >= 0,
+              let length = Int64(exactly: requestedLength),
+              requestedOffset <= Int64.max - length
+        else {
+            throw DescriptorAssetByteRangeError.invalidRequest
+        }
+        let requestedEnd = requestedOffset + length
+        let end = min(byteCount, requestedEnd)
+        guard start <= end else {
+            throw DescriptorAssetByteRangeError.invalidRequest
+        }
+        return start..<end
+    }
+}
+
+private enum DescriptorAssetResourceError: Error {
     case readFailed
 }
 
@@ -491,27 +620,18 @@ private final class DescriptorAssetResourceLoader: NSObject,
     }
 
     private func respond(to request: AVAssetResourceLoadingDataRequest) throws {
-        let start = max(request.requestedOffset, request.currentOffset)
-        guard start >= 0, start <= byteCount else {
-            throw DescriptorAssetResourceError.invalidRequest
-        }
-        let end: Int64
-        if request.requestsAllDataToEndOfResource {
-            end = byteCount
-        } else {
-            let requestedLength = Int64(request.requestedLength)
-            guard requestedLength >= 0,
-                  start <= Int64.max - requestedLength
-            else {
-                throw DescriptorAssetResourceError.invalidRequest
-            }
-            end = min(byteCount, start + requestedLength)
-        }
+        let range = try DescriptorAssetByteRangePlanner.responseRange(
+            requestedOffset: request.requestedOffset,
+            currentOffset: request.currentOffset,
+            requestedLength: request.requestedLength,
+            requestsAllDataToEndOfResource: request.requestsAllDataToEndOfResource,
+            byteCount: byteCount
+        )
 
-        var offset = start
+        var offset = range.lowerBound
         var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
-        while offset < end {
-            let amount = min(Int64(buffer.count), end - offset)
+        while offset < range.upperBound {
+            let amount = min(Int64(buffer.count), range.upperBound - offset)
             let count = buffer.withUnsafeMutableBytes { bytes -> Int in
                 guard let base = bytes.baseAddress else { return -1 }
                 while true {

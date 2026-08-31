@@ -10,6 +10,7 @@ public actor DefaultLibraryFeature: LibraryFeature {
     private let workspace: any LibraryWorkspacePort
     private let clock: any LibraryClock
     private let idGenerator: any LibraryIDGenerator
+    private let activityCoordinator: any LibraryActivityCoordinating
     private var state = LibraryFeatureReducer.initialState
     private var hasStarted = false
     private var queuedExternalOpen: QueuedExternalOpen?
@@ -19,11 +20,13 @@ public actor DefaultLibraryFeature: LibraryFeature {
     public init(
         workspace: any LibraryWorkspacePort,
         clock: any LibraryClock,
-        idGenerator: any LibraryIDGenerator
+        idGenerator: any LibraryIDGenerator,
+        activityCoordinator: any LibraryActivityCoordinating
     ) {
         self.workspace = workspace
         self.clock = clock
         self.idGenerator = idGenerator
+        self.activityCoordinator = activityCoordinator
     }
 
     public var currentState: LibraryFeatureState {
@@ -157,7 +160,17 @@ public actor DefaultLibraryFeature: LibraryFeature {
         let previous = state.selection
         state = LibraryFeatureReducer.begin(activity, from: state)
         publish(state)
+        guard let lease = await activityCoordinator.acquireSelectionMutation() else {
+            state = LibraryFeatureState(
+                selection: previous,
+                notice: .libraryActivityInProgress
+            )
+            publish(state)
+            await replayQueuedExternalOpens()
+            return
+        }
         let outcome = await operation()
+        await activityCoordinator.release(lease)
         state = LibraryFeatureReducer.completeOpen(outcome, previous: previous)
         publish(state)
         await replayQueuedExternalOpens()
@@ -171,7 +184,25 @@ public actor DefaultLibraryFeature: LibraryFeature {
         let previous = state.selection
         state = LibraryFeatureReducer.begin(activity, from: state)
         publish(state)
+        let lease: LibraryActivityLease?
+        if close {
+            guard let acquired = await activityCoordinator.acquireSelectionMutation() else {
+                state = LibraryFeatureState(
+                    selection: previous,
+                    notice: .libraryActivityInProgress
+                )
+                publish(state)
+                await replayQueuedExternalOpens()
+                return
+            }
+            lease = acquired
+        } else {
+            lease = nil
+        }
         let outcome = await operation()
+        if let lease {
+            await activityCoordinator.release(lease)
+        }
         state = close
             ? LibraryFeatureReducer.completeClose(outcome, previous: previous)
             : LibraryFeatureReducer.completeReveal(outcome, previous: previous)
@@ -185,7 +216,17 @@ public actor DefaultLibraryFeature: LibraryFeature {
             let previous = state.selection
             state = LibraryFeatureReducer.begin(.opening, from: state)
             publish(state)
+            guard let lease = await activityCoordinator.acquireSelectionMutation() else {
+                state = LibraryFeatureState(
+                    selection: previous,
+                    notice: .libraryActivityInProgress
+                )
+                publish(state)
+                queued.completion.resume()
+                continue
+            }
             let outcome = await workspace.openExternalRequest(queued.token)
+            await activityCoordinator.release(lease)
             state = LibraryFeatureReducer.completeOpen(outcome, previous: previous)
             publish(state)
             queued.completion.resume()

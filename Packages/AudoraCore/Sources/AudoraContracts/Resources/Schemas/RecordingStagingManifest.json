@@ -1,0 +1,221 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/RecordingStagingManifest.json",
+    "anyOf": [
+        {
+            "$ref": "#/$defs/CapturingRecordingStaging"
+        },
+        {
+            "$ref": "#/$defs/RecoverableRecordingStaging"
+        },
+        {
+            "$ref": "#/$defs/SealingRecordingStaging"
+        },
+        {
+            "$ref": "#/$defs/PublishingRecordingStaging"
+        },
+        {
+            "$ref": "#/$defs/CommittedRecordingStaging"
+        }
+    ],
+    "description": "Non-authoritative microphone Recording staging root.",
+    "$defs": {
+        "CapturingRecordingStaging": {
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "string",
+                    "const": "capturing"
+                }
+            },
+            "required": [
+                "phase"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingStagingBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecoverableRecordingStaging": {
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "string",
+                    "const": "recoverable"
+                },
+                "availability": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "sealOrDiscard"
+                        },
+                        {
+                            "type": "string",
+                            "const": "discardOnly"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "phase",
+                "availability"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingStagingBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SealingRecordingStaging": {
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "string",
+                    "const": "sealing"
+                },
+                "terminalReason": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "userStop"
+                        },
+                        {
+                            "type": "string",
+                            "const": "durationLimit"
+                        },
+                        {
+                            "type": "string",
+                            "const": "interruption"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "phase",
+                "terminalReason"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingStagingBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PublishingRecordingStaging": {
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "string",
+                    "const": "publishing"
+                },
+                "terminalReason": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "userStop"
+                        },
+                        {
+                            "type": "string",
+                            "const": "durationLimit"
+                        },
+                        {
+                            "type": "string",
+                            "const": "interruption"
+                        }
+                    ]
+                },
+                "canonicalSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                }
+            },
+            "required": [
+                "phase",
+                "terminalReason",
+                "canonicalSha256"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingStagingBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CommittedRecordingStaging": {
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "string",
+                    "const": "committed"
+                },
+                "terminalReason": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "userStop"
+                        },
+                        {
+                            "type": "string",
+                            "const": "durationLimit"
+                        },
+                        {
+                            "type": "string",
+                            "const": "interruption"
+                        }
+                    ]
+                },
+                "canonicalSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                }
+            },
+            "required": [
+                "phase",
+                "terminalReason",
+                "canonicalSha256"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/RecordingStagingBase"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RecordingStagingBase": {
+            "type": "object",
+            "properties": {
+                "durableFrameCount": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                }
+            },
+            "required": [
+                "durableFrameCount"
+            ],
+            "allOf": [
+                {
+                    "$ref": "https://audora.local/contracts/RecordingStagingIdentityManifest.json"
+                }
+            ]
+        },
+        "Sha256Hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+        },
+        "RecordingFrameOffset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 43200000
+        }
+    }
+}

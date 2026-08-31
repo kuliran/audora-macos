@@ -44,6 +44,7 @@ public enum LibraryNotice: String, Equatable, Sendable {
     case locatorUpdateFailed
     case revealFailed
     case closeFailed
+    case libraryActivityInProgress
     case multipleExternalOpenRequests
     case externalOpenRequestExpired
 }

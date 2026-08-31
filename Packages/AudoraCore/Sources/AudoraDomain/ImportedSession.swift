@@ -60,29 +60,6 @@ public struct AudioArtifactFingerprint: Equatable, Sendable {
     }
 }
 
-public struct CanonicalAudioFormat: Equatable, Sendable {
-    public static let v1 = CanonicalAudioFormat()
-    public static let sampleRateHz: UInt32 = 16_000
-    public static let channelCount: UInt32 = 1
-    public static let bitsPerSample: UInt32 = 16
-    public static let maximumFrameCount: UInt64 = 43_200_000
-
-    public let container = "wav"
-    public let encoding = "pcmS16LE"
-    public let sampleRateHz = Self.sampleRateHz
-    public let channelCount = Self.channelCount
-    public let bitsPerSample = Self.bitsPerSample
-
-    private init() {}
-
-    public static func durationMilliseconds(forFrameCount frameCount: UInt64) throws -> UInt64 {
-        guard frameCount > 0, frameCount <= maximumFrameCount else {
-            throw ImportedSessionValidationError.invalidFrameCount
-        }
-        return (frameCount * 1_000 + UInt64(sampleRateHz) - 1) / UInt64(sampleRateHz)
-    }
-}
-
 public struct OriginalAudioArtifact: Equatable, Sendable {
     public let relativePath: LibraryRelativePath
     public let container: ImportedAudioContainer

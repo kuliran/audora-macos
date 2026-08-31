@@ -12,6 +12,7 @@ struct AudoraApp: App {
     private let workspace: PortableLibraryWorkspace
     private let feature: DefaultLibraryFeature
     private let audioImportFeature: DefaultAudioImportFeature
+    private let recordingFeature: DefaultRecordingFeature
     private let windowCoordinator: MainWindowCoordinator
 
     init() {
@@ -24,10 +25,22 @@ struct AudoraApp: App {
             locatorStore: locatorStore,
             revealer: NSWorkspaceLibraryRevealer()
         )
+        let activityCoordinator = LibraryActivityCoordinator()
         let feature = DefaultLibraryFeature(
             workspace: workspace,
             clock: SystemLibraryClock(),
-            idGenerator: RandomLibraryIDGenerator()
+            idGenerator: RandomLibraryIDGenerator(),
+            activityCoordinator: activityCoordinator
+        )
+        let recordingCapture = AVFoundationAudioCaptureAdapter(
+            roots: workspace,
+            sources: AVFoundationMicrophoneInputSourceFactory()
+        )
+        let recordingFeature = DefaultRecordingFeature(
+            capture: recordingCapture,
+            clock: SystemRecordingClock(),
+            idGenerator: RandomRecordingIDGenerator(),
+            activity: activityCoordinator
         )
         let audioImportWorkspace = PortableAudioImportWorkspace(
             workspace: workspace,
@@ -37,7 +50,8 @@ struct AudoraApp: App {
         let audioImportFeature = DefaultAudioImportFeature(
             port: audioImportWorkspace,
             clock: SystemLibraryClock(),
-            sessionIDGenerator: RandomSessionIDGenerator()
+            sessionIDGenerator: RandomSessionIDGenerator(),
+            activityCoordinator: activityCoordinator
         )
         let windowCoordinator = MainWindowCoordinator(
             access: AppKitMainWindowAccess()
@@ -45,6 +59,7 @@ struct AudoraApp: App {
         self.workspace = workspace
         self.feature = feature
         self.audioImportFeature = audioImportFeature
+        self.recordingFeature = recordingFeature
         self.windowCoordinator = windowCoordinator
         appDelegate.configure(
             feature: feature,
@@ -58,6 +73,7 @@ struct AudoraApp: App {
             LibraryRootView(
                 feature: feature,
                 audioImportFeature: audioImportFeature,
+                recordingFeature: recordingFeature,
                 windowCoordinator: windowCoordinator
             )
         }

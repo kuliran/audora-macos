@@ -16,7 +16,8 @@ final class AudioImportFeatureTests: XCTestCase {
         let feature = DefaultAudioImportFeature(
             port: port,
             clock: clock,
-            sessionIDGenerator: ids
+            sessionIDGenerator: ids,
+            activityCoordinator: LibraryActivityCoordinator()
         )
 
         await feature.send(.chooseAudio)
@@ -40,7 +41,8 @@ final class AudioImportFeatureTests: XCTestCase {
         let feature = DefaultAudioImportFeature(
             port: port,
             clock: clock,
-            sessionIDGenerator: ids
+            sessionIDGenerator: ids,
+            activityCoordinator: LibraryActivityCoordinator()
         )
 
         await feature.send(.chooseAudio)
@@ -196,6 +198,90 @@ final class AudioImportFeatureTests: XCTestCase {
         XCTAssertEqual(finalCalls.filter { $0 == .choose }.count, 1)
     }
 
+    func testSharedActivityLeaseCoversChooserThroughInstallAndReleasesAtTerminal() async throws {
+        let fixture = try AudioFixture()
+        let port = ScriptedAudioPort(
+            chooseOutcome: .selected(fixture.token, scope: fixture.scope),
+            preparedCandidate: fixture.candidate,
+            installResult: .success(fixture.snapshot),
+            suspendInstall: true
+        )
+        let activity = LibraryActivityCoordinator()
+        let feature = DefaultAudioImportFeature(
+            port: port,
+            clock: AudioClock(value: fixture.instant),
+            sessionIDGenerator: AudioSessionIDGenerator(value: fixture.session.sessionID),
+            activityCoordinator: activity
+        )
+
+        await feature.send(.chooseAudio)
+        await port.waitForInstallCall()
+
+        let activeKind = await activity.activeKind
+        let competingRecordingLease = await activity.acquireRecording(
+            in: LibraryScope(libraryID: fixture.scope.libraryID)
+        )
+        XCTAssertEqual(activeKind, .audioImport)
+        XCTAssertNil(competingRecordingLease)
+
+        await port.resumeInstall()
+        let state = await waitForTerminal(feature)
+        XCTAssertEqual(state.status, .succeeded(fixture.snapshot))
+        let terminalActiveKind = await activity.activeKind
+        XCTAssertNil(terminalActiveKind)
+    }
+
+    func testSharedActivityConflictFailsBeforeOpeningChooser() async throws {
+        let fixture = try AudioFixture()
+        let port = ScriptedAudioPort(chooseOutcome: .cancelled)
+        let activity = LibraryActivityCoordinator()
+        let acquiredRecordingLease = await activity.acquireRecording(
+            in: LibraryScope(libraryID: fixture.scope.libraryID)
+        )
+        let recordingLease = try XCTUnwrap(acquiredRecordingLease)
+        let feature = DefaultAudioImportFeature(
+            port: port,
+            clock: AudioClock(value: fixture.instant),
+            sessionIDGenerator: AudioSessionIDGenerator(value: fixture.session.sessionID),
+            activityCoordinator: activity
+        )
+
+        await feature.send(.chooseAudio)
+        let state = await waitForTerminal(feature)
+
+        XCTAssertEqual(state.status, .failed(.anotherLibraryActivity))
+        let calls = await port.recording.calls
+        XCTAssertTrue(calls.isEmpty)
+        await activity.release(recordingLease)
+    }
+
+    func testSharedActivityLeaseIsReleasedExactlyOnceOnCancellation() async throws {
+        let fixture = try AudioFixture()
+        let port = ScriptedAudioPort(
+            chooseOutcome: .selected(fixture.token, scope: fixture.scope),
+            preparedCandidate: fixture.candidate,
+            suspendPrepare: true
+        )
+        let activity = CountingAudioImportActivityCoordinator()
+        let feature = DefaultAudioImportFeature(
+            port: port,
+            clock: AudioClock(value: fixture.instant),
+            sessionIDGenerator: AudioSessionIDGenerator(value: fixture.session.sessionID),
+            activityCoordinator: activity
+        )
+
+        await feature.send(.chooseAudio)
+        await port.waitForPrepareCall()
+        await feature.send(.cancelImport)
+        await port.resumePrepare()
+        let state = await waitForTerminal(feature)
+        let audit = await activity.audit
+
+        XCTAssertEqual(state.status, .failed(.cancelled))
+        XCTAssertEqual(audit.acquired.count, 1)
+        XCTAssertEqual(audit.released, audit.acquired)
+    }
+
     func testSessionIDCollisionRegeneratesBeforeAnyPreparationSideEffect() async throws {
         let fixture = try AudioFixture()
         let collidedID = try SessionID("ses-20260830T120000000Z-C011")
@@ -209,7 +295,8 @@ final class AudioImportFeatureTests: XCTestCase {
         let feature = DefaultAudioImportFeature(
             port: port,
             clock: AudioClock(value: fixture.instant),
-            sessionIDGenerator: ids
+            sessionIDGenerator: ids,
+            activityCoordinator: LibraryActivityCoordinator()
         )
 
         await feature.send(.chooseAudio)
@@ -242,7 +329,8 @@ final class AudioImportFeatureTests: XCTestCase {
         let feature = DefaultAudioImportFeature(
             port: port,
             clock: AudioClock(value: fixture.instant),
-            sessionIDGenerator: ids
+            sessionIDGenerator: ids,
+            activityCoordinator: LibraryActivityCoordinator()
         )
 
         await feature.send(.chooseAudio)
@@ -267,7 +355,8 @@ final class AudioImportFeatureTests: XCTestCase {
         DefaultAudioImportFeature(
             port: port,
             clock: AudioClock(value: fixture.instant),
-            sessionIDGenerator: AudioSessionIDGenerator(value: fixture.session.sessionID)
+            sessionIDGenerator: AudioSessionIDGenerator(value: fixture.session.sessionID),
+            activityCoordinator: LibraryActivityCoordinator()
         )
     }
 
@@ -561,11 +650,15 @@ private actor ScriptedAudioPort: AudioImportPort {
     }
 
     func waitForPrepareCall() async {
-        while !calls.contains(.prepare) { await Task.yield() }
+        while !calls.contains(.prepare) || (suspendPrepare && prepareContinuation == nil) {
+            await Task.yield()
+        }
     }
 
     func waitForInstallCall() async {
-        while !calls.contains(.install) { await Task.yield() }
+        while !calls.contains(.install) || (suspendInstall && installContinuation == nil) {
+            await Task.yield()
+        }
     }
 
     func resumePrepare() {
@@ -585,4 +678,33 @@ private struct AudioPortRecording: Sendable {
     let reservedSessionIDs: [SessionID]
     let seeds: [ImportedSessionSeed]
     let discarded: [AudioStagingID]
+}
+
+private actor CountingAudioImportActivityCoordinator: LibraryActivityCoordinating {
+    private let base = LibraryActivityCoordinator()
+    private var acquiredTokens: [UInt64] = []
+    private var releasedTokens: [UInt64] = []
+
+    func acquireAudioImport() async -> LibraryActivityLease? {
+        let lease = await base.acquireAudioImport()
+        if let lease { acquiredTokens.append(lease.token) }
+        return lease
+    }
+
+    func acquireRecording(in scope: LibraryScope) async -> LibraryActivityLease? {
+        await base.acquireRecording(in: scope)
+    }
+
+    func acquireSelectionMutation() async -> LibraryActivityLease? {
+        await base.acquireSelectionMutation()
+    }
+
+    func release(_ lease: LibraryActivityLease) async {
+        releasedTokens.append(lease.token)
+        await base.release(lease)
+    }
+
+    var audit: (acquired: [UInt64], released: [UInt64]) {
+        (acquiredTokens, releasedTokens)
+    }
 }

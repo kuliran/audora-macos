@@ -83,13 +83,6 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
     public static let maximumRootBytes = 65_536
 
     private let fault: @Sendable (PortableLibraryFaultPoint) throws -> Void
-
-    public init(
-        fault: @escaping @Sendable (PortableLibraryFaultPoint) throws -> Void = { _ in }
-    ) {
-        self.fault = fault
-    }
-
     private var confined: ConfinedPersistencePrimitives<PortableLibraryPersistenceError> {
         ConfinedPersistencePrimitives(
             ioFailure: .ioFailure,
@@ -100,6 +93,12 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
             invalidSchemaVersion: .invalidSchemaVersion,
             unknownKey: .unknownKey
         )
+    }
+
+    public init(
+        fault: @escaping @Sendable (PortableLibraryFaultPoint) throws -> Void = { _ in }
+    ) {
+        self.fault = fault
     }
 
     public func create(
@@ -337,6 +336,9 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         return authority
     }
 
+    /// Descriptor-anchored canonical authority loader shared by portable
+    /// persistence adapters. Normal Library opens reconcile abandoned imports;
+    /// feature-owned mutation validation must opt out while it holds authority.
     func load(
         from rootDescriptor: Int32,
         reconcileAbandonedImports: Bool = true
@@ -658,12 +660,7 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         components: [String],
         under rootDescriptor: Int32
     ) throws -> Int32 {
-        var current = Darwin.openat(
-            rootDescriptor,
-            ".",
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-        )
-        guard current >= 0 else { throw PortableLibraryPersistenceError.ioFailure }
+        var current = try confined.openDirectory(named: ".", under: rootDescriptor)
         do {
             for component in components {
                 let next = try confined.openDirectory(named: component, under: current)
@@ -678,21 +675,10 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
     }
 
     private func rejectSymlinkIfPresent(named name: String, under descriptor: Int32) throws {
-        var metadata = stat()
-        let result = name.withCString { pointer in
-            fstatat(descriptor, pointer, &metadata, AT_SYMLINK_NOFOLLOW)
-        }
-        guard result == 0 else {
-            if errno == ENOENT { return }
-            throw PortableLibraryPersistenceError.ioFailure
-        }
-        if (metadata.st_mode & S_IFMT) == S_IFLNK {
+        guard try confined.entryExists(named: name, under: descriptor) else { return }
+        if confined.isSymlink(named: name, under: descriptor) {
             throw PortableLibraryPersistenceError.expectedPathIsSymlink
         }
-    }
-
-    private func isSymlink(named name: String, under descriptor: Int32) -> Bool {
-        confined.isSymlink(named: name, under: descriptor)
     }
 
     private func entryExists(named name: String, under descriptor: Int32) throws -> Bool {

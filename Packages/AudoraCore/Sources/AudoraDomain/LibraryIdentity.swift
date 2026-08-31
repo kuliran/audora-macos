@@ -2,20 +2,8 @@ public enum LibraryIdentityError: Error, Equatable, Sendable {
     case invalidLibraryID
     case invalidSessionID
     case invalidProfileRevisionID
+    case invalidRecordingID
     case invalidInstant
-}
-
-public struct SessionID: Hashable, Sendable, CustomStringConvertible {
-    public let rawValue: String
-
-    public init(_ rawValue: String) throws {
-        guard TypedIdentifierValidator.isValid(rawValue, prefix: "ses-") else {
-            throw LibraryIdentityError.invalidSessionID
-        }
-        self.rawValue = rawValue
-    }
-
-    public var description: String { rawValue }
 }
 
 public struct LibraryID: Hashable, Sendable, CustomStringConvertible {
@@ -37,6 +25,32 @@ public struct ProfileRevisionID: Hashable, Sendable, CustomStringConvertible {
     public init(_ rawValue: String) throws {
         guard TypedIdentifierValidator.isValid(rawValue, prefix: "prf-") else {
             throw LibraryIdentityError.invalidProfileRevisionID
+        }
+        self.rawValue = rawValue
+    }
+
+    public var description: String { rawValue }
+}
+
+public struct RecordingID: Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard TypedIdentifierValidator.isValid(rawValue, prefix: "rec-") else {
+            throw LibraryIdentityError.invalidRecordingID
+        }
+        self.rawValue = rawValue
+    }
+
+    public var description: String { rawValue }
+}
+
+public struct SessionID: Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard TypedIdentifierValidator.isValid(rawValue, prefix: "ses-") else {
+            throw LibraryIdentityError.invalidSessionID
         }
         self.rawValue = rawValue
     }

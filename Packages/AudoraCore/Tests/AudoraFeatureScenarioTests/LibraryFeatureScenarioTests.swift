@@ -30,7 +30,8 @@ final class LibraryFeatureScenarioTests: XCTestCase {
             let feature = DefaultLibraryFeature(
                 workspace: workspace,
                 clock: ScenarioClock(recorder: recorder),
-                idGenerator: ScenarioIDGenerator(recorder: recorder)
+                idGenerator: ScenarioIDGenerator(recorder: recorder),
+                activityCoordinator: LibraryActivityCoordinator()
             )
 
             if scenario.initialState.requiresPreparation {

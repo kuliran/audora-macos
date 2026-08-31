@@ -16,7 +16,8 @@ final class LibraryFeatureTests: XCTestCase {
         let feature = DefaultLibraryFeature(
             workspace: workspace,
             clock: clock,
-            idGenerator: ids
+            idGenerator: ids,
+            activityCoordinator: LibraryActivityCoordinator()
         )
 
         await feature.send(.start)
@@ -46,7 +47,8 @@ final class LibraryFeatureTests: XCTestCase {
         let feature = DefaultLibraryFeature(
             workspace: workspace,
             clock: clock,
-            idGenerator: ids
+            idGenerator: ids,
+            activityCoordinator: LibraryActivityCoordinator()
         )
         await feature.send(.start)
 
@@ -121,6 +123,61 @@ final class LibraryFeatureTests: XCTestCase {
         let calls = await workspace.calls
         XCTAssertEqual(finalState, LibraryFeatureState(selection: .active(original)))
         XCTAssertEqual(calls, [.restore, .reveal])
+    }
+
+    func testAudioImportLeaseBlocksLibraryMutationButStillAllowsReveal() async throws {
+        let original = try snapshot(id: "lib-20260830T120000000Z-2ABC")
+        let workspace = ScriptedWorkspace(
+            restore: [.opened(original)],
+            reveal: [.succeeded()]
+        )
+        let activity = LibraryActivityCoordinator()
+        let feature = DefaultLibraryFeature(
+            workspace: workspace,
+            clock: RecordingClock(),
+            idGenerator: RecordingIDGenerator(),
+            activityCoordinator: activity
+        )
+        await feature.send(.start)
+        let acquiredLease = await activity.acquireAudioImport()
+        let lease = try XCTUnwrap(acquiredLease)
+
+        await feature.send(.chooseExisting)
+        let blockedState = await feature.currentState
+        XCTAssertEqual(
+            blockedState,
+            LibraryFeatureState(
+                selection: .active(original),
+                notice: .libraryActivityInProgress
+            )
+        )
+        await feature.send(.close)
+        await feature.send(.reveal)
+
+        let calls = await workspace.calls
+        let revealedState = await feature.currentState
+        XCTAssertEqual(calls, [.restore, .reveal])
+        XCTAssertEqual(
+            revealedState,
+            LibraryFeatureState(selection: .active(original))
+        )
+        await activity.release(lease)
+    }
+
+    func testQueuedExternalOpenIsRejectedWhenOpenAcquisitionIsRejected() async throws {
+        try await assertQueuedExternalOpenIsRejectedAtAcquisitionExit(
+            command: .chooseExisting,
+            token: LibraryOpenRequestToken("external_during_rejected_open")!,
+            cleanupToken: LibraryOpenRequestToken("cleanup_rejected_open")!
+        )
+    }
+
+    func testQueuedExternalOpenIsRejectedWhenCloseAcquisitionIsRejected() async throws {
+        try await assertQueuedExternalOpenIsRejectedAtAcquisitionExit(
+            command: .close,
+            token: LibraryOpenRequestToken("external_during_rejected_close")!,
+            cleanupToken: LibraryOpenRequestToken("cleanup_rejected_close")!
+        )
     }
 
     func testExternalOpenSwitchesOnlyAfterSuccessfulOutcome() async throws {
@@ -288,11 +345,70 @@ final class LibraryFeatureTests: XCTestCase {
         XCTAssertEqual(calls, [.restore])
     }
 
+    private func assertQueuedExternalOpenIsRejectedAtAcquisitionExit(
+        command: LibraryCommand,
+        token: LibraryOpenRequestToken,
+        cleanupToken: LibraryOpenRequestToken
+    ) async throws {
+        let original = try snapshot(id: "lib-20260830T120000000Z-2ABC")
+        let workspace = ScriptedWorkspace(restore: [.opened(original)])
+        let activity = SuspendingLibraryActivityCoordinator()
+        let feature = DefaultLibraryFeature(
+            workspace: workspace,
+            clock: RecordingClock(),
+            idGenerator: RecordingIDGenerator(),
+            activityCoordinator: activity
+        )
+        let capability = CapabilityProbe()
+        await feature.send(.start)
+        let scope = LibraryScope(libraryID: original.libraryID)
+        let acquiredRecordingLease = await activity.acquireRecording(in: scope)
+        let recordingLease = try XCTUnwrap(acquiredRecordingLease)
+        await activity.suspendNextSelectionAcquisition()
+
+        let selectionMutation = Task { await feature.send(command) }
+        await activity.waitForSuspendedSelectionAcquisition()
+        let callback = Task {
+            await capability.retain()
+            await feature.send(.openExternal(token))
+            await capability.release()
+        }
+        await waitForQueuedExternalOpen(token, in: feature)
+
+        await activity.resumeSelectionAcquisition()
+        await selectionMutation.value
+        let queuedAtAcquisitionExit = await feature.queuedExternalOpenToken
+
+        // Keep a red test from retaining its suspended callback forever.
+        await activity.release(recordingLease)
+        if queuedAtAcquisitionExit != nil {
+            await feature.send(.openExternal(cleanupToken))
+        }
+        await callback.value
+
+        let finalState = await feature.currentState
+        let calls = await workspace.calls
+        let externalTokens = await workspace.externalTokens
+        let activeCapabilities = await capability.activeCount
+        XCTAssertNil(queuedAtAcquisitionExit)
+        XCTAssertEqual(activeCapabilities, 0)
+        XCTAssertEqual(calls, [.restore])
+        XCTAssertEqual(externalTokens, [])
+        XCTAssertEqual(
+            finalState,
+            LibraryFeatureState(
+                selection: .active(original),
+                notice: .libraryActivityInProgress
+            )
+        )
+    }
+
     private func makeFeature(_ workspace: ScriptedWorkspace) -> DefaultLibraryFeature {
         DefaultLibraryFeature(
             workspace: workspace,
             clock: RecordingClock(),
-            idGenerator: RecordingIDGenerator()
+            idGenerator: RecordingIDGenerator(),
+            activityCoordinator: LibraryActivityCoordinator()
         )
     }
 
@@ -327,6 +443,61 @@ private actor CompletionProbe {
 
     func markCompleted() {
         isCompleted = true
+    }
+}
+
+private actor CapabilityProbe {
+    private(set) var activeCount = 0
+
+    func retain() {
+        activeCount += 1
+    }
+
+    func release() {
+        activeCount -= 1
+    }
+}
+
+private actor SuspendingLibraryActivityCoordinator: LibraryActivityCoordinating {
+    private let base = LibraryActivityCoordinator()
+    private var shouldSuspendNextSelectionAcquisition = false
+    private var selectionContinuation: CheckedContinuation<Void, Never>?
+
+    func acquireAudioImport() async -> LibraryActivityLease? {
+        await base.acquireAudioImport()
+    }
+
+    func acquireRecording(in scope: LibraryScope) async -> LibraryActivityLease? {
+        await base.acquireRecording(in: scope)
+    }
+
+    func acquireSelectionMutation() async -> LibraryActivityLease? {
+        if shouldSuspendNextSelectionAcquisition {
+            shouldSuspendNextSelectionAcquisition = false
+            await withCheckedContinuation { continuation in
+                selectionContinuation = continuation
+            }
+        }
+        return await base.acquireSelectionMutation()
+    }
+
+    func release(_ lease: LibraryActivityLease) async {
+        await base.release(lease)
+    }
+
+    func suspendNextSelectionAcquisition() {
+        shouldSuspendNextSelectionAcquisition = true
+    }
+
+    func waitForSuspendedSelectionAcquisition() async {
+        while selectionContinuation == nil {
+            await Task.yield()
+        }
+    }
+
+    func resumeSelectionAcquisition() {
+        selectionContinuation?.resume()
+        selectionContinuation = nil
     }
 }
 

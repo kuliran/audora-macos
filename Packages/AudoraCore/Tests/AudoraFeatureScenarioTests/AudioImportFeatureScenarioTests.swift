@@ -27,7 +27,8 @@ final class AudioImportFeatureScenarioTests: XCTestCase {
             let feature = DefaultAudioImportFeature(
                 port: AudioScenarioPort(recorder: recorder, fixture: fixture),
                 clock: AudioScenarioClock(recorder: recorder),
-                sessionIDGenerator: AudioScenarioIDGenerator(recorder: recorder)
+                sessionIDGenerator: AudioScenarioIDGenerator(recorder: recorder),
+                activityCoordinator: LibraryActivityCoordinator()
             )
 
             let initial = await feature.currentState
@@ -500,7 +501,7 @@ private struct AudioScenarioFixture: Sendable {
             canonicalFrameCount: audio.canonical.frameCount,
             canonicalDurationMilliseconds: audio.canonical.durationMilliseconds,
             canonicalContainer: audio.canonical.format.container,
-            canonicalEncoding: audio.canonical.format.encoding,
+            canonicalEncoding: audio.canonical.format.encoding.rawValue,
             canonicalSampleRateHz: sampleRate,
             canonicalChannelCount: audio.canonical.format.channelCount,
             canonicalBitsPerSample: audio.canonical.format.bitsPerSample,

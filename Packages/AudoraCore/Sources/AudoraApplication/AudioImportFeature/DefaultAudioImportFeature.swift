@@ -8,6 +8,7 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
     private let clock: any LibraryClock
     private let sessionIDGenerator: any SessionIDGenerator
     private let policy: AudioImportPolicy
+    private let activityCoordinator: any LibraryActivityCoordinating
     private var state = AudioImportFeatureState(status: .idle)
     private var operationTask: Task<Void, Never>?
     private var operationGeneration: UInt64 = 0
@@ -18,12 +19,14 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
         port: any AudioImportPort,
         clock: any LibraryClock,
         sessionIDGenerator: any SessionIDGenerator,
-        policy: AudioImportPolicy = .versionOne
+        policy: AudioImportPolicy = .versionOne,
+        activityCoordinator: any LibraryActivityCoordinating
     ) {
         self.port = port
         self.clock = clock
         self.sessionIDGenerator = sessionIDGenerator
         self.policy = policy
+        self.activityCoordinator = activityCoordinator
     }
 
     public var currentState: AudioImportFeatureState { state }
@@ -55,6 +58,23 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
     }
 
     private func runImport(generation: UInt64) async {
+        guard let activityLease = await activityCoordinator.acquireAudioImport() else {
+            finish(
+                generation: generation,
+                status: .failed(Task.isCancelled ? .cancelled : .anotherLibraryActivity)
+            )
+            return
+        }
+
+        guard !Task.isCancelled else {
+            await complete(
+                generation: generation,
+                status: .failed(.cancelled),
+                releasing: activityLease
+            )
+            return
+        }
+
         var stagedID: AudioStagingID?
         var selectedToken: AudioSelectionToken?
         var installStarted = false
@@ -62,17 +82,29 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
             let selection = await port.choose()
             switch selection {
             case .cancelled:
-                finish(generation: generation, status: .failed(.cancelled))
+                await complete(
+                    generation: generation,
+                    status: .failed(.cancelled),
+                    releasing: activityLease
+                )
                 return
             case let .failed(failure):
-                finish(generation: generation, status: .failed(failure))
+                await complete(
+                    generation: generation,
+                    status: .failed(failure),
+                    releasing: activityLease
+                )
                 return
             case let .selected(token, scope):
                 selectedToken = token
                 guard !Task.isCancelled else {
                     await port.revokeSelection(token)
                     selectedToken = nil
-                    finish(generation: generation, status: .failed(.cancelled))
+                    await complete(
+                        generation: generation,
+                        status: .failed(.cancelled),
+                        releasing: activityLease
+                    )
                     return
                 }
 
@@ -114,7 +146,11 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
                 stagedID = candidate.stagingID
                 guard !Task.isCancelled else {
                     await port.discard(candidate.stagingID)
-                    finish(generation: generation, status: .failed(.cancelled))
+                    await complete(
+                        generation: generation,
+                        status: .failed(.cancelled),
+                        releasing: activityLease
+                    )
                     return
                 }
 
@@ -125,7 +161,11 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
                 )
                 guard !Task.isCancelled else {
                     await port.discard(candidate.stagingID)
-                    finish(generation: generation, status: .failed(.cancelled))
+                    await complete(
+                        generation: generation,
+                        status: .failed(.cancelled),
+                        releasing: activityLease
+                    )
                     return
                 }
 
@@ -135,7 +175,11 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
 
                 // Directory installation is the authority boundary. A cancel that
                 // races with a successful reopened result cannot erase the Session.
-                finish(generation: generation, status: .succeeded(reopened))
+                await complete(
+                    generation: generation,
+                    status: .succeeded(reopened),
+                    releasing: activityLease
+                )
             }
         } catch {
             let failure = (error as? AudioImportFailure) ?? .unavailable
@@ -153,8 +197,21 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
             } else {
                 terminal = failure
             }
-            finish(generation: generation, status: .failed(terminal))
+            await complete(
+                generation: generation,
+                status: .failed(terminal),
+                releasing: activityLease
+            )
         }
+    }
+
+    private func complete(
+        generation: UInt64,
+        status: AudioImportFeatureState.Status,
+        releasing lease: LibraryActivityLease
+    ) async {
+        await activityCoordinator.release(lease)
+        finish(generation: generation, status: status)
     }
 
     private func acceptProgress(

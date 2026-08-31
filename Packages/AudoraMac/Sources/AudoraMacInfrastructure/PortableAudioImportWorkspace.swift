@@ -457,7 +457,7 @@ public actor PortableAudioImportWorkspace: AudioImportPort {
             canonicalFrameCount: audio.canonical.frameCount,
             canonicalDurationMilliseconds: audio.canonical.durationMilliseconds,
             canonicalContainer: audio.canonical.format.container,
-            canonicalEncoding: audio.canonical.format.encoding,
+            canonicalEncoding: audio.canonical.format.encoding.rawValue,
             canonicalSampleRateHz: audio.canonical.format.sampleRateHz,
             canonicalChannelCount: audio.canonical.format.channelCount,
             canonicalBitsPerSample: audio.canonical.format.bitsPerSample,

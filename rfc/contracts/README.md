@@ -4,10 +4,13 @@
 the provider aggregate in [`coach-provider.tsp`](coach-provider.tsp), the
 portable Library document roots in
 [`portable-library.tsp`](portable-library.tsp), and the Library lifecycle
-scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp). The
-portable imported-Session roots and normalization vectors live in
-[`audio-import.tsp`](audio-import.tsp); their Application scenario envelope is
-[`audio-import-scenario.tsp`](audio-import-scenario.tsp).
+scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp).
+[`session-audio.tsp`](session-audio.tsp) is the single source of truth for
+shared Session identity and the imported/microphone audio and Session manifest
+variants. Imported-audio normalization and feature behavior live in
+[`audio-import.tsp`](audio-import.tsp) and
+[`audio-import-scenario.tsp`](audio-import-scenario.tsp); Recording staging and
+feature behavior live in [`recording.tsp`](recording.tsp).
 
 The provider source is separated by audience:
 
@@ -22,32 +25,40 @@ TypeSpec compilation emits committed JSON Schemas into the `AudoraContracts`
 package resources. Application and scenario runners do not need Node or TypeSpec
 at runtime.
 
-- [`CoachProviderDescriptor.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json)
-- [`CoachRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json)
-- [`CoachResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json)
 - [`AudioImportFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioImportFeatureScenario.json)
 - [`AudioManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json)
 - [`AudioNormalizationVectors.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioNormalizationVectors.json)
+- [`CoachProviderDescriptor.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json)
+- [`CoachRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json)
+- [`CoachResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json)
 - [`LibraryFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json)
 - [`LibraryManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json)
 - [`LibraryPreferences.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json)
 - [`ProfileHead.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json)
 - [`ReadSessionTranscriptsRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json)
 - [`ReadSessionTranscriptsResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json)
+- [`RecordingFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingFeatureScenario.json)
+- [`RecordingStagingIdentityManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingIdentityManifest.json)
+- [`RecordingStagingManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingManifest.json)
 - [`SessionManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionManifest.json)
 
 | Root schema | Direction | Coach-visible instance? |
 | --- | --- | --- |
+| `AudioImportFeatureScenario` | Portable cross-implementation behavior | No |
+| `AudioManifest` | Imported or microphone Session storage | No |
 | `CoachProviderDescriptor` | Application configuration | No |
 | `CoachRequest` | Application -> coach | Yes |
 | `CoachResponse` | Coach -> Application | Yes |
-| `AudioManifest` | Portable imported-Session storage | No |
-| `SessionManifest` | Portable Session storage | No |
+| `LibraryFeatureScenario` | Portable cross-implementation behavior | No |
 | `LibraryManifest` | Portable Library storage | No |
 | `LibraryPreferences` | Portable Library storage | No |
 | `ProfileHead` | Portable Library storage | No |
 | `ReadSessionTranscriptsRequest` | Coach tool call -> Application | Yes |
 | `ReadSessionTranscriptsResponse` | Application -> coach tool result | Yes |
+| `RecordingFeatureScenario` | Portable cross-implementation behavior | No |
+| `RecordingStagingIdentityManifest` | Recording staging storage | No |
+| `RecordingStagingManifest` | Recording staging storage | No |
+| `SessionManifest` | Imported or recorded Session storage | No |
 
 Invocation and Attempt identities, provider idempotency, admission state, token
 estimator identity, Profile integrity hashes, and persisted-record schema versions
@@ -64,20 +75,37 @@ relaunch restoration, and newer-root read-only behavior. The
 fixture describes launch without a saved Library locator. Portable implementations
 consume all scenarios through their package resources.
 
+## Session audio roots
+
+`AudioManifest.json` is emitted once as the closed union of
+`ImportedAudioManifest` and `MicrophoneAudioManifest`.
+`SessionManifest.json` is emitted once as the closed union of
+`ImportedSessionManifest` and `RecordedSessionManifest`. Every concrete model is
+sealed, so an object that combines fields from both variants is rejected rather
+than being treated as a future-compatible shape.
+
+The runtime pair boundary accepts only imported audio with an imported Session,
+or microphone audio with a recorded Session. Imported Sessions additionally bind
+the exact `audio.json` bytes by SHA-256. Schema checks exercise both positive
+families, reject hybrid objects and cross-variant pairs, and keep the two
+same-basename resource families distinct by their package subdirectories.
+
 ## Audio import contracts
 
-`AudioManifest` is a sealed union over the three v1 container/codec pairs:
+`ImportedAudioManifest` contains a sealed union over the three v1
+container/codec pairs:
 PCM WAV, AAC-LC M4A, and ALAC M4A. It retains the exact original artifact by a
 portable relative path and binds the canonical `audio/audio.wav` artifact. The
 canonical representation is 16 kHz, mono, signed 16-bit little-endian PCM; its
 frame count is authoritative and is limited to 43,200,000 frames. Duration uses
 integer ceiling from that frame count and cannot exceed 2,700,000 ms.
 
-`SessionManifest` binds the exact `audio.json` bytes by SHA-256 and starts with
-no transcript revisions. Cross-field relationships that JSON Schema cannot
-express—canonical WAV length, exact frame-to-duration arithmetic, artifact
-hashes, and cross-root hash binding—are enforced by Domain and Infrastructure
-candidate validation before the Session directory becomes authoritative.
+`ImportedSessionManifest` binds the exact `audio.json` bytes by SHA-256 and
+starts with no transcript revisions. Cross-field relationships that JSON Schema
+cannot express—canonical WAV length, exact frame-to-duration arithmetic,
+artifact hashes, and cross-root hash binding—are enforced by Domain and
+Infrastructure candidate validation before the Session directory becomes
+authoritative.
 
 The checked-in normalization vectors lock stereo arithmetic mean, saturating
 round-to-nearest-away signed-16 quantization, and the exact duration boundary.
@@ -85,6 +113,22 @@ Audio-import scenarios cover success, user cancellation, normalization and
 candidate failures, precommit install failure, and the postcommit reopen
 boundary. Portable feature runners consume those fixtures without importing any
 macOS framework.
+
+## Recording contracts
+
+`MicrophoneAudioManifest` fixes canonical microphone audio at 16 kHz mono
+signed-16 little-endian PCM, caps duration at 43,200,000 frames, and records a
+bounded list of half-open unavailable intervals. `RecordedSessionManifest`
+points to the portable relative `audio/audio.json` aggregate. Recording staging
+roots remain non-authoritative until the committed receipt is published.
+
+JSON Schema rejects wrong formats, source cardinality, unknown keys, duration
+overflow, and invalid Session IDs. Interval ordering, overlap, frame-relative
+bounds, and staged-WAV fingerprint equality require runtime context; their
+fixtures remain schema-valid and are routed through the production validators.
+Recording scenarios cover live state, mute gaps, duration warnings and limits,
+stop races, cancellation, recovery, repeated takes, late-event fencing, and
+Library-switch serialization.
 
 `CoachProviderDescriptor` is app-only configuration. JSON Schema validates each
 field's shape. `displayName` is a bounded Presentation label for provider health
@@ -102,13 +146,18 @@ turn or its own valid response structurally impossible.
 
 ## Source ordering
 
-TypeSpec declarations are order-independent. Source files favor reading from the
-prominent root outward:
+TypeSpec declarations are order-independent. New contract files and roots that a
+change introduces or substantively modifies favor reading from the prominent
+root outward. Untouched legacy declarations do not need to be reordered solely
+to adopt this convention:
 
-1. Start with the schema named after the file or generated root.
-2. Declare referenced models breadth-first, preserving field and union order.
-3. Put a spread `*Base` after the models that use it.
-4. Start a new queue at each direction or generated-root heading.
+1. Declare each new or substantively modified exported `@jsonSchema` root before
+   the supporting shapes introduced for it.
+2. Traverse those roots in source order, preserving field and union order.
+3. Declare supporting models, unions, enums, and scalars breadth-first in the
+   order they are first referenced.
+4. Put a spread `*Base` after the models that use it.
+5. Start a new root-and-support queue at each direction heading.
 
 Comments explain only non-obvious trust, units, or cross-field rules.
 
@@ -126,10 +175,10 @@ The compiler and JSON Schema emitter are pinned in `package.json`. The resolved
 dependency graph is committed in `pnpm-lock.yaml`. `generated-json-files.txt`
 enumerates the canonical package-resource schemas and makes the check fail when
 generated roots change unexpectedly or their committed bytes drift. The same
-check runs every checked-in audio-import scenario and golden through the
-generated Draft 2020-12 schemas. Rejected fixtures declare the schema boundary
-they cross; cross-root relationships that JSON Schema cannot express continue
-through the descriptor-bound Swift persistence tests.
+check runs every checked-in audio-import and Recording scenario and golden
+through the generated Draft 2020-12 schemas. It also checks exact imported
+cross-root hashes, rejects mixed manifest families, and keeps runtime-only
+Recording rejection fixtures schema-valid for the production Swift validators.
 
 ## Request context
 

@@ -276,6 +276,19 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         return .succeeded(recentAvailable: true)
     }
 
+    /// Resolves an Application-owned Library identity to the currently leased,
+    /// writable package root. The URL remains an Infrastructure capability and
+    /// is never written into portable recording metadata.
+    public func recordingRoot(for scope: LibraryScope) -> URL? {
+        guard let activeScope,
+              case let .readWrite(authority) = activeScope.loaded,
+              authority.manifest.libraryID == scope.libraryID
+        else {
+            return nil
+        }
+        return activeScope.root
+    }
+
     private func openLocator(
         _ locator: MachineLibraryLocator,
         restoreOnLaunch: Bool

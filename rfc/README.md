@@ -388,7 +388,7 @@ Audora Library.audoralibrary/
     annotations/...
   chats/<chat-id>/...            # messages and unresolved operational state
   jobs/<job-id>/...
-  staging/recordings/<session-id>/...
+  staging/recordings/<recording-id>/...
   staging/jobs/<job-id>/...
   trash/...
 ```
@@ -402,10 +402,17 @@ fresh monotonic revision, or sets the head to the null-Profile state when none i
 eligible. All broken and colliding revision bundles remain available for
 inspection. A null Profile is projected to the coach as an empty Statement array.
 
-Session, Chat, Profile Revision, Profile Statement, and Profile Change Proposal IDs
-use a typed UTC timestamp plus four random Crockford Base32 characters, for example
-`ses-20260822T153045123Z-P4R7`. A Session owns its Audio Asset by containment
-rather than by an independent audio ID. Other relationships use explicit IDs and
+Session, Recording, Chat, Profile Revision, Profile Statement, and Profile Change
+Proposal IDs use a typed UTC timestamp plus four random Crockford Base32
+characters, for example `ses-20260822T153045123Z-P4R7` and
+`rec-20260822T153045123Z-P4R7`. A RecordingID identifies only one incomplete
+capture aggregate under `staging/recordings/<recording-id>`. Its identity root
+binds that RecordingID to the intended SessionID, LibraryID, capture start
+instant, canonical format, and duration ceiling. Sealing installs the immutable
+Session under its SessionID; cancellation and recovery cleanup remain scoped to
+the RecordingID. A RecordingID never becomes an Audio Asset ID or a portable
+relationship after sealing. A Session owns its Audio Asset by containment rather
+than by an independent audio ID. Other relationships use explicit IDs and
 relative paths; timestamps are not relationships.
 
 For imported media, version one retains the original file as evidence and also

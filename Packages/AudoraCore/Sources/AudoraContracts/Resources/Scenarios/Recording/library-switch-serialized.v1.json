@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "recording.library-switch-serialized",
+  "initialState": { "kind": "unavailable" },
+  "commands": [
+    { "kind": "selectLibrary" },
+    { "kind": "record" },
+    { "kind": "selectLibrary" }
+  ],
+  "dependencyTrace": [
+    { "port": "audioCapture", "effect": "inspectRecovery", "outcome": "none", "afterCommand": 0 },
+    { "port": "audioCapture", "effect": "begin", "outcome": "started", "afterCommand": 1 },
+    { "port": "audioCapture", "effect": "progress", "outcome": "measured", "afterCommand": 1, "frameCount": 16000, "level": 0.3 }
+  ],
+  "expectedState": {
+    "kind": "active",
+    "elapsedFrames": 16000,
+    "mute": "live",
+    "limitPhase": "ordinary",
+    "confirmation": "none"
+  },
+  "expectedEffects": [
+    { "kind": "librarySwitchBlockedWhileActive" }
+  ]
+}
