@@ -320,7 +320,7 @@ public struct DeterministicSpeechAnnotator: Sendable {
             for event in existing {
                 let interval = Interval(event.timeRange)
                 switch event.category {
-                case .silentPause, .untranscribedVoicedInterval:
+                case .nonSpeech, .silentPause, .untranscribedVoicedInterval:
                     let availableFragments = subtract([interval], unavailable)
                     if availableFragments == [interval] {
                         retainedExisting.append(event)
@@ -334,9 +334,6 @@ public struct DeterministicSpeechAnnotator: Sendable {
                         })
                     }
                     existingObservedCoverage.append(contentsOf: availableFragments)
-                case .nonSpeech:
-                    retainedExisting.append(event)
-                    existingObservedCoverage.append(interval)
                 case .muted, .captureGap:
                     retainedExisting.append(event)
                 }

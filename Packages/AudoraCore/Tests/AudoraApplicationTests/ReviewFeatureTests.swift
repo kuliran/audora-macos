@@ -72,6 +72,44 @@ final class ReviewFeatureTests: XCTestCase {
         XCTAssertEqual(writes, [false])
     }
 
+    func testAnnotationVisibilityReconcilesDurableValueAfterReportedWriteFailure() async throws {
+        let revision = try reviewRevision(
+            id: "trv-20260830T121000000Z-4FGH",
+            text: "Hello, world!"
+        )
+        let selection = ReviewSelection(
+            scope: LibraryScope(libraryID: revisionFixtureLibraryID),
+            sessionID: revision.sessionID
+        )
+        let stored = try ReviewSessionSnapshot(
+            selection: selection,
+            revisionIDs: [revision.revisionID],
+            selectedRevision: revision,
+            audioCapabilityID: ReviewAudioCapabilityID("review-annotation-reconcile"),
+            canonicalAudioDurationMilliseconds: revision.durationMilliseconds
+        )
+        let visibility = PostcommitReviewAnnotationVisibilityStub(visible: true)
+        let feature = DefaultReviewFeature(
+            sessions: ReviewSessionStoreStub(snapshot: stored),
+            playback: ReviewPlaybackStub(),
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: visibility
+        )
+        await feature.send(.selectSession(selection))
+
+        await feature.send(.setAnnotationsVisible(false))
+
+        guard case let .ready(ready) = await feature.currentState else {
+            return XCTFail("visibility reconciliation must preserve Ready review")
+        }
+        XCTAssertFalse(ready.annotations.isVisible)
+        XCTAssertNil(ready.activity)
+        let writes = await visibility.writes
+        let readCount = await visibility.readCount
+        XCTAssertEqual(writes, [false])
+        XCTAssertEqual(readCount, 2)
+    }
+
     func testVisibilityWriteCannotRewindLatestPlaybackState() async throws {
         let revision = try reviewRevision(
             id: "trv-20260830T121000000Z-4FGH",
@@ -1071,6 +1109,30 @@ private actor ReviewAnnotationVisibilityStub: ReviewAnnotationVisibilityPort {
         self.visible = visible
         writes.append(visible)
         return true
+    }
+}
+
+private actor PostcommitReviewAnnotationVisibilityStub:
+    ReviewAnnotationVisibilityPort
+{
+    private var visible: Bool
+    private(set) var writes: [Bool] = []
+    private(set) var readCount = 0
+
+    init(visible: Bool) { self.visible = visible }
+
+    func annotationsVisible(in scope: LibraryScope) async -> Bool? {
+        readCount += 1
+        return visible
+    }
+
+    func setAnnotationsVisible(
+        _ visible: Bool,
+        in scope: LibraryScope
+    ) async -> Bool {
+        self.visible = visible
+        writes.append(visible)
+        return false
     }
 }
 

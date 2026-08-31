@@ -426,6 +426,48 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testAnnotationVisibilityReconcilesPostInstallFaultWithoutReconcilingImportStaging() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent(
+                "PostinstallAnnotations.audoralibrary"
+            )
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: makeSeed()
+            )
+            let faultPoint = PortableLibraryFaultPoint.afterMutableRootInstall(
+                "preferences.json"
+            )
+            let persistence = PortableLibraryPersistence { reached in
+                if reached == faultPoint {
+                    throw PortableLibraryPersistenceError.injectedFault(reached)
+                }
+            }
+            let workspace = PortableLibraryWorkspace(
+                persistence: persistence,
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let activeImport = try makeRecognizedAbandonedAudioImportTree(in: root)
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+
+            let didWrite = await workspace.setAnnotationsVisible(false, in: scope)
+            let visible = await workspace.annotationsVisible(in: scope)
+
+            XCTAssertTrue(didWrite)
+            XCTAssertEqual(visible, false)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: activeImport.path))
+            guard case let .readWrite(reopened) = try PortableLibraryPersistence()
+                .openWithoutReconcilingImports(at: root)
+            else { return XCTFail("expected a writable portable Library") }
+            XCTAssertFalse(reopened.preferences.annotationsVisible)
+        }
+    }
+
     func testAnnotationVisibilityWriteNeverReconcilesActiveImportStaging() async throws {
         try await withTemporaryParent { parent in
             let root = parent.appendingPathComponent("ActiveAnnotations.audoralibrary")

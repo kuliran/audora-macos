@@ -177,11 +177,16 @@ public struct ReviewView: View {
                             snapshot.annotations.projection.audioEvents.prefix(500),
                             id: \.audioEventID
                         ) { event in
-                            Text(audioEventLabel(event))
+                            let accessibilityLabel =
+                                ReviewPresentationModel.audioEventAccessibilityLabel(
+                                    for: event
+                                )
+                            Text(accessibilityLabel)
                                 .font(.caption.monospacedDigit())
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 4)
                                 .background(.quaternary, in: Capsule())
+                                .accessibilityLabel(accessibilityLabel)
                         }
                         let hiddenCount = max(
                             snapshot.annotations.projection.audioEvents.count - 500,
@@ -254,17 +259,6 @@ public struct ReviewView: View {
         }
     }
 
-    private func audioEventLabel(_ event: TranscriptAudioEvent) -> String {
-        let title = switch event.category {
-        case .nonSpeech: "Non-speech"
-        case .silentPause: "Pause"
-        case .untranscribedVoicedInterval: "Untranscribed voice"
-        case .muted: "Muted"
-        case .captureGap: "Capture gap"
-        }
-        return "\(title) \(format(event.timeRange.startMilliseconds))–" +
-            format(event.timeRange.endMilliseconds)
-    }
 }
 
 private struct ReviewTranscriptTextView: NSViewRepresentable {

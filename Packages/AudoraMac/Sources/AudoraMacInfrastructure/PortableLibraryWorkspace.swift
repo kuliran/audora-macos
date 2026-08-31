@@ -528,18 +528,19 @@ extension PortableLibraryWorkspace: ReviewAnnotationVisibilityPort {
                 under: activeScope.root,
                 reconcileAbandonedImports: false
             )
-            guard case let .readWrite(reopened) = try persistence
-                .openWithoutReconcilingImports(at: activeScope.root),
-                  reopened.manifest.libraryID == scope.libraryID,
-                  reopened.preferences == preferences
-            else { return false }
-            self.activeScope = ActiveScope(
-                lease: activeScope.lease,
-                loaded: .readWrite(reopened)
-            )
-            return true
         } catch {
-            return false
+            // Installation precedes the final durability checks, so failure is
+            // commit-ambiguous. Reopen the confined active root below and report
+            // the durable preference rather than the thrown operation outcome.
         }
+        guard case let .readWrite(reopened) = try? persistence
+            .openWithoutReconcilingImports(at: activeScope.root),
+              reopened.manifest.libraryID == scope.libraryID
+        else { return false }
+        self.activeScope = ActiveScope(
+            lease: activeScope.lease,
+            loaded: .readWrite(reopened)
+        )
+        return reopened.preferences == preferences
     }
 }

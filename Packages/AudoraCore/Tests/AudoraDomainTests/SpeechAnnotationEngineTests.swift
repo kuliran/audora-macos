@@ -231,6 +231,75 @@ final class SpeechAnnotationEngineTests: XCTestCase {
         )
     }
 
+    func testAuthoritativeUnavailableSplitsExistingNonSpeechAndKeepsUnchangedIdentity() throws {
+        let duration: UInt64 = 1_000
+        let revision = try annotationRevision(
+            text: "hello",
+            words: [("hello", .lexical, 1, 50)],
+            audioEvents: [
+                try annotationAudioEvent(
+                    "a000000",
+                    .nonSpeech,
+                    100,
+                    500,
+                    duration: duration
+                ),
+                try annotationAudioEvent(
+                    "a000001",
+                    .nonSpeech,
+                    600,
+                    700,
+                    duration: duration
+                ),
+            ],
+            durationMilliseconds: duration
+        )
+        let evidence = SpeechAnnotationEvidence(
+            sources: [
+                SpeechAcousticEvidence(
+                    audioSourceID: .microphone,
+                    observedRanges: [],
+                    voicedRanges: [],
+                    unavailableIntervals: [
+                        SpeechUnavailableInterval(
+                            timeRange: try annotationTimeRange(
+                                200,
+                                250,
+                                duration: duration
+                            ),
+                            reasons: [.muted]
+                        ),
+                        SpeechUnavailableInterval(
+                            timeRange: try annotationTimeRange(
+                                300,
+                                350,
+                                duration: duration
+                            ),
+                            reasons: [.captureGap]
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+        let result = try DeterministicSpeechAnnotator().annotate(
+            revision: revision,
+            evidence: evidence
+        )
+
+        XCTAssertEqual(
+            describedAudioEvents(result.audioEvents),
+            [
+                "a000002:nonSpeech:100-200",
+                "a000003:muted:200-250",
+                "a000004:nonSpeech:250-300",
+                "a000005:captureGap:300-350",
+                "a000006:nonSpeech:350-500",
+                "a000001:nonSpeech:600-700",
+            ]
+        )
+    }
+
     func testUnavailableDeduplicationIsCategorySpecific() throws {
         let duration: UInt64 = 1_000
         let revision = try annotationRevision(
@@ -294,7 +363,6 @@ final class SpeechAnnotationEngineTests: XCTestCase {
                 "a000003:captureGap:150-350",
                 "a000000:muted:200-300",
                 "a000004:muted:300-350",
-                "a000001:nonSpeech:400-500",
                 "a000005:captureGap:400-500",
             ]
         )
