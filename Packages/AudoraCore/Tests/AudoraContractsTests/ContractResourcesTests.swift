@@ -299,13 +299,30 @@ final class ContractResourcesTests: XCTestCase {
         let queuedExpected = try XCTUnwrap(
             queuedRelaunch["expectedState"] as? [String: Any]
         )
-        XCTAssertEqual(queuedInitial["status"] as? String, "queued")
-        XCTAssertEqual(queuedExpected["status"] as? String, "interrupted")
-        XCTAssertEqual(
-            queuedExpected["jobId"] as? String,
-            queuedInitial["jobId"] as? String
+        XCTAssertEqual(queuedInitial["status"] as? String, "unavailable")
+        XCTAssertEqual(queuedInitial["reason"] as? String, "noSession")
+        XCTAssertEqual(queuedInitial["actions"] as? [String], [])
+        XCTAssertEqual(queuedExpected["status"] as? String, "unavailable")
+        XCTAssertEqual(queuedExpected["reason"] as? String, "noSession")
+        XCTAssertEqual(queuedExpected["actions"] as? [String], [])
+        let queuedInitialJobs = try XCTUnwrap(
+            queuedRelaunch["initialJobs"] as? [[String: Any]]
         )
-        XCTAssertEqual(queuedExpected["actions"] as? [String], ["retry"])
+        let queuedExpectedJobs = try XCTUnwrap(
+            queuedRelaunch["expectedJobs"] as? [[String: Any]]
+        )
+        XCTAssertEqual(queuedInitialJobs.count, 1)
+        XCTAssertEqual(queuedExpectedJobs.count, 1)
+        XCTAssertEqual(queuedInitialJobs[0]["state"] as? String, "queued")
+        XCTAssertEqual(queuedExpectedJobs[0]["state"] as? String, "interrupted")
+        XCTAssertEqual(
+            queuedExpectedJobs[0]["jobId"] as? String,
+            queuedInitialJobs[0]["jobId"] as? String
+        )
+        XCTAssertEqual(
+            queuedExpectedJobs[0]["revisionId"] as? String,
+            queuedInitialJobs[0]["revisionId"] as? String
+        )
         let queuedCommands = try XCTUnwrap(
             queuedRelaunch["commands"] as? [[String: Any]]
         )
@@ -347,11 +364,46 @@ final class ContractResourcesTests: XCTestCase {
                 "noEngineLaunch", "noPublication",
             ]
         )
+        let runningRelaunch = try jsonObject(
+            .sessionProcessingRelaunchInterruptedScenario
+        )
+        let runningInitial = try XCTUnwrap(
+            runningRelaunch["initialState"] as? [String: Any]
+        )
+        let runningExpected = try XCTUnwrap(
+            runningRelaunch["expectedState"] as? [String: Any]
+        )
+        XCTAssertEqual(runningInitial["status"] as? String, "unavailable")
+        XCTAssertEqual(runningInitial["reason"] as? String, "noSession")
+        XCTAssertEqual(runningExpected["status"] as? String, "unavailable")
+        XCTAssertEqual(runningExpected["reason"] as? String, "noSession")
+        let runningInitialJobs = try XCTUnwrap(
+            runningRelaunch["initialJobs"] as? [[String: Any]]
+        )
+        let runningExpectedJobs = try XCTUnwrap(
+            runningRelaunch["expectedJobs"] as? [[String: Any]]
+        )
+        XCTAssertEqual(runningInitialJobs.map { $0["state"] as? String }, ["running"])
+        XCTAssertEqual(
+            runningExpectedJobs.map { $0["state"] as? String },
+            ["interrupted"]
+        )
+
         let stale = try jsonObject(
             .sessionProcessingRelaunchStaleSelectionScenario
         )
         let staleState = try XCTUnwrap(stale["expectedState"] as? [String: Any])
-        XCTAssertEqual(staleState["reason"] as? String, "staleSelection")
+        XCTAssertEqual(staleState["status"] as? String, "unavailable")
+        XCTAssertEqual(staleState["reason"] as? String, "noSession")
+        let staleInitialJobs = try XCTUnwrap(
+            stale["initialJobs"] as? [[String: Any]]
+        )
+        let staleExpectedJobs = try XCTUnwrap(
+            stale["expectedJobs"] as? [[String: Any]]
+        )
+        XCTAssertEqual(staleInitialJobs.map { $0["state"] as? String }, ["validating"])
+        XCTAssertEqual(staleExpectedJobs.map { $0["state"] as? String }, ["failed"])
+        XCTAssertEqual(staleExpectedJobs[0]["failure"] as? String, "staleSelection")
         let staleEffects = try XCTUnwrap(stale["expectedEffects"] as? [[String: Any]])
         XCTAssertTrue(
             staleEffects.contains {
@@ -375,6 +427,24 @@ final class ContractResourcesTests: XCTestCase {
             String(data: commandSchemaData, encoding: .utf8)
         )
         XCTAssertTrue(commandSchemaText.contains("activateLibrary"))
+
+        let featureProperties = try XCTUnwrap(feature["properties"] as? [String: Any])
+        XCTAssertEqual(
+            (featureProperties["initialJobs"] as? [String: Any])?["minItems"] as? Int,
+            1
+        )
+        XCTAssertEqual(
+            (featureProperties["expectedJobs"] as? [String: Any])?["minItems"] as? Int,
+            1
+        )
+        let durableJobSchema = try XCTUnwrap(
+            featureDefinitions["SessionProcessingScenarioDurableJob"]
+                as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(durableJobSchema["required"] as? [String] ?? []),
+            ["jobId", "revisionId", "state"]
+        )
 
         let completedSchema = try XCTUnwrap(
             featureDefinitions["SessionProcessingScenarioCompletedState"]
@@ -422,10 +492,29 @@ final class ContractResourcesTests: XCTestCase {
         let relaunchExpected = try XCTUnwrap(
             validationRelaunch["expectedState"] as? [String: Any]
         )
-        XCTAssertNotNil(relaunchExpected["revisionId"] as? String)
-        XCTAssertNotEqual(
-            relaunchExpected["revisionId"] as? String,
-            relaunchExpected["selectedRevisionId"] as? String
+        XCTAssertEqual(relaunchExpected["status"] as? String, "unavailable")
+        XCTAssertEqual(relaunchExpected["reason"] as? String, "noSession")
+        let validationInitialJobs = try XCTUnwrap(
+            validationRelaunch["initialJobs"] as? [[String: Any]]
+        )
+        let validationExpectedJobs = try XCTUnwrap(
+            validationRelaunch["expectedJobs"] as? [[String: Any]]
+        )
+        XCTAssertEqual(
+            validationInitialJobs.map { $0["state"] as? String },
+            ["validating"]
+        )
+        XCTAssertEqual(
+            validationExpectedJobs.map { $0["state"] as? String },
+            ["completed"]
+        )
+        XCTAssertEqual(
+            validationExpectedJobs[0]["jobId"] as? String,
+            validationInitialJobs[0]["jobId"] as? String
+        )
+        XCTAssertEqual(
+            validationExpectedJobs[0]["revisionId"] as? String,
+            validationInitialJobs[0]["revisionId"] as? String
         )
         let relaunchEffects = try XCTUnwrap(
             validationRelaunch["expectedEffects"] as? [[String: Any]]

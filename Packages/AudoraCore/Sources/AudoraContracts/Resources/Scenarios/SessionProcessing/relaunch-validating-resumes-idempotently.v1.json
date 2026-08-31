@@ -1,9 +1,17 @@
 {
   "schemaVersion": 1,
   "scenarioId": "session-processing.relaunch-validating-resumes-idempotently",
+  "initialJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "validating"
+    }
+  ],
   "initialState": {
-    "status": "validating",
-    "jobId": "job-20260830T120500000Z-5GHJ"
+    "status": "unavailable",
+    "reason": "noSession",
+    "actions": []
   },
   "commands": [
     { "kind": "activateLibrary" }
@@ -15,10 +23,17 @@
     { "port": "jobs", "effect": "transitionCompleted", "outcome": "written" }
   ],
   "expectedState": {
-    "status": "completed",
-    "revisionId": "trv-20260830T120600000Z-6JKM",
-    "selectedRevisionId": "trv-20260830T115900000Z-4BCD"
+    "status": "unavailable",
+    "reason": "noSession",
+    "actions": []
   },
+  "expectedJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "completed"
+    }
+  ],
   "expectedEffects": [
     { "kind": "canonicalRevisionReopened" },
     { "kind": "allDurableJobsReconciled" },

@@ -1,9 +1,16 @@
 {
   "schemaVersion": 1,
   "scenarioId": "session-processing.relaunch-queued-interrupted",
+  "initialJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "queued"
+    }
+  ],
   "initialState": {
-    "status": "queued",
-    "jobId": "job-20260830T120500000Z-5GHJ",
+    "status": "unavailable",
+    "reason": "noSession",
     "actions": []
   },
   "commands": [
@@ -18,10 +25,17 @@
     }
   ],
   "expectedState": {
-    "status": "interrupted",
-    "jobId": "job-20260830T120500000Z-5GHJ",
-    "actions": ["retry"]
+    "status": "unavailable",
+    "reason": "noSession",
+    "actions": []
   },
+  "expectedJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "interrupted"
+    }
+  ],
   "expectedEffects": [
     { "kind": "allDurableJobsReconciled" },
     { "kind": "queuedInterrupted" },

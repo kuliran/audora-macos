@@ -10,6 +10,14 @@
         "scenarioId": {
             "$ref": "#/$defs/SessionProcessingScenarioId"
         },
+        "initialJobs": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SessionProcessingScenarioDurableJob"
+            },
+            "minItems": 1,
+            "description": "Durable Job summaries present before the first command, when relevant."
+        },
         "initialState": {
             "$ref": "#/$defs/SessionProcessingScenarioState"
         },
@@ -28,6 +36,14 @@
         },
         "expectedState": {
             "$ref": "#/$defs/SessionProcessingScenarioState"
+        },
+        "expectedJobs": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SessionProcessingScenarioDurableJob"
+            },
+            "minItems": 1,
+            "description": "Durable Job summaries after all commands and dependency effects."
         },
         "expectedEffects": {
             "type": "array",
@@ -54,6 +70,32 @@
         "SessionProcessingScenarioId": {
             "type": "string",
             "pattern": "^session-processing\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "SessionProcessingScenarioDurableJob": {
+            "type": "object",
+            "properties": {
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "revisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId"
+                },
+                "state": {
+                    "$ref": "#/$defs/TranscriptionJobState"
+                },
+                "failure": {
+                    "$ref": "#/$defs/SessionProcessingFailure"
+                }
+            },
+            "required": [
+                "jobId",
+                "revisionId",
+                "state"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "Observable durable outcome without conflating it with feature UI state."
         },
         "SessionProcessingScenarioState": {
             "anyOf": [
@@ -404,6 +446,41 @@
                 "not": {}
             }
         },
+        "TranscriptionJobId": {
+            "type": "string",
+            "pattern": "^job-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "TranscriptRevisionId": {
+            "type": "string",
+            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "TranscriptionJobState": {
+            "type": "string",
+            "enum": [
+                "queued",
+                "preparing",
+                "running",
+                "validating",
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted"
+            ]
+        },
+        "SessionProcessingFailure": {
+            "type": "string",
+            "enum": [
+                "sourceUnavailable",
+                "jobPersistenceFailed",
+                "engineUnavailable",
+                "engineFailed",
+                "candidateRejected",
+                "publicationFailed",
+                "installedNeedsRefresh",
+                "canonicalRevisionIntegrityFailed",
+                "staleSelection"
+            ]
+        },
         "SessionProcessingScenarioUnavailableState": {
             "type": "object",
             "properties": {
@@ -739,10 +816,6 @@
                 "retry"
             ]
         },
-        "TranscriptionJobId": {
-            "type": "string",
-            "pattern": "^job-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
-        },
         "SessionProcessingScenarioProgress": {
             "type": "object",
             "properties": {
@@ -771,24 +844,6 @@
             "type": "string",
             "enum": [
                 "cancel"
-            ]
-        },
-        "TranscriptRevisionId": {
-            "type": "string",
-            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
-        },
-        "SessionProcessingFailure": {
-            "type": "string",
-            "enum": [
-                "sourceUnavailable",
-                "jobPersistenceFailed",
-                "engineUnavailable",
-                "engineFailed",
-                "candidateRejected",
-                "publicationFailed",
-                "installedNeedsRefresh",
-                "canonicalRevisionIntegrityFailed",
-                "staleSelection"
             ]
         }
     }

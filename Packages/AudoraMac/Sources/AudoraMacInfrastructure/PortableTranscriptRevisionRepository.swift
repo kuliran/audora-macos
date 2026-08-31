@@ -46,6 +46,7 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
 
     private let root: URL
     private let libraryID: LibraryID
+    private let expectedRootIdentity: SessionProcessingRootIdentity?
     private let fault: @Sendable (TranscriptRevisionPersistenceFaultPoint) throws -> Void
 
     public init(
@@ -55,8 +56,37 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             _ in
         }
     ) {
+        self.init(
+            root: root,
+            libraryID: libraryID,
+            expectedRootIdentity: nil,
+            fault: fault
+        )
+    }
+
+    init(
+        root: URL,
+        libraryID: LibraryID,
+        expectedRootIdentity: SessionProcessingRootIdentity,
+        fault: @escaping @Sendable (TranscriptRevisionPersistenceFaultPoint) throws -> Void = {
+            _ in
+        }
+    ) {
         self.root = root
         self.libraryID = libraryID
+        self.expectedRootIdentity = expectedRootIdentity
+        self.fault = fault
+    }
+
+    private init(
+        root: URL,
+        libraryID: LibraryID,
+        expectedRootIdentity: SessionProcessingRootIdentity?,
+        fault: @escaping @Sendable (TranscriptRevisionPersistenceFaultPoint) throws -> Void
+    ) {
+        self.root = root
+        self.libraryID = libraryID
+        self.expectedRootIdentity = expectedRootIdentity
         self.fault = fault
     }
 
@@ -471,11 +501,15 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             throw TranscriptRevisionRepositoryFailure.sessionUnavailable
         }
         do {
+            let identity = try Self.identity(of: rootDescriptor)
+            guard matchesExpectedRootIdentity(identity) else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
             return OpenedRootAuthority(
                 parentDescriptor: parentDescriptor,
                 rootDescriptor: rootDescriptor,
                 name: name,
-                identity: try Self.identity(of: rootDescriptor)
+                identity: identity
             )
         } catch {
             Darwin.close(rootDescriptor)
@@ -606,7 +640,8 @@ private extension PortableTranscriptRevisionRepository {
         _ authority: LockedSessionAuthority,
         expectedSessionID: SessionID
     ) throws {
-        guard try Self.identity(
+        guard matchesExpectedRootIdentity(authority.root.identity),
+            try Self.identity(
             named: authority.root.name,
             under: authority.root.parentDescriptor
         ) == authority.root.identity,
@@ -640,6 +675,12 @@ private extension PortableTranscriptRevisionRepository {
         } catch {
             throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
         }
+    }
+
+    func matchesExpectedRootIdentity(_ identity: EntryIdentity) -> Bool {
+        guard let expectedRootIdentity else { return true }
+        return identity.device == expectedRootIdentity.device &&
+            identity.inode == expectedRootIdentity.inode
     }
 
     func configuredRootIdentity() throws -> EntryIdentity {

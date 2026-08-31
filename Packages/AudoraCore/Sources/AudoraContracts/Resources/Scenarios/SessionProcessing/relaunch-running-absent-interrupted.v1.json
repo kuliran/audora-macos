@@ -1,11 +1,17 @@
 {
   "schemaVersion": 1,
   "scenarioId": "session-processing.relaunch-running-absent-interrupted",
+  "initialJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "running"
+    }
+  ],
   "initialState": {
-    "status": "running",
-    "jobId": "job-20260830T120500000Z-5GHJ",
-    "phase": "transcribing",
-    "actions": ["cancel"]
+    "status": "unavailable",
+    "reason": "noSession",
+    "actions": []
   },
   "commands": [
     { "kind": "activateLibrary" }
@@ -16,10 +22,17 @@
     { "port": "jobs", "effect": "transitionInterrupted", "outcome": "written" }
   ],
   "expectedState": {
-    "status": "interrupted",
-    "jobId": "job-20260830T120500000Z-5GHJ",
-    "actions": ["retry"]
+    "status": "unavailable",
+    "reason": "noSession",
+    "actions": []
   },
+  "expectedJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "interrupted"
+    }
+  ],
   "expectedEffects": [
     { "kind": "allDurableJobsReconciled" },
     { "kind": "processAbsenceConfirmed" },

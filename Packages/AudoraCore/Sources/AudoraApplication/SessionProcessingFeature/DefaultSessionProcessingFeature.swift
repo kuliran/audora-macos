@@ -794,6 +794,9 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
               revision.revisionID == job.revisionID,
               revision.sessionID == job.sessionID,
               revision.jobID == job.jobID,
+              revision.createdAt == job.createdAt,
+              let qualification = revision.engine.qualification,
+              qualification.qualificationProfileID == job.profileID,
               revision.audioFingerprint == source.audioFingerprint,
               revision.sourceFingerprints == source.sourceFingerprints,
               revision.candidateArtifactFingerprint.sha256 ==
@@ -930,7 +933,11 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         }
         guard case .written = await jobs.transition(requested, from: active.job.state)
         else {
-            _ = await engine.cancel(active.job.executionReference)
+            let outcome = await engine.cancel(active.job.executionReference)
+            guard outcome == .reaped || outcome == .alreadyAbsent else {
+                await retainRecoveryForUnconfirmedCancellation(active.job)
+                return
+            }
             transition(
                 to: .failed(
                     SessionProcessingFailedSnapshot(
@@ -953,18 +960,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
 
         let outcome = await engine.cancel(requested.executionReference)
         guard outcome == .reaped || outcome == .alreadyAbsent else {
-            transition(to: .recoveryRequired(requested))
-            // The old worker may still be alive, so Session selection remains
-            // fenced. Library activation is different: it is a system lifecycle
-            // obligation for a newly active authority and must not wait forever
-            // for this run. Keep the cancellation fence raised while draining
-            // the coalesced activation(s), then hand ordinary pending context
-            // back to the original run or the idle command loop.
-            while let scope = pendingLibraryActivationScope {
-                pendingLibraryActivationScope = nil
-                await reconcileActiveLibrary(scope)
-            }
-            await finishCancellationFinalization()
+            await retainRecoveryForUnconfirmedCancellation(requested)
             return
         }
         let cancelled = requested.transitioning(to: .cancelled)
@@ -991,6 +987,21 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 )
             )
         )
+        await finishCancellationFinalization()
+    }
+
+    private func retainRecoveryForUnconfirmedCancellation(
+        _ job: SessionProcessingJob
+    ) async {
+        transition(to: .recoveryRequired(job))
+        // The old worker may still be alive, so ordinary Session commands stay
+        // fenced behind its in-flight run. Library activation is a lifecycle
+        // obligation for a newly active authority and must still reconcile its
+        // durable Jobs without inheriting this run's UI state.
+        while let scope = pendingLibraryActivationScope {
+            pendingLibraryActivationScope = nil
+            await reconcileActiveLibrary(scope)
+        }
         await finishCancellationFinalization()
     }
 

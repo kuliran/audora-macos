@@ -325,6 +325,153 @@ final class SessionProcessingFeatureTests: XCTestCase {
         await run.value
     }
 
+    func testFailedCancellationPersistenceKeepsRecoveryFenceWhenReapIsUnconfirmed()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let activationScope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T120000000Z-9XYZ")
+        )
+        let abandoned = SessionProcessingJob(
+            jobID: try TranscriptionJobID("job-20260830T120800000Z-8NPQ"),
+            sessionID: try SessionID("ses-20260830T120800000Z-8NPQ"),
+            revisionID: try TranscriptRevisionID(
+                "trv-20260830T120800000Z-8NPQ"
+            ),
+            profileID: fixture.profile.profileID,
+            createdAt: try UTCInstant("2026-08-30T12:08:00.000Z"),
+            state: .queued,
+            cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                "cancel-abandoned-persistence-failure"
+            )
+        )
+        let reconciliationID = try SessionProcessingReconciliationID(
+            "reconcile-after-persistence-failure"
+        )
+        let jobs = JobProbe(
+            inventoryResult: .available(
+                SessionProcessingJobInventory(
+                    reconciliationID: reconciliationID,
+                    scope: activationScope,
+                    jobs: [abandoned]
+                )
+            ),
+            failingCancellationRequestCount: 1
+        )
+        let revisions = RevisionProbe()
+        let engine = UnconfirmedCancellationEngineProbe(
+            lateResult: VerifiedTranscriptionCandidate(
+                candidate: fixture.candidate,
+                artifactFingerprint: fixture.candidateFingerprint
+            )
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: SourceProbe(.available(fixture.source)),
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: SequencedProcessingClock([
+                fixture.createdAt,
+                try UTCInstant("2026-08-30T12:07:00.000Z"),
+            ]),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+        let run = Task { await feature.send(.start) }
+        await engine.waitUntilTranscriptionStarts()
+        let cancellation = Task { await feature.send(.cancel) }
+        await engine.waitUntilCancellationStarts()
+
+        await feature.send(.activateLibrary(activationScope))
+        await engine.releaseCancellationAsUnconfirmed()
+        await cancellation.value
+
+        guard case let .recoveryRequired(authoritative) = await feature.currentState
+        else {
+            return XCTFail("unconfirmed worker must retain recovery authority")
+        }
+        XCTAssertEqual(authoritative.jobID, fixture.jobID)
+        XCTAssertNotNil(authoritative.cancellationAuthorityID)
+        XCTAssertNil(authoritative.cancellationRequestedAt)
+        let finishedReconciliations = await jobs.finishedReconciliationIDs
+        let abandonedStates = await jobs.snapshots.filter {
+            $0.jobID == abandoned.jobID
+        }.map(\.state)
+        XCTAssertEqual(finishedReconciliations, [reconciliationID])
+        XCTAssertEqual(
+            abandonedStates,
+            [.interrupted]
+        )
+
+        await engine.releaseTranscription()
+        await run.value
+
+        guard case let .recoveryRequired(afterLateResult) = await feature.currentState
+        else { return XCTFail("late worker result must remain fenced") }
+        let publishCount = await revisions.publishCountValue()
+        XCTAssertEqual(afterLateResult.jobID, fixture.jobID)
+        XCTAssertEqual(publishCount, 0)
+    }
+
+    func testFailedCancellationPersistenceBecomesRetryableOnlyAfterReapProof()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let jobs = JobProbe(failingCancellationRequestCount: 1)
+        let revisions = RevisionProbe()
+        let engine = CancellableEngineProbe(
+            lateResult: VerifiedTranscriptionCandidate(
+                candidate: fixture.candidate,
+                artifactFingerprint: fixture.candidateFingerprint
+            )
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: SourceProbe(.available(fixture.source)),
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: SequencedProcessingClock([
+                fixture.createdAt,
+                try UTCInstant("2026-08-30T12:07:00.000Z"),
+            ]),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+        let run = Task { await feature.send(.start) }
+        await engine.waitUntilTranscriptionStarts()
+        let cancellation = Task { await feature.send(.cancel) }
+        await engine.waitUntilCancellationStarts()
+        await engine.releaseCancellation()
+        await cancellation.value
+        await run.value
+
+        guard case let .failed(failure) = await feature.currentState else {
+            return XCTFail("reaped worker may expose the durable retry path")
+        }
+        XCTAssertEqual(failure.reason, .jobPersistenceFailed)
+        XCTAssertEqual(failure.actions, [.retry])
+        XCTAssertEqual(failure.job?.state, .running)
+        XCTAssertNil(failure.job?.cancellationRequestedAt)
+        let cancellationCount = await engine.cancelledControls.count
+        let publishCount = await revisions.publishCountValue()
+        XCTAssertEqual(cancellationCount, 1)
+        XCTAssertEqual(publishCount, 0)
+    }
+
     func testUnqualifiedPinnedProfileNeverCreatesAJobOrLaunchesAnEngine() async throws {
         let fixture = try ProcessingFixture()
         let runtime = RuntimeProbe(
@@ -1217,6 +1364,59 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(snapshot.selectedRevisionID, fixture.revisionID)
         let exactReopenCount = await revisions.exactReopenCount
         XCTAssertEqual(exactReopenCount, 1)
+    }
+
+    func testRelaunchRejectsCompletedJobWhoseManifestProvenanceDiffersFromRevision()
+        async throws
+    {
+        let fixture = try ProcessingFixture(selectedRevisionID: true)
+        let cancellationAuthorityID = try TranscriptionCancellationAuthorityID(
+            "cancel-fixture-authority"
+        )
+        let mismatchedJobs = [
+            SessionProcessingJob(
+                jobID: fixture.jobID,
+                sessionID: fixture.selection.sessionID,
+                revisionID: fixture.revisionID,
+                profileID: "different-qualified-profile-v1",
+                createdAt: fixture.createdAt,
+                state: .completed,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: cancellationAuthorityID,
+                candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+            ),
+            SessionProcessingJob(
+                jobID: fixture.jobID,
+                sessionID: fixture.selection.sessionID,
+                revisionID: fixture.revisionID,
+                profileID: fixture.profile.profileID,
+                createdAt: try UTCInstant("2026-08-30T12:06:01.000Z"),
+                state: .completed,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: cancellationAuthorityID,
+                candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+            ),
+        ]
+
+        for completed in mismatchedJobs {
+            let revisions = RevisionProbe(selected: try fixture.validatedRevision())
+            let feature = fixture.makeFeature(
+                jobs: JobProbe(latest: completed),
+                engine: EngineProbe(result: .failure(.launchFailed)),
+                revisions: revisions
+            )
+
+            await feature.send(.selectSession(fixture.selection))
+
+            guard case let .failed(failure) = await feature.currentState else {
+                XCTFail("expected mismatched completed manifest to fail closed")
+                continue
+            }
+            XCTAssertEqual(failure.reason, .canonicalRevisionIntegrityFailed)
+            XCTAssertEqual(failure.actions, [])
+            let exactReopenCount = await revisions.exactReopenCount
+            XCTAssertEqual(exactReopenCount, 1)
+        }
     }
 
     func testCompletedJobRemainsValidAfterAnotherRevisionIsSelectedAndCanRetranscribe()
@@ -2415,6 +2615,7 @@ private actor JobProbe: SessionProcessingJobPort {
     private let tracksLatestWrites: Bool
     private let failingTransitionState: SessionProcessingJobState?
     private var remainingTransitionFailures: Int
+    private var remainingCancellationRequestFailures: Int
     private var durableLatest: SessionProcessingJob?
     private(set) var states: [SessionProcessingJobState] = []
     private(set) var snapshots: [SessionProcessingJob] = []
@@ -2427,7 +2628,8 @@ private actor JobProbe: SessionProcessingJobPort {
         inventoryResult: SessionProcessingJobInventoryResult = .unavailable,
         tracksLatestWrites: Bool = false,
         failingTransitionState: SessionProcessingJobState? = nil,
-        transitionFailureCount: Int = 0
+        transitionFailureCount: Int = 0,
+        failingCancellationRequestCount: Int = 0
     ) {
         self.latestResult = latestResult ?? latest.map {
             SessionProcessingJobLoadResult.loaded($0)
@@ -2437,6 +2639,7 @@ private actor JobProbe: SessionProcessingJobPort {
         durableLatest = latest
         self.failingTransitionState = failingTransitionState
         remainingTransitionFailures = transitionFailureCount
+        remainingCancellationRequestFailures = failingCancellationRequestCount
     }
 
     func inventory(
@@ -2473,6 +2676,12 @@ private actor JobProbe: SessionProcessingJobPort {
     ) async -> SessionProcessingJobWriteResult {
         states.append(job.state)
         snapshots.append(job)
+        if job.state == .running, job.cancellationRequestedAt != nil,
+           remainingCancellationRequestFailures > 0
+        {
+            remainingCancellationRequestFailures -= 1
+            return .failed
+        }
         if job.state == failingTransitionState, remainingTransitionFailures > 0 {
             remainingTransitionFailures -= 1
             return .failed

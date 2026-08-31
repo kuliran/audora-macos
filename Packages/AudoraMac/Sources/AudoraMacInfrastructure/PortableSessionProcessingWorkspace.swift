@@ -487,7 +487,8 @@ public actor PortableSessionProcessingWorkspace:
         let root = active.root
         let revisions = PortableTranscriptRevisionRepository(
             root: root,
-            libraryID: selection.scope.libraryID
+            libraryID: selection.scope.libraryID,
+            expectedRootIdentity: active.identity.rootIdentity
         )
         let read: PortableSessionTranscriptionRead
         do {

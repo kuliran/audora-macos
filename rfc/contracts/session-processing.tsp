@@ -99,6 +99,11 @@ namespace Audora.Contracts {
   model SessionProcessingFeatureScenario {
     schemaVersion: 1;
     scenarioId: SessionProcessingScenarioId;
+
+    /** Durable Job summaries present before the first command, when relevant. */
+    @minItems(1)
+    initialJobs?: SessionProcessingScenarioDurableJob[];
+
     initialState: SessionProcessingScenarioState;
 
     @minItems(1)
@@ -107,8 +112,20 @@ namespace Audora.Contracts {
     dependencyTrace: SessionProcessingScenarioDependencyEvent[];
     expectedState: SessionProcessingScenarioState;
 
+    /** Durable Job summaries after all commands and dependency effects. */
+    @minItems(1)
+    expectedJobs?: SessionProcessingScenarioDurableJob[];
+
     @minItems(1)
     expectedEffects: SessionProcessingScenarioEffect[];
+  }
+
+  /** Observable durable outcome without conflating it with feature UI state. */
+  model SessionProcessingScenarioDurableJob {
+    jobId: TranscriptionJobId;
+    revisionId: TranscriptRevisionId;
+    state: TranscriptionJobState;
+    failure?: SessionProcessingFailure;
   }
 
   enum TranscriptionJobState {
