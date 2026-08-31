@@ -329,8 +329,7 @@ public actor DefaultReviewFeature: ReviewFeature {
             await invalidateReview(
                 selection: snapshot.selection,
                 reason: .playbackUnavailable,
-                clearing: previousPlayback?.audioCapabilityID ??
-                    snapshot.audioCapabilityID
+                clearing: nil
             )
             return
         }

@@ -432,9 +432,13 @@ final class ReviewFeatureTests: XCTestCase {
             }
 
             let cleared = await playback.clearedCapabilities()
+            let expectedClearedCapability: ReviewAudioCapabilityID? =
+                scenario.trigger == .playbackReplacementFailure
+                    ? nil
+                    : firstCapability
             XCTAssertEqual(
                 cleared,
-                [firstCapability],
+                [expectedClearedCapability],
                 scenario.trigger.rawValue
             )
             let hasLoadedAudio = await playback.hasLoadedAudio()
@@ -458,6 +462,81 @@ final class ReviewFeatureTests: XCTestCase {
             XCTAssertEqual(finalSelection, selection, scenario.trigger.rawValue)
             XCTAssertEqual(reason, scenario.expectedReason, scenario.trigger.rawValue)
         }
+    }
+
+    func testNewSessionLoadFailureRevokesPreviouslyPlayingAdapterWholesale() async throws {
+        let first = try reviewRevision(
+            id: "trv-20260830T121000000Z-4FGH",
+            text: "Hello, world!"
+        )
+        let replacement = try reviewRevision(
+            id: "trv-20260830T122000000Z-8JKM",
+            sessionID: "ses-20260830T121500000Z-7HJK",
+            text: "Hello, world!"
+        )
+        let scope = LibraryScope(libraryID: revisionFixtureLibraryID)
+        let firstSelection = ReviewSelection(
+            scope: scope,
+            sessionID: first.sessionID
+        )
+        let replacementSelection = ReviewSelection(
+            scope: scope,
+            sessionID: replacement.sessionID
+        )
+        let firstCapability = try ReviewAudioCapabilityID("review-old-session")
+        let replacementCapability = try ReviewAudioCapabilityID(
+            "review-new-session"
+        )
+        let firstSnapshot = try ReviewSessionSnapshot(
+            selection: firstSelection,
+            revisionIDs: [first.revisionID],
+            selectedRevision: first,
+            audioCapabilityID: firstCapability,
+            canonicalAudioDurationMilliseconds: first.durationMilliseconds
+        )
+        let replacementSnapshot = try ReviewSessionSnapshot(
+            selection: replacementSelection,
+            revisionIDs: [replacement.revisionID],
+            selectedRevision: replacement,
+            audioCapabilityID: replacementCapability,
+            canonicalAudioDurationMilliseconds: replacement.durationMilliseconds
+        )
+        let sessions = ScriptedAuthorityLossReviewSessions(
+            reads: [.available(firstSnapshot), .available(replacementSnapshot)],
+            selectionResult: .failed
+        )
+        let playback = AuthorityLossPlaybackStub(failLoadAfter: 1)
+        let feature = DefaultReviewFeature(
+            sessions: sessions,
+            playback: playback,
+            retranscriber: ReviewRetranscriberStub()
+        )
+        await feature.send(.selectSession(firstSelection))
+        await feature.send(.play)
+        guard case let .ready(playing) = await feature.currentState else {
+            return XCTFail("expected old session audio to be ready")
+        }
+        XCTAssertEqual(playing.playback.status, .playing)
+
+        await feature.send(.selectSession(replacementSelection))
+
+        let clears = await playback.clearedCapabilities()
+        XCTAssertEqual(clears, [nil])
+        let hasLoadedAudio = await playback.hasLoadedAudio()
+        XCTAssertFalse(hasLoadedAudio)
+        await playback.emit(
+            ReviewPlaybackSnapshot(
+                audioCapabilityID: firstCapability,
+                positionMilliseconds: 800,
+                durationMilliseconds: first.durationMilliseconds,
+                status: .playing
+            )
+        )
+        for _ in 0..<8 { await Task.yield() }
+        guard case let .unavailable(selection, reason) = await feature.currentState
+        else { return XCTFail("failed replacement must not restore Review controls") }
+        XCTAssertEqual(selection, replacementSelection)
+        XCTAssertEqual(reason, .playbackUnavailable)
     }
 }
 
@@ -779,6 +858,7 @@ private let revisionFixtureLibraryID = try! LibraryID("lib-20260830T120000000Z-1
 
 private func reviewRevision(
     id: String,
+    sessionID: String = "ses-20260830T120000000Z-2ABC",
     text: String
 ) throws -> TranscriptRevision {
     let duration: UInt64 = 1_000
@@ -814,7 +894,7 @@ private func reviewRevision(
     )
     return try TranscriptRevision(
         revisionID: TranscriptRevisionID(id),
-        sessionID: SessionID("ses-20260830T120000000Z-2ABC"),
+        sessionID: SessionID(sessionID),
         jobID: TranscriptionJobID("job-20260830T120500000Z-3DEF"),
         createdAt: UTCInstant("2026-08-30T12:10:00.000Z"),
         durationMilliseconds: duration,
