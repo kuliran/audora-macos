@@ -1,0 +1,1635 @@
+import AudoraApplication
+import AudoraDomain
+import CoreFoundation
+import CryptoKit
+import Darwin
+import Foundation
+
+@_silgen_name("flock")
+private func transcriptRevisionFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
+
+public enum TranscriptRevisionPersistenceFaultPoint: Equatable, Sendable {
+    case afterTranscriptsDirectoryFlush
+    case afterRevisionFilesFlush
+    case afterRevisionDirectoryInstall
+    case afterSessionManifestPartialFlush
+    case afterSessionManifestInstall
+    case afterSessionDirectoryFlush
+}
+
+/// The one persistence boundary that turns a validated Transcript Revision into
+/// selected portable Session state. Revision bytes are installed immutably before
+/// the Session manifest's logical compare-and-swap commit. All Audora Session
+/// writers share the advisory Session-directory lock; the repository validates
+/// the expected manifest and pinned revision authority as the final work before
+/// rename. The advisory lock is the serialization authority, not a kernel
+/// content-CAS against noncooperating processes.
+public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository,
+    @unchecked Sendable
+{
+    private static let maximumManifestBytes = 65_536
+    private static let maximumRevisionBytes = 256 * 1_024 * 1_024
+
+    private let root: URL
+    private let libraryID: LibraryID
+    private let fault: @Sendable (TranscriptRevisionPersistenceFaultPoint) throws -> Void
+
+    public init(
+        root: URL,
+        libraryID: LibraryID,
+        fault: @escaping @Sendable (TranscriptRevisionPersistenceFaultPoint) throws -> Void = {
+            _ in
+        }
+    ) {
+        self.root = root
+        self.libraryID = libraryID
+        self.fault = fault
+    }
+
+    public func publishAndSelect(
+        _ revision: TranscriptRevision,
+        expectedSelectedRevisionID: TranscriptRevisionID?
+    ) async throws -> ReopenedTranscriptRevisionSnapshot {
+        try withLockedSession(sessionID: revision.sessionID, exclusive: true) {
+            authority in
+            let sessionDescriptor = authority.sessionDescriptor
+            var selectionInstalled = false
+            do {
+                let loaded = try loadSession(
+                    sessionID: revision.sessionID,
+                    sessionDescriptor: sessionDescriptor
+                )
+                guard loaded.manifest.selectedRevisionID == expectedSelectedRevisionID else {
+                    throw TranscriptRevisionRepositoryFailure.staleSelection
+                }
+                try validate(revision, against: loaded.audio)
+
+                let revisionData = try Self.deterministicJSON(
+                    TranscriptRevisionDTO(revision)
+                )
+                guard revisionData.count <= Self.maximumRevisionBytes else {
+                    throw TranscriptRevisionRepositoryFailure.writeFailed
+                }
+                let revisionSHA256 = Self.sha256(revisionData)
+                let selected = try SelectedTranscriptRevision(
+                    revisionID: revision.revisionID,
+                    revisionSHA256: revisionSHA256
+                )
+                let updatedManifest = try loaded.manifest.selecting(selected)
+                let transcriptsDescriptor = try openOrCreateTranscripts(
+                    under: sessionDescriptor
+                )
+                defer { Darwin.close(transcriptsDescriptor) }
+                let transcriptsIdentity = try Self.identity(of: transcriptsDescriptor)
+                try installRevisionIfNeeded(
+                    revisionData,
+                    sha256: revisionSHA256,
+                    revisionID: revision.revisionID,
+                    under: transcriptsDescriptor,
+                    sessionDescriptor: sessionDescriptor,
+                    expectedIdentity: transcriptsIdentity
+                )
+                let installedRevision = try openInstalledRevisionAuthority(
+                    revisionID: revision.revisionID,
+                    expectedData: revisionData,
+                    expectedSHA256: revisionSHA256,
+                    under: transcriptsDescriptor
+                )
+                defer { Darwin.close(installedRevision.descriptor) }
+
+                try replaceSessionManifest(
+                    updatedManifest,
+                    under: sessionDescriptor,
+                    precommit: {
+                        try revalidate(
+                            authority,
+                            expectedSessionID: revision.sessionID
+                        )
+                        try revalidateDirectoryEntry(
+                            named: "transcripts",
+                            under: sessionDescriptor,
+                            descriptor: transcriptsDescriptor,
+                            expectedIdentity: transcriptsIdentity
+                        )
+                        try requireCurrentSessionManifest(
+                            expectedData: loaded.manifestData,
+                            expectedSelectedRevisionID: expectedSelectedRevisionID,
+                            expectedSessionID: revision.sessionID,
+                            under: sessionDescriptor
+                        )
+                        try revalidateInstalledRevision(
+                            installedRevision,
+                            revisionID: revision.revisionID,
+                            expectedData: revisionData,
+                            expectedSHA256: revisionSHA256,
+                            under: transcriptsDescriptor
+                        )
+                    }
+                )
+                selectionInstalled = true
+                try fault(.afterSessionManifestInstall)
+                try Self.flush(sessionDescriptor)
+                try fault(.afterSessionDirectoryFlush)
+
+                try revalidate(authority, expectedSessionID: revision.sessionID)
+
+                return try reopenSelectedLocked(
+                    sessionID: revision.sessionID,
+                    sessionDescriptor: sessionDescriptor
+                )
+            } catch let failure as TranscriptRevisionRepositoryFailure {
+                if selectionInstalled {
+                    throw TranscriptRevisionRepositoryFailure.installedNeedsRefresh
+                }
+                throw failure
+            } catch {
+                throw selectionInstalled
+                    ? TranscriptRevisionRepositoryFailure.installedNeedsRefresh
+                    : TranscriptRevisionRepositoryFailure.writeFailed
+            }
+        }
+    }
+
+    public func reopenSelected(
+        sessionID: SessionID
+    ) async throws -> ReopenedTranscriptRevisionSnapshot {
+        try withLockedSession(sessionID: sessionID, exclusive: false) {
+            let snapshot = try reopenSelectedLocked(
+                sessionID: sessionID,
+                sessionDescriptor: $0.sessionDescriptor
+            )
+            try revalidate($0, expectedSessionID: sessionID)
+            return snapshot
+        }
+    }
+
+    private func reopenSelectedLocked(
+        sessionID: SessionID,
+        sessionDescriptor: Int32
+    ) throws -> ReopenedTranscriptRevisionSnapshot {
+        let loaded = try loadSession(
+            sessionID: sessionID,
+            sessionDescriptor: sessionDescriptor
+        )
+        guard let selected = loaded.manifest.selectedTranscriptRevision else {
+            throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+        }
+        let transcriptsDescriptor = try readConfined.openDirectory(
+            named: "transcripts",
+            under: sessionDescriptor
+        )
+        defer { Darwin.close(transcriptsDescriptor) }
+        let revisionDescriptor = try readConfined.openDirectory(
+            named: selected.revisionID.rawValue,
+            under: transcriptsDescriptor
+        )
+        defer { Darwin.close(revisionDescriptor) }
+        guard try readConfined.listEntryNames(
+            under: revisionDescriptor,
+            maximumCount: 2
+        ) == ["revision.json", "revision.sha256"] else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        let revisionData = try readConfined.boundedData(
+            named: "revision.json",
+            under: revisionDescriptor,
+            maximumBytes: Self.maximumRevisionBytes
+        )
+        let detachedData = try readConfined.boundedData(
+            named: "revision.sha256",
+            under: revisionDescriptor,
+            maximumBytes: 64
+        )
+        guard let detached = String(data: detachedData, encoding: .utf8),
+              AudioArtifactFingerprint.isSHA256(detached),
+              detached == selected.revisionSHA256,
+              detached == Self.sha256(revisionData)
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        let revision = try decodeRevision(revisionData)
+        guard revision.revisionID == selected.revisionID,
+              revision.sessionID == sessionID
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        try validate(revision, against: loaded.audio)
+        return ReopenedTranscriptRevisionSnapshot(
+            revisionIDs: loaded.manifest.transcriptRevisionIDs,
+            selectedRevisionID: selected.revisionID,
+            selectedRevision: revision
+        )
+    }
+
+    private func withLockedSession<T>(
+        sessionID: SessionID,
+        exclusive: Bool,
+        _ body: (LockedSessionAuthority) throws -> T
+    ) throws -> T {
+        let rootAuthority = try openRoot()
+        defer {
+            Darwin.close(rootAuthority.rootDescriptor)
+            Darwin.close(rootAuthority.parentDescriptor)
+        }
+        do {
+            let loaded = try PortableLibraryPersistence().load(
+                from: rootAuthority.rootDescriptor,
+                reconcileAbandonedImports: false
+            )
+            guard case let .readWrite(authority) = loaded,
+                  authority.manifest.libraryID == libraryID
+            else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+        } catch let failure as TranscriptRevisionRepositoryFailure {
+            throw failure
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        let sessionsDescriptor = try readConfined.openDirectory(
+            named: "sessions",
+            under: rootAuthority.rootDescriptor
+        )
+        defer { Darwin.close(sessionsDescriptor) }
+        let sessionsIdentity = try Self.identity(of: sessionsDescriptor)
+        let sessionDescriptor: Int32
+        do {
+            sessionDescriptor = try readConfined.openDirectory(
+                named: sessionID.rawValue,
+                under: sessionsDescriptor
+            )
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+        }
+        defer { Darwin.close(sessionDescriptor) }
+        let sessionIdentity = try Self.identity(of: sessionDescriptor)
+        let operation = exclusive ? LOCK_EX : LOCK_SH
+        while transcriptRevisionFlock(sessionDescriptor, operation) != 0 {
+            if errno == EINTR { continue }
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
+        defer { _ = transcriptRevisionFlock(sessionDescriptor, LOCK_UN) }
+        let authority = LockedSessionAuthority(
+            root: rootAuthority,
+            sessionsDescriptor: sessionsDescriptor,
+            sessionsIdentity: sessionsIdentity,
+            sessionDescriptor: sessionDescriptor,
+            sessionIdentity: sessionIdentity
+        )
+        try revalidate(authority, expectedSessionID: sessionID)
+        return try body(authority)
+    }
+
+    private func openRoot() throws -> OpenedRootAuthority {
+        let parentURL = root.deletingLastPathComponent()
+        let name = root.lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..",
+              !name.contains("/"), !name.contains("\\")
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+        }
+        let parentDescriptor: Int32 = parentURL.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return Darwin.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard parentDescriptor >= 0 else {
+            throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+        }
+        let rootDescriptor = name.withCString {
+            Darwin.openat(
+                parentDescriptor,
+                $0,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard rootDescriptor >= 0 else {
+            Darwin.close(parentDescriptor)
+            throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+        }
+        do {
+            return OpenedRootAuthority(
+                parentDescriptor: parentDescriptor,
+                rootDescriptor: rootDescriptor,
+                name: name,
+                identity: try Self.identity(of: rootDescriptor)
+            )
+        } catch {
+            Darwin.close(rootDescriptor)
+            Darwin.close(parentDescriptor)
+            throw error
+        }
+    }
+
+    private var readConfined: ConfinedPersistencePrimitives<TranscriptRevisionRepositoryFailure> {
+        ConfinedPersistencePrimitives(
+            ioFailure: .sessionIntegrityMismatch,
+            invalidLayout: .sessionIntegrityMismatch,
+            expectedPathIsSymlink: .sessionIntegrityMismatch,
+            rootTooLarge: .sessionIntegrityMismatch,
+            invalidJSON: .sessionIntegrityMismatch,
+            invalidSchemaVersion: .sessionIntegrityMismatch,
+            unknownKey: .sessionIntegrityMismatch
+        )
+    }
+
+    private var writeConfined: ConfinedPersistencePrimitives<TranscriptRevisionRepositoryFailure> {
+        ConfinedPersistencePrimitives(
+            ioFailure: .writeFailed,
+            invalidLayout: .sessionIntegrityMismatch,
+            expectedPathIsSymlink: .sessionIntegrityMismatch,
+            rootTooLarge: .sessionIntegrityMismatch,
+            invalidJSON: .sessionIntegrityMismatch,
+            invalidSchemaVersion: .sessionIntegrityMismatch,
+            unknownKey: .sessionIntegrityMismatch
+        )
+    }
+}
+
+private extension PortableTranscriptRevisionRepository {
+    struct TrustedSessionAudio {
+        let durationMilliseconds: UInt64
+        let audioFingerprint: AudioFingerprint
+        let sourceFingerprints: [TranscriptSourceFingerprint]
+    }
+
+    struct LoadedSession {
+        let manifestData: Data
+        let manifest: PortableSessionManifest
+        let audio: TrustedSessionAudio
+    }
+
+    struct EntryIdentity: Equatable {
+        let device: UInt64
+        let inode: UInt64
+
+        init(_ metadata: stat) {
+            device = UInt64(truncatingIfNeeded: metadata.st_dev)
+            inode = UInt64(truncatingIfNeeded: metadata.st_ino)
+        }
+    }
+
+    struct OpenedRootAuthority {
+        let parentDescriptor: Int32
+        let rootDescriptor: Int32
+        let name: String
+        let identity: EntryIdentity
+    }
+
+    struct LockedSessionAuthority {
+        let root: OpenedRootAuthority
+        let sessionsDescriptor: Int32
+        let sessionsIdentity: EntryIdentity
+        let sessionDescriptor: Int32
+        let sessionIdentity: EntryIdentity
+    }
+
+    struct InstalledRevisionAuthority {
+        let descriptor: Int32
+        let directoryIdentity: EntryIdentity
+        let revisionFileIdentity: EntryIdentity
+        let hashFileIdentity: EntryIdentity
+    }
+
+    func loadSession(
+        sessionID: SessionID,
+        sessionDescriptor: Int32
+    ) throws -> LoadedSession {
+        let manifestData = try readConfined.boundedData(
+            named: "session.json",
+            under: sessionDescriptor,
+            maximumBytes: Self.maximumManifestBytes
+        )
+        let manifest = try decodeSessionManifest(
+            manifestData,
+            expectedSessionID: sessionID
+        )
+        let audio: TrustedSessionAudio
+        switch manifest {
+        case .recorded:
+            audio = try loadRecordedAudio(under: sessionDescriptor)
+        case .imported:
+            let reopened = try PortableAudioImportPersistence().openSession(
+                under: sessionDescriptor,
+                sessionID: sessionID
+            )
+            guard case let .readWrite(session) = reopened,
+                  session.transcriptRevisionIDs == manifest.transcriptRevisionIDs,
+                  session.selectedTranscriptRevision == manifest.selectedTranscriptRevision
+            else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+            let canonical = session.audio.canonical
+            let fingerprint = try AudioFingerprint(sha256: canonical.fingerprint.sha256)
+            audio = TrustedSessionAudio(
+                durationMilliseconds: session.durationMilliseconds,
+                audioFingerprint: fingerprint,
+                sourceFingerprints: session.audio.sources.map {
+                    TranscriptSourceFingerprint(
+                        audioSourceID: $0.audioSourceID,
+                        fingerprint: fingerprint
+                    )
+                }
+            )
+        }
+        return LoadedSession(
+            manifestData: manifestData,
+            manifest: manifest,
+            audio: audio
+        )
+    }
+
+    func revalidate(
+        _ authority: LockedSessionAuthority,
+        expectedSessionID: SessionID
+    ) throws {
+        guard try Self.identity(
+            named: authority.root.name,
+            under: authority.root.parentDescriptor
+        ) == authority.root.identity,
+            try configuredRootIdentity() == authority.root.identity,
+            try Self.identity(of: authority.root.rootDescriptor) == authority.root.identity,
+            try Self.identity(
+                named: "sessions",
+                under: authority.root.rootDescriptor
+            ) == authority.sessionsIdentity,
+            try Self.identity(of: authority.sessionsDescriptor) == authority.sessionsIdentity,
+            try Self.identity(
+                named: expectedSessionID.rawValue,
+                under: authority.sessionsDescriptor
+            ) == authority.sessionIdentity,
+            try Self.identity(of: authority.sessionDescriptor) == authority.sessionIdentity
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        do {
+            let loaded = try PortableLibraryPersistence().load(
+                from: authority.root.rootDescriptor,
+                reconcileAbandonedImports: false
+            )
+            guard case let .readWrite(library) = loaded,
+                  library.manifest.libraryID == libraryID
+            else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+        } catch let failure as TranscriptRevisionRepositoryFailure {
+            throw failure
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+    }
+
+    func configuredRootIdentity() throws -> EntryIdentity {
+        let descriptor: Int32 = root.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return Darwin.open(
+                path,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard descriptor >= 0 else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        defer { Darwin.close(descriptor) }
+        return try Self.identity(of: descriptor)
+    }
+
+    func revalidateDirectoryEntry(
+        named name: String,
+        under parent: Int32,
+        descriptor: Int32,
+        expectedIdentity: EntryIdentity
+    ) throws {
+        guard try Self.identity(named: name, under: parent) == expectedIdentity,
+              try Self.identity(of: descriptor) == expectedIdentity
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+    }
+
+    static func identity(of descriptor: Int32) throws -> EntryIdentity {
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFDIR
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        return EntryIdentity(metadata)
+    }
+
+    static func identity(named name: String, under parent: Int32) throws -> EntryIdentity {
+        try identity(named: name, under: parent, expectedType: S_IFDIR)
+    }
+
+    static func identity(
+        named name: String,
+        under parent: Int32,
+        expectedType: mode_t
+    ) throws -> EntryIdentity {
+        var metadata = stat()
+        guard name.withCString({
+            fstatat(parent, $0, &metadata, AT_SYMLINK_NOFOLLOW)
+        }) == 0,
+            (metadata.st_mode & S_IFMT) == expectedType
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        return EntryIdentity(metadata)
+    }
+
+    func decodeSessionManifest(
+        _ data: Data,
+        expectedSessionID: SessionID
+    ) throws -> PortableSessionManifest {
+        let dictionary = try readConfined.jsonDictionary(data)
+        let commonRequired: Set<String> = [
+            "schemaVersion", "sessionId", "createdAt", "transcriptRevisionIds",
+        ]
+        let optional: Set<String> = ["selectedTranscriptRevision"]
+        let keys = Set(dictionary.keys)
+        if keys.contains("selectedTranscriptRevision") {
+            guard let selected = dictionary["selectedTranscriptRevision"]
+                as? [String: Any],
+                Set(selected.keys) == ["revisionId", "revisionSha256"]
+            else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+        }
+        let manifest: PortableSessionManifest
+        do {
+            if keys.contains("audioManifestPath") {
+                guard commonRequired
+                    .union(["audioManifestPath"])
+                    .isSubset(of: keys),
+                    keys.isSubset(of: commonRequired.union(["audioManifestPath"]).union(optional))
+                else {
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                }
+                let dto = try JSONDecoder().decode(RecordedSessionManifestDTO.self, from: data)
+                guard dto.schemaVersion == 1,
+                      dto.sessionId == expectedSessionID.rawValue,
+                      dto.audioManifestPath == "audio/audio.json",
+                      (try? UTCInstant(dto.createdAt)) != nil
+                else {
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                }
+                manifest = try validatedManifest(dto)
+            } else {
+                let required = commonRequired.union([
+                    "durationMs", "audioManifestSha256",
+                ])
+                guard required.isSubset(of: keys),
+                      keys.isSubset(of: required.union(optional))
+                else {
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                }
+                let dto = try JSONDecoder().decode(ImportedSessionManifestDTO.self, from: data)
+                guard dto.schemaVersion == 1,
+                      dto.sessionId == expectedSessionID.rawValue,
+                      dto.durationMs > 0,
+                      dto.durationMs <= 2_700_000,
+                      AudioArtifactFingerprint.isSHA256(dto.audioManifestSha256),
+                      (try? UTCInstant(dto.createdAt)) != nil
+                else {
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                }
+                manifest = try validatedManifest(dto)
+            }
+            return manifest
+        } catch let failure as TranscriptRevisionRepositoryFailure {
+            throw failure
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+    }
+
+    func loadRecordedAudio(under sessionDescriptor: Int32) throws -> TrustedSessionAudio {
+        do {
+            let audio = try RecordingPersistence().loadValidatedSealedAudio(
+                under: sessionDescriptor
+            )
+            let duration = try CanonicalAudioFormat.durationMilliseconds(
+                forFrameCount: audio.frameCount
+            )
+            return TrustedSessionAudio(
+                durationMilliseconds: duration,
+                audioFingerprint: audio.fingerprint,
+                sourceFingerprints: [
+                    TranscriptSourceFingerprint(
+                        audioSourceID: .microphone,
+                        fingerprint: audio.fingerprint
+                    ),
+                ]
+            )
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+    }
+
+    func validate(
+        _ revision: TranscriptRevision,
+        against audio: TrustedSessionAudio
+    ) throws {
+        guard revision.durationMilliseconds == audio.durationMilliseconds,
+              revision.audioFingerprint == audio.audioFingerprint,
+              revision.sourceFingerprints.count == audio.sourceFingerprints.count
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        var expected: [AudioSourceID: AudioFingerprint] = [:]
+        for source in audio.sourceFingerprints {
+            guard expected.updateValue(
+                source.fingerprint,
+                forKey: source.audioSourceID
+            ) == nil else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+        }
+        var actual: [AudioSourceID: AudioFingerprint] = [:]
+        for source in revision.sourceFingerprints {
+            guard actual.updateValue(
+                source.fingerprint,
+                forKey: source.audioSourceID
+            ) == nil else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+        }
+        guard actual == expected else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+    }
+
+    func openOrCreateTranscripts(under sessionDescriptor: Int32) throws -> Int32 {
+        if mkdirat(sessionDescriptor, "transcripts", 0o700) != 0, errno != EEXIST {
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
+        do {
+            let descriptor = try writeConfined.openDirectory(
+                named: "transcripts",
+                under: sessionDescriptor
+            )
+            do {
+                try Self.flush(sessionDescriptor)
+                try fault(.afterTranscriptsDirectoryFlush)
+                return descriptor
+            } catch {
+                Darwin.close(descriptor)
+                throw error
+            }
+        } catch let failure as TranscriptRevisionRepositoryFailure {
+            throw failure
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
+    }
+
+    func installRevisionIfNeeded(
+        _ data: Data,
+        sha256: String,
+        revisionID: TranscriptRevisionID,
+        under transcriptsDescriptor: Int32,
+        sessionDescriptor: Int32,
+        expectedIdentity: EntryIdentity
+    ) throws {
+        try revalidateDirectoryEntry(
+            named: "transcripts",
+            under: sessionDescriptor,
+            descriptor: transcriptsDescriptor,
+            expectedIdentity: expectedIdentity
+        )
+        try reconcileOwnedRevisionPartials(
+            for: revisionID,
+            under: transcriptsDescriptor
+        )
+        if try readConfined.entryExists(
+            named: revisionID.rawValue,
+            under: transcriptsDescriptor
+        ) {
+            try requireExactInstalledRevision(
+                data,
+                sha256: sha256,
+                revisionID: revisionID,
+                under: transcriptsDescriptor
+            )
+            try Self.flush(transcriptsDescriptor)
+            return
+        }
+
+        let partialName = ".\(revisionID.rawValue)-\(UUID().uuidString).partial"
+        guard mkdirat(transcriptsDescriptor, partialName, 0o700) == 0 else {
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
+        var installed = false
+        defer {
+            if !installed {
+                removeOwnedRevisionPartial(
+                    named: partialName,
+                    under: transcriptsDescriptor
+                )
+            }
+        }
+        let partialDescriptor = try writeConfined.openDirectory(
+            named: partialName,
+            under: transcriptsDescriptor
+        )
+        do {
+            try writeConfined.writeExclusive(
+                data,
+                named: "revision.json",
+                under: partialDescriptor,
+                flushBeforeClose: true
+            )
+            try writeConfined.writeExclusive(
+                Data(sha256.utf8),
+                named: "revision.sha256",
+                under: partialDescriptor,
+                flushBeforeClose: true
+            )
+            try Self.flush(partialDescriptor)
+            let partialAuthority = try captureRevisionAuthority(
+                descriptor: partialDescriptor
+            )
+            try fault(.afterRevisionFilesFlush)
+            try revalidateDirectoryEntry(
+                named: "transcripts",
+                under: sessionDescriptor,
+                descriptor: transcriptsDescriptor,
+                expectedIdentity: expectedIdentity
+            )
+            try revalidateRevisionBundle(
+                partialAuthority,
+                name: partialName,
+                expectedData: data,
+                expectedSHA256: sha256,
+                under: transcriptsDescriptor
+            )
+        } catch {
+            Darwin.close(partialDescriptor)
+            throw error
+        }
+        Darwin.close(partialDescriptor)
+        do {
+            try writeConfined.renameNoReplace(
+                from: partialName,
+                under: transcriptsDescriptor,
+                to: revisionID.rawValue,
+                under: transcriptsDescriptor,
+                collision: .revisionCollision
+            )
+            installed = true
+            try Self.flush(transcriptsDescriptor)
+            try fault(.afterRevisionDirectoryInstall)
+            try revalidateDirectoryEntry(
+                named: "transcripts",
+                under: sessionDescriptor,
+                descriptor: transcriptsDescriptor,
+                expectedIdentity: expectedIdentity
+            )
+        } catch TranscriptRevisionRepositoryFailure.revisionCollision {
+            try requireExactInstalledRevision(
+                data,
+                sha256: sha256,
+                revisionID: revisionID,
+                under: transcriptsDescriptor
+            )
+        }
+    }
+
+    func requireExactInstalledRevision(
+        _ data: Data,
+        sha256: String,
+        revisionID: TranscriptRevisionID,
+        under transcriptsDescriptor: Int32
+    ) throws {
+        let revisionDescriptor: Int32
+        do {
+            revisionDescriptor = try readConfined.openDirectory(
+                named: revisionID.rawValue,
+                under: transcriptsDescriptor
+            )
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.revisionCollision
+        }
+        defer { Darwin.close(revisionDescriptor) }
+        guard (try? readConfined.listEntryNames(
+            under: revisionDescriptor,
+            maximumCount: 2
+        )) == ["revision.json", "revision.sha256"],
+            (try? readConfined.boundedData(
+                named: "revision.json",
+                under: revisionDescriptor,
+                maximumBytes: Self.maximumRevisionBytes
+            )) == data,
+            (try? readConfined.boundedData(
+                named: "revision.sha256",
+                under: revisionDescriptor,
+                maximumBytes: 64
+            )) == Data(sha256.utf8)
+        else {
+            throw TranscriptRevisionRepositoryFailure.revisionCollision
+        }
+    }
+
+    func openInstalledRevisionAuthority(
+        revisionID: TranscriptRevisionID,
+        expectedData: Data,
+        expectedSHA256: String,
+        under transcriptsDescriptor: Int32
+    ) throws -> InstalledRevisionAuthority {
+        let descriptor = try readConfined.openDirectory(
+            named: revisionID.rawValue,
+            under: transcriptsDescriptor
+        )
+        do {
+            let authority = try captureRevisionAuthority(descriptor: descriptor)
+            try revalidateInstalledRevision(
+                authority,
+                revisionID: revisionID,
+                expectedData: expectedData,
+                expectedSHA256: expectedSHA256,
+                under: transcriptsDescriptor
+            )
+            return authority
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    func revalidateInstalledRevision(
+        _ authority: InstalledRevisionAuthority,
+        revisionID: TranscriptRevisionID,
+        expectedData: Data,
+        expectedSHA256: String,
+        under transcriptsDescriptor: Int32
+    ) throws {
+        try revalidateRevisionBundle(
+            authority,
+            name: revisionID.rawValue,
+            expectedData: expectedData,
+            expectedSHA256: expectedSHA256,
+            under: transcriptsDescriptor
+        )
+    }
+
+    func captureRevisionAuthority(
+        descriptor: Int32
+    ) throws -> InstalledRevisionAuthority {
+        InstalledRevisionAuthority(
+            descriptor: descriptor,
+            directoryIdentity: try Self.identity(of: descriptor),
+            revisionFileIdentity: try Self.identity(
+                named: "revision.json",
+                under: descriptor,
+                expectedType: S_IFREG
+            ),
+            hashFileIdentity: try Self.identity(
+                named: "revision.sha256",
+                under: descriptor,
+                expectedType: S_IFREG
+            )
+        )
+    }
+
+    func revalidateRevisionBundle(
+        _ authority: InstalledRevisionAuthority,
+        name: String,
+        expectedData: Data,
+        expectedSHA256: String,
+        under transcriptsDescriptor: Int32
+    ) throws {
+        guard try Self.identity(
+            named: name,
+            under: transcriptsDescriptor
+        ) == authority.directoryIdentity,
+            try Self.identity(of: authority.descriptor) == authority.directoryIdentity,
+            try Self.identity(
+                named: "revision.json",
+                under: authority.descriptor,
+                expectedType: S_IFREG
+            ) == authority.revisionFileIdentity,
+            try Self.identity(
+                named: "revision.sha256",
+                under: authority.descriptor,
+                expectedType: S_IFREG
+            ) == authority.hashFileIdentity,
+            try readConfined.listEntryNames(
+                under: authority.descriptor,
+                maximumCount: 2
+            ) == ["revision.json", "revision.sha256"],
+            try readConfined.boundedData(
+                named: "revision.json",
+                under: authority.descriptor,
+                maximumBytes: Self.maximumRevisionBytes
+            ) == expectedData,
+            try readConfined.boundedData(
+                named: "revision.sha256",
+                under: authority.descriptor,
+                maximumBytes: 64
+            ) == Data(expectedSHA256.utf8)
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+    }
+
+    func requireCurrentSessionManifest(
+        expectedData: Data,
+        expectedSelectedRevisionID: TranscriptRevisionID?,
+        expectedSessionID: SessionID,
+        under sessionDescriptor: Int32
+    ) throws {
+        let currentData = try readConfined.boundedData(
+            named: "session.json",
+            under: sessionDescriptor,
+            maximumBytes: Self.maximumManifestBytes
+        )
+        let current = try decodeSessionManifest(
+            currentData,
+            expectedSessionID: expectedSessionID
+        )
+        guard current.selectedRevisionID == expectedSelectedRevisionID else {
+            throw TranscriptRevisionRepositoryFailure.staleSelection
+        }
+        guard currentData == expectedData else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+    }
+
+    func replaceSessionManifest(
+        _ manifest: PortableSessionManifest,
+        under sessionDescriptor: Int32,
+        precommit: () throws -> Void
+    ) throws {
+        let data: Data
+        switch manifest {
+        case let .recorded(dto, _, _):
+            data = try Self.deterministicJSON(dto)
+        case let .imported(dto, _, _):
+            data = try Self.deterministicJSON(dto)
+        }
+        guard data.count <= Self.maximumManifestBytes else {
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
+        try reconcileOwnedSessionPartials(under: sessionDescriptor)
+        let partialName = ".session-\(UUID().uuidString).partial"
+        var installed = false
+        defer {
+            if !installed { _ = unlinkat(sessionDescriptor, partialName, 0) }
+        }
+        try writeConfined.writeExclusive(
+            data,
+            named: partialName,
+            under: sessionDescriptor,
+            flushBeforeClose: true
+        )
+        let partialIdentity = try Self.identity(
+            named: partialName,
+            under: sessionDescriptor,
+            expectedType: S_IFREG
+        )
+        try fault(.afterSessionManifestPartialFlush)
+        guard try Self.identity(
+            named: partialName,
+            under: sessionDescriptor,
+            expectedType: S_IFREG
+        ) == partialIdentity,
+            try readConfined.boundedData(
+                named: partialName,
+                under: sessionDescriptor,
+                maximumBytes: Self.maximumManifestBytes
+            ) == data
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        // Keep the current-manifest CAS and installed-bundle authority checks as
+        // the final operations before the commit rename while holding LOCK_EX.
+        try precommit()
+        guard renameat(
+            sessionDescriptor,
+            partialName,
+            sessionDescriptor,
+            "session.json"
+        ) == 0 else {
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
+        installed = true
+    }
+
+    func reconcileOwnedRevisionPartials(
+        for revisionID: TranscriptRevisionID,
+        under parent: Int32
+    ) throws {
+        let prefix = ".\(revisionID.rawValue)-"
+        let names = try readConfined.listEntryNames(under: parent, maximumCount: 32_768)
+        for name in names where name.hasPrefix(prefix) && name.hasSuffix(".partial") {
+            let uuidText = String(
+                name.dropFirst(prefix.count).dropLast(".partial".count)
+            )
+            guard UUID(uuidString: uuidText) != nil else { continue }
+            removeOwnedRevisionPartial(named: name, under: parent)
+        }
+    }
+
+    func reconcileOwnedSessionPartials(under sessionDescriptor: Int32) throws {
+        let names = try readConfined.listEntryNames(under: sessionDescriptor, maximumCount: 64)
+        for name in names where name.hasPrefix(".session-") && name.hasSuffix(".partial") {
+            let uuidText = String(
+                name.dropFirst(".session-".count).dropLast(".partial".count)
+            )
+            guard UUID(uuidString: uuidText) != nil else { continue }
+            var metadata = stat()
+            guard name.withCString({
+                fstatat(sessionDescriptor, $0, &metadata, AT_SYMLINK_NOFOLLOW)
+            }) == 0,
+                (metadata.st_mode & S_IFMT) == S_IFREG,
+                metadata.st_size >= 0,
+                metadata.st_size <= Self.maximumManifestBytes
+            else {
+                continue
+            }
+            guard unlinkat(sessionDescriptor, name, 0) == 0 else {
+                throw TranscriptRevisionRepositoryFailure.writeFailed
+            }
+        }
+    }
+
+    func removeOwnedRevisionPartial(named name: String, under parent: Int32) {
+        guard let descriptor = try? readConfined.openDirectory(named: name, under: parent)
+        else { return }
+        defer { Darwin.close(descriptor) }
+        guard let entries = try? readConfined.listEntryNames(
+            under: descriptor,
+            maximumCount: 2
+        ), Set(entries).isSubset(of: ["revision.json", "revision.sha256"])
+        else { return }
+        _ = unlinkat(descriptor, "revision.json", 0)
+        _ = unlinkat(descriptor, "revision.sha256", 0)
+        _ = unlinkat(parent, name, AT_REMOVEDIR)
+    }
+
+    static func deterministicJSON<T: Encodable>(_ value: T) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        var data = try encoder.encode(value)
+        data.append(0x0A)
+        return data
+    }
+
+    static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func flush(_ descriptor: Int32) throws {
+        while fsync(descriptor) != 0 {
+            if errno == EINTR { continue }
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
+    }
+}
+
+private extension PortableTranscriptRevisionRepository {
+    func validateRevisionJSONShape(_ data: Data) throws {
+        let root = try readConfined.jsonDictionary(data)
+        try requireExactKeys(root, [
+            "schemaVersion", "revisionId", "sessionId", "jobId", "createdAt",
+            "durationMs", "audioFingerprintSha256", "sourceFingerprints",
+            "candidateArtifactSha256", "engine", "lines", "audioEvents",
+        ])
+        let sources = try dictionaries(root["sourceFingerprints"])
+        guard sources.count <= 32 else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        for source in sources {
+            try requireExactKeys(source, ["audioSourceId", "sha256"])
+        }
+        let engine = try dictionary(root["engine"])
+        try requireExactKeys(engine, [
+            "provider", "model", "revision", "language", "mode",
+            "decodingOptionsSha256", "usePolicy",
+        ])
+        let usePolicy = try dictionary(engine["usePolicy"])
+        try requireExactKeys(usePolicy, [
+            "policyId", "coveredArtifacts", "privateLocalUseAllowed",
+            "privateExportAllowed", "externalProcessingAllowed",
+            "publicDistributionAllowed", "commercialUseAllowed",
+            "licenseReference", "licenseSha256",
+        ])
+
+        let lines = try dictionaries(root["lines"])
+        guard !lines.isEmpty, lines.count <= 100_000 else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        var wordCount = 0
+        for line in lines {
+            try requireExactKeys(line, [
+                "lineId", "order", "audioSourceId", "timeRange", "text", "words",
+            ])
+            try validateTimeRangeShape(line["timeRange"])
+            let words = try dictionaries(line["words"])
+            guard !words.isEmpty, wordCount <= 1_000_000 - words.count else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+            wordCount += words.count
+            for word in words {
+                let required: Set<String> = [
+                    "wordId", "ordinal", "text", "displayRange", "wordKind",
+                ]
+                let optional: Set<String> = ["timeRange", "confidence"]
+                guard required.isSubset(of: Set(word.keys)),
+                      Set(word.keys).isSubset(of: required.union(optional))
+                else {
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                }
+                let display = try dictionary(word["displayRange"])
+                try requireExactKeys(display, ["startUtf8Byte", "endUtf8Byte"])
+                if let timeRange = word["timeRange"] {
+                    try validateTimeRangeShape(timeRange)
+                }
+                if let confidence = word["confidence"] {
+                    guard let number = confidence as? NSNumber,
+                          CFGetTypeID(number) != CFBooleanGetTypeID()
+                    else {
+                        throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                    }
+                }
+            }
+        }
+        let events = try dictionaries(root["audioEvents"])
+        guard events.count <= 100_000 else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        for event in events {
+            try requireExactKeys(event, [
+                "audioEventId", "category", "audioSourceId", "timeRange",
+            ])
+            try validateTimeRangeShape(event["timeRange"])
+        }
+    }
+
+    func validateTimeRangeShape(_ value: Any?) throws {
+        try requireExactKeys(try dictionary(value), ["startMs", "endMs"])
+    }
+
+    func dictionary(_ value: Any?) throws -> [String: Any] {
+        guard let dictionary = value as? [String: Any] else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        return dictionary
+    }
+
+    func dictionaries(_ value: Any?) throws -> [[String: Any]] {
+        guard let dictionaries = value as? [[String: Any]] else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        return dictionaries
+    }
+
+    func requireExactKeys(_ value: [String: Any], _ keys: Set<String>) throws {
+        guard Set(value.keys) == keys else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+    }
+}
+
+
+private struct TranscriptRevisionDTO: Codable {
+    let schemaVersion: UInt64
+    let revisionId: String
+    let sessionId: String
+    let jobId: String
+    let createdAt: String
+    let durationMs: UInt64
+    let audioFingerprintSha256: String
+    let sourceFingerprints: [TranscriptSourceFingerprintDTO]
+    let candidateArtifactSha256: String
+    let engine: TranscriptEngineProvenanceDTO
+    let lines: [PersistedTranscriptLineDTO]
+    let audioEvents: [PersistedTranscriptAudioEventDTO]
+
+    init(_ revision: TranscriptRevision) {
+        schemaVersion = 1
+        revisionId = revision.revisionID.rawValue
+        sessionId = revision.sessionID.rawValue
+        jobId = revision.jobID.rawValue
+        createdAt = revision.createdAt.rawValue
+        durationMs = revision.durationMilliseconds
+        audioFingerprintSha256 = revision.audioFingerprint.sha256
+        sourceFingerprints = revision.sourceFingerprints.map(
+            TranscriptSourceFingerprintDTO.init
+        )
+        candidateArtifactSha256 = revision.candidateArtifactFingerprint.sha256
+        engine = TranscriptEngineProvenanceDTO(revision.engine)
+        lines = revision.lines.map(PersistedTranscriptLineDTO.init)
+        audioEvents = revision.audioEvents.map(PersistedTranscriptAudioEventDTO.init)
+    }
+}
+
+private struct TranscriptSourceFingerprintDTO: Codable {
+    let audioSourceId: String
+    let sha256: String
+
+    init(_ source: TranscriptSourceFingerprint) {
+        audioSourceId = source.audioSourceID.rawValue
+        sha256 = source.fingerprint.sha256
+    }
+}
+
+private struct TranscriptEngineProvenanceDTO: Codable {
+    let provider: String
+    let model: String
+    let revision: String
+    let language: String
+    let mode: String
+    let decodingOptionsSha256: String
+    let usePolicy: TranscriptEngineUsePolicyDTO
+
+    init(_ engine: TranscriptEngineProvenance) {
+        provider = engine.provider
+        model = engine.model
+        revision = engine.revision
+        language = engine.language
+        mode = engine.mode
+        decodingOptionsSha256 = engine.decodingOptionsSHA256
+        usePolicy = TranscriptEngineUsePolicyDTO(engine.usePolicy)
+    }
+}
+
+private struct TranscriptEngineUsePolicyDTO: Codable {
+    let policyId: String
+    let coveredArtifacts: [String]
+    let privateLocalUseAllowed: Bool
+    let privateExportAllowed: Bool
+    let externalProcessingAllowed: Bool
+    let publicDistributionAllowed: Bool
+    let commercialUseAllowed: Bool
+    let licenseReference: String
+    let licenseSha256: String
+
+    init(_ policy: EngineUsePolicy) {
+        policyId = policy.policyID
+        coveredArtifacts = policy.coveredArtifacts.map(\.rawValue).sorted()
+        privateLocalUseAllowed = policy.privateLocalUseAllowed
+        privateExportAllowed = policy.privateExportAllowed
+        externalProcessingAllowed = policy.externalProcessingAllowed
+        publicDistributionAllowed = policy.publicDistributionAllowed
+        commercialUseAllowed = policy.commercialUseAllowed
+        licenseReference = policy.licenseReference
+        licenseSha256 = policy.licenseSHA256
+    }
+}
+
+private struct PersistedTranscriptLineDTO: Codable {
+    let lineId: String
+    let order: Int
+    let audioSourceId: String
+    let timeRange: SessionTimeRangeDTO
+    let text: String
+    let words: [PersistedTranscriptWordDTO]
+
+    init(_ line: TranscriptLine) {
+        lineId = line.lineID.rawValue
+        order = line.order
+        audioSourceId = line.audioSourceID.rawValue
+        timeRange = SessionTimeRangeDTO(line.timeRange)
+        text = line.text
+        words = line.words.map(PersistedTranscriptWordDTO.init)
+    }
+}
+
+private struct PersistedTranscriptWordDTO: Codable {
+    let wordId: String
+    let ordinal: Int
+    let text: String
+    let displayRange: LineTextRangeDTO
+    let timeRange: SessionTimeRangeDTO?
+    let confidence: Double?
+    let wordKind: String
+
+    init(_ word: TranscriptWord) {
+        wordId = word.wordID.rawValue
+        ordinal = word.ordinal
+        text = word.text
+        displayRange = LineTextRangeDTO(word.displayRange)
+        timeRange = word.timeRange.map(SessionTimeRangeDTO.init)
+        confidence = word.confidence
+        wordKind = word.wordKind.rawValue
+    }
+}
+
+private struct LineTextRangeDTO: Codable {
+    let startUtf8Byte: Int
+    let endUtf8Byte: Int
+
+    init(_ range: LineTextRange) {
+        startUtf8Byte = range.startUTF8Byte
+        endUtf8Byte = range.endUTF8Byte
+    }
+}
+
+private struct SessionTimeRangeDTO: Codable {
+    let startMs: UInt64
+    let endMs: UInt64
+
+    init(_ range: SessionTimeRange) {
+        startMs = range.startMilliseconds
+        endMs = range.endMilliseconds
+    }
+}
+
+private struct PersistedTranscriptAudioEventDTO: Codable {
+    let audioEventId: String
+    let category: String
+    let audioSourceId: String
+    let timeRange: SessionTimeRangeDTO
+
+    init(_ event: TranscriptAudioEvent) {
+        audioEventId = event.audioEventID.rawValue
+        category = event.category.rawValue
+        audioSourceId = event.audioSourceID.rawValue
+        timeRange = SessionTimeRangeDTO(event.timeRange)
+    }
+}
+
+private extension PortableTranscriptRevisionRepository {
+    func decodeRevision(_ data: Data) throws -> TranscriptRevision {
+        do {
+            try validateRevisionJSONShape(data)
+            let dto = try JSONDecoder().decode(TranscriptRevisionDTO.self, from: data)
+            guard dto.schemaVersion == 1 else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+            let usePolicyDTO = dto.engine.usePolicy
+            let coveredArtifacts = usePolicyDTO.coveredArtifacts.compactMap(
+                EngineCoveredArtifact.init(rawValue:)
+            )
+            guard coveredArtifacts.count == usePolicyDTO.coveredArtifacts.count,
+                  Set(coveredArtifacts).count == coveredArtifacts.count
+            else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+            let usePolicy = try EngineUsePolicy(
+                policyID: usePolicyDTO.policyId,
+                coveredArtifacts: Set(coveredArtifacts),
+                privateLocalUseAllowed: usePolicyDTO.privateLocalUseAllowed,
+                privateExportAllowed: usePolicyDTO.privateExportAllowed,
+                externalProcessingAllowed: usePolicyDTO.externalProcessingAllowed,
+                publicDistributionAllowed: usePolicyDTO.publicDistributionAllowed,
+                commercialUseAllowed: usePolicyDTO.commercialUseAllowed,
+                licenseReference: usePolicyDTO.licenseReference,
+                licenseSHA256: usePolicyDTO.licenseSha256
+            )
+            let engine = try TranscriptEngineProvenance(
+                provider: dto.engine.provider,
+                model: dto.engine.model,
+                revision: dto.engine.revision,
+                language: dto.engine.language,
+                mode: dto.engine.mode,
+                decodingOptionsSHA256: dto.engine.decodingOptionsSha256,
+                usePolicy: usePolicy
+            )
+            return try TranscriptRevision(
+                revisionID: TranscriptRevisionID(dto.revisionId),
+                sessionID: SessionID(dto.sessionId),
+                jobID: TranscriptionJobID(dto.jobId),
+                createdAt: UTCInstant(dto.createdAt),
+                durationMilliseconds: dto.durationMs,
+                audioFingerprint: AudioFingerprint(
+                    sha256: dto.audioFingerprintSha256
+                ),
+                sourceFingerprints: try dto.sourceFingerprints.map {
+                    TranscriptSourceFingerprint(
+                        audioSourceID: try AudioSourceID($0.audioSourceId),
+                        fingerprint: try AudioFingerprint(sha256: $0.sha256)
+                    )
+                },
+                candidateArtifactFingerprint: AudioFingerprint(
+                    sha256: dto.candidateArtifactSha256
+                ),
+                engine: engine,
+                lines: try dto.lines.map { line in
+                    TranscriptLine(
+                        lineID: try TranscriptLineID(line.lineId),
+                        order: line.order,
+                        audioSourceID: try AudioSourceID(line.audioSourceId),
+                        timeRange: try decodeTimeRange(
+                            line.timeRange,
+                            durationMilliseconds: dto.durationMs
+                        ),
+                        text: line.text,
+                        words: try line.words.map { word in
+                            TranscriptWord(
+                                wordID: try TranscriptWordID(word.wordId),
+                                ordinal: word.ordinal,
+                                text: word.text,
+                                displayRange: LineTextRange(
+                                    startUTF8Byte: word.displayRange.startUtf8Byte,
+                                    endUTF8Byte: word.displayRange.endUtf8Byte
+                                ),
+                                timeRange: try word.timeRange.map {
+                                    try decodeTimeRange(
+                                        $0,
+                                        durationMilliseconds: dto.durationMs
+                                    )
+                                },
+                                confidence: word.confidence,
+                                wordKind: try requireWordKind(word.wordKind)
+                            )
+                        }
+                    )
+                },
+                audioEvents: try dto.audioEvents.map { event in
+                    TranscriptAudioEvent(
+                        audioEventID: try AudioEventID(event.audioEventId),
+                        category: try requireAudioEventCategory(event.category),
+                        audioSourceID: try AudioSourceID(event.audioSourceId),
+                        timeRange: try decodeTimeRange(
+                            event.timeRange,
+                            durationMilliseconds: dto.durationMs
+                        )
+                    )
+                }
+            )
+        } catch let failure as TranscriptRevisionRepositoryFailure {
+            throw failure
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+    }
+
+    func decodeTimeRange(
+        _ dto: SessionTimeRangeDTO,
+        durationMilliseconds: UInt64
+    ) throws -> SessionTimeRange {
+        try SessionTimeRange(
+            startMilliseconds: dto.startMs,
+            endMilliseconds: dto.endMs,
+            sessionDurationMilliseconds: durationMilliseconds
+        )
+    }
+
+    func requireWordKind(_ value: String) throws -> TranscriptWordKind {
+        guard let kind = TranscriptWordKind(rawValue: value) else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        return kind
+    }
+
+    func requireAudioEventCategory(
+        _ value: String
+    ) throws -> TranscriptAudioEventCategory {
+        guard let category = TranscriptAudioEventCategory(rawValue: value) else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        return category
+    }
+}
+
+
+private enum PortableSessionManifest {
+    case recorded(
+        RecordedSessionManifestDTO,
+        revisionIDs: [TranscriptRevisionID],
+        selected: SelectedTranscriptRevision?
+    )
+    case imported(
+        ImportedSessionManifestDTO,
+        revisionIDs: [TranscriptRevisionID],
+        selected: SelectedTranscriptRevision?
+    )
+
+    var transcriptRevisionIDs: [TranscriptRevisionID] {
+        switch self {
+        case let .recorded(_, revisionIDs, _), let .imported(_, revisionIDs, _):
+            revisionIDs
+        }
+    }
+
+    var selectedTranscriptRevision: SelectedTranscriptRevision? {
+        switch self {
+        case let .recorded(_, _, selected), let .imported(_, _, selected):
+            selected
+        }
+    }
+
+    var selectedRevisionID: TranscriptRevisionID? {
+        selectedTranscriptRevision?.revisionID
+    }
+
+    func selecting(_ selected: SelectedTranscriptRevision) throws -> Self {
+        var revisionIDs = transcriptRevisionIDs
+        if !revisionIDs.contains(selected.revisionID) {
+            revisionIDs.append(selected.revisionID)
+        }
+        do {
+            try SessionTranscriptSelectionValidator.validate(
+                revisionIDs: revisionIDs,
+                selected: selected
+            )
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
+        let rawRevisionIDs = revisionIDs.map(\.rawValue)
+        let selectedDTO = SelectedTranscriptRevisionDTO(selected)
+        switch self {
+        case let .recorded(dto, _, _):
+            return .recorded(
+                RecordedSessionManifestDTO(
+                    schemaVersion: dto.schemaVersion,
+                    sessionId: dto.sessionId,
+                    createdAt: dto.createdAt,
+                    audioManifestPath: dto.audioManifestPath,
+                    transcriptRevisionIds: rawRevisionIDs,
+                    selectedTranscriptRevision: selectedDTO
+                ),
+                revisionIDs: revisionIDs,
+                selected: selected
+            )
+        case let .imported(dto, _, _):
+            return .imported(
+                ImportedSessionManifestDTO(
+                    schemaVersion: dto.schemaVersion,
+                    sessionId: dto.sessionId,
+                    createdAt: dto.createdAt,
+                    durationMs: dto.durationMs,
+                    audioManifestSha256: dto.audioManifestSha256,
+                    transcriptRevisionIds: rawRevisionIDs,
+                    selectedTranscriptRevision: selectedDTO
+                ),
+                revisionIDs: revisionIDs,
+                selected: selected
+            )
+        }
+    }
+}
+
+private struct SelectedTranscriptRevisionDTO: Codable {
+    let revisionId: String
+    let revisionSha256: String
+
+    init(_ selected: SelectedTranscriptRevision) {
+        revisionId = selected.revisionID.rawValue
+        revisionSha256 = selected.revisionSHA256
+    }
+}
+
+private struct RecordedSessionManifestDTO: Codable {
+    let schemaVersion: UInt64
+    let sessionId: String
+    let createdAt: String
+    let audioManifestPath: String
+    let transcriptRevisionIds: [String]
+    let selectedTranscriptRevision: SelectedTranscriptRevisionDTO?
+}
+
+private struct ImportedSessionManifestDTO: Codable {
+    let schemaVersion: UInt64
+    let sessionId: String
+    let createdAt: String
+    let durationMs: UInt64
+    let audioManifestSha256: String
+    let transcriptRevisionIds: [String]
+    let selectedTranscriptRevision: SelectedTranscriptRevisionDTO?
+}
+
+private extension PortableTranscriptRevisionRepository {
+    func validatedManifest(
+        _ dto: RecordedSessionManifestDTO
+    ) throws -> PortableSessionManifest {
+        let (revisionIDs, selected) = try validatedSelection(
+            revisionIDs: dto.transcriptRevisionIds,
+            selected: dto.selectedTranscriptRevision
+        )
+        return .recorded(dto, revisionIDs: revisionIDs, selected: selected)
+    }
+
+    func validatedManifest(
+        _ dto: ImportedSessionManifestDTO
+    ) throws -> PortableSessionManifest {
+        let (revisionIDs, selected) = try validatedSelection(
+            revisionIDs: dto.transcriptRevisionIds,
+            selected: dto.selectedTranscriptRevision
+        )
+        return .imported(dto, revisionIDs: revisionIDs, selected: selected)
+    }
+
+    func validatedSelection(
+        revisionIDs rawRevisionIDs: [String],
+        selected rawSelected: SelectedTranscriptRevisionDTO?
+    ) throws -> ([TranscriptRevisionID], SelectedTranscriptRevision?) {
+        do {
+            let revisionIDs = try rawRevisionIDs.map(TranscriptRevisionID.init)
+            let selected = try rawSelected.map {
+                try SelectedTranscriptRevision(
+                    revisionID: TranscriptRevisionID($0.revisionId),
+                    revisionSHA256: $0.revisionSha256
+                )
+            }
+            try SessionTranscriptSelectionValidator.validate(
+                revisionIDs: revisionIDs,
+                selected: selected
+            )
+            return (revisionIDs, selected)
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+    }
+}

@@ -12,6 +12,12 @@ namespace Audora.Contracts {
   @pattern("^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
   scalar SessionId extends string;
 
+  @pattern("^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar TranscriptRevisionId extends string;
+
+  @pattern("^job-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar TranscriptionJobId extends string;
+
   @pattern("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$")
   scalar UTCInstant extends string;
 

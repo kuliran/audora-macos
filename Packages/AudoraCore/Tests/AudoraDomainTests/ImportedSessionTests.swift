@@ -18,7 +18,10 @@ final class ImportedSessionTests: XCTestCase {
         ] {
             XCTAssertThrowsError(try SessionID(invalid), invalid)
         }
-        XCTAssertThrowsError(try AudioSourceID("src-0002"))
+        XCTAssertEqual(try AudioSourceID("src-0002").rawValue, "src-0002")
+        for invalid in ["src-001", "src-00001", "src-ABCD", "../src-0001"] {
+            XCTAssertThrowsError(try AudioSourceID(invalid), invalid)
+        }
     }
 
     func testCanonicalFrameAndDurationBoundaryUsesExactIntegerCeiling() throws {

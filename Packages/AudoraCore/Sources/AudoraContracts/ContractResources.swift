@@ -20,6 +20,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case recordingStagingIdentityManifestSchema
     case recordingStagingManifestSchema
     case sessionManifestSchema
+    case transcriptRevisionSchema
 
     case audioImportSuccessScenario
     case audioImportSelectionCancelledScenario
@@ -120,6 +121,10 @@ public enum ContractResource: CaseIterable, Sendable {
     case rejectedRecordingOutOfBoundsInterval
     case rejectedRecordingMismatchedFingerprint
 
+    case transcriptRevisionExample
+    case rejectedTranscriptPunctuationWord
+    case rejectedTranscriptUTF8Range
+
     /// Preserves the historical filename-only diagnostic and scenario identity.
     public var rawValue: String {
         switch self {
@@ -161,6 +166,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "RecordingStagingManifest.json"
         case .sessionManifestSchema:
             "SessionManifest.json"
+        case .transcriptRevisionSchema:
+            "TranscriptRevision.json"
         case .audioImportSuccessScenario:
             "success-retains-and-reopens.v1.json"
         case .audioImportSelectionCancelledScenario:
@@ -345,6 +352,12 @@ public enum ContractResource: CaseIterable, Sendable {
             "audio-interval-out-of-bounds.json"
         case .rejectedRecordingMismatchedFingerprint:
             "audio-mismatched-fingerprint.json"
+        case .transcriptRevisionExample:
+            "revision.json"
+        case .rejectedTranscriptPunctuationWord:
+            "punctuation-as-word.json"
+        case .rejectedTranscriptUTF8Range:
+            "utf8-range-split.json"
         }
     }
 
@@ -358,7 +371,8 @@ public enum ContractResource: CaseIterable, Sendable {
              .libraryManifestSchema, .libraryPreferencesSchema, .profileHeadSchema,
              .readSessionTranscriptsRequestSchema, .readSessionTranscriptsResponseSchema,
              .recordingFeatureScenarioSchema, .recordingStagingIdentityManifestSchema,
-             .recordingStagingManifestSchema, .sessionManifestSchema:
+             .recordingStagingManifestSchema, .sessionManifestSchema,
+             .transcriptRevisionSchema:
             "Schemas"
         case .audioImportSuccessScenario, .audioImportSelectionCancelledScenario,
              .audioImportNormalizationFailureScenario, .audioImportCorruptCandidateScenario,
@@ -425,6 +439,10 @@ public enum ContractResource: CaseIterable, Sendable {
              .rejectedRecordingOutOfBoundsInterval,
              .rejectedRecordingMismatchedFingerprint:
             "Examples/Recording/v1/rejected"
+        case .transcriptRevisionExample:
+            "Examples/TranscriptRevision/v1"
+        case .rejectedTranscriptPunctuationWord, .rejectedTranscriptUTF8Range:
+            "Examples/TranscriptRevision/v1/rejected"
         }
     }
 

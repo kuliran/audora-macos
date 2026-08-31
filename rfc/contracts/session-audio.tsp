@@ -55,8 +55,10 @@ namespace Audora.Contracts {
     durationMs: CanonicalDurationMilliseconds;
     audioManifestSha256: Sha256Hex;
 
-    @maxItems(0)
-    transcriptRevisionIds: string[];
+    @maxItems(256)
+    transcriptRevisionIds: TranscriptRevisionId[];
+
+    selectedTranscriptRevision?: SelectedTranscriptRevision;
   }
 
   /** Aggregate commit marker for a microphone-recorded Session. */
@@ -65,6 +67,16 @@ namespace Audora.Contracts {
     sessionId: SessionId;
     createdAt: UTCInstant;
     audioManifestPath: "audio/audio.json";
+
+    @maxItems(256)
+    transcriptRevisionIds: TranscriptRevisionId[];
+
+    selectedTranscriptRevision?: SelectedTranscriptRevision;
+  }
+
+  model SelectedTranscriptRevision {
+    revisionId: TranscriptRevisionId;
+    revisionSha256: Sha256Hex;
   }
 
   union OriginalAudioArtifact {

@@ -441,7 +441,9 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
             createdAt: session.createdAt,
             durationMilliseconds: session.durationMilliseconds,
             audioManifestSHA256: audioHash,
-            audio: session.audio
+            audio: session.audio,
+            transcriptRevisionIDs: session.transcriptRevisionIDs,
+            selectedTranscriptRevision: session.selectedTranscriptRevision
         )
         try writeRoot(
             audioData,
@@ -575,6 +577,19 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         return try loadSession(
             components: ["sessions", sessionID.rawValue],
             under: rootDescriptor,
+            expectedSessionID: sessionID
+        )
+    }
+
+    /// Reopens an imported Session relative to an already-confined Session
+    /// descriptor so callers cannot cross authorities through path replacement.
+    func openSession(
+        under sessionDescriptor: Int32,
+        sessionID: SessionID
+    ) throws -> LoadedImportedSession {
+        try loadSession(
+            components: [],
+            under: sessionDescriptor,
             expectedSessionID: sessionID
         )
     }
@@ -874,7 +889,10 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
                 createdAt: session.createdAt.rawValue,
                 durationMs: session.durationMilliseconds,
                 audioManifestSha256: session.audioManifestSHA256,
-                transcriptRevisionIds: []
+                transcriptRevisionIds: session.transcriptRevisionIDs.map(\.rawValue),
+                selectedTranscriptRevision: session.selectedTranscriptRevision.map(
+                    SessionSelectedTranscriptRevisionDTO.init
+                )
             )
         )
     }
@@ -952,7 +970,16 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
                     createdAt: UTCInstant(sessionDTO.createdAt),
                     durationMilliseconds: sessionDTO.durationMs,
                     audioManifestSHA256: sessionDTO.audioManifestSha256,
-                    audio: audio
+                    audio: audio,
+                    transcriptRevisionIDs: try sessionDTO.transcriptRevisionIds.map(
+                        TranscriptRevisionID.init
+                    ),
+                    selectedTranscriptRevision: try sessionDTO.selectedTranscriptRevision.map {
+                        try SelectedTranscriptRevision(
+                            revisionID: TranscriptRevisionID($0.revisionId),
+                            revisionSHA256: $0.revisionSha256
+                        )
+                    }
                 )
             )
         } catch {
@@ -990,25 +1017,51 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
 
     private func decodeSession(_ data: Data) throws -> SessionManifestDTO {
         let dictionary = try jsonDictionary(data)
-        guard Set(dictionary.keys) == Set([
+        let requiredKeys = Set([
             "schemaVersion",
             "sessionId",
             "createdAt",
             "durationMs",
             "audioManifestSha256",
             "transcriptRevisionIds",
-        ]) else {
+        ])
+        let keys = Set(dictionary.keys)
+        guard requiredKeys.isSubset(of: keys),
+              keys.isSubset(of: requiredKeys.union(["selectedTranscriptRevision"]))
+        else {
             throw AudioImportFailure.candidateCorrupt
+        }
+        if keys.contains("selectedTranscriptRevision") {
+            guard let selected = dictionary["selectedTranscriptRevision"]
+                as? [String: Any],
+                Set(selected.keys) == ["revisionId", "revisionSha256"]
+            else {
+                throw AudioImportFailure.candidateCorrupt
+            }
         }
         let dto: SessionManifestDTO = try decode(SessionManifestDTO.self, data)
         guard dto.schemaVersion == 1,
               dto.durationMs > 0,
               dto.durationMs <= 2_700_000,
-              dto.transcriptRevisionIds.isEmpty,
               (try? SessionID(dto.sessionId)) != nil,
               (try? UTCInstant(dto.createdAt)) != nil,
               AudioArtifactFingerprint.isSHA256(dto.audioManifestSha256)
         else {
+            throw AudioImportFailure.candidateCorrupt
+        }
+        do {
+            let revisionIDs = try dto.transcriptRevisionIds.map(TranscriptRevisionID.init)
+            let selected = try dto.selectedTranscriptRevision.map {
+                try SelectedTranscriptRevision(
+                    revisionID: TranscriptRevisionID($0.revisionId),
+                    revisionSHA256: $0.revisionSha256
+                )
+            }
+            try SessionTranscriptSelectionValidator.validate(
+                revisionIDs: revisionIDs,
+                selected: selected
+            )
+        } catch {
             throw AudioImportFailure.candidateCorrupt
         }
         return dto
@@ -1538,6 +1591,17 @@ private struct SessionManifestDTO: Codable {
     let durationMs: UInt64
     let audioManifestSha256: String
     let transcriptRevisionIds: [String]
+    let selectedTranscriptRevision: SessionSelectedTranscriptRevisionDTO?
+}
+
+private struct SessionSelectedTranscriptRevisionDTO: Codable {
+    let revisionId: String
+    let revisionSha256: String
+
+    init(_ selected: SelectedTranscriptRevision) {
+        revisionId = selected.revisionID.rawValue
+        revisionSha256 = selected.revisionSHA256
+    }
 }
 
 private struct AudioManifestDTO: Codable {

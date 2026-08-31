@@ -1,0 +1,415 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/TranscriptRevision.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "revisionId": {
+            "$ref": "#/$defs/TranscriptRevisionId"
+        },
+        "sessionId": {
+            "$ref": "#/$defs/SessionId"
+        },
+        "jobId": {
+            "$ref": "#/$defs/TranscriptionJobId"
+        },
+        "createdAt": {
+            "$ref": "#/$defs/UTCInstant"
+        },
+        "durationMs": {
+            "$ref": "#/$defs/CanonicalDurationMilliseconds"
+        },
+        "audioFingerprintSha256": {
+            "$ref": "#/$defs/Sha256Hex"
+        },
+        "sourceFingerprints": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/TranscriptSourceFingerprint"
+            },
+            "minItems": 1,
+            "maxItems": 32
+        },
+        "candidateArtifactSha256": {
+            "$ref": "#/$defs/Sha256Hex"
+        },
+        "engine": {
+            "$ref": "#/$defs/TranscriptEngineProvenance"
+        },
+        "lines": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/PersistedTranscriptLine"
+            },
+            "minItems": 1,
+            "maxItems": 100000
+        },
+        "audioEvents": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/PersistedTranscriptAudioEvent"
+            },
+            "maxItems": 100000
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "revisionId",
+        "sessionId",
+        "jobId",
+        "createdAt",
+        "durationMs",
+        "audioFingerprintSha256",
+        "sourceFingerprints",
+        "candidateArtifactSha256",
+        "engine",
+        "lines",
+        "audioEvents"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "Complete immutable canonical transcription selected only after validation.",
+    "$defs": {
+        "TranscriptRevisionId": {
+            "type": "string",
+            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "SessionId": {
+            "type": "string",
+            "pattern": "^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "TranscriptionJobId": {
+            "type": "string",
+            "pattern": "^job-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "UTCInstant": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        },
+        "CanonicalDurationMilliseconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2700000
+        },
+        "Sha256Hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+        },
+        "TranscriptSourceFingerprint": {
+            "type": "object",
+            "properties": {
+                "audioSourceId": {
+                    "$ref": "#/$defs/TranscriptAudioSourceId"
+                },
+                "sha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                }
+            },
+            "required": [
+                "audioSourceId",
+                "sha256"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptEngineProvenance": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "const": "crisperwhisper"
+                },
+                "model": {
+                    "type": "string",
+                    "const": "small"
+                },
+                "revision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[0-9A-Za-z._-]+$"
+                },
+                "language": {
+                    "type": "string",
+                    "const": "en"
+                },
+                "mode": {
+                    "type": "string",
+                    "const": "verbatim"
+                },
+                "decodingOptionsSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                },
+                "usePolicy": {
+                    "$ref": "#/$defs/TranscriptEngineUsePolicy"
+                }
+            },
+            "required": [
+                "provider",
+                "model",
+                "revision",
+                "language",
+                "mode",
+                "decodingOptionsSha256",
+                "usePolicy"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedTranscriptLine": {
+            "type": "object",
+            "properties": {
+                "lineId": {
+                    "$ref": "#/$defs/TranscriptLineId"
+                },
+                "order": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "audioSourceId": {
+                    "$ref": "#/$defs/TranscriptAudioSourceId"
+                },
+                "timeRange": {
+                    "$ref": "#/$defs/SessionTimeRange"
+                },
+                "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 131072
+                },
+                "words": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/PersistedTranscriptWord"
+                    },
+                    "minItems": 1,
+                    "maxItems": 1000000
+                }
+            },
+            "required": [
+                "lineId",
+                "order",
+                "audioSourceId",
+                "timeRange",
+                "text",
+                "words"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedTranscriptAudioEvent": {
+            "type": "object",
+            "properties": {
+                "audioEventId": {
+                    "$ref": "#/$defs/TranscriptAudioEventId"
+                },
+                "category": {
+                    "$ref": "#/$defs/AudioEventCategory"
+                },
+                "audioSourceId": {
+                    "$ref": "#/$defs/TranscriptAudioSourceId"
+                },
+                "timeRange": {
+                    "$ref": "#/$defs/SessionTimeRange"
+                }
+            },
+            "required": [
+                "audioEventId",
+                "category",
+                "audioSourceId",
+                "timeRange"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptAudioSourceId": {
+            "type": "string",
+            "pattern": "^src-[0-9]{4}$"
+        },
+        "TranscriptEngineUsePolicy": {
+            "type": "object",
+            "properties": {
+                "policyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[0-9A-Za-z._-]+$"
+                },
+                "coveredArtifacts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/TranscriptCoveredArtifact"
+                    },
+                    "minItems": 1,
+                    "maxItems": 1
+                },
+                "privateLocalUseAllowed": {
+                    "type": "boolean"
+                },
+                "privateExportAllowed": {
+                    "type": "boolean"
+                },
+                "externalProcessingAllowed": {
+                    "type": "boolean"
+                },
+                "publicDistributionAllowed": {
+                    "type": "boolean"
+                },
+                "commercialUseAllowed": {
+                    "type": "boolean"
+                },
+                "licenseReference": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                },
+                "licenseSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                }
+            },
+            "required": [
+                "policyId",
+                "coveredArtifacts",
+                "privateLocalUseAllowed",
+                "privateExportAllowed",
+                "externalProcessingAllowed",
+                "publicDistributionAllowed",
+                "commercialUseAllowed",
+                "licenseReference",
+                "licenseSha256"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptLineId": {
+            "type": "string",
+            "pattern": "^l[0-9]{6}$"
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "SessionTimeRange": {
+            "type": "object",
+            "properties": {
+                "startMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                },
+                "endMs": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647
+                }
+            },
+            "required": [
+                "startMs",
+                "endMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedTranscriptWord": {
+            "type": "object",
+            "properties": {
+                "wordId": {
+                    "$ref": "#/$defs/TranscriptWordId"
+                },
+                "ordinal": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                },
+                "displayRange": {
+                    "$ref": "#/$defs/LineTextRange"
+                },
+                "timeRange": {
+                    "$ref": "#/$defs/SessionTimeRange"
+                },
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                },
+                "wordKind": {
+                    "$ref": "#/$defs/TranscriptWordKind"
+                }
+            },
+            "required": [
+                "wordId",
+                "ordinal",
+                "text",
+                "displayRange",
+                "wordKind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptAudioEventId": {
+            "type": "string",
+            "pattern": "^a[0-9]{6}$"
+        },
+        "AudioEventCategory": {
+            "type": "string",
+            "enum": [
+                "nonSpeech",
+                "silentPause",
+                "untranscribedVoicedInterval",
+                "muted",
+                "captureGap"
+            ]
+        },
+        "TranscriptCoveredArtifact": {
+            "type": "string",
+            "enum": [
+                "transcriptRevision"
+            ]
+        },
+        "TranscriptWordId": {
+            "type": "string",
+            "pattern": "^w[0-9]{6}$"
+        },
+        "LineTextRange": {
+            "type": "object",
+            "properties": {
+                "startUtf8Byte": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "endUtf8Byte": {
+                    "type": "integer",
+                    "minimum": 0
+                }
+            },
+            "required": [
+                "startUtf8Byte",
+                "endUtf8Byte"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptWordKind": {
+            "type": "string",
+            "enum": [
+                "lexical",
+                "filledPause",
+                "partialWord"
+            ]
+        }
+    }
+}
