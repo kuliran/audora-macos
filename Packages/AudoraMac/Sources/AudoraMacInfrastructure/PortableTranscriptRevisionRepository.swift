@@ -76,19 +76,43 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     revisionSHA256: revisionSHA256
                 )
                 let updatedManifest = try loaded.manifest.selecting(selected)
-                let transcriptsDescriptor = try openOrCreateTranscripts(
-                    under: sessionDescriptor
+                let revisionIsInventoried = loaded.manifest.transcriptRevisionIDs.contains(
+                    revision.revisionID
                 )
+                let transcriptsDescriptor: Int32
+                if revisionIsInventoried {
+                    do {
+                        transcriptsDescriptor = try readConfined.openDirectory(
+                            named: "transcripts",
+                            under: sessionDescriptor
+                        )
+                    } catch {
+                        throw TranscriptRevisionRepositoryFailure.revisionCollision
+                    }
+                } else {
+                    transcriptsDescriptor = try openOrCreateTranscripts(
+                        under: sessionDescriptor
+                    )
+                }
                 defer { Darwin.close(transcriptsDescriptor) }
                 let transcriptsIdentity = try Self.identity(of: transcriptsDescriptor)
-                try installRevisionIfNeeded(
-                    revisionData,
-                    sha256: revisionSHA256,
-                    revisionID: revision.revisionID,
-                    under: transcriptsDescriptor,
-                    sessionDescriptor: sessionDescriptor,
-                    expectedIdentity: transcriptsIdentity
-                )
+                if revisionIsInventoried {
+                    try requireExactInstalledRevision(
+                        revisionData,
+                        sha256: revisionSHA256,
+                        revisionID: revision.revisionID,
+                        under: transcriptsDescriptor
+                    )
+                } else {
+                    try installRevisionIfNeeded(
+                        revisionData,
+                        sha256: revisionSHA256,
+                        revisionID: revision.revisionID,
+                        under: transcriptsDescriptor,
+                        sessionDescriptor: sessionDescriptor,
+                        expectedIdentity: transcriptsIdentity
+                    )
+                }
                 let installedRevision = try openInstalledRevisionAuthority(
                     revisionID: revision.revisionID,
                     expectedData: revisionData,
@@ -1089,6 +1113,19 @@ private extension PortableTranscriptRevisionRepository {
 private extension PortableTranscriptRevisionRepository {
     func validateRevisionJSONShape(_ data: Data) throws {
         let root = try readConfined.jsonDictionary(data)
+        guard let schemaVersion = root["schemaVersion"] as? NSNumber,
+              CFGetTypeID(schemaVersion) != CFBooleanGetTypeID(),
+              schemaVersion.doubleValue.isFinite,
+              schemaVersion.doubleValue.rounded() == schemaVersion.doubleValue
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        if schemaVersion.doubleValue > 1 {
+            throw TranscriptRevisionRepositoryFailure.unsupportedSchema
+        }
+        guard schemaVersion.doubleValue == 1 else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
         try requireExactKeys(root, [
             "schemaVersion", "revisionId", "sessionId", "jobId", "createdAt",
             "durationMs", "audioFingerprintSha256", "sourceFingerprints",

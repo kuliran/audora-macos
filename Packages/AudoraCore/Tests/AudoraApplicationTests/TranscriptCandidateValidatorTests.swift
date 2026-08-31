@@ -227,6 +227,58 @@ final class TranscriptCandidateValidatorTests: XCTestCase {
         assertRejected(loop, against: fixture.context, as: .pathologicalRepetition)
     }
 
+    func testPathologicalRepeatedPhraseHasNoMaximumDetectableWidth() throws {
+        let fixture = try TranscriptCandidateFixture()
+        let phrase = (0..<33).map { String(format: "word%03d", $0) }
+        let tokens = Array(repeating: phrase, count: 9).flatMap { $0 }
+        var cursor = 0
+        let words = tokens.enumerated().map { index, token in
+            let start = cursor
+            cursor += token.utf8.count + 1
+            return CandidateTranscriptWord(
+                wordID: String(format: "w%06d", index),
+                ordinal: index,
+                text: token,
+                displayRange: CandidateLineTextRange(
+                    startUTF8Byte: start,
+                    endUTF8Byte: start + token.utf8.count
+                ),
+                timeRange: CandidateSessionTimeRange(
+                    startMilliseconds: 100 + UInt64(index * 30),
+                    endMilliseconds: 120 + UInt64(index * 30)
+                ),
+                confidence: 0.9,
+                wordKind: .lexical
+            )
+        }
+        let loop = fixture.candidate.replacingLines([
+            CandidateTranscriptLine(
+                lineID: "l000000",
+                order: 0,
+                audioSourceID: "src-0001",
+                timeRange: CandidateSessionTimeRange(
+                    startMilliseconds: 0,
+                    endMilliseconds: 10_000
+                ),
+                text: tokens.joined(separator: " "),
+                words: words
+            ),
+        ])
+
+        assertRejected(loop, against: fixture.context, as: .pathologicalRepetition)
+    }
+
+    func testLargeNonrepeatingTranscriptDoesNotTripRepetitionGuard() {
+        let words = (0..<25_000).map { "unique\($0)" }
+
+        XCTAssertFalse(
+            TranscriptRepetitionValidator.isPathological(
+                words: words,
+                maximumConsecutiveOccurrences: 8
+            )
+        )
+    }
+
     func testSourceFingerprintsMustBeAUniqueExactIdentityAndHashSet() throws {
         let fixture = try TranscriptCandidateFixture()
         let secondSource = try AudioSourceID("src-0002")

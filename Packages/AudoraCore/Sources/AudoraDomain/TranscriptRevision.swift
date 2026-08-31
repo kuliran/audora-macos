@@ -128,21 +128,87 @@ public enum TranscriptRepetitionValidator {
         guard !normalized.contains(where: \.isEmpty) else { return false }
         guard maximumConsecutiveOccurrences < normalized.count else { return false }
         let requiredOccurrences = maximumConsecutiveOccurrences + 1
-        let maximumPhraseWidth = min(32, normalized.count / requiredOccurrences)
+        let maximumPhraseWidth = normalized.count / requiredOccurrences
         guard maximumPhraseWidth > 0 else { return false }
-        for width in 1...maximumPhraseWidth {
-            var consecutivePeriodMatches = 0
-            let rejectionThreshold = width * maximumConsecutiveOccurrences
-            for index in width..<normalized.count {
-                if normalized[index] == normalized[index - width] {
-                    consecutivePeriodMatches += 1
-                    if consecutivePeriodMatches >= rejectionThreshold { return true }
-                } else {
-                    consecutivePeriodMatches = 0
+
+        let fingerprints = RepetitionRangeFingerprints(normalized)
+        let (scaledBudget, budgetOverflow) = normalized.count.multipliedReportingOverflow(by: 4)
+        var exactComparisonBudget = budgetOverflow ? Int.max : max(4_096, scaledBudget)
+
+        // For every possible period, inspect boundaries on that period's grid.
+        // Any K-copy run contains such a boundary. The LCP/LCS range probes make
+        // the complete scan bounded without capping phrase width. Hash equality
+        // can only nominate a candidate: exact String comparisons make collision
+        // false positives harmless, and budget exhaustion rejects conservatively.
+        for period in 1...maximumPhraseWidth {
+            let requiredPeriodMatches = period * maximumConsecutiveOccurrences
+            var boundary = period
+            while boundary <= normalized.count - period {
+                let forward = fingerprints.longestCommonPrefix(
+                    boundary,
+                    boundary + period,
+                    maximumLength: normalized.count - boundary - period
+                )
+                let backward = fingerprints.longestCommonSuffix(
+                    endingBefore: boundary,
+                    and: boundary + period,
+                    maximumLength: boundary
+                )
+                if forward >= requiredPeriodMatches ||
+                    backward >= requiredPeriodMatches - forward
+                {
+                    switch exactPeriodMatch(
+                        normalized,
+                        boundary: boundary,
+                        period: period,
+                        requiredMatches: requiredPeriodMatches,
+                        comparisonBudget: &exactComparisonBudget
+                    ) {
+                    case .match, .budgetExhausted:
+                        return true
+                    case .noMatch:
+                        break
+                    }
                 }
+                boundary += period
             }
         }
         return false
+    }
+
+    private enum ExactPeriodMatchResult {
+        case match
+        case noMatch
+        case budgetExhausted
+    }
+
+    private static func exactPeriodMatch(
+        _ words: [String],
+        boundary: Int,
+        period: Int,
+        requiredMatches: Int,
+        comparisonBudget: inout Int
+    ) -> ExactPeriodMatchResult {
+        var matched = 0
+        var forwardIndex = boundary
+        while matched < requiredMatches,
+              forwardIndex < words.count - period
+        {
+            guard comparisonBudget > 0 else { return .budgetExhausted }
+            comparisonBudget -= 1
+            guard words[forwardIndex] == words[forwardIndex + period] else { break }
+            matched += 1
+            forwardIndex += 1
+        }
+        var backwardIndex = boundary
+        while matched < requiredMatches, backwardIndex > 0 {
+            backwardIndex -= 1
+            guard comparisonBudget > 0 else { return .budgetExhausted }
+            comparisonBudget -= 1
+            guard words[backwardIndex] == words[backwardIndex + period] else { break }
+            matched += 1
+        }
+        return matched >= requiredMatches ? .match : .noMatch
     }
 
     private static func normalize(_ text: String) -> String {
@@ -150,6 +216,112 @@ public enum TranscriptRepetitionValidator {
             scalar.properties.isAlphabetic || (48...57).contains(scalar.value) ||
                 scalar.value == 39 || scalar.value == 45
         })
+    }
+}
+
+private struct RepetitionRangeFingerprints {
+    private struct Pair: Equatable {
+        let first: UInt64
+        let second: UInt64
+    }
+
+    private static let firstBase: UInt64 = 1_099_511_628_211
+    private static let secondBase: UInt64 = 14_695_981_039_346_656_037
+
+    private let prefixes: [Pair]
+    private let powers: [Pair]
+
+    init(_ words: [String]) {
+        var prefixes: [Pair] = []
+        var powers: [Pair] = []
+        prefixes.reserveCapacity(words.count + 1)
+        powers.reserveCapacity(words.count + 1)
+        var prefix = Pair(first: 0, second: 0)
+        var power = Pair(first: 1, second: 1)
+        prefixes.append(prefix)
+        powers.append(power)
+        for word in words {
+            let token = Self.tokenFingerprint(word)
+            prefix = Pair(
+                first: prefix.first &* Self.firstBase &+ token.first,
+                second: prefix.second &* Self.secondBase &+ token.second
+            )
+            power = Pair(
+                first: power.first &* Self.firstBase,
+                second: power.second &* Self.secondBase
+            )
+            prefixes.append(prefix)
+            powers.append(power)
+        }
+        self.prefixes = prefixes
+        self.powers = powers
+    }
+
+    func longestCommonPrefix(
+        _ firstStart: Int,
+        _ secondStart: Int,
+        maximumLength: Int
+    ) -> Int {
+        longestLikelyEqualLength(maximumLength: maximumLength) { length in
+            rangesLikelyEqual(firstStart, secondStart, length: length)
+        }
+    }
+
+    func longestCommonSuffix(
+        endingBefore firstEnd: Int,
+        and secondEnd: Int,
+        maximumLength: Int
+    ) -> Int {
+        longestLikelyEqualLength(maximumLength: maximumLength) { length in
+            rangesLikelyEqual(firstEnd - length, secondEnd - length, length: length)
+        }
+    }
+
+    private func longestLikelyEqualLength(
+        maximumLength: Int,
+        comparison: (Int) -> Bool
+    ) -> Int {
+        guard maximumLength > 0, comparison(1) else { return 0 }
+        var lowerBound = 1
+        var upperBound = maximumLength
+        while lowerBound < upperBound {
+            let midpoint = lowerBound + (upperBound - lowerBound + 1) / 2
+            if comparison(midpoint) {
+                lowerBound = midpoint
+            } else {
+                upperBound = midpoint - 1
+            }
+        }
+        return lowerBound
+    }
+
+    private func rangesLikelyEqual(
+        _ firstStart: Int,
+        _ secondStart: Int,
+        length: Int
+    ) -> Bool {
+        rangeFingerprint(start: firstStart, length: length) ==
+            rangeFingerprint(start: secondStart, length: length)
+    }
+
+    private func rangeFingerprint(start: Int, length: Int) -> Pair {
+        let end = start + length
+        return Pair(
+            first: prefixes[end].first &-
+                prefixes[start].first &* powers[length].first,
+            second: prefixes[end].second &-
+                prefixes[start].second &* powers[length].second
+        )
+    }
+
+    private static func tokenFingerprint(_ word: String) -> Pair {
+        var first: UInt64 = 14_695_981_039_346_656_037
+        var second: UInt64 = 7_807_829_772_237_909_021
+        for byte in word.utf8 {
+            first = (first ^ UInt64(byte)) &* 1_099_511_628_211
+            second = (second &+ UInt64(byte) &+ 1) &* 1_401_934_673_119
+        }
+        return Pair(first: first, second: second)
     }
 }
 

@@ -19,6 +19,7 @@ public struct ReopenedTranscriptRevisionSnapshot: Equatable, Sendable {
 public enum TranscriptRevisionRepositoryFailure: Error, Equatable, Sendable {
     case sessionUnavailable
     case sessionIntegrityMismatch
+    case unsupportedSchema
     case staleSelection
     case revisionCollision
     case writeFailed
@@ -33,12 +34,17 @@ public protocol TranscriptRevisionRepository: Sendable {
         _ revision: TranscriptRevision,
         expectedSelectedRevisionID: TranscriptRevisionID?
     ) async throws -> ReopenedTranscriptRevisionSnapshot
+
+    func reopenSelected(
+        sessionID: SessionID
+    ) async throws -> ReopenedTranscriptRevisionSnapshot
 }
 
 public enum TranscriptPublicationFailure: Error, Equatable, Sendable {
     case invalidCandidate(TranscriptCandidateValidationError)
     case sessionUnavailable
     case sessionIntegrityMismatch
+    case unsupportedSchema
     case staleSelection
     case revisionCollision
     case writeFailed
@@ -49,6 +55,32 @@ public enum TranscriptPublicationFailure: Error, Equatable, Sendable {
 public enum TranscriptPublicationOutcome: Equatable, Sendable {
     case published(ReopenedTranscriptRevisionSnapshot)
     case rejected(TranscriptPublicationFailure)
+}
+
+public enum TranscriptRevisionReferenceResult: Equatable, Sendable {
+    case available(ReopenedTranscriptRevisionSnapshot)
+    case unavailable
+    case unsupportedSchema
+}
+
+public struct TranscriptRevisionReferenceReader: Sendable {
+    private let repository: any TranscriptRevisionRepository
+
+    public init(repository: any TranscriptRevisionRepository) {
+        self.repository = repository
+    }
+
+    public func reopenSelected(
+        sessionID: SessionID
+    ) async -> TranscriptRevisionReferenceResult {
+        do {
+            return .available(try await repository.reopenSelected(sessionID: sessionID))
+        } catch TranscriptRevisionRepositoryFailure.unsupportedSchema {
+            return .unsupportedSchema
+        } catch {
+            return .unavailable
+        }
+    }
 }
 
 public struct TranscriptRevisionPublisher: Sendable {
@@ -102,6 +134,7 @@ public struct TranscriptRevisionPublisher: Sendable {
         switch failure {
         case .sessionUnavailable: .sessionUnavailable
         case .sessionIntegrityMismatch: .sessionIntegrityMismatch
+        case .unsupportedSchema: .unsupportedSchema
         case .staleSelection: .staleSelection
         case .revisionCollision: .revisionCollision
         case .writeFailed: .writeFailed

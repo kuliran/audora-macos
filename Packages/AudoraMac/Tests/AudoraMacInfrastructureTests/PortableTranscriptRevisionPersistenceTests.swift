@@ -241,6 +241,7 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
         for injectedFailure in [
             TranscriptRevisionRepositoryFailure.staleSelection,
             .revisionCollision,
+            .unsupportedSchema,
         ] {
             try await withRecordedSession { root, receipt in
                 let revision = try transcriptRevision(for: receipt)
@@ -346,6 +347,65 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 sessionID: receipt.sessionID
             )
             XCTAssertEqual(reopened.selectedRevision, selected)
+        }
+    }
+
+    func testInventoriedRevisionIDCannotBeReincarnatedAfterItsBundleIsDeleted() async throws {
+        try await withRecordedSession { root, receipt in
+            let revisionA = try transcriptRevision(for: receipt)
+            let revisionB = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121100000Z-6HJK"
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revisionA,
+                expectedSelectedRevisionID: nil
+            )
+            _ = try await repository.publishAndSelect(
+                revisionB,
+                expectedSelectedRevisionID: revisionA.revisionID
+            )
+
+            let sessionURL = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/session.json"
+            )
+            let before = try Data(contentsOf: sessionURL)
+            let revisionARoot = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/transcripts/\(revisionA.revisionID.rawValue)"
+            )
+            try FileManager.default.removeItem(at: revisionARoot)
+            let reincarnation = try transcriptRevision(
+                for: receipt,
+                revisionID: revisionA.revisionID.rawValue,
+                word: "No",
+                lineText: "No."
+            )
+
+            do {
+                _ = try await repository.publishAndSelect(
+                    reincarnation,
+                    expectedSelectedRevisionID: revisionB.revisionID
+                )
+                XCTFail("expected immutable inventoried identity collision")
+            } catch {
+                XCTAssertEqual(
+                    error as? TranscriptRevisionRepositoryFailure,
+                    .revisionCollision
+                )
+            }
+
+            XCTAssertEqual(try Data(contentsOf: sessionURL), before)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: revisionARoot.path))
+            let selected = try sessionJSONObject(root: root, sessionID: receipt.sessionID)
+            XCTAssertEqual(
+                (selected["selectedTranscriptRevision"] as? [String: Any])?["revisionId"]
+                    as? String,
+                revisionB.revisionID.rawValue
+            )
         }
     }
 
@@ -864,6 +924,67 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 ] as? [String],
                 []
             )
+        }
+    }
+
+    func testSelectedNewerRevisionSchemaIsUnsupportedAndPreservedByteForByte() async throws {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+
+            let revisionRoot = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/transcripts/\(revision.revisionID.rawValue)"
+            )
+            let revisionURL = revisionRoot.appendingPathComponent("revision.json")
+            let hashURL = revisionRoot.appendingPathComponent("revision.sha256")
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: revisionURL))
+                    as? [String: Any]
+            )
+            object["schemaVersion"] = 2
+            object["newerField"] = ["preserve": true]
+            let newerData = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            let newerDigest = SHA256.hash(data: newerData).hexLowercase
+            let newerHashData = Data(newerDigest.utf8)
+            try newerData.write(to: revisionURL)
+            try newerHashData.write(to: hashURL)
+
+            let sessionURL = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/session.json"
+            )
+            var session = try sessionJSONObject(root: root, sessionID: receipt.sessionID)
+            session["selectedTranscriptRevision"] = [
+                "revisionId": revision.revisionID.rawValue,
+                "revisionSha256": newerDigest,
+            ]
+            let selectedSessionData = try JSONSerialization.data(
+                withJSONObject: session,
+                options: [.sortedKeys]
+            )
+            try selectedSessionData.write(to: sessionURL)
+
+            do {
+                _ = try await repository.reopenSelected(sessionID: receipt.sessionID)
+                XCTFail("expected unsupported newer Transcript Revision")
+            } catch {
+                XCTAssertEqual(
+                    error as? TranscriptRevisionRepositoryFailure,
+                    .unsupportedSchema
+                )
+            }
+            XCTAssertEqual(try Data(contentsOf: revisionURL), newerData)
+            XCTAssertEqual(try Data(contentsOf: hashURL), newerHashData)
+            XCTAssertEqual(try Data(contentsOf: sessionURL), selectedSessionData)
         }
     }
 
