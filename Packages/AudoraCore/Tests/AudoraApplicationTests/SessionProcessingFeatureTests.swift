@@ -495,7 +495,7 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(persistedStates, [.cancelled])
     }
 
-    func testRelaunchKeepsQueuedWorkQueuedWithoutCheckingOrLaunchingAWorker()
+    func testRelaunchInterruptsDurableQueuedWorkWithoutCheckingOrLaunchingAWorker()
         async throws
     {
         let fixture = try ProcessingFixture()
@@ -509,16 +509,20 @@ final class SessionProcessingFeatureTests: XCTestCase {
 
         await feature.send(.selectSession(fixture.selection))
 
-        guard case let .queued(snapshot) = await feature.currentState else {
-            return XCTFail("expected queued work to remain queued")
+        guard case let .interrupted(snapshot) = await feature.currentState else {
+            return XCTFail("expected queued crash window to become retryable")
         }
-        XCTAssertEqual(snapshot.job, queued)
+        XCTAssertEqual(snapshot.job.state, .interrupted)
+        XCTAssertEqual(snapshot.job.jobID, queued.jobID)
+        XCTAssertEqual(snapshot.job.sessionID, queued.sessionID)
+        XCTAssertEqual(snapshot.source, fixture.source)
+        XCTAssertEqual(snapshot.actions, [.retry])
         let presenceCount = await engine.presenceQueryCount()
         let requestCount = await engine.requestCount()
         let persistedStates = await jobs.states
         XCTAssertEqual(presenceCount, 0)
         XCTAssertEqual(requestCount, 0)
-        XCTAssertEqual(persistedStates, [])
+        XCTAssertEqual(persistedStates, [.interrupted])
     }
 
     func testRelaunchResumesHashValidConfinedCandidatePublicationIdempotently()

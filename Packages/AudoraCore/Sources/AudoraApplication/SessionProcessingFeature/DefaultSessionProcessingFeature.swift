@@ -419,15 +419,11 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     ) async {
         switch job.state {
         case .queued:
-            transition(
-                to: .queued(
-                    SessionProcessingRecoverableSnapshot(
-                        source: source,
-                        job: job,
-                        actions: []
-                    )
-                )
-            )
+            // Running is persisted before any engine launch. A durable queued
+            // Job therefore proves that no worker acquired execution authority,
+            // but the interrupted create→running window still needs an explicit
+            // retry path after relaunch.
+            await interrupt(job, source: source)
         case .preparing, .running:
             guard job.cancellationAuthorityID != nil else {
                 transition(to: .recoveryRequired(job))

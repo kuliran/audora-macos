@@ -162,7 +162,9 @@ transcript.
 
 Every state has deterministic restart reconciliation:
 
-- `queued` remains queued;
+- `queued` becomes interrupted and retryable without consulting process state;
+  persisting `running` before launch proves that a durable queued Job never gave
+  a worker execution authority;
 - `preparing` and `running` become interrupted and retryable after owned processes
   are proven absent;
 - `validating` resumes idempotent validation/publication when its staged candidate
