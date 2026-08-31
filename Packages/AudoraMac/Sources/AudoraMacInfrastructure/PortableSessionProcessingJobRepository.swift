@@ -81,7 +81,10 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
     func createSynchronously(
         _ job: SessionProcessingJob
     ) -> SessionProcessingJobWriteResult {
-        guard isValid(job), job.state == .queued else { return .failed }
+        guard isValid(job), job.state == .queued,
+              job.cancellationAuthorityID != nil,
+              job.cancellationRequestedAt == nil
+        else { return .failed }
         do {
             return try withJobs(exclusive: true) { authority in
                 let name = job.jobID.rawValue
@@ -107,7 +110,7 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                     under: authority.jobsDescriptor
                 )
                 defer { Darwin.close(partialDescriptor) }
-                let data = try confined.deterministicJSON(JobDTO(job))
+                let data = try encoded(job)
                 guard data.count <= Self.maximumJobBytes else { return .failed }
                 try confined.writeExclusive(
                     data,
@@ -171,11 +174,12 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                 guard current.state == expected,
                       sameIdentity(current, job)
                 else { return .stale }
-                guard isAllowedTransition(from: expected, to: job.state),
-                      preservesCandidateIntegrity(from: current, to: job)
+                guard isAllowedTransition(from: current, to: job),
+                      preservesCandidateIntegrity(from: current, to: job),
+                      preservesControlIntegrity(from: current, to: job)
                 else { return .failed }
 
-                let data = try confined.deterministicJSON(JobDTO(job))
+                let data = try encoded(job)
                 guard data.count <= Self.maximumJobBytes,
                       try !confined.entryExists(
                         named: "job.json.partial",
@@ -244,7 +248,38 @@ private extension PortableSessionProcessingJobRepository {
         let inode: UInt64
     }
 
-    struct JobDTO: Codable {
+    struct JobV2DTO: Codable {
+        let schemaVersion: UInt32
+        let jobId: String
+        let sessionId: String
+        let revisionId: String
+        let profileId: String
+        let createdAt: String
+        let state: String
+        let cancellationAuthorityId: String
+        let cancellationRequestedAt: String?
+        let candidateArtifactSha256: String?
+        let failure: String?
+
+        init(_ job: SessionProcessingJob) throws {
+            guard let cancellationAuthorityID = job.cancellationAuthorityID else {
+                throw JobPersistenceError.integrityMismatch
+            }
+            schemaVersion = 2
+            jobId = job.jobID.rawValue
+            sessionId = job.sessionID.rawValue
+            revisionId = job.revisionID.rawValue
+            profileId = job.profileID
+            createdAt = job.createdAt.rawValue
+            state = job.state.rawValue
+            cancellationAuthorityId = cancellationAuthorityID.rawValue
+            cancellationRequestedAt = job.cancellationRequestedAt?.rawValue
+            candidateArtifactSha256 = job.candidateArtifactSHA256
+            failure = job.failure?.rawValue
+        }
+    }
+
+    struct JobV1DTO: Codable {
         let schemaVersion: UInt32
         let jobId: String
         let sessionId: String
@@ -402,39 +437,83 @@ private extension PortableSessionProcessingJobRepository {
 
     func decode(_ data: Data) throws -> SessionProcessingJob {
         let dictionary = try confined.jsonDictionary(data)
-        let required: Set<String> = [
+        let commonRequired: Set<String> = [
             "schemaVersion", "jobId", "sessionId", "revisionId", "profileId",
             "createdAt", "state",
         ]
-        let optional: Set<String> = ["candidateArtifactSha256", "failure"]
-        guard required.isSubset(of: dictionary.keys),
-              Set(dictionary.keys).isSubset(of: required.union(optional))
+        guard let schemaNumber = dictionary["schemaVersion"] as? NSNumber,
+              String(cString: schemaNumber.objCType) != "c"
         else { throw JobPersistenceError.integrityMismatch }
-        let dto = try confined.decode(JobDTO.self, from: data)
-        guard dto.schemaVersion == 1,
-              let state = SessionProcessingJobState(rawValue: dto.state)
-        else { throw JobPersistenceError.integrityMismatch }
-        let failure: SessionProcessingFailureReason?
-        if let rawFailure = dto.failure {
-            guard let parsed = SessionProcessingFailureReason(rawValue: rawFailure) else {
-                throw JobPersistenceError.integrityMismatch
-            }
-            failure = parsed
-        } else {
-            failure = nil
+        let schema = schemaNumber.uint32Value
+        let job: SessionProcessingJob
+        switch schema {
+        case 1:
+            let optional: Set<String> = ["candidateArtifactSha256", "failure"]
+            guard commonRequired.isSubset(of: dictionary.keys),
+                  Set(dictionary.keys).isSubset(of: commonRequired.union(optional))
+            else { throw JobPersistenceError.integrityMismatch }
+            let dto = try confined.decode(JobV1DTO.self, from: data)
+            guard dto.schemaVersion == 1,
+                  let state = SessionProcessingJobState(rawValue: dto.state)
+            else { throw JobPersistenceError.integrityMismatch }
+            job = .legacyV1(
+                jobID: try TranscriptionJobID(dto.jobId),
+                sessionID: try SessionID(dto.sessionId),
+                revisionID: try TranscriptRevisionID(dto.revisionId),
+                profileID: dto.profileId,
+                createdAt: try UTCInstant(dto.createdAt),
+                state: state,
+                candidateArtifactSHA256: dto.candidateArtifactSha256,
+                failure: try failure(dto.failure)
+            )
+        case 2:
+            let required = commonRequired.union(["cancellationAuthorityId"])
+            let optional: Set<String> = [
+                "cancellationRequestedAt", "candidateArtifactSha256", "failure",
+            ]
+            guard required.isSubset(of: dictionary.keys),
+                  Set(dictionary.keys).isSubset(of: required.union(optional))
+            else { throw JobPersistenceError.integrityMismatch }
+            let dto = try confined.decode(JobV2DTO.self, from: data)
+            guard dto.schemaVersion == 2,
+                  let state = SessionProcessingJobState(rawValue: dto.state)
+            else { throw JobPersistenceError.integrityMismatch }
+            job = SessionProcessingJob(
+                jobID: try TranscriptionJobID(dto.jobId),
+                sessionID: try SessionID(dto.sessionId),
+                revisionID: try TranscriptRevisionID(dto.revisionId),
+                profileID: dto.profileId,
+                createdAt: try UTCInstant(dto.createdAt),
+                state: state,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    dto.cancellationAuthorityId
+                ),
+                cancellationRequestedAt: try dto.cancellationRequestedAt.map(
+                    UTCInstant.init
+                ),
+                candidateArtifactSHA256: dto.candidateArtifactSha256,
+                failure: try failure(dto.failure)
+            )
+        default:
+            throw JobPersistenceError.integrityMismatch
         }
-        let job = SessionProcessingJob(
-            jobID: try TranscriptionJobID(dto.jobId),
-            sessionID: try SessionID(dto.sessionId),
-            revisionID: try TranscriptRevisionID(dto.revisionId),
-            profileID: dto.profileId,
-            createdAt: try UTCInstant(dto.createdAt),
-            state: state,
-            candidateArtifactSHA256: dto.candidateArtifactSha256,
-            failure: failure
-        )
         guard isValid(job) else { throw JobPersistenceError.integrityMismatch }
         return job
+    }
+
+    func failure(_ raw: String?) throws -> SessionProcessingFailureReason? {
+        guard let raw else { return nil }
+        guard let parsed = SessionProcessingFailureReason(rawValue: raw) else {
+            throw JobPersistenceError.integrityMismatch
+        }
+        return parsed
+    }
+
+    func encoded(_ job: SessionProcessingJob) throws -> Data {
+        if job.cancellationAuthorityID != nil {
+            return try confined.deterministicJSON(try JobV2DTO(job))
+        }
+        return try confined.deterministicJSON(JobV1DTO(job))
     }
 
     func isValid(_ job: SessionProcessingJob) -> Bool {
@@ -443,22 +522,33 @@ private extension PortableSessionProcessingJobRepository {
                   (48...57).contains($0) || (65...90).contains($0) ||
                       (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95
               }),
-              job.candidateArtifactSHA256.map(AudioArtifactFingerprint.isSHA256) ?? true
+              job.candidateArtifactSHA256.map(AudioArtifactFingerprint.isSHA256) ?? true,
+              job.cancellationRequestedAt == nil || job.cancellationAuthorityID != nil
         else { return false }
         switch job.state {
-        case .queued, .preparing, .running, .cancelled, .interrupted:
+        case .queued:
+            return job.candidateArtifactSHA256 == nil && job.failure == nil &&
+                job.cancellationRequestedAt == nil
+        case .preparing, .running:
             return job.candidateArtifactSHA256 == nil && job.failure == nil
         case .validating, .completed:
-            return job.candidateArtifactSHA256 != nil && job.failure == nil
+            return job.candidateArtifactSHA256 != nil && job.failure == nil &&
+                job.cancellationRequestedAt == nil
         case .failed:
-            return job.failure != nil
+            return job.failure != nil && job.cancellationRequestedAt == nil
+        case .cancelled:
+            return job.candidateArtifactSHA256 == nil && job.failure == nil &&
+                (job.cancellationAuthorityID == nil || job.cancellationRequestedAt != nil)
+        case .interrupted:
+            return job.failure == nil
         }
     }
 
     func sameIdentity(_ left: SessionProcessingJob, _ right: SessionProcessingJob) -> Bool {
         left.jobID == right.jobID && left.sessionID == right.sessionID &&
             left.revisionID == right.revisionID && left.profileID == right.profileID &&
-            left.createdAt == right.createdAt
+            left.createdAt == right.createdAt &&
+            left.cancellationAuthorityID == right.cancellationAuthorityID
     }
 
     func preservesCandidateIntegrity(
@@ -469,11 +559,35 @@ private extension PortableSessionProcessingJobRepository {
         return next.candidateArtifactSHA256 == currentHash
     }
 
-    func isAllowedTransition(
-        from current: SessionProcessingJobState,
-        to next: SessionProcessingJobState
+    func preservesControlIntegrity(
+        from current: SessionProcessingJob,
+        to next: SessionProcessingJob
     ) -> Bool {
-        switch (current, next) {
+        guard current.cancellationAuthorityID == next.cancellationAuthorityID else {
+            return false
+        }
+        switch (current.cancellationRequestedAt, next.cancellationRequestedAt) {
+        case (.none, .none):
+            return true
+        case let (.some(current), .some(next)):
+            return current == next
+        case (.some, .none):
+            return false
+        case (.none, .some):
+            return current.state == next.state &&
+                (current.state == .preparing || current.state == .running)
+        }
+    }
+
+    func isAllowedTransition(
+        from current: SessionProcessingJob,
+        to next: SessionProcessingJob
+    ) -> Bool {
+        if current.state == next.state {
+            return current.cancellationRequestedAt == nil &&
+                next.cancellationRequestedAt != nil
+        }
+        switch (current.state, next.state) {
         case (.queued, .preparing), (.queued, .running), (.queued, .failed),
              (.queued, .cancelled), (.queued, .interrupted),
              (.preparing, .running), (.preparing, .failed),
@@ -482,9 +596,12 @@ private extension PortableSessionProcessingJobRepository {
              (.running, .cancelled), (.running, .interrupted),
              (.validating, .completed), (.validating, .failed),
              (.validating, .interrupted):
-            true
+            if next.state == .cancelled, next.cancellationAuthorityID != nil {
+                return next.cancellationRequestedAt != nil
+            }
+            return true
         default:
-            false
+            return false
         }
     }
 

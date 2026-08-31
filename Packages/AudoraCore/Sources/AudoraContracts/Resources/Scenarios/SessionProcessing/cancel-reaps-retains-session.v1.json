@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.cancel-reaps-retains-session",
+  "initialState": {
+    "status": "running",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "phase": "transcribing",
+    "progress": {
+      "completedWindows": 2,
+      "totalWindows": 4,
+      "approximateEtaSeconds": 5
+    },
+    "actions": ["cancel"]
+  },
+  "commands": [
+    { "kind": "cancel" },
+    { "kind": "cancel" }
+  ],
+  "dependencyTrace": [
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:07:00.000Z" },
+    { "port": "jobs", "effect": "persistCancellationRequest", "outcome": "written" },
+    { "port": "engine", "effect": "cancelAndReap", "outcome": "reaped-once" },
+    { "port": "jobs", "effect": "transitionCancelled", "outcome": "written" }
+  ],
+  "expectedState": {
+    "status": "cancelled",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "actions": ["retry"]
+  },
+  "expectedEffects": [
+    { "kind": "cancellationAuthorityPersisted" },
+    { "kind": "workerReaped" },
+    { "kind": "lateCandidateRejected" },
+    { "kind": "sessionRetained" },
+    { "kind": "noPublication" }
+  ]
+}

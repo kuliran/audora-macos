@@ -128,6 +128,15 @@ public struct TranscriptRevisionPublisher: Sendable {
         }
     }
 
+    /// Reopens the repository-selected canonical Revision without granting the
+    /// Session-processing feature direct persistence authority.
+    public func reopenSelected(
+        sessionID: SessionID
+    ) async -> TranscriptRevisionReferenceResult {
+        await TranscriptRevisionReferenceReader(repository: repository)
+            .reopenSelected(sessionID: sessionID)
+    }
+
     private static func map(
         _ failure: TranscriptRevisionRepositoryFailure
     ) -> TranscriptPublicationFailure {

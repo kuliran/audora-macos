@@ -6,15 +6,20 @@ public enum SessionProcessingPresentationStatus: Equatable, Sendable {
     case unavailable
     case ready
     case preparing
+    case queued
     case running
+    case cancelling
     case validating
     case completed
     case failed
+    case cancelled
+    case interrupted
     case recoveryRequired
 }
 
 public enum SessionProcessingPresentationAction: String, Hashable, Sendable {
     case start
+    case cancel
     case prepare
     case reinstall
     case retry
@@ -22,6 +27,7 @@ public enum SessionProcessingPresentationAction: String, Hashable, Sendable {
     public var label: String {
         switch self {
         case .start: "Transcribe"
+        case .cancel: "Cancel"
         case .prepare: "Prepare"
         case .reinstall: "Reinstall"
         case .retry: "Retry"
@@ -29,22 +35,44 @@ public enum SessionProcessingPresentationAction: String, Hashable, Sendable {
     }
 }
 
+public enum SessionProcessingPresentationPhase: String, Equatable, Sendable {
+    case preparing
+    case loadingModel
+    case transcribing
+    case cancelling
+    case validating
+}
+
+public enum SessionProcessingPresentationProgress: Equatable, Sendable {
+    case indeterminate
+    case measurable(completedWindows: UInt32, totalWindows: UInt32)
+}
+
 public struct SessionProcessingPresentationState: Equatable, Sendable {
     public let status: SessionProcessingPresentationStatus
     public let title: String
     public let detail: String?
     public let actions: [SessionProcessingPresentationAction]
+    public let phase: SessionProcessingPresentationPhase?
+    public let progress: SessionProcessingPresentationProgress?
+    public let approximateETASeconds: UInt32?
 
     public init(
         status: SessionProcessingPresentationStatus,
         title: String,
         detail: String?,
-        actions: [SessionProcessingPresentationAction]
+        actions: [SessionProcessingPresentationAction],
+        phase: SessionProcessingPresentationPhase? = nil,
+        progress: SessionProcessingPresentationProgress? = nil,
+        approximateETASeconds: UInt32? = nil
     ) {
         self.status = status
         self.title = title
         self.detail = detail
         self.actions = actions
+        self.phase = phase
+        self.progress = progress
+        self.approximateETASeconds = approximateETASeconds
     }
 }
 
@@ -75,21 +103,66 @@ public enum SessionProcessingPresentationMapper {
                     ? "Reinstalling offline dependencies…"
                     : "Preparing offline dependencies…",
                 detail: "Only the pinned runtime and model are accepted.",
+                actions: [],
+                phase: .preparing,
+                progress: .indeterminate
+            )
+        case .queued:
+            return SessionProcessingPresentationState(
+                status: .queued,
+                title: "Transcription queued",
+                detail: "The sealed Session audio remains ready to process.",
                 actions: []
             )
-        case .running:
+        case let .running(snapshot):
+            let phase: SessionProcessingPresentationPhase
+            let title: String
+            switch snapshot.phase {
+            case .preparing:
+                phase = .preparing
+                title = "Preparing transcription…"
+            case .loadingModel:
+                phase = .loadingModel
+                title = "Loading offline model…"
+            case .transcribing:
+                phase = .transcribing
+                title = "Transcribing offline…"
+            }
+            let progress = snapshot.progress.map {
+                SessionProcessingPresentationProgress.measurable(
+                    completedWindows: $0.completedWindows,
+                    totalWindows: $0.totalWindows
+                )
+            } ?? .indeterminate
+            let detail = snapshot.progress?.approximateETASeconds == nil
+                ? "Audio remains on this Mac."
+                : "Audio remains on this Mac. Approximate ETA may change."
             return SessionProcessingPresentationState(
                 status: .running,
-                title: "Transcribing offline…",
-                detail: "Audio remains on this Mac.",
-                actions: []
+                title: title,
+                detail: detail,
+                actions: [.cancel],
+                phase: phase,
+                progress: progress,
+                approximateETASeconds: snapshot.progress?.approximateETASeconds
+            )
+        case .cancelling:
+            return SessionProcessingPresentationState(
+                status: .cancelling,
+                title: "Cancelling transcription…",
+                detail: "The worker is being stopped and reaped.",
+                actions: [],
+                phase: .cancelling,
+                progress: .indeterminate
             )
         case .validating:
             return SessionProcessingPresentationState(
                 status: .validating,
                 title: "Checking transcript…",
                 detail: "The untrusted worker result is being validated before selection.",
-                actions: []
+                actions: [],
+                phase: .validating,
+                progress: .indeterminate
             )
         case .completed:
             return SessionProcessingPresentationState(
@@ -103,6 +176,20 @@ public enum SessionProcessingPresentationMapper {
                 status: .failed,
                 title: "Offline transcription failed",
                 detail: failureText(snapshot.reason),
+                actions: snapshot.actions.map(action)
+            )
+        case let .cancelled(snapshot):
+            return SessionProcessingPresentationState(
+                status: .cancelled,
+                title: "Transcription cancelled",
+                detail: "The sealed Session audio was retained for Retry.",
+                actions: snapshot.actions.map(action)
+            )
+        case let .interrupted(snapshot):
+            return SessionProcessingPresentationState(
+                status: .interrupted,
+                title: "Transcription interrupted",
+                detail: "The sealed Session audio was retained for Retry.",
                 actions: snapshot.actions.map(action)
             )
         case .recoveryRequired:
@@ -204,6 +291,7 @@ public final class SessionProcessingPresentationModel: ObservableObject {
         let command: SessionProcessingCommand
         switch action {
         case .start: command = .start
+        case .cancel: command = .cancel
         case .prepare: command = .prepare
         case .reinstall: command = .reinstall
         case .retry: command = .retry
@@ -232,16 +320,30 @@ public struct SessionProcessingView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if let state = model.state {
                     HStack(spacing: 8) {
-                        if state.status == .preparing || state.status == .running ||
-                            state.status == .validating
-                        {
-                            ProgressView().controlSize(.small)
+                        if let progress = state.progress {
+                            switch progress {
+                            case .indeterminate:
+                                ProgressView().controlSize(.small)
+                            case let .measurable(completed, total):
+                                ProgressView(
+                                    value: Double(completed),
+                                    total: Double(total)
+                                )
+                                .frame(width: 72)
+                                .accessibilityLabel("Transcription progress")
+                                .accessibilityValue("\(completed) of \(total) windows")
+                            }
                         }
                         Text(state.title).font(.headline)
                     }
                     if let detail = state.detail {
                         Text(detail)
                             .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let eta = state.approximateETASeconds {
+                        Text("Approximately \(eta) seconds remaining; estimate may change.")
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     if !state.actions.isEmpty {

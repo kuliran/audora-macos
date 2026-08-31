@@ -248,6 +248,13 @@ final class ContractResourcesTests: XCTestCase {
                 "failed", "cancelled", "interrupted",
             ]
         )
+        let controlledJob = try XCTUnwrap(
+            jobDefinitions["ControlledTranscriptionJobManifest"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(controlledJob["required"] as? [String] ?? []),
+            ["schemaVersion", "cancellationAuthorityId"]
+        )
 
         let blocked = try jsonObject(.sessionProcessingQualificationBlockedScenario)
         let blockedEffects = try XCTUnwrap(
@@ -265,6 +272,23 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(
             successEffects.contains { $0["kind"] as? String == "publishedThroughValidator" }
         )
+
+        let cancellation = try jsonObject(.sessionProcessingCancellationScenario)
+        let cancellationEffects = try XCTUnwrap(
+            cancellation["expectedEffects"] as? [[String: Any]]
+        )
+        XCTAssertTrue(
+            cancellationEffects.contains { $0["kind"] as? String == "workerReaped" }
+        )
+        XCTAssertTrue(
+            cancellationEffects.contains { $0["kind"] as? String == "lateCandidateRejected" }
+        )
+        let progress = try jsonObject(.sessionProcessingProgressScenario)
+        let progressState = try XCTUnwrap(progress["expectedState"] as? [String: Any])
+        let measured = try XCTUnwrap(progressState["progress"] as? [String: Any])
+        XCTAssertEqual(measured["completedWindows"] as? Int, 2)
+        XCTAssertEqual(measured["totalWindows"] as? Int, 4)
+        XCTAssertEqual(measured["approximateEtaSeconds"] as? Int, 5)
     }
 
     func testImportedSessionGoldensPreservePortableV1Fields() throws {

@@ -285,10 +285,14 @@ for (const name of runtimeRejectedTranscriptRevisionFixtures) {
 }
 
 const expectedSessionProcessingScenarios = [
+  "cancel-reaps-retains-session.v1.json",
   "candidate-rejected-no-publication.v1.json",
   "model-prepare-retry.v1.json",
+  "progress-monotonic-eta-approximate.v1.json",
   "qualification-blocked-no-fallback.v1.json",
   "qualified-offline-success.v1.json",
+  "relaunch-running-absent-interrupted.v1.json",
+  "relaunch-validating-resumes-idempotently.v1.json",
 ];
 await assertInventory(
   sessionProcessingScenariosDirectory,

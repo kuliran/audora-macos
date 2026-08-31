@@ -101,6 +101,36 @@ public protocol TranscriptionEngine: Sendable {
         _ request: TranscriptionRequest,
         events: @escaping @Sendable (TranscriptionEvent) async -> Void
     ) async throws -> VerifiedTranscriptionCandidate
+
+    /// Idempotently requests cooperative stop, then bounded termination and
+    /// reap. Success is returned only after process absence is proven.
+    func cancel(
+        _ execution: TranscriptionExecutionReference
+    ) async -> TranscriptionCancellationOutcome
+
+    func workerPresence(
+        for execution: TranscriptionExecutionReference
+    ) async -> TranscriptionWorkerPresence
+
+    /// Reopens only a complete, confined, hash-valid Candidate staged by the
+    /// exact durable Job. It never publishes or selects a Revision.
+    func recoverCandidate(
+        for job: SessionProcessingJob
+    ) async -> StagedTranscriptionCandidateResolution
+}
+
+public extension TranscriptionEngine {
+    func cancel(
+        _ execution: TranscriptionExecutionReference
+    ) async -> TranscriptionCancellationOutcome { .unableToConfirm }
+
+    func workerPresence(
+        for execution: TranscriptionExecutionReference
+    ) async -> TranscriptionWorkerPresence { .unknown }
+
+    func recoverCandidate(
+        for job: SessionProcessingJob
+    ) async -> StagedTranscriptionCandidateResolution { .unavailable }
 }
 
 public protocol SessionProcessingClock: Sendable {
@@ -110,6 +140,9 @@ public protocol SessionProcessingClock: Sendable {
 public protocol SessionProcessingIDGenerator: Sendable {
     func generateJobID(at instant: UTCInstant) async -> TranscriptionJobID
     func generateRevisionID(at instant: UTCInstant) async -> TranscriptRevisionID
+    func generateCancellationAuthorityID(
+        at instant: UTCInstant
+    ) async -> TranscriptionCancellationAuthorityID
 }
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.progress-monotonic-eta-approximate",
+  "initialState": {
+    "status": "ready"
+  },
+  "commands": [
+    { "kind": "start" }
+  ],
+  "dependencyTrace": [
+    { "port": "runtime", "effect": "resolve", "outcome": "qualified" },
+    { "port": "model", "effect": "verify", "outcome": "ready" },
+    { "port": "acousticEvidence", "effect": "resolve", "outcome": "qualified" },
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:06:00.000Z" },
+    { "port": "identifiers", "effect": "generateJobId", "outcome": "job-20260830T120500000Z-5GHJ" },
+    { "port": "identifiers", "effect": "generateRevisionId", "outcome": "trv-20260830T120600000Z-6JKM" },
+    { "port": "identifiers", "effect": "generateCancellationAuthorityId", "outcome": "cancel-synthetic-authority" },
+    { "port": "jobs", "effect": "create", "outcome": "written" },
+    { "port": "jobs", "effect": "transitionRunning", "outcome": "written" },
+    { "port": "engine", "effect": "transcribe", "outcome": "loadingModel;1-of-4;0-of-4-ignored;2-of-4;eta-5" }
+  ],
+  "expectedState": {
+    "status": "running",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "phase": "transcribing",
+    "progress": {
+      "completedWindows": 2,
+      "totalWindows": 4,
+      "approximateEtaSeconds": 5
+    },
+    "actions": ["cancel"]
+  },
+  "expectedEffects": [
+    { "kind": "progressMonotonic" },
+    { "kind": "etaApproximate" },
+    { "kind": "noPublication" }
+  ]
+}

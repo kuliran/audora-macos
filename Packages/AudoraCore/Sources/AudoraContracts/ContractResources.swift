@@ -77,6 +77,10 @@ public enum ContractResource: CaseIterable, Sendable {
     case sessionProcessingQualificationBlockedScenario
     case sessionProcessingCandidateRejectedScenario
     case sessionProcessingModelPrepareRetryScenario
+    case sessionProcessingCancellationScenario
+    case sessionProcessingRelaunchInterruptedScenario
+    case sessionProcessingRelaunchValidationScenario
+    case sessionProcessingProgressScenario
 
     case portableLibraryManifestExample
     case portableLibraryPreferencesExample
@@ -291,6 +295,14 @@ public enum ContractResource: CaseIterable, Sendable {
             "candidate-rejected-no-publication.v1.json"
         case .sessionProcessingModelPrepareRetryScenario:
             "model-prepare-retry.v1.json"
+        case .sessionProcessingCancellationScenario:
+            "cancel-reaps-retains-session.v1.json"
+        case .sessionProcessingRelaunchInterruptedScenario:
+            "relaunch-running-absent-interrupted.v1.json"
+        case .sessionProcessingRelaunchValidationScenario:
+            "relaunch-validating-resumes-idempotently.v1.json"
+        case .sessionProcessingProgressScenario:
+            "progress-monotonic-eta-approximate.v1.json"
         case .portableLibraryManifestExample:
             "library.json"
         case .portableLibraryPreferencesExample:
@@ -450,7 +462,11 @@ public enum ContractResource: CaseIterable, Sendable {
         case .sessionProcessingQualifiedSuccessScenario,
              .sessionProcessingQualificationBlockedScenario,
              .sessionProcessingCandidateRejectedScenario,
-             .sessionProcessingModelPrepareRetryScenario:
+             .sessionProcessingModelPrepareRetryScenario,
+             .sessionProcessingCancellationScenario,
+             .sessionProcessingRelaunchInterruptedScenario,
+             .sessionProcessingRelaunchValidationScenario,
+             .sessionProcessingProgressScenario:
             "Scenarios/SessionProcessing"
         case .portableLibraryManifestExample, .portableLibraryPreferencesExample,
              .portableProfileNullExample, .portableProfileSelectedExample:

@@ -5,6 +5,80 @@ import XCTest
 
 @MainActor
 final class SessionProcessingPresentationModelTests: XCTestCase {
+    func testActivePhaseProgressAndApproximateETAStayExplicit() throws {
+        let source = try makeSource()
+        let job = makeJob(state: .running)
+
+        let loading = SessionProcessingPresentationMapper.map(
+            .running(
+                SessionProcessingActiveSnapshot(
+                    source: source,
+                    job: job,
+                    phase: .loadingModel
+                )
+            )
+        )
+        XCTAssertEqual(loading.phase, .loadingModel)
+        XCTAssertEqual(loading.progress, .indeterminate)
+        XCTAssertNil(loading.approximateETASeconds)
+        XCTAssertEqual(loading.actions, [.cancel])
+
+        let transcribing = SessionProcessingPresentationMapper.map(
+            .running(
+                SessionProcessingActiveSnapshot(
+                    source: source,
+                    job: job,
+                    phase: .transcribing,
+                    progress: SessionProcessingProgress(
+                        completedWindows: 2,
+                        totalWindows: 4,
+                        approximateETASeconds: 5
+                    )
+                )
+            )
+        )
+        XCTAssertEqual(transcribing.phase, .transcribing)
+        XCTAssertEqual(
+            transcribing.progress,
+            .measurable(completedWindows: 2, totalWindows: 4)
+        )
+        XCTAssertEqual(transcribing.approximateETASeconds, 5)
+        XCTAssertTrue(transcribing.detail?.contains("may change") == true)
+    }
+
+    func testQueuedAndTerminalStatesDoNotExposeStaleProgressOrNoOpControls() throws {
+        let source = try makeSource()
+        let queued = makeJob(state: .queued)
+        let cancelled = makeJob(state: .cancelled)
+
+        let queuedPresentation = SessionProcessingPresentationMapper.map(
+            .queued(
+                SessionProcessingRecoverableSnapshot(
+                    source: source,
+                    job: queued,
+                    actions: []
+                )
+            )
+        )
+        XCTAssertNil(queuedPresentation.phase)
+        XCTAssertNil(queuedPresentation.progress)
+        XCTAssertEqual(queuedPresentation.actions, [])
+
+        let cancelledPresentation = SessionProcessingPresentationMapper.map(
+            .cancelled(
+                SessionProcessingRecoverableSnapshot(
+                    source: source,
+                    job: cancelled,
+                    actions: [.retry]
+                )
+            )
+        )
+        XCTAssertNil(cancelledPresentation.phase)
+        XCTAssertNil(cancelledPresentation.progress)
+        XCTAssertNil(cancelledPresentation.approximateETASeconds)
+        XCTAssertEqual(cancelledPresentation.actions, [.retry])
+    }
+
     func testBlockedQualificationOffersNoImpossibleRepairAndExplainsReleaseRecovery()
         throws
     {
@@ -62,7 +136,10 @@ final class SessionProcessingPresentationModelTests: XCTestCase {
             revisionID: try TranscriptRevisionID("trv-20260830T120600000Z-6JKM"),
             profileID: "synthetic-qualified-v1",
             createdAt: try UTCInstant("2026-08-30T12:05:00.000Z"),
-            state: .running
+            state: .running,
+            cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                "cancel-presentation"
+            )
         )
 
         let presentation = SessionProcessingPresentationMapper.map(
@@ -100,6 +177,20 @@ final class SessionProcessingPresentationModelTests: XCTestCase {
                 ),
             ],
             expectedSelectedRevisionID: nil
+        )
+    }
+
+    private func makeJob(state: SessionProcessingJobState) -> SessionProcessingJob {
+        SessionProcessingJob(
+            jobID: try! TranscriptionJobID("job-20260830T120500000Z-5GHJ"),
+            sessionID: try! SessionID("ses-20260830T120100000Z-2CDE"),
+            revisionID: try! TranscriptRevisionID("trv-20260830T120600000Z-6JKM"),
+            profileID: "synthetic-qualified-v1",
+            createdAt: try! UTCInstant("2026-08-30T12:05:00.000Z"),
+            state: state,
+            cancellationAuthorityID: try! TranscriptionCancellationAuthorityID(
+                "cancel-presentation"
+            )
         )
     }
 }

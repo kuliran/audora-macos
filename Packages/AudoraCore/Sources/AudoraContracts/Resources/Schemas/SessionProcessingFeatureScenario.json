@@ -64,10 +64,31 @@
                     "$ref": "#/$defs/SessionProcessingScenarioReadyState"
                 },
                 {
+                    "$ref": "#/$defs/SessionProcessingScenarioQueuedState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioRunningState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioCancellingState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioValidatingState"
+                },
+                {
                     "$ref": "#/$defs/SessionProcessingScenarioCompletedState"
                 },
                 {
                     "$ref": "#/$defs/SessionProcessingScenarioFailedState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioCancelledState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioInterruptedState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioRecoveryRequiredState"
                 }
             ]
         },
@@ -87,6 +108,10 @@
                         {
                             "type": "string",
                             "const": "start"
+                        },
+                        {
+                            "type": "string",
+                            "const": "cancel"
                         },
                         {
                             "type": "string",
@@ -189,11 +214,31 @@
                         },
                         {
                             "type": "string",
+                            "const": "generateCancellationAuthorityId"
+                        },
+                        {
+                            "type": "string",
                             "const": "create"
                         },
                         {
                             "type": "string",
                             "const": "transitionRunning"
+                        },
+                        {
+                            "type": "string",
+                            "const": "persistCancellationRequest"
+                        },
+                        {
+                            "type": "string",
+                            "const": "cancelAndReap"
+                        },
+                        {
+                            "type": "string",
+                            "const": "workerPresence"
+                        },
+                        {
+                            "type": "string",
+                            "const": "recoverCandidate"
                         },
                         {
                             "type": "string",
@@ -209,11 +254,23 @@
                         },
                         {
                             "type": "string",
+                            "const": "reopenSelected"
+                        },
+                        {
+                            "type": "string",
                             "const": "transitionCompleted"
                         },
                         {
                             "type": "string",
                             "const": "transitionFailed"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transitionCancelled"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transitionInterrupted"
                         }
                     ]
                 },
@@ -272,6 +329,46 @@
                         {
                             "type": "string",
                             "const": "noFallback"
+                        },
+                        {
+                            "type": "string",
+                            "const": "cancellationAuthorityPersisted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "workerReaped"
+                        },
+                        {
+                            "type": "string",
+                            "const": "lateCandidateRejected"
+                        },
+                        {
+                            "type": "string",
+                            "const": "sessionRetained"
+                        },
+                        {
+                            "type": "string",
+                            "const": "processAbsenceConfirmed"
+                        },
+                        {
+                            "type": "string",
+                            "const": "queuedPreserved"
+                        },
+                        {
+                            "type": "string",
+                            "const": "stagedCandidateRevalidated"
+                        },
+                        {
+                            "type": "string",
+                            "const": "publicationIdempotent"
+                        },
+                        {
+                            "type": "string",
+                            "const": "progressMonotonic"
+                        },
+                        {
+                            "type": "string",
+                            "const": "etaApproximate"
                         }
                     ]
                 }
@@ -357,6 +454,123 @@
                 "not": {}
             }
         },
+        "SessionProcessingScenarioQueuedState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "queued"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingRecoveryAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioRunningState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "running"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "phase": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "preparing"
+                        },
+                        {
+                            "type": "string",
+                            "const": "loadingModel"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transcribing"
+                        }
+                    ]
+                },
+                "progress": {
+                    "$ref": "#/$defs/SessionProcessingScenarioProgress"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingControlAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "phase",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioCancellingState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "cancelling"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingControlAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioValidatingState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "validating"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                }
+            },
+            "required": [
+                "status",
+                "jobId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "SessionProcessingScenarioCompletedState": {
             "type": "object",
             "properties": {
@@ -402,12 +616,124 @@
                 "not": {}
             }
         },
+        "SessionProcessingScenarioCancelledState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "cancelled"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingRecoveryAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioInterruptedState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "interrupted"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingRecoveryAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioRecoveryRequiredState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "recoveryRequired"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingRecoveryAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "SessionProcessingRecoveryAction": {
             "type": "string",
             "enum": [
                 "prepare",
                 "reinstall",
                 "retry"
+            ]
+        },
+        "TranscriptionJobId": {
+            "type": "string",
+            "pattern": "^job-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "SessionProcessingScenarioProgress": {
+            "type": "object",
+            "properties": {
+                "completedWindows": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "totalWindows": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "approximateEtaSeconds": {
+                    "type": "integer",
+                    "minimum": 0
+                }
+            },
+            "required": [
+                "completedWindows",
+                "totalWindows"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingControlAction": {
+            "type": "string",
+            "enum": [
+                "cancel"
             ]
         },
         "TranscriptRevisionId": {

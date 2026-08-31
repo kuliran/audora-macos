@@ -301,6 +301,57 @@ public enum SessionProcessingJobState: String, Equatable, Sendable {
     }
 }
 
+/// Durable, non-secret authority identity for controlling exactly one owned
+/// worker execution. It is persisted with the Job so relaunch reconciliation
+/// never guesses from a PID or an ambient process list.
+public struct TranscriptionCancellationAuthorityID: Hashable, Sendable {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard (1...128).contains(rawValue.utf8.count), rawValue.utf8.allSatisfy({
+            (48...57).contains($0) || (65...90).contains($0) ||
+                (97...122).contains($0) || $0 == 45 || $0 == 95
+        }) else {
+            throw SessionProcessingConfigurationError.invalidProfile
+        }
+        self.rawValue = rawValue
+    }
+}
+
+/// The complete identity needed by the engine to cancel or reconcile one
+/// worker. A legacy v1 Job may lack the authority; that absence must produce
+/// `unknown`, never a guessed process match.
+public struct TranscriptionExecutionReference: Hashable, Sendable {
+    public let jobID: TranscriptionJobID
+    public let cancellationAuthorityID: TranscriptionCancellationAuthorityID?
+
+    public init(
+        jobID: TranscriptionJobID,
+        cancellationAuthorityID: TranscriptionCancellationAuthorityID?
+    ) {
+        self.jobID = jobID
+        self.cancellationAuthorityID = cancellationAuthorityID
+    }
+}
+
+public enum TranscriptionCancellationOutcome: Equatable, Sendable {
+    case reaped
+    case alreadyAbsent
+    case unableToConfirm
+}
+
+public enum TranscriptionWorkerPresence: Equatable, Sendable {
+    case present
+    case absent
+    case unknown
+}
+
+public enum StagedTranscriptionCandidateResolution: Equatable, Sendable {
+    case available(VerifiedTranscriptionCandidate)
+    case unavailable
+    case integrityMismatch
+}
+
 public enum SessionProcessingFailureReason: String, Error, Equatable, Sendable {
     case sourceUnavailable
     case jobPersistenceFailed
@@ -318,6 +369,8 @@ public struct SessionProcessingJob: Equatable, Sendable {
     public let profileID: String
     public let createdAt: UTCInstant
     public let state: SessionProcessingJobState
+    public let cancellationAuthorityID: TranscriptionCancellationAuthorityID?
+    public let cancellationRequestedAt: UTCInstant?
     public let candidateArtifactSHA256: String?
     public let failure: SessionProcessingFailureReason?
 
@@ -328,6 +381,8 @@ public struct SessionProcessingJob: Equatable, Sendable {
         profileID: String,
         createdAt: UTCInstant,
         state: SessionProcessingJobState,
+        cancellationAuthorityID: TranscriptionCancellationAuthorityID,
+        cancellationRequestedAt: UTCInstant? = nil,
         candidateArtifactSHA256: String? = nil,
         failure: SessionProcessingFailureReason? = nil
     ) {
@@ -337,6 +392,8 @@ public struct SessionProcessingJob: Equatable, Sendable {
         self.profileID = profileID
         self.createdAt = createdAt
         self.state = state
+        self.cancellationAuthorityID = cancellationAuthorityID
+        self.cancellationRequestedAt = cancellationRequestedAt
         self.candidateArtifactSHA256 = candidateArtifactSHA256
         self.failure = failure
     }
@@ -346,7 +403,22 @@ public struct SessionProcessingJob: Equatable, Sendable {
         candidateArtifactSHA256: String? = nil,
         failure: SessionProcessingFailureReason? = nil
     ) -> SessionProcessingJob {
-        SessionProcessingJob(
+        if let cancellationAuthorityID {
+            return SessionProcessingJob(
+                jobID: jobID,
+                sessionID: sessionID,
+                revisionID: revisionID,
+                profileID: profileID,
+                createdAt: createdAt,
+                state: state,
+                cancellationAuthorityID: cancellationAuthorityID,
+                cancellationRequestedAt: cancellationRequestedAt,
+                candidateArtifactSHA256:
+                    candidateArtifactSHA256 ?? self.candidateArtifactSHA256,
+                failure: failure
+            )
+        }
+        return .legacyV1(
             jobID: jobID,
             sessionID: sessionID,
             revisionID: revisionID,
@@ -357,6 +429,75 @@ public struct SessionProcessingJob: Equatable, Sendable {
                 candidateArtifactSHA256 ?? self.candidateArtifactSHA256,
             failure: failure
         )
+    }
+
+    func requestingCancellation(at instant: UTCInstant) -> SessionProcessingJob? {
+        guard let cancellationAuthorityID else { return nil }
+        return SessionProcessingJob(
+            jobID: jobID,
+            sessionID: sessionID,
+            revisionID: revisionID,
+            profileID: profileID,
+            createdAt: createdAt,
+            state: state,
+            cancellationAuthorityID: cancellationAuthorityID,
+            cancellationRequestedAt: instant,
+            candidateArtifactSHA256: candidateArtifactSHA256,
+            failure: failure
+        )
+    }
+
+    public var executionReference: TranscriptionExecutionReference {
+        TranscriptionExecutionReference(
+            jobID: jobID,
+            cancellationAuthorityID: cancellationAuthorityID
+        )
+    }
+
+    /// Explicit reader-only construction for immutable schema-v1 Jobs. New
+    /// processing work must always use the authority-requiring initializer.
+    public static func legacyV1(
+        jobID: TranscriptionJobID,
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID,
+        profileID: String,
+        createdAt: UTCInstant,
+        state: SessionProcessingJobState,
+        candidateArtifactSHA256: String? = nil,
+        failure: SessionProcessingFailureReason? = nil
+    ) -> SessionProcessingJob {
+        SessionProcessingJob(
+            legacyJobID: jobID,
+            sessionID: sessionID,
+            revisionID: revisionID,
+            profileID: profileID,
+            createdAt: createdAt,
+            state: state,
+            candidateArtifactSHA256: candidateArtifactSHA256,
+            failure: failure
+        )
+    }
+
+    private init(
+        legacyJobID jobID: TranscriptionJobID,
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID,
+        profileID: String,
+        createdAt: UTCInstant,
+        state: SessionProcessingJobState,
+        candidateArtifactSHA256: String?,
+        failure: SessionProcessingFailureReason?
+    ) {
+        self.jobID = jobID
+        self.sessionID = sessionID
+        self.revisionID = revisionID
+        self.profileID = profileID
+        self.createdAt = createdAt
+        self.state = state
+        cancellationAuthorityID = nil
+        cancellationRequestedAt = nil
+        self.candidateArtifactSHA256 = candidateArtifactSHA256
+        self.failure = failure
     }
 }
 
@@ -370,13 +511,65 @@ public struct SessionProcessingReadySnapshot: Equatable, Sendable {
     }
 }
 
+/// Honest user-visible phase for one admitted offline worker run. Model loading
+/// and transcription are intentionally distinct because only the latter can
+/// expose measurable window progress.
+public enum SessionProcessingActivePhase: String, Equatable, Sendable {
+    case preparing
+    case loadingModel
+    case transcribing
+}
+
+/// One accepted worker-window observation. ETA remains explicitly approximate
+/// and is not clamped: a slower later window may truthfully increase it.
+public struct SessionProcessingProgress: Equatable, Sendable {
+    public let completedWindows: UInt32
+    public let totalWindows: UInt32
+    public let approximateETASeconds: UInt32?
+
+    public init(
+        completedWindows: UInt32,
+        totalWindows: UInt32,
+        approximateETASeconds: UInt32?
+    ) {
+        self.completedWindows = completedWindows
+        self.totalWindows = totalWindows
+        self.approximateETASeconds = approximateETASeconds
+    }
+}
+
 public struct SessionProcessingActiveSnapshot: Equatable, Sendable {
     public let source: SessionTranscriptionSource
     public let job: SessionProcessingJob
+    public let phase: SessionProcessingActivePhase
+    public let progress: SessionProcessingProgress?
 
-    public init(source: SessionTranscriptionSource, job: SessionProcessingJob) {
+    public init(
+        source: SessionTranscriptionSource,
+        job: SessionProcessingJob,
+        phase: SessionProcessingActivePhase = .preparing,
+        progress: SessionProcessingProgress? = nil
+    ) {
         self.source = source
         self.job = job
+        self.phase = phase
+        self.progress = progress
+    }
+}
+
+public struct SessionProcessingRecoverableSnapshot: Equatable, Sendable {
+    public let source: SessionTranscriptionSource
+    public let job: SessionProcessingJob
+    public let actions: [SessionProcessingRecoveryAction]
+
+    public init(
+        source: SessionTranscriptionSource,
+        job: SessionProcessingJob,
+        actions: [SessionProcessingRecoveryAction]
+    ) {
+        self.source = source
+        self.job = job
+        self.actions = actions
     }
 }
 
@@ -416,10 +609,14 @@ public enum SessionProcessingFeatureState: Equatable, Sendable {
     case unavailable(SessionProcessingUnavailableSnapshot)
     case ready(SessionProcessingReadySnapshot)
     case preparing(SessionProcessingReadySnapshot, SessionProcessingRecoveryAction)
+    case queued(SessionProcessingRecoverableSnapshot)
     case running(SessionProcessingActiveSnapshot)
+    case cancelling(SessionProcessingActiveSnapshot)
     case validating(SessionProcessingActiveSnapshot)
     case completed(SessionProcessingCompletedSnapshot)
     case failed(SessionProcessingFailedSnapshot)
+    case cancelled(SessionProcessingRecoverableSnapshot)
+    case interrupted(SessionProcessingRecoverableSnapshot)
     /// Issue #16 owns deterministic reconciliation of these nonterminal jobs.
     /// Issue #15 only exposes the durable seam without inventing a transition.
     case recoveryRequired(SessionProcessingJob)
@@ -429,6 +626,7 @@ public enum SessionProcessingCommand: Equatable, Sendable {
     case selectSession(SessionProcessingSelection)
     case clearSelection
     case start
+    case cancel
     case prepare
     case reinstall
     case retry
@@ -441,6 +639,7 @@ public struct TranscriptionRequest: Equatable, Sendable {
     public let audioCapabilityID: SessionTranscriptionAudioCapabilityID
     public let selection: SessionProcessingSelection
     public let jobID: TranscriptionJobID
+    public let execution: TranscriptionExecutionReference
     public let revisionID: TranscriptRevisionID
     public let createdAt: UTCInstant
     public let profileID: String
@@ -459,7 +658,8 @@ public struct TranscriptionRequest: Equatable, Sendable {
         createdAt: UTCInstant,
         profile: QualifiedTranscriptionProfile,
         runtimeCapability: VerifiedTranscriptionRuntime,
-        modelCapability: VerifiedTranscriptionModel
+        modelCapability: VerifiedTranscriptionModel,
+        cancellationAuthorityID: TranscriptionCancellationAuthorityID
     ) {
         self.profile = profile
         self.runtimeCapability = runtimeCapability
@@ -467,6 +667,10 @@ public struct TranscriptionRequest: Equatable, Sendable {
         audioCapabilityID = source.audioCapabilityID
         selection = source.selection
         self.jobID = jobID
+        execution = TranscriptionExecutionReference(
+            jobID: jobID,
+            cancellationAuthorityID: cancellationAuthorityID
+        )
         self.revisionID = revisionID
         self.createdAt = createdAt
         profileID = profile.profileID
@@ -515,4 +719,5 @@ public enum TranscriptionEngineFailure: String, Error, Equatable, Sendable {
     case candidateIntegrityMismatch
     case launchFailed
     case workerFailed
+    case cancelled
 }

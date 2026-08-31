@@ -451,6 +451,14 @@ public struct RandomSessionProcessingIDGenerator: SessionProcessingIDGenerator {
         try! TranscriptRevisionID(Self.identifier(prefix: "trv-", instant: instant))
     }
 
+    public func generateCancellationAuthorityID(
+        at instant: UTCInstant
+    ) async -> TranscriptionCancellationAuthorityID {
+        try! TranscriptionCancellationAuthorityID(
+            Self.identifier(prefix: "cancel-", instant: instant)
+        )
+    }
+
     private static func identifier(prefix: String, instant: UTCInstant) -> String {
         let compact = instant.rawValue
             .replacingOccurrences(of: "-", with: "")

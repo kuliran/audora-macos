@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.relaunch-validating-resumes-idempotently",
+  "initialState": {
+    "status": "validating",
+    "jobId": "job-20260830T120500000Z-5GHJ"
+  },
+  "commands": [
+    { "kind": "selectSession" }
+  ],
+  "dependencyTrace": [
+    { "port": "source", "effect": "load", "outcome": "available" },
+    { "port": "jobs", "effect": "latest", "outcome": "validating" },
+    { "port": "engine", "effect": "recoverCandidate", "outcome": "confined-complete-hash-valid" },
+    { "port": "runtime", "effect": "resolve", "outcome": "qualified" },
+    { "port": "acousticEvidence", "effect": "resolve", "outcome": "qualified" },
+    { "port": "publisher", "effect": "publish", "outcome": "published-or-identical" },
+    { "port": "jobs", "effect": "transitionCompleted", "outcome": "written" }
+  ],
+  "expectedState": {
+    "status": "completed",
+    "selectedRevisionId": "trv-20260830T120600000Z-6JKM"
+  },
+  "expectedEffects": [
+    { "kind": "stagedCandidateRevalidated" },
+    { "kind": "publishedThroughValidator" },
+    { "kind": "publicationIdempotent" },
+    { "kind": "selectedAtomically" }
+  ]
+}

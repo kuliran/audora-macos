@@ -12,24 +12,28 @@ public struct ConfinedTranscriptionWorkerLimits: Equatable, Sendable {
     public let standardErrorBytes: UInt64
     public let candidateArtifactBytes: UInt64
     public let maximumProtocolMessages: Int
+    public let terminationGraceMilliseconds: UInt32
 
     public init(
         standardOutputBytes: UInt64,
         standardErrorBytes: UInt64,
         candidateArtifactBytes: UInt64,
-        maximumProtocolMessages: Int
+        maximumProtocolMessages: Int,
+        terminationGraceMilliseconds: UInt32
     ) {
         self.standardOutputBytes = standardOutputBytes
         self.standardErrorBytes = standardErrorBytes
         self.candidateArtifactBytes = candidateArtifactBytes
         self.maximumProtocolMessages = maximumProtocolMessages
+        self.terminationGraceMilliseconds = terminationGraceMilliseconds
     }
 
     public static let versionOne = ConfinedTranscriptionWorkerLimits(
         standardOutputBytes: 1_048_576,
         standardErrorBytes: 65_536,
         candidateArtifactBytes: UInt64(TranscriptRevisionLimits.maximumSerializedBytes),
-        maximumProtocolMessages: 100_004
+        maximumProtocolMessages: 100_004,
+        terminationGraceMilliseconds: 5_000
     )
 }
 
@@ -59,15 +63,18 @@ public struct ConfinedTranscriptionWorkerInvocation: Sendable {
 /// Private inputs granted only after the adapter accepts the exact startup
 /// hello. A worker that fails qualification never receives either authority.
 public struct ConfinedTranscriptionWorkerExecution: Sendable {
+    public let execution: TranscriptionExecutionReference
     public let requestJSON: Data
     public let canonicalAudio: ConfinedCanonicalAudioInput
     public let model: any ConfinedTranscriptionModelExecutionCapability
 
     public init(
+        execution: TranscriptionExecutionReference,
         requestJSON: Data,
         canonicalAudio: ConfinedCanonicalAudioInput,
         model: any ConfinedTranscriptionModelExecutionCapability
     ) {
+        self.execution = execution
         self.requestJSON = requestJSON
         self.canonicalAudio = canonicalAudio
         self.model = model
@@ -88,7 +95,8 @@ public struct ConfinedTranscriptionWorkerArtifact: Equatable, Sendable {
 }
 
 public struct ConfinedTranscriptionWorkerResult: Equatable, Sendable {
-    /// Protocol lines after the already-validated startup hello.
+    /// Exact bounded audit copy of the lines already delivered live through
+    /// `execute`. The adapter rejects a missing, reordered, or changed copy.
     public let stdoutLines: [Data]
     public let candidateArtifact: ConfinedTranscriptionWorkerArtifact?
     public let exitStatus: Int32
@@ -104,10 +112,39 @@ public struct ConfinedTranscriptionWorkerResult: Equatable, Sendable {
     }
 }
 
+public struct ConfinedTranscriptionCandidateRecoveryRequest: Equatable, Sendable {
+    public let execution: TranscriptionExecutionReference
+    public let expectedArtifactSHA256: String
+    public let maximumArtifactBytes: UInt64
+
+    public init(
+        execution: TranscriptionExecutionReference,
+        expectedArtifactSHA256: String,
+        maximumArtifactBytes: UInt64
+    ) {
+        self.execution = execution
+        self.expectedArtifactSHA256 = expectedArtifactSHA256
+        self.maximumArtifactBytes = maximumArtifactBytes
+    }
+}
+
+public enum ConfinedStagedCandidateResolution: Equatable, Sendable {
+    case available(ConfinedTranscriptionWorkerArtifact)
+    case unavailable
+    case integrityMismatch
+}
+
 public protocol ConfinedTranscriptionWorkerSession: Sendable {
     func execute(
-        _ execution: ConfinedTranscriptionWorkerExecution
+        _ execution: ConfinedTranscriptionWorkerExecution,
+        receiveStandardOutputLine: @escaping @Sendable (Data) async throws -> Void
     ) async throws -> ConfinedTranscriptionWorkerResult
+
+    /// Requests the worker's cooperative stop first, then applies the bounded
+    /// termination grace and synchronously reaps before reporting success.
+    func cancelAndReap(
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome
 
     /// Idempotently terminates and reaps a started worker that has not entered
     /// execution, and releases any remaining session resources after execute.
@@ -131,6 +168,34 @@ public protocol ConfinedTranscriptionWorkerHost: Sendable {
     func start(
         _ invocation: ConfinedTranscriptionWorkerInvocation
     ) async throws -> ConfinedTranscriptionWorkerStarted
+
+    func cancelAndReap(
+        _ execution: TranscriptionExecutionReference,
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome
+
+    func workerPresence(
+        for execution: TranscriptionExecutionReference
+    ) async -> TranscriptionWorkerPresence
+
+    func recoverCandidate(
+        _ request: ConfinedTranscriptionCandidateRecoveryRequest
+    ) async -> ConfinedStagedCandidateResolution
+}
+
+public extension ConfinedTranscriptionWorkerHost {
+    func cancelAndReap(
+        _ execution: TranscriptionExecutionReference,
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome { .unableToConfirm }
+
+    func workerPresence(
+        for execution: TranscriptionExecutionReference
+    ) async -> TranscriptionWorkerPresence { .unknown }
+
+    func recoverCandidate(
+        _ request: ConfinedTranscriptionCandidateRecoveryRequest
+    ) async -> ConfinedStagedCandidateResolution { .unavailable }
 }
 
 /// Production fail-closed host used while the reviewed Crisper qualification
@@ -153,7 +218,7 @@ public struct QualificationBlockedTranscriptionWorkerHost:
 /// each request carries the exact profile already admitted by qualification.
 /// The worker result stays untrusted after shape/hash verification and can only
 /// become canonical through TranscriptCandidateValidator/RevisionPublisher.
-public struct ConfinedJSONLTranscriptionEngine: TranscriptionEngine, Sendable {
+public actor ConfinedJSONLTranscriptionEngine: TranscriptionEngine {
     private static let maximumLineBytes = 65_536
 
     private let host: any ConfinedTranscriptionWorkerHost
@@ -161,6 +226,22 @@ public struct ConfinedJSONLTranscriptionEngine: TranscriptionEngine, Sendable {
     private let runtime: any ConfinedTranscriptionRuntimeResolving
     private let model: any ConfinedTranscriptionModelResolving
     private let limits: ConfinedTranscriptionWorkerLimits
+    private struct ActiveExecution {
+        var session: (any ConfinedTranscriptionWorkerSession)?
+        var hostStartInFlight = false
+        var cancellationRequested = false
+        var cancellationStarted = false
+        var outputBytes: UInt64 = 0
+        var protocolLines: [Data] = []
+        var terminal: TerminalMessage?
+        var waiters: [CheckedContinuation<TranscriptionCancellationOutcome, Never>] = []
+    }
+
+    private var activeExecutions: [TranscriptionExecutionReference: ActiveExecution] = [:]
+    private var completedCancellations: [
+        TranscriptionExecutionReference: TranscriptionCancellationOutcome
+    ] = [:]
+    private var completedCancellationOrder: [TranscriptionExecutionReference] = []
 
     public init(
         host: any ConfinedTranscriptionWorkerHost,
@@ -181,18 +262,34 @@ public struct ConfinedJSONLTranscriptionEngine: TranscriptionEngine, Sendable {
         events: @escaping @Sendable (TranscriptionEvent) async -> Void
     ) async throws -> VerifiedTranscriptionCandidate {
         guard requestMatchesProfile(request), request.sourceIDs.count == 1,
+              request.execution.jobID == request.jobID,
+              request.execution.cancellationAuthorityID != nil,
               limits.maximumProtocolMessages >= 2,
               limits.standardOutputBytes >= 2,
               limits.candidateArtifactBytes > 0
         else {
             throw TranscriptionEngineFailure.profileMismatch
         }
+        let execution = request.execution
+        guard begin(execution) else {
+            throw TranscriptionEngineFailure.cancelled
+        }
         guard let runtimeInput = await runtime.resolveRuntime(
             request.runtimeCapability,
             profile: request.profile
         ) else {
+            if cancellationWasRequested(execution) {
+                finishCancellation(execution, outcome: .alreadyAbsent)
+                throw TranscriptionEngineFailure.cancelled
+            }
+            finishNormally(execution)
             throw TranscriptionEngineFailure.candidateUnavailable
         }
+        if cancellationWasRequested(execution) {
+            finishCancellation(execution, outcome: .alreadyAbsent)
+            throw TranscriptionEngineFailure.cancelled
+        }
+        markHostStartInFlight(execution)
         let started: ConfinedTranscriptionWorkerStarted
         do {
             started = try await host.start(
@@ -204,9 +301,36 @@ public struct ConfinedJSONLTranscriptionEngine: TranscriptionEngine, Sendable {
                 )
             )
         } catch let failure as TranscriptionEngineFailure {
+            if cancellationWasRequested(execution) {
+                let outcome = await host.cancelAndReap(
+                    execution,
+                    graceMilliseconds: limits.terminationGraceMilliseconds
+                )
+                finishCancellation(execution, outcome: outcome)
+                throw TranscriptionEngineFailure.cancelled
+            }
+            finishNormally(execution)
             throw failure
         } catch {
+            if cancellationWasRequested(execution) {
+                let outcome = await host.cancelAndReap(
+                    execution,
+                    graceMilliseconds: limits.terminationGraceMilliseconds
+                )
+                finishCancellation(execution, outcome: outcome)
+                throw TranscriptionEngineFailure.cancelled
+            }
+            finishNormally(execution)
             throw TranscriptionEngineFailure.launchFailed
+        }
+        attach(started.session, to: execution)
+        if cancellationWasRequested(execution) {
+            let outcome = await started.session.cancelAndReap(
+                graceMilliseconds: limits.terminationGraceMilliseconds
+            )
+            await started.session.close()
+            finishCancellation(execution, outcome: outcome)
+            throw TranscriptionEngineFailure.cancelled
         }
         let helloBytes: UInt64
         do {
@@ -214,8 +338,14 @@ public struct ConfinedJSONLTranscriptionEngine: TranscriptionEngine, Sendable {
                 started.helloLine,
                 profile: request.profile
             )
+            beginProtocol(afterHelloBytes: helloBytes, for: execution)
         } catch {
             await started.session.close()
+            if cancellationWasRequested(execution) {
+                finishCancellation(execution, outcome: .reaped)
+                throw TranscriptionEngineFailure.cancelled
+            }
+            finishNormally(execution)
             throw error
         }
         guard let modelInput = await model.resolveModel(
@@ -227,42 +357,272 @@ public struct ConfinedJSONLTranscriptionEngine: TranscriptionEngine, Sendable {
             fingerprint: request.audioFingerprint
         ) else {
             await started.session.close()
+            if cancellationWasRequested(execution) {
+                finishCancellation(execution, outcome: .reaped)
+                throw TranscriptionEngineFailure.cancelled
+            }
+            finishNormally(execution)
             throw TranscriptionEngineFailure.candidateUnavailable
+        }
+        if cancellationWasRequested(execution) {
+            let outcome = await started.session.cancelAndReap(
+                graceMilliseconds: limits.terminationGraceMilliseconds
+            )
+            await started.session.close()
+            finishCancellation(execution, outcome: outcome)
+            throw TranscriptionEngineFailure.cancelled
         }
         let requestJSON: Data
         do {
             requestJSON = try makeRequestJSON(request)
         } catch {
             await started.session.close()
+            if cancellationWasRequested(execution) {
+                finishCancellation(execution, outcome: .reaped)
+                throw TranscriptionEngineFailure.cancelled
+            }
+            finishNormally(execution)
             throw error
         }
         let result: ConfinedTranscriptionWorkerResult
         do {
             result = try await started.session.execute(
                 ConfinedTranscriptionWorkerExecution(
+                    execution: execution,
                     requestJSON: requestJSON,
                     canonicalAudio: canonicalAudio,
                     model: modelInput
-                )
+                ),
+                receiveStandardOutputLine: { [weak self] line in
+                    guard let self else {
+                        throw TranscriptionEngineFailure.cancelled
+                    }
+                    try await self.acceptProtocolLine(
+                        line,
+                        request: request,
+                        execution: execution,
+                        events: events
+                    )
+                }
             )
         } catch let failure as TranscriptionEngineFailure {
             await started.session.close()
+            if cancellationWasRequested(execution) {
+                finishCancellation(execution, outcome: .reaped)
+                throw TranscriptionEngineFailure.cancelled
+            }
+            finishNormally(execution)
             throw failure
         } catch {
             await started.session.close()
+            if cancellationWasRequested(execution) {
+                finishCancellation(execution, outcome: .reaped)
+                throw TranscriptionEngineFailure.cancelled
+            }
+            finishNormally(execution)
             throw TranscriptionEngineFailure.launchFailed
         }
         await started.session.close()
-        return try await parse(
-            result,
-            request: request,
-            initialOutputBytes: helloBytes,
-            events: events
+        markWorkerReaped(execution)
+        if cancellationWasRequested(execution) {
+            finishCancellation(execution, outcome: .reaped)
+            throw TranscriptionEngineFailure.cancelled
+        }
+        do {
+            let candidate = try finalize(
+                result,
+                execution: execution
+            )
+            guard !cancellationWasRequested(execution) else {
+                finishCancellation(execution, outcome: .alreadyAbsent)
+                throw TranscriptionEngineFailure.cancelled
+            }
+            finishNormally(execution)
+            return candidate
+        } catch {
+            if cancellationWasRequested(execution) {
+                finishCancellation(execution, outcome: .alreadyAbsent)
+                throw TranscriptionEngineFailure.cancelled
+            }
+            finishNormally(execution)
+            throw error
+        }
+    }
+
+    public func cancel(
+        _ execution: TranscriptionExecutionReference
+    ) async -> TranscriptionCancellationOutcome {
+        if let completed = completedCancellations[execution] { return completed }
+        guard var active = activeExecutions[execution] else {
+            let outcome = await host.cancelAndReap(
+                execution,
+                graceMilliseconds: limits.terminationGraceMilliseconds
+            )
+            rememberCancellation(execution, outcome: outcome)
+            return outcome
+        }
+
+        if !active.cancellationRequested {
+            active.cancellationRequested = true
+        }
+        if active.session == nil, !active.hostStartInFlight {
+            activeExecutions[execution] = active
+            finishCancellation(execution, outcome: .alreadyAbsent)
+            return .alreadyAbsent
+        }
+
+        return await withCheckedContinuation { continuation in
+            active.waiters.append(continuation)
+            let session = active.session
+            let shouldStartCancellation = session != nil && !active.cancellationStarted
+            if shouldStartCancellation { active.cancellationStarted = true }
+            activeExecutions[execution] = active
+            if shouldStartCancellation, let session {
+                Task {
+                    let outcome = await session.cancelAndReap(
+                        graceMilliseconds: self.limits.terminationGraceMilliseconds
+                    )
+                    self.finishCancellation(execution, outcome: outcome)
+                }
+            }
+        }
+    }
+
+    public func workerPresence(
+        for execution: TranscriptionExecutionReference
+    ) async -> TranscriptionWorkerPresence {
+        if activeExecutions[execution] != nil { return .present }
+        if let completed = completedCancellations[execution],
+           completed == .reaped || completed == .alreadyAbsent
+        {
+            return .absent
+        }
+        return await host.workerPresence(for: execution)
+    }
+
+    public func recoverCandidate(
+        for job: SessionProcessingJob
+    ) async -> StagedTranscriptionCandidateResolution {
+        guard job.state == .validating,
+              let expectedHash = job.candidateArtifactSHA256,
+              AudioArtifactFingerprint.isSHA256(expectedHash)
+        else { return .integrityMismatch }
+        let recovery = ConfinedTranscriptionCandidateRecoveryRequest(
+            execution: job.executionReference,
+            expectedArtifactSHA256: expectedHash,
+            maximumArtifactBytes: limits.candidateArtifactBytes
         )
+        switch await host.recoverCandidate(recovery) {
+        case .unavailable:
+            return .unavailable
+        case .integrityMismatch:
+            return .integrityMismatch
+        case let .available(artifact):
+            guard artifact.relativePath == "result.json",
+                  !artifact.data.isEmpty,
+                  UInt64(artifact.data.count) <= limits.candidateArtifactBytes,
+                  sha256(artifact.data) == expectedHash
+            else { return .integrityMismatch }
+            do {
+                let candidate = try decodeCandidate(
+                    artifact.data,
+                    artifactSHA256: expectedHash
+                )
+                guard candidate.jobID == job.jobID.rawValue,
+                      candidate.sessionID == job.sessionID.rawValue,
+                      candidate.revisionID == job.revisionID.rawValue,
+                      candidate.candidateArtifactSHA256 == expectedHash,
+                      let fingerprint = try? AudioFingerprint(sha256: expectedHash)
+                else { return .integrityMismatch }
+                return .available(
+                    VerifiedTranscriptionCandidate(
+                        candidate: candidate,
+                        artifactFingerprint: fingerprint
+                    )
+                )
+            } catch {
+                return .integrityMismatch
+            }
+        }
     }
 }
 
 private extension ConfinedJSONLTranscriptionEngine {
+    func begin(_ execution: TranscriptionExecutionReference) -> Bool {
+        guard activeExecutions[execution] == nil,
+              completedCancellations[execution] == nil
+        else { return false }
+        activeExecutions[execution] = ActiveExecution()
+        return true
+    }
+
+    func markHostStartInFlight(_ execution: TranscriptionExecutionReference) {
+        guard var active = activeExecutions[execution] else { return }
+        active.hostStartInFlight = true
+        activeExecutions[execution] = active
+    }
+
+    func attach(
+        _ session: any ConfinedTranscriptionWorkerSession,
+        to execution: TranscriptionExecutionReference
+    ) {
+        guard var active = activeExecutions[execution] else { return }
+        active.hostStartInFlight = false
+        active.session = session
+        activeExecutions[execution] = active
+    }
+
+    func markWorkerReaped(_ execution: TranscriptionExecutionReference) {
+        guard var active = activeExecutions[execution] else { return }
+        active.session = nil
+        active.hostStartInFlight = false
+        activeExecutions[execution] = active
+    }
+
+    func beginProtocol(
+        afterHelloBytes bytes: UInt64,
+        for execution: TranscriptionExecutionReference
+    ) {
+        guard var active = activeExecutions[execution] else { return }
+        active.outputBytes = bytes
+        activeExecutions[execution] = active
+    }
+
+    func cancellationWasRequested(
+        _ execution: TranscriptionExecutionReference
+    ) -> Bool {
+        activeExecutions[execution]?.cancellationRequested == true ||
+            completedCancellations[execution] != nil
+    }
+
+    func finishNormally(_ execution: TranscriptionExecutionReference) {
+        guard activeExecutions[execution]?.cancellationRequested != true else { return }
+        activeExecutions.removeValue(forKey: execution)
+    }
+
+    func finishCancellation(
+        _ execution: TranscriptionExecutionReference,
+        outcome: TranscriptionCancellationOutcome
+    ) {
+        if completedCancellations[execution] != nil { return }
+        let waiters = activeExecutions.removeValue(forKey: execution)?.waiters ?? []
+        rememberCancellation(execution, outcome: outcome)
+        for waiter in waiters { waiter.resume(returning: outcome) }
+    }
+
+    func rememberCancellation(
+        _ execution: TranscriptionExecutionReference,
+        outcome: TranscriptionCancellationOutcome
+    ) {
+        guard completedCancellations[execution] == nil else { return }
+        completedCancellations[execution] = outcome
+        completedCancellationOrder.append(execution)
+        while completedCancellationOrder.count > 256 {
+            let expired = completedCancellationOrder.removeFirst()
+            completedCancellations.removeValue(forKey: expired)
+        }
+    }
+
     struct CandidateReference {
         let result: String
         let sha256: String
@@ -330,101 +690,121 @@ private extension ConfinedJSONLTranscriptionEngine {
         }
     }
 
-    func parse(
-        _ result: ConfinedTranscriptionWorkerResult,
+    func acceptProtocolLine(
+        _ line: Data,
         request: TranscriptionRequest,
-        initialOutputBytes: UInt64,
+        execution: TranscriptionExecutionReference,
         events: @escaping @Sendable (TranscriptionEvent) async -> Void
-    ) async throws -> VerifiedTranscriptionCandidate {
-        guard !result.stdoutLines.isEmpty,
-              result.stdoutLines.count < limits.maximumProtocolMessages
-        else { throw TranscriptionEngineFailure.malformedProtocol }
-        var totalBytes = initialOutputBytes
-        for line in result.stdoutLines {
-            let lineBytes = try protocolLineBytes(line)
-            let (nextTotal, totalOverflow) = totalBytes.addingReportingOverflow(lineBytes)
-            guard !totalOverflow,
-                  nextTotal <= limits.standardOutputBytes
-            else { throw TranscriptionEngineFailure.outputLimitExceeded }
-            totalBytes = nextTotal
+    ) async throws {
+        guard var active = activeExecutions[execution] else {
+            throw completedCancellations[execution] == nil
+                ? TranscriptionEngineFailure.malformedProtocol
+                : TranscriptionEngineFailure.cancelled
+        }
+        guard !active.cancellationRequested else {
+            throw TranscriptionEngineFailure.cancelled
+        }
+        let lineBytes = try protocolLineBytes(line)
+        let (nextBytes, overflow) = active.outputBytes.addingReportingOverflow(lineBytes)
+        let nextCount = active.protocolLines.count + 1
+        guard !overflow, nextBytes <= limits.standardOutputBytes,
+              nextCount < limits.maximumProtocolMessages
+        else { throw TranscriptionEngineFailure.outputLimitExceeded }
+        guard active.terminal == nil else {
+            throw TranscriptionEngineFailure.malformedProtocol
         }
 
-        var terminal: TerminalMessage?
-        for line in result.stdoutLines {
-            guard terminal == nil else {
-                throw TranscriptionEngineFailure.malformedProtocol
-            }
-            let message = try dictionary(line)
-            guard let type = message["type"] as? String else {
-                throw TranscriptionEngineFailure.malformedProtocol
-            }
-            switch type {
-            case "phase":
-                try exactKeys(message, ["v", "type", "jobId", "phase"])
-                try validateEnvelope(message, request: request)
-                guard let raw = message["phase"] as? String,
-                      let phase = TranscriptionPhase(rawValue: raw)
-                else { throw TranscriptionEngineFailure.malformedProtocol }
-                await events(.phase(phase))
-            case "progress":
-                let keys = Set(message.keys)
-                let required: Set<String> = [
-                    "v", "type", "jobId", "completed", "total", "unit",
-                ]
-                guard required.isSubset(of: keys),
-                      keys.isSubset(of: required.union(["etaSeconds"]))
-                else { throw TranscriptionEngineFailure.malformedProtocol }
-                try validateEnvelope(message, request: request)
-                guard message["unit"] as? String == "window",
-                      let completed = uint32(message["completed"]),
-                      let total = uint32(message["total"]),
-                      total > 0, completed <= total
-                else { throw TranscriptionEngineFailure.malformedProtocol }
-                let eta: UInt32?
-                if let rawETA = message["etaSeconds"] {
-                    guard !(rawETA is NSNull), let parsed = uint32(rawETA) else {
-                        throw TranscriptionEngineFailure.malformedProtocol
-                    }
-                    eta = parsed
-                } else {
-                    eta = nil
-                }
-                await events(.progress(completed: completed, total: total, etaSeconds: eta))
-            case "candidate_ready":
-                try exactKeys(
-                    message,
-                    ["v", "type", "jobId", "result", "sha256"]
-                )
-                try validateEnvelope(message, request: request)
-                guard let relativePath = message["result"] as? String,
-                      relativePath == "result.json",
-                      let hash = message["sha256"] as? String,
-                      AudioArtifactFingerprint.isSHA256(hash)
-                else { throw TranscriptionEngineFailure.malformedProtocol }
-                terminal = .candidate(
-                    CandidateReference(result: relativePath, sha256: hash)
-                )
-            case "failed":
-                try exactKeys(message, ["v", "type", "jobId", "error"])
-                try validateEnvelope(message, request: request)
-                guard let error = message["error"] as? [String: Any] else {
+        let message = try dictionary(line)
+        guard let type = message["type"] as? String else {
+            throw TranscriptionEngineFailure.malformedProtocol
+        }
+        var event: TranscriptionEvent?
+        switch type {
+        case "phase":
+            try exactKeys(message, ["v", "type", "jobId", "phase"])
+            try validateEnvelope(message, request: request)
+            guard let raw = message["phase"] as? String,
+                  let phase = TranscriptionPhase(rawValue: raw)
+            else { throw TranscriptionEngineFailure.malformedProtocol }
+            event = .phase(phase)
+        case "progress":
+            let keys = Set(message.keys)
+            let required: Set<String> = [
+                "v", "type", "jobId", "completed", "total", "unit",
+            ]
+            guard required.isSubset(of: keys),
+                  keys.isSubset(of: required.union(["etaSeconds"]))
+            else { throw TranscriptionEngineFailure.malformedProtocol }
+            try validateEnvelope(message, request: request)
+            guard message["unit"] as? String == "window",
+                  let completed = uint32(message["completed"]),
+                  let total = uint32(message["total"]),
+                  total > 0, completed <= total
+            else { throw TranscriptionEngineFailure.malformedProtocol }
+            let eta: UInt32?
+            if let rawETA = message["etaSeconds"] {
+                guard !(rawETA is NSNull), let parsed = uint32(rawETA) else {
                     throw TranscriptionEngineFailure.malformedProtocol
                 }
-                try exactKeys(error, ["code", "retryable"])
-                guard let code = error["code"] as? String,
-                      (1...64).contains(code.utf8.count),
-                      error["retryable"] is Bool
-                else { throw TranscriptionEngineFailure.malformedProtocol }
-                terminal = .failed
-            default:
+                eta = parsed
+            } else {
+                eta = nil
+            }
+            event = .progress(completed: completed, total: total, etaSeconds: eta)
+        case "candidate_ready":
+            try exactKeys(
+                message,
+                ["v", "type", "jobId", "result", "sha256"]
+            )
+            try validateEnvelope(message, request: request)
+            guard let relativePath = message["result"] as? String,
+                  relativePath == "result.json",
+                  let hash = message["sha256"] as? String,
+                  AudioArtifactFingerprint.isSHA256(hash)
+            else { throw TranscriptionEngineFailure.malformedProtocol }
+            active.terminal = .candidate(
+                CandidateReference(result: relativePath, sha256: hash)
+            )
+        case "failed":
+            try exactKeys(message, ["v", "type", "jobId", "error"])
+            try validateEnvelope(message, request: request)
+            guard let error = message["error"] as? [String: Any] else {
                 throw TranscriptionEngineFailure.malformedProtocol
             }
+            try exactKeys(error, ["code", "retryable"])
+            guard let code = error["code"] as? String,
+                  (1...64).contains(code.utf8.count),
+                  error["retryable"] is Bool
+            else { throw TranscriptionEngineFailure.malformedProtocol }
+            active.terminal = .failed
+        default:
+            throw TranscriptionEngineFailure.malformedProtocol
         }
+        active.outputBytes = nextBytes
+        active.protocolLines.append(line)
+        activeExecutions[execution] = active
+        if let event {
+            await events(event)
+            guard !cancellationWasRequested(execution) else {
+                throw TranscriptionEngineFailure.cancelled
+            }
+        }
+    }
 
+    func finalize(
+        _ result: ConfinedTranscriptionWorkerResult,
+        execution: TranscriptionExecutionReference
+    ) throws -> VerifiedTranscriptionCandidate {
+        guard let active = activeExecutions[execution],
+              !active.cancellationRequested
+        else { throw TranscriptionEngineFailure.cancelled }
+        guard !active.protocolLines.isEmpty,
+              active.protocolLines == result.stdoutLines
+        else { throw TranscriptionEngineFailure.malformedProtocol }
         guard result.exitStatus == 0 else {
             throw TranscriptionEngineFailure.workerFailed
         }
-        guard let terminal else {
+        guard let terminal = active.terminal else {
             throw TranscriptionEngineFailure.candidateUnavailable
         }
         guard case let .candidate(candidateReference) = terminal else {

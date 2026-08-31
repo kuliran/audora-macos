@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.relaunch-running-absent-interrupted",
+  "initialState": {
+    "status": "running",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "phase": "transcribing",
+    "actions": ["cancel"]
+  },
+  "commands": [
+    { "kind": "selectSession" }
+  ],
+  "dependencyTrace": [
+    { "port": "source", "effect": "load", "outcome": "available" },
+    { "port": "jobs", "effect": "latest", "outcome": "running" },
+    { "port": "engine", "effect": "workerPresence", "outcome": "absent" },
+    { "port": "jobs", "effect": "transitionInterrupted", "outcome": "written" }
+  ],
+  "expectedState": {
+    "status": "interrupted",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "actions": ["retry"]
+  },
+  "expectedEffects": [
+    { "kind": "processAbsenceConfirmed" },
+    { "kind": "sessionRetained" },
+    { "kind": "noEngineLaunch" },
+    { "kind": "noPublication" }
+  ]
+}

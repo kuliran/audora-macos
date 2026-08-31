@@ -54,6 +54,95 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
         }
     }
 
+    func testCancellationIntentAndAuthorityAreDurableAndCannotBeCleared() async throws {
+        try await withLibrary { root, libraryID in
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let queued = try makeJob(state: .queued)
+            _ = await repository.create(queued)
+            let running = queued.replacing(state: .running)
+            _ = await repository.transition(running, from: .queued)
+            let requestedAt = try UTCInstant("2026-08-30T12:05:30.000Z")
+            let requested = running.replacing(
+                state: .running,
+                cancellationRequestedAt: requestedAt
+            )
+
+            let requestResult = await repository.transition(requested, from: .running)
+            let requestedReload = await repository.latest(
+                for: try makeSelection(libraryID: libraryID)
+            )
+            XCTAssertEqual(requestResult, .written(requested))
+            XCTAssertEqual(requestedReload, .loaded(requested))
+
+            let data = try Data(
+                contentsOf: root
+                    .appendingPathComponent("jobs")
+                    .appendingPathComponent(queued.jobID.rawValue)
+                    .appendingPathComponent("job.json")
+            )
+            let object = try XCTUnwrap(
+                try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            )
+            XCTAssertEqual(object["schemaVersion"] as? Int, 2)
+            XCTAssertEqual(
+                object["cancellationAuthorityId"] as? String,
+                queued.cancellationAuthorityID?.rawValue
+            )
+            XCTAssertEqual(object["cancellationRequestedAt"] as? String, requestedAt.rawValue)
+
+            let cleared = requested.replacing(
+                state: .cancelled,
+                cancellationRequestedAt: nil
+            )
+            let clearResult = await repository.transition(cleared, from: .running)
+            let afterClear = await repository.latest(
+                for: try makeSelection(libraryID: libraryID)
+            )
+            XCTAssertEqual(clearResult, .failed)
+            XCTAssertEqual(afterClear, .loaded(requested))
+        }
+    }
+
+    func testLegacyV1JobReopensWithoutInventingCancellationAuthority() async throws {
+        try await withLibrary { root, libraryID in
+            let jobID = "job-20260830T120500000Z-5GHJ"
+            let jobDirectory = root.appendingPathComponent("jobs")
+                .appendingPathComponent(jobID)
+            try FileManager.default.createDirectory(
+                at: jobDirectory,
+                withIntermediateDirectories: false
+            )
+            let legacy: [String: Any] = [
+                "schemaVersion": 1,
+                "jobId": jobID,
+                "sessionId": "ses-20260830T120100000Z-2CDE",
+                "revisionId": "trv-20260830T120600000Z-6JKM",
+                "profileId": "synthetic-qualified-v1",
+                "createdAt": "2026-08-30T12:05:00.000Z",
+                "state": "running",
+            ]
+            try JSONSerialization.data(
+                withJSONObject: legacy,
+                options: [.sortedKeys]
+            ).write(to: jobDirectory.appendingPathComponent("job.json"))
+
+            let result = await PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            ).latest(for: try makeSelection(libraryID: libraryID))
+
+            guard case let .loaded(job) = result else {
+                return XCTFail("expected exact legacy v1 reopen")
+            }
+            XCTAssertEqual(job.state, .running)
+            XCTAssertNil(job.cancellationAuthorityID)
+            XCTAssertNil(job.cancellationRequestedAt)
+        }
+    }
+
     func testUnexpectedPartialOrSymlinkFailsClosed() async throws {
         try await withLibrary { root, libraryID in
             let jobs = root.appendingPathComponent("jobs", isDirectory: true)
@@ -145,7 +234,10 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
             revisionID: try TranscriptRevisionID("trv-20260830T120600000Z-6JKM"),
             profileID: "synthetic-qualified-v1",
             createdAt: try UTCInstant("2026-08-30T12:05:00.000Z"),
-            state: state
+            state: state,
+            cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                "cancel-job-repository"
+            )
         )
     }
 }
@@ -153,7 +245,8 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
 private extension SessionProcessingJob {
     func replacing(
         state: SessionProcessingJobState,
-        failure: SessionProcessingFailureReason? = nil
+        failure: SessionProcessingFailureReason? = nil,
+        cancellationRequestedAt: UTCInstant? = nil
     ) -> SessionProcessingJob {
         SessionProcessingJob(
             jobID: jobID,
@@ -162,6 +255,8 @@ private extension SessionProcessingJob {
             profileID: profileID,
             createdAt: createdAt,
             state: state,
+            cancellationAuthorityID: cancellationAuthorityID!,
+            cancellationRequestedAt: cancellationRequestedAt,
             candidateArtifactSHA256: candidateArtifactSHA256,
             failure: failure
         )
