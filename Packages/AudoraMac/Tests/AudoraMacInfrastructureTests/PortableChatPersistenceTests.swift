@@ -271,6 +271,146 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testDelayedOlderDraftSaveCannotOverwriteNewerFlushedVersion() throws {
+        try withCreatedChat { root, scope, original in
+            let persistence = PortableChatPersistence()
+            let first = try original.chat.draft.edited(
+                text: "older autosave",
+                at: UTCInstant("2026-08-30T12:00:01.000Z")
+            )
+            let second = try first.edited(
+                text: "newer synchronous flush",
+                at: UTCInstant("2026-08-30T12:00:02.000Z")
+            )
+
+            let flushed = try persistence.saveDraft(
+                SaveChatDraftMutation(
+                    library: scope,
+                    chatID: original.chat.id,
+                    replacement: second
+                ),
+                at: root
+            )
+            guard case let .committed(current) = flushed else {
+                return XCTFail("newer Draft did not commit")
+            }
+
+            let delayed = try persistence.saveDraft(
+                SaveChatDraftMutation(
+                    library: scope,
+                    chatID: original.chat.id,
+                    replacement: first
+                ),
+                at: root
+            )
+
+            XCTAssertEqual(delayed, .stale(current))
+            XCTAssertEqual(
+                try persistence.load(original.chat.id, at: root, in: scope),
+                .readWrite(current)
+            )
+            XCTAssertEqual(current.chat.draft, second)
+        }
+    }
+
+    func testPendingUserTurnReopensAndDiscardUnlocksSameDraftWithoutMessages() throws {
+        try withCreatedChat { root, scope, original in
+            let persistence = PortableChatPersistence()
+            let draft = try original.chat.draft.edited(
+                text: "Keep this exact populated Draft.",
+                at: UTCInstant("2026-08-30T12:00:01.000Z")
+            )
+            guard case let .committed(saved) = try persistence.saveDraft(
+                SaveChatDraftMutation(
+                    library: scope,
+                    chatID: original.chat.id,
+                    replacement: draft
+                ),
+                at: root
+            ) else {
+                return XCTFail("Draft did not save")
+            }
+            let pending = PendingUserTurn(
+                id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+                draftID: draft.draftID,
+                draftVersion: draft.version,
+                responsePositionID: try ChatResponsePositionID(
+                    "rsp-20260830T120001000Z-6PQR"
+                )
+            )
+
+            guard case let .committed(locked) = try persistence.lockPendingUserTurn(
+                LockPendingUserTurnMutation(
+                    library: scope,
+                    chatID: saved.chat.id,
+                    pendingUserTurn: pending
+                ),
+                at: root
+            ) else {
+                return XCTFail("Pending User Turn did not lock")
+            }
+            XCTAssertEqual(locked.pendingUserTurn, pending)
+            XCTAssertEqual(locked.chat.messageIDs, [])
+            XCTAssertEqual(
+                try persistence.load(saved.chat.id, at: root, in: scope),
+                .readWrite(locked)
+            )
+
+            let discard = DiscardPendingUserTurnMutation(
+                library: scope,
+                chatID: saved.chat.id,
+                pendingUserTurn: pending
+            )
+            guard case let .committed(unlocked) = try persistence.discardPendingUserTurn(
+                discard,
+                at: root
+            ) else {
+                return XCTFail("Pending User Turn did not discard")
+            }
+            XCTAssertNil(unlocked.pendingUserTurn)
+            XCTAssertEqual(unlocked.chat.draft, draft)
+            XCTAssertEqual(unlocked.chat.messageIDs, [])
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: chatRoot(root, saved.chat.id)
+                        .appendingPathComponent("pending-user-turn.json").path
+                )
+            )
+            XCTAssertEqual(
+                try persistence.load(saved.chat.id, at: root, in: scope),
+                .readWrite(unlocked)
+            )
+            XCTAssertEqual(
+                try persistence.discardPendingUserTurn(discard, at: root),
+                .committed(unlocked)
+            )
+        }
+    }
+
+    func testReopenReconcilesExactDraftAndPendingPartialsLeftByACrashedProcess() throws {
+        try withCreatedChat { root, scope, aggregate in
+            let chat = chatRoot(root, aggregate.chat.id)
+            let draftPartial = chat.appendingPathComponent(
+                ".chat.json.11111111-1111-1111-1111-111111111111.partial"
+            )
+            let pendingPartial = chat.appendingPathComponent(
+                ".pending-user-turn.json.22222222-2222-2222-2222-222222222222.partial"
+            )
+            try Data("crashed Draft write".utf8).write(to: draftPartial)
+            try Data("crashed Pending User Turn write".utf8).write(to: pendingPartial)
+
+            let reopened = try PortableChatPersistence().load(
+                aggregate.chat.id,
+                at: root,
+                in: scope
+            )
+
+            XCTAssertEqual(reopened, .readWrite(aggregate))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: draftPartial.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: pendingPartial.path))
+        }
+    }
+
     func testLibraryIdentityChangingBeforeRenameInstallLeavesOriginalChatUnchanged() throws {
         try withCreatedChat { root, scope, original in
             let manifestURL = chatRoot(root, original.chat.id).appendingPathComponent("chat.json")

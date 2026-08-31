@@ -21,6 +21,9 @@ public enum ChatCommand: Equatable, Sendable {
     )
     case setFilter(ChatCommandContext, ChatFilterQuery)
     case open(ChatCommandContext, ChatID)
+    case editDraft(ChatCommandContext, text: String)
+    case sendDraft(ChatCommandContext)
+    case discardPendingUserTurn(ChatCommandContext, PendingUserTurnID)
 }
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
@@ -30,4 +33,5 @@ public protocol ChatFeature: Sendable {
 
     func currentState(in scope: LibraryScope) async -> ChatFeatureState?
     func send(_ command: ChatCommand) async
+    func flushForOrderlyTermination() async -> Bool
 }

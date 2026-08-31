@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "draft-send-discard",
+  "libraryId": "lib-20260830T100000000Z-1ABC",
+  "initialChats": [{
+    "chatId": "cht-20260830T120000000Z-2ABC",
+    "draftId": "drf-20260830T120000000Z-3DEF",
+    "memoryId": "mem-20260830T120000000Z-4GHJ",
+    "manifestRevision": 0,
+    "title": "New Chat",
+    "createdAt": "2026-08-30T12:00:00.000Z",
+    "updatedAt": "2026-08-30T12:00:00.000Z",
+    "creationKind": "newChat",
+    "attachments": [],
+    "draftText": "",
+    "draftVersion": 0,
+    "messageIds": [],
+    "memoryGeneralNotes": "",
+    "memorySessionSummaries": []
+  }],
+  "commands": [
+    {"kind": "open", "chatId": "cht-20260830T120000000Z-2ABC"},
+    {"kind": "editDraft", "text": "Keep this exact synthetic Draft."},
+    {"kind": "sendDraft"},
+    {
+      "kind": "discardPendingUserTurn",
+      "pendingUserTurnId": "ptu-20260830T120002000Z-5KMN"
+    }
+  ],
+  "dependencyTrace": [
+    {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded"},
+    {"port": "chatStore", "effect": "load", "outcome": "loaded"},
+    {"port": "clock", "effect": "now", "outcome": "2026-08-30T12:01:00.000Z"},
+    {"port": "chatStore", "effect": "saveDraft", "outcome": "committed"},
+    {"port": "clock", "effect": "now", "outcome": "2026-08-30T12:02:00.000Z"},
+    {
+      "port": "pendingUserTurnIdGenerator",
+      "effect": "next",
+      "outcome": "ptu-20260830T120002000Z-5KMN"
+    },
+    {
+      "port": "chatResponsePositionIdGenerator",
+      "effect": "next",
+      "outcome": "rsp-20260830T120002000Z-6PQR"
+    },
+    {
+      "port": "chatStore",
+      "effect": "lockPendingUserTurn",
+      "outcome": "committed"
+    },
+    {
+      "port": "chatStore",
+      "effect": "discardPendingUserTurn",
+      "outcome": "committed"
+    }
+  ],
+  "expectedState": {
+    "allChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "visibleChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "selectedChatId": "cht-20260830T120000000Z-2ABC",
+    "selectedTitle": "New Chat",
+    "selectedRevision": 1,
+    "selectedDraftText": "Keep this exact synthetic Draft.",
+    "selectedDraftVersion": 1,
+    "composerStatus": "editable"
+  },
+  "expectedProviderCalls": 0,
+  "expectedInvocationCalls": 0,
+  "expectedAdmissionCalls": 0
+}

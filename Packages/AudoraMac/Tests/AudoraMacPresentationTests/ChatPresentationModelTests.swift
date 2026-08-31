@@ -70,6 +70,13 @@ final class ChatPresentationModelTests: XCTestCase {
         await waitForCommandCount(3, in: feature)
         model.rename(chatID, title: "Focused Practice", expectedRevision: 4)
         await waitForCommandCount(4, in: feature)
+        model.updateDraft("A synthetic coaching Draft")
+        await waitForCommandCount(5, in: feature)
+        model.sendDraft()
+        await waitForCommandCount(6, in: feature)
+        let pendingID = try PendingUserTurnID("ptu-20260830T120000000Z-5KMN")
+        model.discardPendingUserTurn(pendingID)
+        await waitForCommandCount(7, in: feature)
 
         let commands = await feature.commands
         XCTAssertEqual(
@@ -79,8 +86,62 @@ final class ChatPresentationModelTests: XCTestCase {
                 .createDevelopmentChat(context),
                 .open(context, chatID),
                 .rename(context, chatID, title: "Focused Practice", expectedRevision: 4),
+                .editDraft(context, text: "A synthetic coaching Draft"),
+                .sendDraft(context),
+                .discardPendingUserTurn(context, pendingID),
             ]
         )
+    }
+
+    func testSharedDispatcherOrdersRapidDraftSendLibrarySwitchAndTermination() async throws {
+        let feature = SuspendedOrderedPresentationChatFeature()
+        let dispatcher = ChatCommandDispatcher(feature: feature)
+        let firstModel = ChatPresentationModel(dispatcher: dispatcher)
+        let firstScope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let secondScope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T121000000Z-3DEF")
+        )
+        await firstModel.start(in: firstScope)
+        let initialCommands = await feature.commands
+        let firstContext = try XCTUnwrap(startContexts(in: initialCommands).first)
+
+        firstModel.updateDraft("A")
+        await feature.waitUntilFirstEditIsSuspended()
+        firstModel.updateDraft("AB")
+        firstModel.sendDraft()
+        let secondModel = ChatPresentationModel(dispatcher: dispatcher)
+        let switchTask = Task { await secondModel.start(in: secondScope) }
+        while dispatcher.admittedCommandCount < 5 { await Task.yield() }
+        async let terminationAllowed: Bool = dispatcher.flushForOrderlyTermination()
+        await Task.yield()
+
+        let flushesWhileSuspended = await feature.flushCallCount
+        let commandsWhileSuspended = await feature.commands
+        XCTAssertEqual(flushesWhileSuspended, 0)
+        XCTAssertEqual(commandsWhileSuspended, [
+            .start(firstContext), .editDraft(firstContext, text: "A"),
+        ])
+
+        await feature.resumeFirstEdit()
+        await switchTask.value
+        let mayTerminate = await terminationAllowed
+        XCTAssertTrue(mayTerminate)
+
+        let commands = await feature.commands
+        let contexts = startContexts(in: commands)
+        let secondContext = try XCTUnwrap(contexts.last)
+        XCTAssertEqual(secondContext.libraryScope, secondScope)
+        XCTAssertEqual(commands, [
+            .start(firstContext),
+            .editDraft(firstContext, text: "A"),
+            .editDraft(firstContext, text: "AB"),
+            .sendDraft(firstContext),
+            .start(secondContext),
+        ])
+        let finalFlushCount = await feature.flushCallCount
+        XCTAssertEqual(finalFlushCount, 1)
     }
 
     func testRenameEditorTaskIdentityChangesBetweenRevisionZeroChats() throws {
@@ -358,6 +419,8 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
         activeContext?.libraryScope == scope ? state : nil
     }
 
+    func flushForOrderlyTermination() async -> Bool { true }
+
     func send(_ command: ChatCommand) async {
         commands.append(command)
         switch command {
@@ -377,7 +440,8 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
                 )
             }
             filterIsComplete = true
-        case .createDevelopmentChat, .rename, .open:
+        case .createDevelopmentChat, .rename, .open, .editDraft, .sendDraft,
+             .discardPendingUserTurn:
             break
         }
     }
@@ -415,12 +479,63 @@ private actor RecordingPresentationChatFeature: ChatFeature {
         activeScope == scope ? state : nil
     }
 
+    func flushForOrderlyTermination() async -> Bool { true }
+
     func send(_ command: ChatCommand) {
         commands.append(command)
         if case let .start(context) = command {
             activeScope = context.libraryScope
             streams.publishStart()
         }
+    }
+}
+
+private actor SuspendedOrderedPresentationChatFeature: ChatFeature {
+    nonisolated var states: AsyncStream<ChatFeatureState> {
+        AsyncStream { continuation in
+            continuation.yield(Self.readyState)
+            continuation.finish()
+        }
+    }
+
+    private static let readyState = ChatFeatureState(
+        catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
+    )
+    private var activeScope: LibraryScope?
+    private var firstEditContinuation: CheckedContinuation<Void, Never>?
+    private var didSuspendFirstEdit = false
+    private(set) var commands: [ChatCommand] = []
+    private(set) var flushCallCount = 0
+
+    var currentState: ChatFeatureState { Self.readyState }
+
+    func currentState(in scope: LibraryScope) -> ChatFeatureState? {
+        activeScope == scope ? Self.readyState : nil
+    }
+
+    func send(_ command: ChatCommand) async {
+        commands.append(command)
+        if case let .start(context) = command {
+            activeScope = context.libraryScope
+        }
+        if case .editDraft = command, !didSuspendFirstEdit {
+            didSuspendFirstEdit = true
+            await withCheckedContinuation { firstEditContinuation = $0 }
+        }
+    }
+
+    func flushForOrderlyTermination() async -> Bool {
+        flushCallCount += 1
+        return true
+    }
+
+    func waitUntilFirstEditIsSuspended() async {
+        while firstEditContinuation == nil { await Task.yield() }
+    }
+
+    func resumeFirstEdit() {
+        firstEditContinuation?.resume()
+        firstEditContinuation = nil
     }
 }
 
@@ -469,6 +584,8 @@ private actor SuspendedInitialPresentationChatFeature: ChatFeature {
     func currentState(in scope: LibraryScope) -> ChatFeatureState? {
         activeScope == scope ? latestState : nil
     }
+
+    func flushForOrderlyTermination() async -> Bool { true }
 
     func send(_ command: ChatCommand) {
         commands.append(command)
@@ -562,6 +679,8 @@ private actor SuspendedLibrarySwitchPresentationChatFeature: ChatFeature {
         activeScope == scope ? state : nil
     }
 
+    func flushForOrderlyTermination() async -> Bool { true }
+
     func send(_ command: ChatCommand) async {
         commands.append(command)
         guard case let .start(context) = command else { return }
@@ -647,6 +766,8 @@ private actor LateSubscriptionPresentationChatFeature: ChatFeature {
     func currentState(in scope: LibraryScope) -> ChatFeatureState? {
         activeScope == scope ? finalState : nil
     }
+
+    func flushForOrderlyTermination() async -> Bool { true }
 
     func send(_ command: ChatCommand) {
         commands.append(command)

@@ -1,0 +1,51 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/PendingUserTurn.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "pendingUserTurnId": {
+            "$ref": "#/$defs/PendingUserTurnId"
+        },
+        "draftId": {
+            "$ref": "#/$defs/ChatDraftId"
+        },
+        "draftVersion": {
+            "$ref": "#/$defs/NonnegativeWholeNumber"
+        },
+        "responsePositionId": {
+            "$ref": "#/$defs/ChatResponsePositionId"
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "pendingUserTurnId",
+        "draftId",
+        "draftVersion",
+        "responsePositionId"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "$defs": {
+        "PendingUserTurnId": {
+            "type": "string",
+            "pattern": "^ptu-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ChatDraftId": {
+            "type": "string",
+            "pattern": "^drf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "ChatResponsePositionId": {
+            "type": "string",
+            "pattern": "^rsp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        }
+    }
+}

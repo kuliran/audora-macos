@@ -165,6 +165,15 @@
                     "$ref": "#/$defs/OpenDevelopmentChatScenarioCommand"
                 },
                 {
+                    "$ref": "#/$defs/EditDevelopmentChatDraftScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/SendDevelopmentChatDraftScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/DiscardPendingUserTurnScenarioCommand"
+                },
+                {
                     "$ref": "#/$defs/StartDevelopmentChatScenarioCommand"
                 }
             ]
@@ -196,6 +205,15 @@
                     "$ref": "#/$defs/ChatStoreRenameStaleEvent"
                 },
                 {
+                    "$ref": "#/$defs/ChatStoreDraftSavedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStorePendingUserTurnLockedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStorePendingUserTurnDiscardedEvent"
+                },
+                {
                     "$ref": "#/$defs/ProfileStatementGenerationReadEvent"
                 },
                 {
@@ -209,6 +227,12 @@
                 },
                 {
                     "$ref": "#/$defs/CoachMemoryIdGeneratedEvent"
+                },
+                {
+                    "$ref": "#/$defs/PendingUserTurnIdGeneratedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatResponsePositionIdGeneratedEvent"
                 }
             ]
         },
@@ -244,6 +268,21 @@
                 },
                 "selectedFrozenReason": {
                     "$ref": "#/$defs/DevelopmentChatScenarioFrozenReason"
+                },
+                "selectedDraftText": {
+                    "$ref": "#/$defs/ChatDraftText"
+                },
+                "selectedDraftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "composerStatus": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioComposerStatus"
+                },
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
                 },
                 "notice": {
                     "$ref": "#/$defs/DevelopmentChatScenarioNotice"
@@ -426,6 +465,59 @@
             "required": [
                 "kind",
                 "chatId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "EditDevelopmentChatDraftScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "editDraft"
+                },
+                "text": {
+                    "$ref": "#/$defs/ChatDraftText"
+                }
+            },
+            "required": [
+                "kind",
+                "text"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SendDevelopmentChatDraftScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "sendDraft"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "DiscardPendingUserTurnScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "discardPendingUserTurn"
+                },
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                }
+            },
+            "required": [
+                "kind",
+                "pendingUserTurnId"
             ],
             "unevaluatedProperties": {
                 "not": {}
@@ -675,6 +767,81 @@
                 "not": {}
             }
         },
+        "ChatStoreDraftSavedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "saveDraft"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "committed"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStorePendingUserTurnLockedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "lockPendingUserTurn"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "committed"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStorePendingUserTurnDiscardedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "discardPendingUserTurn"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "committed"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "ProfileStatementGenerationReadEvent": {
             "type": "object",
             "properties": {
@@ -795,6 +962,54 @@
                 "not": {}
             }
         },
+        "PendingUserTurnIdGeneratedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "pendingUserTurnIdGenerator"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "next"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatResponsePositionIdGeneratedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatResponsePositionIdGenerator"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "next"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "DevelopmentChatScenarioCatalogStatus": {
             "anyOf": [
                 {
@@ -834,6 +1049,26 @@
                     "const": "corrupt"
                 }
             ]
+        },
+        "DevelopmentChatScenarioComposerStatus": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "editable"
+                },
+                {
+                    "type": "string",
+                    "const": "locked"
+                }
+            ]
+        },
+        "PendingUserTurnId": {
+            "type": "string",
+            "pattern": "^ptu-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ChatResponsePositionId": {
+            "type": "string",
+            "pattern": "^rsp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
         },
         "DevelopmentChatScenarioNotice": {
             "anyOf": [
@@ -876,6 +1111,22 @@
                 {
                     "type": "string",
                     "const": "readOnlyLibrary"
+                },
+                {
+                    "type": "string",
+                    "const": "invalidDraft"
+                },
+                {
+                    "type": "string",
+                    "const": "draftSaveFailed"
+                },
+                {
+                    "type": "string",
+                    "const": "draftChanged"
+                },
+                {
+                    "type": "string",
+                    "const": "pendingUserTurnFailed"
                 }
             ]
         },

@@ -6,15 +6,17 @@ public struct LibraryRootView: View {
     @StateObject private var model: LibraryPresentationModel
     @StateObject private var audioImportModel: AudioImportPresentationModel
     @StateObject private var recordingModel: RecordingPresentationModel
+    @ObservedObject private var chatDispatcher: ChatCommandDispatcher
     @Environment(\.openWindow) private var openWindow
-    private let chatFeature: any ChatFeature
+    private let librarySelectionDispatcher: LibrarySelectionCommandDispatcher
     private let windowCoordinator: MainWindowCoordinator
 
     public init(
         feature: any LibraryFeature,
         audioImportFeature: any AudioImportFeature,
         recordingFeature: any RecordingFeature,
-        chatFeature: any ChatFeature,
+        chatDispatcher: ChatCommandDispatcher,
+        librarySelectionDispatcher: LibrarySelectionCommandDispatcher,
         windowCoordinator: MainWindowCoordinator
     ) {
         _model = StateObject(wrappedValue: LibraryPresentationModel(feature: feature))
@@ -24,7 +26,8 @@ public struct LibraryRootView: View {
         _recordingModel = StateObject(
             wrappedValue: RecordingPresentationModel(feature: recordingFeature)
         )
-        self.chatFeature = chatFeature
+        _chatDispatcher = ObservedObject(wrappedValue: chatDispatcher)
+        self.librarySelectionDispatcher = librarySelectionDispatcher
         self.windowCoordinator = windowCoordinator
     }
 
@@ -69,7 +72,7 @@ public struct LibraryRootView: View {
                     .disabled(!interactionAvailability.canUseRecordingControls)
                 Divider()
                 ChatRootView(
-                    feature: chatFeature,
+                    dispatcher: chatDispatcher,
                     scope: LibraryScope(libraryID: library.libraryID)
                 )
                 .id(library.libraryID.rawValue)
@@ -98,7 +101,10 @@ public struct LibraryRootView: View {
         }
         .frame(minWidth: 720, minHeight: 520)
         .padding(32)
-        .disabled(model.snapshot?.activity != nil)
+        .disabled(
+            model.snapshot?.activity != nil ||
+                chatDispatcher.isLibraryNavigationPending
+        )
         .task {
             windowCoordinator.registerReopenAction {
                 openWindow(id: "library")
@@ -132,9 +138,13 @@ public struct LibraryRootView: View {
         HStack {
             Button("Reveal Library") { model.send(.reveal) }
                 .disabled(!interactionAvailability.canRevealLibrary)
-            Button("Choose Another…") { model.send(.chooseExisting) }
+            Button("Choose Another…") {
+                librarySelectionDispatcher.enqueue(.chooseExisting)
+            }
                 .disabled(!interactionAvailability.canMutateLibrarySelection)
-            Button("Close Library") { model.send(.close) }
+            Button("Close Library") {
+                librarySelectionDispatcher.enqueue(.close)
+            }
                 .disabled(!interactionAvailability.canMutateLibrarySelection)
         }
     }

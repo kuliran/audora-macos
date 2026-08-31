@@ -20,6 +20,10 @@ enum ChatNoticePresentation {
         case .chatFrozen: "That Chat is read-only or unavailable."
         case .catalogFailed: "Chats could not be loaded."
         case .readOnlyLibrary: "Chats cannot be changed in this read-only Library."
+        case .invalidDraft: "Write a valid Draft before sending."
+        case .draftSaveFailed: "The Draft could not be saved. Try again before leaving."
+        case .draftChanged: "The Draft changed elsewhere. Its current text is shown."
+        case .pendingUserTurnFailed: "The pending Chat turn could not be changed."
         }
     }
 
@@ -30,11 +34,13 @@ enum ChatNoticePresentation {
 
 public struct ChatRootView: View {
     @StateObject private var model: ChatPresentationModel
+    @ObservedObject private var dispatcher: ChatCommandDispatcher
     @State private var renameTitle = ""
     private let scope: LibraryScope
 
-    public init(feature: any ChatFeature, scope: LibraryScope) {
-        _model = StateObject(wrappedValue: ChatPresentationModel(feature: feature))
+    public init(dispatcher: ChatCommandDispatcher, scope: LibraryScope) {
+        _model = StateObject(wrappedValue: ChatPresentationModel(dispatcher: dispatcher))
+        _dispatcher = ObservedObject(wrappedValue: dispatcher)
         self.scope = scope
     }
 
@@ -167,11 +173,17 @@ public struct ChatRootView: View {
                 Text("No Sessions attached")
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("Chat attachments: No Sessions attached")
-                ContentUnavailableView(
-                    "Start a reflection",
-                    systemImage: "text.bubble",
-                    description: Text("Write a thought when you are ready. Nothing is sent automatically.")
-                )
+                GroupBox("Successful history") {
+                    if aggregate.chat.messageIDs.isEmpty {
+                        Text("No completed Coach turns yet.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Text("\(aggregate.chat.messageIDs.count) completed messages")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                composerView
                 Spacer()
             }
             .task(
@@ -186,19 +198,100 @@ public struct ChatRootView: View {
     }
 
     @ViewBuilder
+    private var composerView: some View {
+        switch model.snapshot.composer {
+        case let .editable(draft, isDirty):
+            GroupBox("Draft") {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextEditor(
+                        text: Binding(
+                            get: {
+                                guard case let .editable(current, _) = model.snapshot.composer,
+                                      current.draftID == draft.draftID
+                                else {
+                                    return draft.text
+                                }
+                                return current.text
+                            },
+                            set: { model.updateDraft($0) }
+                        )
+                    )
+                    .font(.body)
+                    .frame(minHeight: 140)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(.separator)
+                    }
+                    .accessibilityLabel("Chat Draft")
+                    .disabled(!allowsNavigationAndMutation)
+
+                    HStack {
+                        Text(isDirty ? "Unsaved changes" : "Saved")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel(
+                                isDirty ? "Chat Draft has unsaved changes" : "Chat Draft is saved"
+                            )
+                        Spacer()
+                        Button("Send") { model.sendDraft() }
+                            .keyboardShortcut(.return, modifiers: [.command])
+                            .accessibilityLabel("Send Chat Draft")
+                            .disabled(
+                                !allowsNavigationAndMutation ||
+                                    !draft.text.unicodeScalars.contains {
+                                        !$0.properties.isWhitespace
+                                    }
+                            )
+                    }
+                }
+            }
+        case let .locked(draft, pending):
+            GroupBox("Pending User Turn") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ScrollView {
+                        Text(draft.text)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(minHeight: 100)
+                    .accessibilityLabel("Locked Chat Draft")
+                    Text("This exact Draft is locked outside successful history.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Spacer()
+                        Button("Discard") {
+                            model.discardPendingUserTurn(pending.id)
+                        }
+                        .accessibilityLabel("Discard Pending User Turn")
+                        .disabled(!allowsNavigationAndMutation)
+                    }
+                }
+            }
+        case nil:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
     private var activityView: some View {
         switch model.snapshot.activity {
         case .creating:
             ProgressView("Creating Chat…")
         case .renaming:
             ProgressView("Renaming Chat…")
+        case .lockingDraft:
+            ProgressView("Preparing Draft…")
+        case .discardingPendingUserTurn:
+            ProgressView("Unlocking Draft…")
         case nil:
             EmptyView()
         }
     }
 
     private var allowsNavigationAndMutation: Bool {
-        ChatInteractionPolicy.allowsNavigationAndMutation(in: model.snapshot)
+        !dispatcher.isLibraryNavigationPending &&
+            ChatInteractionPolicy.allowsNavigationAndMutation(in: model.snapshot)
     }
 
 }

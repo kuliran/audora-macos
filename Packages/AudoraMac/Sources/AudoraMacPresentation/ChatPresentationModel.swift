@@ -10,13 +10,21 @@ public final class ChatPresentationModel: ObservableObject {
     @Published public var filterText = ""
 
     private let feature: any ChatFeature
+    private let dispatcher: ChatCommandDispatcher
     private var startedLibrary: LibraryID?
     private var commandContext: ChatCommandContext?
     private var projectedStateContext: ChatCommandContext?
     private var stateConsumer: Task<Void, Never>?
 
     public init(feature: any ChatFeature) {
+        let dispatcher = ChatCommandDispatcher(feature: feature)
         self.feature = feature
+        self.dispatcher = dispatcher
+    }
+
+    public init(dispatcher: ChatCommandDispatcher) {
+        feature = dispatcher.feature
+        self.dispatcher = dispatcher
     }
 
     public func start(in scope: LibraryScope) async {
@@ -51,7 +59,7 @@ public final class ChatPresentationModel: ObservableObject {
         stateConsumer = consumer
 
         await withTaskCancellationHandler {
-            await feature.send(.start(context))
+            await dispatcher.sendAndWait(.start(context))
             guard !Task.isCancelled else {
                 consumer.cancel()
                 return
@@ -109,8 +117,23 @@ public final class ChatPresentationModel: ObservableObject {
         )
     }
 
+    public func updateDraft(_ text: String) {
+        guard let context = commandContext else { return }
+        send(.editDraft(context, text: text))
+    }
+
+    public func sendDraft() {
+        guard let context = commandContext else { return }
+        send(.sendDraft(context))
+    }
+
+    public func discardPendingUserTurn(_ pendingUserTurnID: PendingUserTurnID) {
+        guard let context = commandContext else { return }
+        send(.discardPendingUserTurn(context, pendingUserTurnID))
+    }
+
     private func send(_ command: ChatCommand) {
-        Task { await feature.send(command) }
+        dispatcher.enqueue(command)
     }
 
     public func updateFilter(_ value: String) {

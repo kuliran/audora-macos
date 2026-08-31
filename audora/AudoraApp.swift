@@ -13,7 +13,8 @@ struct AudoraApp: App {
     private let feature: DefaultLibraryFeature
     private let audioImportFeature: DefaultAudioImportFeature
     private let recordingFeature: DefaultRecordingFeature
-    private let chatFeature: DefaultChatFeature
+    private let chatDispatcher: ChatCommandDispatcher
+    private let librarySelectionDispatcher: LibrarySelectionCommandDispatcher
     private let windowCoordinator: MainWindowCoordinator
 
     init() {
@@ -63,7 +64,14 @@ struct AudoraApp: App {
             clock: SystemLibraryClock(),
             chatIDGenerator: chatIdentityGenerator,
             draftIDGenerator: chatIdentityGenerator,
-            memoryIDGenerator: chatIdentityGenerator
+            memoryIDGenerator: chatIdentityGenerator,
+            pendingUserTurnIDGenerator: chatIdentityGenerator,
+            responsePositionIDGenerator: chatIdentityGenerator
+        )
+        let chatDispatcher = ChatCommandDispatcher(feature: chatFeature)
+        let librarySelectionDispatcher = LibrarySelectionCommandDispatcher(
+            feature: feature,
+            chatDispatcher: chatDispatcher
         )
         let windowCoordinator = MainWindowCoordinator(
             access: AppKitMainWindowAccess()
@@ -72,10 +80,13 @@ struct AudoraApp: App {
         self.feature = feature
         self.audioImportFeature = audioImportFeature
         self.recordingFeature = recordingFeature
-        self.chatFeature = chatFeature
+        self.chatDispatcher = chatDispatcher
+        self.librarySelectionDispatcher = librarySelectionDispatcher
         self.windowCoordinator = windowCoordinator
         appDelegate.configure(
             feature: feature,
+            chatDispatcher: chatDispatcher,
+            librarySelectionDispatcher: librarySelectionDispatcher,
             workspace: workspace,
             windowCoordinator: windowCoordinator
         )
@@ -87,7 +98,8 @@ struct AudoraApp: App {
                 feature: feature,
                 audioImportFeature: audioImportFeature,
                 recordingFeature: recordingFeature,
-                chatFeature: chatFeature,
+                chatDispatcher: chatDispatcher,
+                librarySelectionDispatcher: librarySelectionDispatcher,
                 windowCoordinator: windowCoordinator
             )
         }
@@ -101,21 +113,28 @@ struct AudoraApp: App {
 @MainActor
 final class AudoraAppDelegate: NSObject, NSApplicationDelegate {
     private var feature: DefaultLibraryFeature?
+    private var chatDispatcher: ChatCommandDispatcher?
+    private var librarySelectionDispatcher: LibrarySelectionCommandDispatcher?
     private var workspace: PortableLibraryWorkspace?
     private var windowCoordinator: MainWindowCoordinator?
+    private var terminationTask: Task<Void, Never>?
 
     func configure(
         feature: DefaultLibraryFeature,
+        chatDispatcher: ChatCommandDispatcher,
+        librarySelectionDispatcher: LibrarySelectionCommandDispatcher,
         workspace: PortableLibraryWorkspace,
         windowCoordinator: MainWindowCoordinator
     ) {
         self.feature = feature
+        self.chatDispatcher = chatDispatcher
+        self.librarySelectionDispatcher = librarySelectionDispatcher
         self.workspace = workspace
         self.windowCoordinator = windowCoordinator
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard let feature, let workspace else { return }
+        guard let feature, let librarySelectionDispatcher, let workspace else { return }
         guard urls.count == 1, let url = urls.first else {
             Task {
                 await feature.send(.rejectMultipleExternalOpenRequests)
@@ -130,7 +149,7 @@ final class AudoraAppDelegate: NSObject, NSApplicationDelegate {
             // replayed or superseded, so revocation cannot invalidate a queued
             // token. The workspace consumes accepted tokens and bounds pending
             // capabilities to one; this final revoke covers every other exit.
-            await feature.send(.openExternal(token))
+            _ = await librarySelectionDispatcher.sendAndWait(.openExternal(token))
             await workspace.revokeExternalOpenRequest(token)
             windowCoordinator?.focusExistingMainWindow()
         }
@@ -142,5 +161,18 @@ final class AudoraAppDelegate: NSObject, NSApplicationDelegate {
     ) -> Bool {
         windowCoordinator?.focusExistingMainWindow()
         return true
+    }
+
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        guard let chatDispatcher else { return .terminateNow }
+        guard terminationTask == nil else { return .terminateLater }
+        terminationTask = Task { @MainActor [weak self] in
+            let draftIsDurable = await chatDispatcher.flushForOrderlyTermination()
+            self?.terminationTask = nil
+            sender.reply(toApplicationShouldTerminate: draftIsDurable)
+        }
+        return .terminateLater
     }
 }
