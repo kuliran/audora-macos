@@ -6,6 +6,235 @@ import Foundation
 import XCTest
 
 final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
+    func testReviewReadReturnsOneVerifiedAudioRevisionAndInventorySnapshot() async throws {
+        try await withRecordedSession { root, receipt in
+            let first = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121000000Z-4FGH"
+            )
+            let second = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121100000Z-5GHJ"
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                first,
+                expectedSelectedRevisionID: nil
+            )
+            _ = try await repository.publishAndSelect(
+                second,
+                expectedSelectedRevisionID: first.revisionID
+            )
+
+            let result = repository.loadReviewSynchronously(
+                for: ReviewSelection(
+                    scope: LibraryScope(libraryID: receipt.libraryID),
+                    sessionID: receipt.sessionID
+                )
+            )
+
+            guard case let .available(verified) = result else {
+                return XCTFail("expected synchronized Review snapshot")
+            }
+            XCTAssertEqual(
+                verified.revision.revisionIDs,
+                [first.revisionID, second.revisionID]
+            )
+            XCTAssertEqual(verified.revision.selectedRevision, second)
+            XCTAssertEqual(verified.durationMilliseconds, second.durationMilliseconds)
+            XCTAssertEqual(
+                verified.canonicalWAV,
+                try Data(
+                    contentsOf: root.appendingPathComponent(
+                        "sessions/\(receipt.sessionID.rawValue)/audio/audio.wav"
+                    )
+                )
+            )
+        }
+    }
+
+    func testReviewWorkspaceUsesOpaqueAudioAndMapsRevisionCAS() async throws {
+        try await withRecordedSession { root, receipt in
+            let first = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121000000Z-4FGH"
+            )
+            let second = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121100000Z-5GHJ"
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                first,
+                expectedSelectedRevisionID: nil
+            )
+            let scopes = StaticReviewScopeProvider(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            let workspace = PortableReviewWorkspace(scopes: scopes)
+            let selection = ReviewSelection(
+                scope: LibraryScope(libraryID: receipt.libraryID),
+                sessionID: receipt.sessionID
+            )
+
+            let loaded = await workspace.load(selection)
+            guard case let .available(snapshot) = loaded else {
+                return XCTFail("expected Review snapshot")
+            }
+            XCTAssertEqual(snapshot.selectedRevision, first)
+            let resolvedAudio = await workspace.resolveCanonicalAudio(
+                for: snapshot.audioSource
+            )
+            XCTAssertEqual(
+                resolvedAudio,
+                try Data(
+                    contentsOf: root.appendingPathComponent(
+                        "sessions/\(receipt.sessionID.rawValue)/audio/audio.wav"
+                    )
+                )
+            )
+
+            _ = try await repository.publishAndSelect(
+                second,
+                expectedSelectedRevisionID: first.revisionID
+            )
+            let stale = await workspace.selectRevision(
+                first.revisionID,
+                for: selection,
+                expectedSelectedRevisionID: first.revisionID
+            )
+            XCTAssertEqual(
+                stale,
+                .stale
+            )
+
+            let selected = await workspace.selectRevision(
+                first.revisionID,
+                for: selection,
+                expectedSelectedRevisionID: second.revisionID
+            )
+            guard case let .selected(reopened) = selected else {
+                return XCTFail("expected pointer-only selection")
+            }
+            XCTAssertEqual(reopened.selectedRevision, first)
+            XCTAssertEqual(reopened.audioCapabilityID, snapshot.audioCapabilityID)
+            XCTAssertEqual(reopened.revisionIDs, [first.revisionID, second.revisionID])
+        }
+    }
+
+    func testSelectingInventoriedRevisionIsPointerOnlyAndChatPinDoesNotFollow() async throws {
+        try await withRecordedSession { root, receipt in
+            let first = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121000000Z-4FGH"
+            )
+            let second = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121100000Z-5GHJ"
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                first,
+                expectedSelectedRevisionID: nil
+            )
+            _ = try await repository.publishAndSelect(
+                second,
+                expectedSelectedRevisionID: first.revisionID
+            )
+
+            let sessionRoot = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)"
+            )
+            let firstRoot = sessionRoot.appendingPathComponent(
+                "transcripts/\(first.revisionID.rawValue)"
+            )
+            let secondRoot = sessionRoot.appendingPathComponent(
+                "transcripts/\(second.revisionID.rawValue)"
+            )
+            let revisionBytesBefore = try [firstRoot, secondRoot].map {
+                (
+                    try Data(contentsOf: $0.appendingPathComponent("revision.json")),
+                    try Data(contentsOf: $0.appendingPathComponent("revision.sha256"))
+                )
+            }
+
+            let instant = try UTCInstant("2026-08-30T12:20:00.000Z")
+            let seed = try NewDevelopmentChatSeed(
+                library: LibraryScope(libraryID: receipt.libraryID),
+                chatID: ChatID("cht-20260830T122000000Z-6PQR"),
+                draftID: ChatDraftID("drf-20260830T122000000Z-7STV"),
+                memoryID: CoachMemoryID("mem-20260830T122000000Z-8WXY"),
+                instant: instant,
+                profileStatementGeneration: 0
+            )
+            let created = try PortableChatPersistence().create(seed, at: root)
+            let chatURL = root.appendingPathComponent(
+                "chats/\(created.chat.id.rawValue)/chat.json"
+            )
+            var chatObject = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: chatURL))
+                    as? [String: Any]
+            )
+            chatObject["creationKind"] = ChatCreationKind.sessionAnalysis.rawValue
+            chatObject["originAttachmentId"] = "review_pin"
+            chatObject["attachments"] = [[
+                "attachmentId": "review_pin",
+                "sessionId": receipt.sessionID.rawValue,
+                "transcriptRevisionId": first.revisionID.rawValue,
+            ]]
+            try JSONSerialization.data(withJSONObject: chatObject, options: [.sortedKeys])
+                .write(to: chatURL)
+            let pinnedBefore = try PortableChatPersistence().load(
+                created.chat.id,
+                at: root,
+                in: LibraryScope(libraryID: receipt.libraryID)
+            )
+
+            let reopened = try repository.selectExistingRevisionSynchronously(
+                first.revisionID,
+                sessionID: receipt.sessionID,
+                expectedSelectedRevisionID: second.revisionID
+            )
+
+            XCTAssertEqual(reopened.revisionIDs, [first.revisionID, second.revisionID])
+            XCTAssertEqual(reopened.selectedRevision, first)
+            let revisionBytesAfter = try [firstRoot, secondRoot].map {
+                (
+                    try Data(contentsOf: $0.appendingPathComponent("revision.json")),
+                    try Data(contentsOf: $0.appendingPathComponent("revision.sha256"))
+                )
+            }
+            XCTAssertEqual(revisionBytesAfter[0].0, revisionBytesBefore[0].0)
+            XCTAssertEqual(revisionBytesAfter[0].1, revisionBytesBefore[0].1)
+            XCTAssertEqual(revisionBytesAfter[1].0, revisionBytesBefore[1].0)
+            XCTAssertEqual(revisionBytesAfter[1].1, revisionBytesBefore[1].1)
+
+            let pinnedAfter = try PortableChatPersistence().load(
+                created.chat.id,
+                at: root,
+                in: LibraryScope(libraryID: receipt.libraryID)
+            )
+            XCTAssertEqual(pinnedAfter, pinnedBefore)
+            guard case let .readWrite(reopenedChat) = pinnedAfter else {
+                return XCTFail("expected pinned Chat to reopen")
+            }
+            XCTAssertEqual(
+                reopenedChat.chat.attachments.values.first?.transcriptRevisionID,
+                first.revisionID
+            )
+        }
+    }
+
     func testPublishesAndReopensImportedSessionWithoutChangingOwnedAudio() async throws {
         try await withImportedSession { root, libraryID, imported in
             let originalURL = root.appendingPathComponent(
@@ -1393,6 +1622,52 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
 
 private enum TranscriptRevisionPersistenceTestFault: Error {
     case injected
+}
+
+private actor StaticReviewScopeProvider: SessionProcessingLibraryScopeProviding {
+    private let active: ActiveLibraryProcessingScope
+
+    init(root: URL, libraryID: LibraryID) {
+        active = ActiveLibraryProcessingScope(
+            identity: SessionProcessingScopeIdentity(
+                libraryID: libraryID,
+                workspaceGeneration: 1,
+                rootIdentity: SessionProcessingRootIdentity.capture(root)!
+            ),
+            root: root,
+            lease: StaticReviewLease(url: root)
+        )
+    }
+
+    func acquireSessionProcessingScope(
+        for scope: LibraryScope
+    ) -> ActiveLibraryProcessingScope? {
+        scope.libraryID == active.identity.libraryID ? active : nil
+    }
+
+    func isCurrentSessionProcessingScope(
+        _ identity: SessionProcessingScopeIdentity
+    ) -> Bool {
+        identity == active.identity
+    }
+
+    func withCurrentSessionProcessingScope<Result: Sendable>(
+        _ identity: SessionProcessingScopeIdentity,
+        perform operation: @Sendable () throws -> Result
+    ) throws -> Result {
+        guard identity == active.identity else {
+            throw SessionProcessingScopeError.changed
+        }
+        return try operation()
+    }
+}
+
+private final class StaticReviewLease: LibraryAccessLease, @unchecked Sendable {
+    let url: URL
+
+    init(url: URL) { self.url = url }
+
+    func release() {}
 }
 
 private func withRecordedSession(

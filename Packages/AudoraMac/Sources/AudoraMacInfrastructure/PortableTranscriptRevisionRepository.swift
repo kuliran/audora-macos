@@ -31,6 +31,18 @@ struct PortableVerifiedSessionAudio: Sendable {
     let canonicalWAV: Data
 }
 
+enum PortableSessionReviewRead: Sendable {
+    case available(PortableVerifiedReviewSession)
+    case unavailable
+    case integrityMismatch
+}
+
+struct PortableVerifiedReviewSession: Sendable {
+    let revision: ReopenedTranscriptRevisionSnapshot
+    let durationMilliseconds: UInt64
+    let canonicalWAV: Data
+}
+
 /// The one persistence boundary that turns a validated Transcript Revision into
 /// selected portable Session state. Revision bytes are installed immutably before
 /// the Session manifest's logical compare-and-swap commit. All Audora Session
@@ -217,6 +229,98 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         }
     }
 
+    /// Switches only the selected-Revision pointer. The target must already be
+    /// present in the Session inventory and its immutable bundle is verified
+    /// before the manifest compare-and-swap commit.
+    func selectExistingRevisionSynchronously(
+        _ revisionID: TranscriptRevisionID,
+        sessionID: SessionID,
+        expectedSelectedRevisionID: TranscriptRevisionID
+    ) throws -> ReopenedTranscriptRevisionSnapshot {
+        try withLockedSession(sessionID: sessionID, exclusive: true) { authority in
+            let sessionDescriptor = authority.sessionDescriptor
+            var selectionInstalled = false
+            do {
+                let loaded = try loadSession(
+                    sessionID: sessionID,
+                    sessionDescriptor: sessionDescriptor
+                )
+                guard loaded.manifest.selectedRevisionID == expectedSelectedRevisionID else {
+                    throw TranscriptRevisionRepositoryFailure.staleSelection
+                }
+                guard loaded.manifest.transcriptRevisionIDs.contains(revisionID) else {
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                }
+
+                let transcriptsDescriptor = try readConfined.openDirectory(
+                    named: "transcripts",
+                    under: sessionDescriptor
+                )
+                defer { Darwin.close(transcriptsDescriptor) }
+                let transcriptsIdentity = try Self.identity(of: transcriptsDescriptor)
+                let target = try loadInstalledRevision(
+                    revisionID: revisionID,
+                    expectedSHA256: nil,
+                    sessionID: sessionID,
+                    audio: loaded.audio,
+                    under: transcriptsDescriptor
+                )
+                defer { Darwin.close(target.authority.descriptor) }
+
+                let selected = try SelectedTranscriptRevision(
+                    revisionID: revisionID,
+                    revisionSHA256: target.sha256
+                )
+                let updatedManifest = try loaded.manifest.selecting(selected)
+                try replaceSessionManifest(
+                    updatedManifest,
+                    under: sessionDescriptor,
+                    precommit: {
+                        try revalidate(authority, expectedSessionID: sessionID)
+                        try revalidateDirectoryEntry(
+                            named: "transcripts",
+                            under: sessionDescriptor,
+                            descriptor: transcriptsDescriptor,
+                            expectedIdentity: transcriptsIdentity
+                        )
+                        try requireCurrentSessionManifest(
+                            expectedData: loaded.manifestData,
+                            expectedSelectedRevisionID: expectedSelectedRevisionID,
+                            expectedSessionID: sessionID,
+                            under: sessionDescriptor
+                        )
+                        try revalidateInstalledRevision(
+                            target.authority,
+                            revisionID: revisionID,
+                            expectedData: target.data,
+                            expectedSHA256: target.sha256,
+                            under: transcriptsDescriptor
+                        )
+                    }
+                )
+                selectionInstalled = true
+                try fault(.afterSessionManifestInstall)
+                try Self.flush(sessionDescriptor)
+                try fault(.afterSessionDirectoryFlush)
+                try revalidate(authority, expectedSessionID: sessionID)
+
+                return try reopenSelectedLocked(
+                    sessionID: sessionID,
+                    sessionDescriptor: sessionDescriptor
+                )
+            } catch let failure as TranscriptRevisionRepositoryFailure {
+                if selectionInstalled {
+                    throw TranscriptRevisionRepositoryFailure.installedNeedsRefresh
+                }
+                throw failure
+            } catch {
+                throw selectionInstalled
+                    ? TranscriptRevisionRepositoryFailure.installedNeedsRefresh
+                    : TranscriptRevisionRepositoryFailure.writeFailed
+            }
+        }
+    }
+
     /// Reconstructs trusted processing input from the same descriptor-confined
     /// Session boundary used for Revision publication. Canonical bytes remain
     /// in Infrastructure and are copied into an opaque execution capability by
@@ -240,24 +344,10 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     sessionID: selection.sessionID,
                     sessionDescriptor: authority.sessionDescriptor
                 )
-                let audioDescriptor = try readConfined.openDirectory(
-                    named: "audio",
+                let wav = try loadCanonicalWAV(
+                    audio: loaded.audio,
                     under: authority.sessionDescriptor
                 )
-                defer { Darwin.close(audioDescriptor) }
-                let wav = try readConfined.boundedData(
-                    named: "audio.wav",
-                    under: audioDescriptor,
-                    maximumBytes: Int(CanonicalAudioFormat.maximumFrameCount * 2 + 44)
-                )
-                guard Self.sha256(wav) == loaded.audio.audioFingerprint.sha256,
-                      let frameCount = Self.validateCanonicalWAV(wav),
-                      try CanonicalAudioFormat.durationMilliseconds(
-                        forFrameCount: frameCount
-                      ) == loaded.audio.durationMilliseconds
-                else {
-                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
-                }
                 try revalidate(authority, expectedSessionID: selection.sessionID)
                 return .available(
                     PortableVerifiedSessionAudio(
@@ -265,6 +355,82 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                         audioFingerprint: loaded.audio.audioFingerprint,
                         sourceFingerprints: loaded.audio.sourceFingerprints,
                         expectedSelectedRevisionID: loaded.manifest.selectedRevisionID,
+                        canonicalWAV: wav
+                    )
+                )
+            }
+        } catch TranscriptRevisionRepositoryFailure.sessionUnavailable,
+                TranscriptRevisionRepositoryFailure.unsupportedSchema {
+            return .unavailable
+        } catch {
+            return .integrityMismatch
+        }
+    }
+
+    /// Reads the manifest, selected immutable Revision, inventory, and
+    /// canonical audio while holding one shared Session authority.
+    func loadReviewSynchronously(
+        for selection: ReviewSelection
+    ) -> PortableSessionReviewRead {
+        guard selection.scope.libraryID == libraryID else { return .unavailable }
+        do {
+            return try withLockedSession(
+                sessionID: selection.sessionID,
+                exclusive: false
+            ) { authority in
+                let loaded = try loadSession(
+                    sessionID: selection.sessionID,
+                    sessionDescriptor: authority.sessionDescriptor
+                )
+                guard let selected = loaded.manifest.selectedTranscriptRevision else {
+                    throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+                }
+                let transcriptsDescriptor = try readConfined.openDirectory(
+                    named: "transcripts",
+                    under: authority.sessionDescriptor
+                )
+                defer { Darwin.close(transcriptsDescriptor) }
+                let transcriptsIdentity = try Self.identity(of: transcriptsDescriptor)
+                let installed = try loadInstalledRevision(
+                    revisionID: selected.revisionID,
+                    expectedSHA256: selected.revisionSHA256,
+                    sessionID: selection.sessionID,
+                    audio: loaded.audio,
+                    under: transcriptsDescriptor
+                )
+                defer { Darwin.close(installed.authority.descriptor) }
+                let wav = try loadCanonicalWAV(
+                    audio: loaded.audio,
+                    under: authority.sessionDescriptor
+                )
+                try revalidate(authority, expectedSessionID: selection.sessionID)
+                try revalidateDirectoryEntry(
+                    named: "transcripts",
+                    under: authority.sessionDescriptor,
+                    descriptor: transcriptsDescriptor,
+                    expectedIdentity: transcriptsIdentity
+                )
+                try requireCurrentSessionManifest(
+                    expectedData: loaded.manifestData,
+                    expectedSelectedRevisionID: selected.revisionID,
+                    expectedSessionID: selection.sessionID,
+                    under: authority.sessionDescriptor
+                )
+                try revalidateInstalledRevision(
+                    installed.authority,
+                    revisionID: selected.revisionID,
+                    expectedData: installed.data,
+                    expectedSHA256: installed.sha256,
+                    under: transcriptsDescriptor
+                )
+                return .available(
+                    PortableVerifiedReviewSession(
+                        revision: ReopenedTranscriptRevisionSnapshot(
+                            revisionIDs: loaded.manifest.transcriptRevisionIDs,
+                            selectedRevisionID: selected.revisionID,
+                            selectedRevision: installed.revision
+                        ),
+                        durationMilliseconds: loaded.audio.durationMilliseconds,
                         canonicalWAV: wav
                     )
                 )
@@ -285,6 +451,18 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             sessionID: sessionID,
             sessionDescriptor: sessionDescriptor
         )
+        return try reopenSelectedLocked(
+            sessionID: sessionID,
+            sessionDescriptor: sessionDescriptor,
+            loaded: loaded
+        )
+    }
+
+    private func reopenSelectedLocked(
+        sessionID: SessionID,
+        sessionDescriptor: Int32,
+        loaded: LoadedSession
+    ) throws -> ReopenedTranscriptRevisionSnapshot {
         guard let selected = loaded.manifest.selectedTranscriptRevision else {
             throw TranscriptRevisionRepositoryFailure.sessionUnavailable
         }
@@ -293,45 +471,18 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             under: sessionDescriptor
         )
         defer { Darwin.close(transcriptsDescriptor) }
-        let revisionDescriptor = try readConfined.openDirectory(
-            named: selected.revisionID.rawValue,
+        let installed = try loadInstalledRevision(
+            revisionID: selected.revisionID,
+            expectedSHA256: selected.revisionSHA256,
+            sessionID: sessionID,
+            audio: loaded.audio,
             under: transcriptsDescriptor
         )
-        defer { Darwin.close(revisionDescriptor) }
-        guard try readConfined.listEntryNames(
-            under: revisionDescriptor,
-            maximumCount: 2
-        ) == ["revision.json", "revision.sha256"] else {
-            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
-        }
-        let revisionData = try readConfined.boundedData(
-            named: "revision.json",
-            under: revisionDescriptor,
-            maximumBytes: Self.maximumRevisionBytes
-        )
-        let detachedData = try readConfined.boundedData(
-            named: "revision.sha256",
-            under: revisionDescriptor,
-            maximumBytes: 64
-        )
-        guard let detached = String(data: detachedData, encoding: .utf8),
-              AudioArtifactFingerprint.isSHA256(detached),
-              detached == selected.revisionSHA256,
-              detached == Self.sha256(revisionData)
-        else {
-            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
-        }
-        let revision = try decodeRevision(revisionData)
-        guard revision.revisionID == selected.revisionID,
-              revision.sessionID == sessionID
-        else {
-            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
-        }
-        try validate(revision, against: loaded.audio)
+        defer { Darwin.close(installed.authority.descriptor) }
         return ReopenedTranscriptRevisionSnapshot(
             revisionIDs: loaded.manifest.transcriptRevisionIDs,
             selectedRevisionID: selected.revisionID,
-            selectedRevision: revision
+            selectedRevision: installed.revision
         )
     }
 
@@ -504,6 +655,13 @@ private extension PortableTranscriptRevisionRepository {
         let hashFileIdentity: EntryIdentity
     }
 
+    struct LoadedInstalledRevision {
+        let data: Data
+        let sha256: String
+        let revision: TranscriptRevision
+        let authority: InstalledRevisionAuthority
+    }
+
     func loadSession(
         sessionID: SessionID,
         sessionDescriptor: Int32
@@ -550,6 +708,95 @@ private extension PortableTranscriptRevisionRepository {
             manifest: manifest,
             audio: audio
         )
+    }
+
+    func loadCanonicalWAV(
+        audio: TrustedSessionAudio,
+        under sessionDescriptor: Int32
+    ) throws -> Data {
+        let audioDescriptor = try readConfined.openDirectory(
+            named: "audio",
+            under: sessionDescriptor
+        )
+        defer { Darwin.close(audioDescriptor) }
+        let wav = try readConfined.boundedData(
+            named: "audio.wav",
+            under: audioDescriptor,
+            maximumBytes: Int(CanonicalAudioFormat.maximumFrameCount * 2 + 44)
+        )
+        guard Self.sha256(wav) == audio.audioFingerprint.sha256,
+              let frameCount = Self.validateCanonicalWAV(wav),
+              try CanonicalAudioFormat.durationMilliseconds(
+                forFrameCount: frameCount
+              ) == audio.durationMilliseconds
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        return wav
+    }
+
+    func loadInstalledRevision(
+        revisionID: TranscriptRevisionID,
+        expectedSHA256: String?,
+        sessionID: SessionID,
+        audio: TrustedSessionAudio,
+        under transcriptsDescriptor: Int32
+    ) throws -> LoadedInstalledRevision {
+        let revisionDescriptor = try readConfined.openDirectory(
+            named: revisionID.rawValue,
+            under: transcriptsDescriptor
+        )
+        do {
+            let authority = try captureRevisionAuthority(
+                descriptor: revisionDescriptor
+            )
+            guard try readConfined.listEntryNames(
+                under: revisionDescriptor,
+                maximumCount: 2
+            ) == ["revision.json", "revision.sha256"] else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+            let revisionData = try readConfined.boundedData(
+                named: "revision.json",
+                under: revisionDescriptor,
+                maximumBytes: Self.maximumRevisionBytes
+            )
+            let detachedData = try readConfined.boundedData(
+                named: "revision.sha256",
+                under: revisionDescriptor,
+                maximumBytes: 64
+            )
+            guard let detached = String(data: detachedData, encoding: .utf8),
+                  AudioArtifactFingerprint.isSHA256(detached),
+                  expectedSHA256.map({ $0 == detached }) ?? true,
+                  detached == Self.sha256(revisionData)
+            else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+            let revision = try decodeRevision(revisionData)
+            guard revision.revisionID == revisionID,
+                  revision.sessionID == sessionID
+            else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+            try validate(revision, against: audio)
+            try revalidateInstalledRevision(
+                authority,
+                revisionID: revisionID,
+                expectedData: revisionData,
+                expectedSHA256: detached,
+                under: transcriptsDescriptor
+            )
+            return LoadedInstalledRevision(
+                data: revisionData,
+                sha256: detached,
+                revision: revision,
+                authority: authority
+            )
+        } catch {
+            Darwin.close(revisionDescriptor)
+            throw error
+        }
     }
 
     func revalidate(

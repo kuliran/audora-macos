@@ -14,6 +14,7 @@ struct AudoraApp: App {
     private let audioImportFeature: DefaultAudioImportFeature
     private let recordingFeature: DefaultRecordingFeature
     private let sessionProcessingFeature: DefaultSessionProcessingFeature
+    private let reviewFeature: DefaultReviewFeature
     private let applicationCommands: DefaultApplicationCommandFeature
     private let chatDispatcher: ChatCommandDispatcher
     private let librarySelectionDispatcher: LibrarySelectionCommandDispatcher
@@ -67,6 +68,14 @@ struct AudoraApp: App {
             clock: SystemLibraryClock(),
             identifiers: RandomSessionProcessingIDGenerator()
         )
+        let reviewWorkspace = PortableReviewWorkspace(scopes: workspace)
+        let reviewFeature = DefaultReviewFeature(
+            sessions: reviewWorkspace,
+            playback: AVFoundationReviewPlaybackAdapter(resolver: reviewWorkspace),
+            retranscriber: SessionProcessingReviewRetranscriber(
+                feature: sessionProcessingFeature
+            )
+        )
         let audioImportWorkspace = PortableAudioImportWorkspace(
             workspace: workspace,
             chooser: AppKitAudioFileChooser(),
@@ -107,6 +116,7 @@ struct AudoraApp: App {
         self.audioImportFeature = audioImportFeature
         self.recordingFeature = recordingFeature
         self.sessionProcessingFeature = sessionProcessingFeature
+        self.reviewFeature = reviewFeature
         self.applicationCommands = applicationCommands
         self.chatDispatcher = chatDispatcher
         self.librarySelectionDispatcher = librarySelectionDispatcher
@@ -127,12 +137,13 @@ struct AudoraApp: App {
                 audioImportFeature: audioImportFeature,
                 recordingFeature: recordingFeature,
                 sessionProcessingFeature: sessionProcessingFeature,
+                reviewFeature: reviewFeature,
                 chatDispatcher: chatDispatcher,
                 librarySelectionDispatcher: librarySelectionDispatcher,
                 windowCoordinator: windowCoordinator
             )
         }
-        .defaultSize(width: 920, height: 640)
+        .defaultSize(width: 980, height: 860)
         .commands {
             CommandGroup(replacing: .newItem) { }
         }
