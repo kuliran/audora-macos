@@ -122,6 +122,68 @@ final class ReviewFeatureTests: XCTestCase {
         XCTAssertFalse(ready.annotations.isVisible)
     }
 
+    func testQueuedVisibilityIntentCannotCrossAReviewSelectionBoundary() async throws {
+        let firstRevision = try reviewRevision(
+            id: "trv-20260830T121000000Z-4FGH",
+            sessionID: "ses-20260830T120000000Z-2ABC",
+            text: "Hello, world!"
+        )
+        let secondRevision = try reviewRevision(
+            id: "trv-20260830T121100000Z-5GHJ",
+            sessionID: "ses-20260830T120100000Z-3DEF",
+            text: "Hello, world!"
+        )
+        let scope = LibraryScope(libraryID: revisionFixtureLibraryID)
+        let firstSelection = ReviewSelection(
+            scope: scope,
+            sessionID: firstRevision.sessionID
+        )
+        let secondSelection = ReviewSelection(
+            scope: scope,
+            sessionID: secondRevision.sessionID
+        )
+        let firstSnapshot = try ReviewSessionSnapshot(
+            selection: firstSelection,
+            revisionIDs: [firstRevision.revisionID],
+            selectedRevision: firstRevision,
+            audioCapabilityID: ReviewAudioCapabilityID("review-visibility-first"),
+            canonicalAudioDurationMilliseconds: firstRevision.durationMilliseconds
+        )
+        let secondSnapshot = try ReviewSessionSnapshot(
+            selection: secondSelection,
+            revisionIDs: [secondRevision.revisionID],
+            selectedRevision: secondRevision,
+            audioCapabilityID: ReviewAudioCapabilityID("review-visibility-second"),
+            canonicalAudioDurationMilliseconds: secondRevision.durationMilliseconds
+        )
+        let sessions = ScriptedAuthorityLossReviewSessions(
+            reads: [.available(firstSnapshot), .available(secondSnapshot)],
+            selectionResult: .failed
+        )
+        let visibility = SuspendedReviewAnnotationReadStub()
+        let feature = DefaultReviewFeature(
+            sessions: sessions,
+            playback: ReviewPlaybackStub(),
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: visibility
+        )
+        await feature.send(.selectSession(firstSelection))
+
+        let selection = Task { await feature.send(.selectSession(secondSelection)) }
+        await visibility.waitUntilRefreshReadStarts()
+        await feature.send(.setAnnotationsVisible(false))
+        await visibility.resumeRefreshRead()
+        await selection.value
+
+        guard case let .ready(ready) = await feature.currentState else {
+            return XCTFail("expected the replacement Review to be ready")
+        }
+        XCTAssertEqual(ready.selection, secondSelection)
+        XCTAssertTrue(ready.annotations.isVisible)
+        let writeCount = await visibility.writeCount()
+        XCTAssertEqual(writeCount, 0)
+    }
+
     func testAnnotationRefreshCannotRewindLatestPlaybackState() async throws {
         let revision = try reviewRevision(
             id: "trv-20260830T121000000Z-4FGH",
@@ -1036,6 +1098,7 @@ private actor SuspendedReviewAnnotationVisibilityStub:
 
 private actor SuspendedReviewAnnotationReadStub: ReviewAnnotationVisibilityPort {
     private var readCount = 0
+    private var writes = 0
     private var continuation: CheckedContinuation<Void, Never>?
 
     func annotationsVisible(in scope: LibraryScope) async -> Bool? {
@@ -1049,7 +1112,12 @@ private actor SuspendedReviewAnnotationReadStub: ReviewAnnotationVisibilityPort 
     func setAnnotationsVisible(
         _ visible: Bool,
         in scope: LibraryScope
-    ) async -> Bool { true }
+    ) async -> Bool {
+        writes += 1
+        return true
+    }
+
+    func writeCount() -> Int { writes }
 
     func waitUntilRefreshReadStarts() async {
         while readCount < 2 { await Task.yield() }

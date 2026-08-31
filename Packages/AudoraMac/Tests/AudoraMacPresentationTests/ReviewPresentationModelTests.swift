@@ -28,15 +28,23 @@ final class ReviewPresentationModelTests: XCTestCase {
             appearance.performAsCurrentDrawingAppearance {
                 for category in categories {
                     let token = ReviewAnnotationStyleTokens.style(for: category)
-                    let contrast = contrastRatio(
-                        foreground: token.underlineColor,
-                        background: .textBackgroundColor
-                    )
-                    XCTAssertGreaterThanOrEqual(
-                        contrast,
-                        ReviewAnnotationStyleTokens.minimumContrastRatio,
-                        "\(category) in \(appearanceName.rawValue)"
-                    )
+                    for background in [
+                        NSColor.textBackgroundColor,
+                        composite(
+                            foreground: ReviewActiveWordStyleTokens.backgroundColor,
+                            over: .textBackgroundColor
+                        ),
+                    ] {
+                        let contrast = contrastRatio(
+                            foreground: token.underlineColor,
+                            background: background
+                        )
+                        XCTAssertGreaterThanOrEqual(
+                            contrast,
+                            ReviewAnnotationStyleTokens.minimumContrastRatio,
+                            "\(category) in \(appearanceName.rawValue)"
+                        )
+                    }
                 }
             }
         }
@@ -115,6 +123,22 @@ private func contrastRatio(
     )
     return (max(foregroundLuminance, backgroundLuminance) + 0.05) /
         (min(foregroundLuminance, backgroundLuminance) + 0.05)
+}
+
+private func composite(foreground: NSColor, over background: NSColor) -> NSColor {
+    guard let foreground = foreground.usingColorSpace(.sRGB),
+          let background = background.usingColorSpace(.sRGB)
+    else { return .clear }
+    let alpha = foreground.alphaComponent
+    return NSColor(
+        calibratedRed: foreground.redComponent * alpha +
+            background.redComponent * (1 - alpha),
+        green: foreground.greenComponent * alpha +
+            background.greenComponent * (1 - alpha),
+        blue: foreground.blueComponent * alpha +
+            background.blueComponent * (1 - alpha),
+        alpha: 1
+    )
 }
 
 private func relativeLuminance(red: Double, green: Double, blue: Double) -> Double {

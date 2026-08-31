@@ -14,6 +14,11 @@ public actor DefaultReviewFeature: ReviewFeature {
         }
     }
 
+    private struct PendingAnnotationVisibilityCommand {
+        let selection: ReviewSelection
+        let visible: Bool
+    }
+
     private let sessions: any ReviewSessionPort
     private let playback: any ReviewPlaybackPort
     private let retranscriber: any ReviewRetranscriptionPort
@@ -28,7 +33,7 @@ public actor DefaultReviewFeature: ReviewFeature {
     private var commandInFlight = false
     private var pendingSelectionCommand: PendingSelectionCommand?
     private var refreshPending = false
-    private var pendingAnnotationVisibility: Bool?
+    private var pendingAnnotationVisibility: PendingAnnotationVisibilityCommand?
     private var playbackObserver: Task<Void, Never>?
     private var stateContinuations: [UInt64: AsyncStream<ReviewFeatureState>.Continuation]
         = [:]
@@ -73,9 +78,11 @@ public actor DefaultReviewFeature: ReviewFeature {
             } else if refreshPending {
                 refreshPending = false
                 next = .refresh
-            } else if let visible = pendingAnnotationVisibility {
+            } else if let pendingVisibility = pendingAnnotationVisibility {
                 pendingAnnotationVisibility = nil
-                next = .setAnnotationsVisible(visible)
+                next = readySnapshot?.selection == pendingVisibility.selection
+                    ? .setAnnotationsVisible(pendingVisibility.visible)
+                    : nil
             } else {
                 next = nil
             }
@@ -94,7 +101,11 @@ public actor DefaultReviewFeature: ReviewFeature {
         case .refresh:
             if pendingSelectionCommand == nil { refreshPending = true }
         case let .setAnnotationsVisible(visible):
-            pendingAnnotationVisibility = visible
+            guard let selection = readySnapshot?.selection else { return }
+            pendingAnnotationVisibility = PendingAnnotationVisibilityCommand(
+                selection: selection,
+                visible: visible
+            )
         case .seek, .play, .pause, .selectRevision, .retranscribe:
             break
         }

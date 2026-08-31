@@ -37,6 +37,14 @@ enum ReviewAnnotationStyleTokens {
     }
 }
 
+enum ReviewActiveWordStyleTokens {
+    /// Keeps the playback cue visible without reducing any annotation
+    /// underline below the WCAG non-text contrast target.
+    static var backgroundColor: NSColor {
+        NSColor.controlAccentColor.withAlphaComponent(0.08)
+    }
+}
+
 public struct ReviewView: View {
     @ObservedObject private var model: ReviewPresentationModel
 
@@ -409,7 +417,7 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
             if let activeWordID, let range = wordRanges[activeWordID] {
                 textView?.textStorage?.addAttribute(
                     .backgroundColor,
-                    value: NSColor.controlAccentColor.withAlphaComponent(0.3),
+                    value: ReviewActiveWordStyleTokens.backgroundColor,
                     range: range
                 )
                 textView?.scrollRangeToVisible(range)
