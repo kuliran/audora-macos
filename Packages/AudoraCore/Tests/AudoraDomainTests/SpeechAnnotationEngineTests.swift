@@ -119,6 +119,154 @@ final class SpeechAnnotationEngineTests: XCTestCase {
         )
     }
 
+    func testAuthoritativeUnavailableSplitsExistingObservedAudioEvents() throws {
+        let duration: UInt64 = 1_000
+        let revision = try annotationRevision(
+            text: "hello",
+            words: [("hello", .lexical, 1, 50)],
+            audioEvents: [
+                try annotationAudioEvent(
+                    "a000000",
+                    .silentPause,
+                    100,
+                    500,
+                    duration: duration
+                ),
+                try annotationAudioEvent(
+                    "a000001",
+                    .untranscribedVoicedInterval,
+                    600,
+                    900,
+                    duration: duration
+                ),
+            ],
+            durationMilliseconds: duration
+        )
+        let evidence = SpeechAnnotationEvidence(
+            sources: [
+                SpeechAcousticEvidence(
+                    audioSourceID: .microphone,
+                    observedRanges: [],
+                    voicedRanges: [],
+                    unavailableIntervals: [
+                        SpeechUnavailableInterval(
+                            timeRange: try annotationTimeRange(
+                                200,
+                                250,
+                                duration: duration
+                            ),
+                            reasons: [.muted]
+                        ),
+                        SpeechUnavailableInterval(
+                            timeRange: try annotationTimeRange(
+                                300,
+                                350,
+                                duration: duration
+                            ),
+                            reasons: [.captureGap]
+                        ),
+                        SpeechUnavailableInterval(
+                            timeRange: try annotationTimeRange(
+                                700,
+                                750,
+                                duration: duration
+                            ),
+                            reasons: [.muted]
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+        let result = try DeterministicSpeechAnnotator().annotate(
+            revision: revision,
+            evidence: evidence
+        )
+
+        XCTAssertEqual(
+            describedAudioEvents(result.audioEvents),
+            [
+                "a000002:silentPause:100-200",
+                "a000003:muted:200-250",
+                "a000004:silentPause:250-300",
+                "a000005:captureGap:300-350",
+                "a000006:silentPause:350-500",
+                "a000007:untranscribedVoicedInterval:600-700",
+                "a000008:muted:700-750",
+                "a000009:untranscribedVoicedInterval:750-900",
+            ]
+        )
+    }
+
+    func testUnavailableDeduplicationIsCategorySpecific() throws {
+        let duration: UInt64 = 1_000
+        let revision = try annotationRevision(
+            text: "hello",
+            words: [("hello", .lexical, 1, 50)],
+            audioEvents: [
+                try annotationAudioEvent(
+                    "a000000",
+                    .muted,
+                    200,
+                    300,
+                    duration: duration
+                ),
+                try annotationAudioEvent(
+                    "a000001",
+                    .nonSpeech,
+                    400,
+                    500,
+                    duration: duration
+                ),
+            ],
+            durationMilliseconds: duration
+        )
+        let evidence = SpeechAnnotationEvidence(
+            sources: [
+                SpeechAcousticEvidence(
+                    audioSourceID: .microphone,
+                    observedRanges: [],
+                    voicedRanges: [],
+                    unavailableIntervals: [
+                        SpeechUnavailableInterval(
+                            timeRange: try annotationTimeRange(
+                                150,
+                                350,
+                                duration: duration
+                            ),
+                            reasons: [.muted, .captureGap]
+                        ),
+                        SpeechUnavailableInterval(
+                            timeRange: try annotationTimeRange(
+                                400,
+                                500,
+                                duration: duration
+                            ),
+                            reasons: [.captureGap]
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+        let result = try DeterministicSpeechAnnotator().annotate(
+            revision: revision,
+            evidence: evidence
+        )
+
+        XCTAssertEqual(
+            describedAudioEvents(result.audioEvents),
+            [
+                "a000002:muted:150-200",
+                "a000003:captureGap:150-350",
+                "a000000:muted:200-300",
+                "a000004:muted:300-350",
+                "a000001:nonSpeech:400-500",
+                "a000005:captureGap:400-500",
+            ]
+        )
+    }
+
     func testProjectorUsesCanonicalUTF8RangesAndStableLocalIdentities() throws {
         let revision = try annotationRevision(
             text: "Écho, Um",
@@ -278,8 +426,14 @@ final class SpeechAnnotationEngineTests: XCTestCase {
 
     func testExistingAudioEvidenceKeepsItsIdentityWithoutDerivedDuplicate() throws {
         let duration: UInt64 = 1_000
-        let existing = TranscriptAudioEvent(
+        let existingPause = TranscriptAudioEvent(
             audioEventID: try AudioEventID("a000000"),
+            category: .silentPause,
+            audioSourceID: .microphone,
+            timeRange: try annotationTimeRange(100, 200, duration: duration)
+        )
+        let existingMuted = TranscriptAudioEvent(
+            audioEventID: try AudioEventID("a000001"),
             category: .muted,
             audioSourceID: .microphone,
             timeRange: try annotationTimeRange(250, 350, duration: duration)
@@ -287,7 +441,7 @@ final class SpeechAnnotationEngineTests: XCTestCase {
         let revision = try annotationRevision(
             text: "hello",
             words: [("hello", .lexical, 400, 600)],
-            audioEvents: [existing],
+            audioEvents: [existingPause, existingMuted],
             durationMilliseconds: duration
         )
         let evidence = SpeechAnnotationEvidence(
@@ -315,7 +469,7 @@ final class SpeechAnnotationEngineTests: XCTestCase {
             evidence: evidence
         )
 
-        XCTAssertEqual(result.audioEvents, [existing])
+        XCTAssertEqual(result.audioEvents, [existingPause, existingMuted])
     }
 }
 
@@ -435,6 +589,30 @@ private func annotationTimeRange(
         endMilliseconds: end,
         sessionDurationMilliseconds: duration
     )
+}
+
+private func annotationAudioEvent(
+    _ id: String,
+    _ category: TranscriptAudioEventCategory,
+    _ start: UInt64,
+    _ end: UInt64,
+    duration: UInt64
+) throws -> TranscriptAudioEvent {
+    TranscriptAudioEvent(
+        audioEventID: try AudioEventID(id),
+        category: category,
+        audioSourceID: .microphone,
+        timeRange: try annotationTimeRange(start, end, duration: duration)
+    )
+}
+
+private func describedAudioEvents(
+    _ events: [TranscriptAudioEvent]
+) -> [String] {
+    events.map {
+        "\($0.audioEventID.rawValue):\($0.category.rawValue):" +
+            "\($0.timeRange.startMilliseconds)-\($0.timeRange.endMilliseconds)"
+    }
 }
 
 private enum AnnotationFixtureError: Error {

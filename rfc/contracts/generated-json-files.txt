@@ -20,6 +20,7 @@ Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingId
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingManifest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionManifest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionProcessingFeatureScenario.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SpeechAnnotationFixture.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptRevision.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptionCandidateArtifact.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptionJobManifest.json

@@ -17,6 +17,9 @@ transcription root and its stable evidence anchors live in
 [`transcript-revision.tsp`](transcript-revision.tsp). Durable offline processing,
 the confined JSONL boundary, untrusted Candidate artifacts, and portable feature
 scenarios live in [`session-processing.tsp`](session-processing.tsp).
+The deterministic local-annotation golden seam lives in
+[`speech-annotation-fixture.tsp`](speech-annotation-fixture.tsp); its expected
+Textual and Audio Events remain local test evidence and are not provider DTOs.
 
 The provider source is separated by audience:
 
@@ -52,6 +55,7 @@ at runtime.
 - [`RecordingStagingManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingManifest.json)
 - [`SessionManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionManifest.json)
 - [`SessionProcessingFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionProcessingFeatureScenario.json)
+- [`SpeechAnnotationFixture.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SpeechAnnotationFixture.json)
 - [`TranscriptRevision.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptRevision.json)
 - [`TranscriptionCandidateArtifact.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptionCandidateArtifact.json)
 - [`TranscriptionJobManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptionJobManifest.json)
@@ -80,6 +84,7 @@ at runtime.
 | `RecordingStagingManifest` | Recording staging storage | No |
 | `SessionManifest` | Imported or recorded Session storage | No |
 | `SessionProcessingFeatureScenario` | Portable cross-implementation behavior | No |
+| `SpeechAnnotationFixture` | Portable deterministic classifier golden | No |
 | `TranscriptRevision` | Immutable canonical Session transcription storage | No |
 | `TranscriptionCandidateArtifact` | Confined worker -> Application staging | No |
 | `TranscriptionJobManifest` | Portable Library job storage | No |
@@ -161,6 +166,16 @@ fixtures remain schema-valid and are routed through the production validators.
 Recording scenarios cover live state, mute gaps, duration warnings and limits,
 stop races, cancellation, recovery, repeated takes, late-event fencing, and
 Library-switch serialization.
+
+## Speech annotation fixture
+
+`SpeechAnnotationFixture` is a versioned, platform-neutral golden for the pure
+Domain annotator. Its v1 example combines explicit filler and partial-word kinds,
+a legitimate hyphenated Word, deliberate emphasis, a bounded multiword
+repetition, missing timing, canonical non-speech evidence, observed silence and
+voice, and authoritative Muted Interval and Capture Gap ranges. Swift contract
+tests decode the package resource and run it through the production classifier;
+the fixture is neither portable Session state nor coach-visible content.
 
 ## Session processing contracts
 

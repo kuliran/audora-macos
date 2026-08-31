@@ -38,6 +38,10 @@ const qualifiedTranscriptRevisionExamplesDirectory = path.join(
   resourcesDirectory,
   "Examples/TranscriptRevision/v2",
 );
+const speechAnnotationExamplesDirectory = path.join(
+  resourcesDirectory,
+  "Examples/SpeechAnnotations/v1",
+);
 const sessionProcessingScenariosDirectory = path.join(
   resourcesDirectory,
   "Scenarios/SessionProcessing",
@@ -126,6 +130,7 @@ await registerSchema("RecordingStagingIdentityManifest.json");
 const recordingStagingManifest = await validator("RecordingStagingManifest.json");
 const recordingScenario = await validator("RecordingFeatureScenario.json");
 const transcriptRevision = await validator("TranscriptRevision.json");
+const speechAnnotationFixture = await validator("SpeechAnnotationFixture.json");
 const sessionProcessingScenario = await validator(
   "SessionProcessingFeatureScenario.json",
 );
@@ -261,6 +266,17 @@ assertValidation(
   qualifiedTranscriptRevision,
   true,
   "transcript-revision/v2/revision.json",
+);
+await assertInventory(
+  speechAnnotationExamplesDirectory,
+  ["golden.json"],
+  "speech-annotation fixture",
+);
+assertValidation(
+  speechAnnotationFixture,
+  await loadJSON(path.join(speechAnnotationExamplesDirectory, "golden.json")),
+  true,
+  "speech-annotation/v1/golden.json",
 );
 const transcriptRevisionRejectedDirectory = path.join(
   transcriptRevisionExamplesDirectory,

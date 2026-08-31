@@ -23,6 +23,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case recordingStagingManifestSchema
     case sessionManifestSchema
     case sessionProcessingFeatureScenarioSchema
+    case speechAnnotationFixtureSchema
     case transcriptRevisionSchema
     case transcriptionCandidateArtifactSchema
     case transcriptionJobManifestSchema
@@ -141,6 +142,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case legacyTranscriptRevisionExample
     case rejectedTranscriptPunctuationWord
     case rejectedTranscriptUTF8Range
+    case speechAnnotationGoldenExample
 
     /// Preserves the historical filename-only diagnostic and scenario identity.
     public var rawValue: String {
@@ -189,6 +191,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "SessionManifest.json"
         case .sessionProcessingFeatureScenarioSchema:
             "SessionProcessingFeatureScenario.json"
+        case .speechAnnotationFixtureSchema:
+            "SpeechAnnotationFixture.json"
         case .transcriptRevisionSchema:
             "TranscriptRevision.json"
         case .transcriptionCandidateArtifactSchema:
@@ -409,6 +413,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "punctuation-as-word.json"
         case .rejectedTranscriptUTF8Range:
             "utf8-range-split.json"
+        case .speechAnnotationGoldenExample:
+            "golden.json"
         }
     }
 
@@ -425,7 +431,8 @@ public enum ContractResource: CaseIterable, Sendable {
              .readSessionTranscriptsRequestSchema, .readSessionTranscriptsResponseSchema,
              .recordingFeatureScenarioSchema, .recordingStagingIdentityManifestSchema,
              .recordingStagingManifestSchema, .sessionManifestSchema,
-             .sessionProcessingFeatureScenarioSchema, .transcriptRevisionSchema,
+             .sessionProcessingFeatureScenarioSchema,
+             .speechAnnotationFixtureSchema, .transcriptRevisionSchema,
              .transcriptionCandidateArtifactSchema, .transcriptionJobManifestSchema,
              .transcriptionWorkerMessageSchema, .transcriptionWorkerRequestSchema:
             "Schemas"
@@ -510,6 +517,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "Examples/TranscriptRevision/v1"
         case .rejectedTranscriptPunctuationWord, .rejectedTranscriptUTF8Range:
             "Examples/TranscriptRevision/v1/rejected"
+        case .speechAnnotationGoldenExample:
+            "Examples/SpeechAnnotations/v1"
         }
     }
 

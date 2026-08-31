@@ -266,7 +266,11 @@ public struct DeterministicSpeechAnnotator: Sendable {
                 evidence.sources.count
         else { throw SpeechAnnotationError.invalidEvidence }
         let allowedSources = Set(revision.sourceFingerprints.map(\.audioSourceID))
+        let evidenceSourceIDs = Set(evidence.sources.map(\.audioSourceID))
         var totalInputRanges = 0
+        var retainedExisting = revision.audioEvents.filter {
+            !evidenceSourceIDs.contains($0.audioSourceID)
+        }
         var derived: [AudioDraft] = []
         for source in evidence.sources {
             guard allowedSources.contains(source.audioSourceID) else {
@@ -296,7 +300,6 @@ public struct DeterministicSpeechAnnotator: Sendable {
             let existing = revision.audioEvents.filter {
                 $0.audioSourceID == source.audioSourceID
             }
-            let existingCoverage = normalize(existing.map { Interval($0.timeRange) })
             let wordCoverage = normalize(
                 revision.lines
                     .filter { $0.audioSourceID == source.audioSourceID }
@@ -313,13 +316,38 @@ public struct DeterministicSpeechAnnotator: Sendable {
                         }
                     }
             )
+            var existingObservedCoverage: [Interval] = []
+            for event in existing {
+                let interval = Interval(event.timeRange)
+                switch event.category {
+                case .silentPause, .untranscribedVoicedInterval:
+                    let availableFragments = subtract([interval], unavailable)
+                    if availableFragments == [interval] {
+                        retainedExisting.append(event)
+                    } else {
+                        derived.append(contentsOf: availableFragments.map {
+                            AudioDraft(
+                                category: event.category,
+                                audioSourceID: event.audioSourceID,
+                                interval: $0
+                            )
+                        })
+                    }
+                    existingObservedCoverage.append(contentsOf: availableFragments)
+                case .nonSpeech:
+                    retainedExisting.append(event)
+                    existingObservedCoverage.append(interval)
+                case .muted, .captureGap:
+                    retainedExisting.append(event)
+                }
+            }
             let observed = subtract(
                 normalize(source.observedRanges.map(Interval.init)),
                 unavailable
             )
             let residual = subtract(
                 subtract(observed, wordCoverage),
-                existingCoverage
+                normalize(existingObservedCoverage)
             )
             let voiced = intersect(
                 residual,
@@ -350,7 +378,12 @@ public struct DeterministicSpeechAnnotator: Sendable {
                 case .muted: .muted
                 case .captureGap: .captureGap
                 }
-                derived.append(contentsOf: subtract(ranges, existingCoverage).map {
+                let sameCategoryCoverage = normalize(
+                    existing.compactMap {
+                        $0.category == category ? Interval($0.timeRange) : nil
+                    }
+                )
+                derived.append(contentsOf: subtract(ranges, sameCategoryCoverage).map {
                     AudioDraft(
                         category: category,
                         audioSourceID: source.audioSourceID,
@@ -361,8 +394,8 @@ public struct DeterministicSpeechAnnotator: Sendable {
         }
 
         derived.sort(by: audioDraftPrecedes)
-        guard revision.audioEvents.count <= Self.maximumAnnotationCount,
-              derived.count <= Self.maximumAnnotationCount - revision.audioEvents.count
+        guard retainedExisting.count <= Self.maximumAnnotationCount,
+              derived.count <= Self.maximumAnnotationCount - retainedExisting.count
         else { throw SpeechAnnotationError.outputLimitExceeded }
         let generated = try derived.enumerated().map { index, draft in
             TranscriptAudioEvent(
@@ -378,7 +411,7 @@ public struct DeterministicSpeechAnnotator: Sendable {
                 )
             )
         }
-        return (revision.audioEvents + generated).sorted(by: audioEventPrecedes)
+        return (retainedExisting + generated).sorted(by: audioEventPrecedes)
     }
 
     private func normalize(_ intervals: [Interval]) -> [Interval] {

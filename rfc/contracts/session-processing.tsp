@@ -283,7 +283,8 @@ namespace Audora.Contracts {
     etaSeconds?: integer;
   }
 
-  model TranscriptionWorkerCandidateReady extends TranscriptionWorkerMessageBase {
+  model TranscriptionWorkerCandidateReady
+    extends TranscriptionWorkerMessageBase {
     type: "candidate_ready";
     result: "result.json";
     sha256: Sha256Hex;
@@ -348,7 +349,13 @@ namespace Audora.Contracts {
   }
 
   model SessionProcessingScenarioCommand {
-    kind: "selectSession" | "clearSelection" | "start" | "prepare" | "reinstall" | "retry";
+    kind:
+      | "selectSession"
+      | "clearSelection"
+      | "start"
+      | "prepare"
+      | "reinstall"
+      | "retry";
   }
 
   model SessionProcessingScenarioDependencyEvent {
