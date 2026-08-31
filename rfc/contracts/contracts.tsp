@@ -1,4 +1,5 @@
 import "./coach-provider.tsp";
+import "./coach-context-capacity.tsp";
 import "./development-chat.tsp";
 import "./portable-library.tsp";
 import "./library-feature-scenario.tsp";

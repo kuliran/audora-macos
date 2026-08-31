@@ -1,4 +1,5 @@
 import AudoraCodexCLIQualification
+@_spi(CoachContextQualification) import AudoraApplication
 import CryptoKit
 import Foundation
 
@@ -140,7 +141,7 @@ public struct ProviderOnDemandTranscriptAttachment: Equatable, Sendable {
         self.sessionTranscriptHandle = sessionTranscriptHandle
     }
 
-    public var canonicalProviderValue: CanonicalJSONValue {
+    var canonicalProviderValue: CanonicalJSONValue {
         .object([
             "displayLabel": .string(displayLabel),
             "kind": .string("onDemand"),
@@ -316,10 +317,10 @@ public struct AttemptTranscriptGrant: Sendable {
     }
 }
 
-public struct AttemptTranscriptGrantIssuer: Sendable {
-    public init() {}
+struct AttemptTranscriptGrantIssuer: Sendable {
+    init() {}
 
-    public func issue(
+    func issue(
         attachments: [FrozenTranscriptAttachment],
         reader: FrozenTranscriptReader,
         completeResponseBudget: CompleteToolResponseBudget,

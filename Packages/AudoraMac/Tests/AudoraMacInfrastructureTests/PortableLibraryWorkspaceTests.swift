@@ -664,6 +664,81 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testChatStoreReconcilesPendingFailureReplacementAfterPostcommitFault() async throws {
+        let points: [PortableChatFaultPoint] = [
+            .afterPendingInstall,
+            .afterPendingDirectoryFlush,
+            .beforePendingFinalRead,
+        ]
+        for point in points {
+            try await withTemporaryParent { parent in
+                let root = parent.appendingPathComponent("Replace-\(point).audoralibrary")
+                let authority = try PortableLibraryPersistence().create(
+                    at: root,
+                    seed: makeSeed()
+                )
+                let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+                let workspace = PortableLibraryWorkspace(
+                    locations: QueueLocations(existing: [root]),
+                    bookmarks: SyntheticBookmarks(),
+                    access: RecordingAccessGrantor(),
+                    locatorStore: MemoryLocatorStore(),
+                    revealer: RecordingRevealer()
+                )
+                _ = await workspace.chooseLibrary()
+                let seed = try makeChatSeed(scope: scope)
+                let initialStore = PortableChatStore(workspace: workspace)
+                let created = await initialStore.create(seed)
+                XCTAssertEqual(created, .committed(seed.aggregate))
+                let pending = PendingUserTurn(
+                    id: try PendingUserTurnID("ptu-20260830T120100000Z-5KMN"),
+                    draftID: seed.aggregate.chat.draft.draftID,
+                    draftVersion: seed.aggregate.chat.draft.version,
+                    responsePositionID: try ChatResponsePositionID(
+                        "rsp-20260830T120100000Z-6PQR"
+                    )
+                )
+                guard case .committed = await initialStore.lockPendingUserTurn(
+                    LockPendingUserTurnMutation(
+                        library: scope,
+                        chatID: seed.aggregate.chat.id,
+                        pendingUserTurn: pending
+                    )
+                ) else {
+                    return XCTFail("Pending setup did not commit")
+                }
+                let failed = pending.replacingFailure(.coachContextCannotFit)
+                let mutation = try ReplacePendingUserTurnMutation(
+                    library: scope,
+                    chatID: seed.aggregate.chat.id,
+                    base: pending,
+                    replacement: failed
+                )
+                let store = PortableChatStore(
+                    persistence: PortableChatPersistence { reached in
+                        if reached == point {
+                            throw PortableChatPersistenceError.injectedFault(point)
+                        }
+                    },
+                    workspace: workspace
+                )
+
+                let outcome = await store.replacePendingUserTurn(mutation)
+                guard case let .committed(committed) = outcome else {
+                    return XCTFail(
+                        "Pending replacement was not reconciled at \(point): \(outcome)"
+                    )
+                }
+                XCTAssertEqual(committed.pendingUserTurn, failed)
+                let reopened = await store.load(mutation.chatID, in: scope)
+                XCTAssertEqual(
+                    reopened,
+                    .loaded(committed)
+                )
+            }
+        }
+    }
+
     func testChatStoreReconcilesPendingDiscardCommittedBeforePostcommitFault() async throws {
         let points: [PortableChatFaultPoint] = [
             .afterPendingRemoval,

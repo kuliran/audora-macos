@@ -237,6 +237,14 @@ examples cover ambiguous creation shapes, unknown keys, missing attachments,
 dangling Memory summaries, and newer schemas that must remain byte-identical
 while frozen.
 
+`CoachContextQuote.json` is the app-only advisory projection. Its golden locks the
+16,384 UTF-8-byte Send limit and exactly nine explanatory cost categories:
+Profile, Memory, history, Draft, framing, attachments, one complete transcript
+exchange, response reserve, and safety margin. It deliberately contains no
+canonical provider bytes. `context-capacity-recovery.v1.json` exercises an exact
+local miss, typed Create New Chat intent, identity-preserving Retry, and Discard;
+it declares zero provider, Invocation, and admission calls.
+
 `CoachProviderDescriptor` is app-only configuration. JSON Schema validates each
 field's shape. `displayName` is a bounded Presentation label for provider health
 and errors; no behavior branches on its text. Application additionally rejects the

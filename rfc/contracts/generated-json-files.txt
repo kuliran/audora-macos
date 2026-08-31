@@ -2,6 +2,7 @@ Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioImportFeature
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioNormalizationVectors.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ChatManifest.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachContextQuote.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachMemoryEnvelope.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json

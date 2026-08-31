@@ -1,3 +1,4 @@
+@_spi(CoachContextQualification) import AudoraApplication
 import AudoraCodexCLIQualification
 import Darwin
 import Foundation

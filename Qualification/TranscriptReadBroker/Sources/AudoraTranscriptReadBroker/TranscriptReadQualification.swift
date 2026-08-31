@@ -1,4 +1,5 @@
 import AudoraCodexCLIQualification
+@_spi(CoachContextQualification) import AudoraApplication
 import Foundation
 
 public struct TranscriptReadQualificationReport: Codable, Equatable, Sendable {

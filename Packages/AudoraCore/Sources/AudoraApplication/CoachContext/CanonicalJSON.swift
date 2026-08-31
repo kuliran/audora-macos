@@ -1,10 +1,13 @@
 import Foundation
 
+// Shared by Application context preparation and provider qualification fixtures.
+
 /// The JSON subset used by Audora's provider contracts.
 ///
 /// Numbers in the current contracts are integers. Keeping the value model this
 /// small avoids platform-dependent floating-point spelling and makes the exact
 /// bytes sent to a provider reproducible on macOS and Linux.
+@_spi(CoachContextQualification)
 public indirect enum CanonicalJSONValue: Equatable, Sendable {
     case object([String: CanonicalJSONValue])
     case array([CanonicalJSONValue])
@@ -14,7 +17,18 @@ public indirect enum CanonicalJSONValue: Equatable, Sendable {
     case null
 }
 
+@_spi(CoachContextQualification)
+public enum CanonicalJSONMeasurementError: Error, Equatable, Sendable {
+    case invalidMaximumByteCount
+    case byteLimitExceeded
+    case nestingLimitExceeded
+    case integerOverflow
+}
+
+@_spi(CoachContextQualification)
 public enum CanonicalJSON {
+    public static let maximumMeasuredNestingDepth = 256
+
     /// Serializes compact UTF-8 JSON with keys ordered by their UTF-8 bytes.
     ///
     /// String contents are not normalized. Quotes, reverse solidus, and control
@@ -23,6 +37,24 @@ public enum CanonicalJSON {
         var bytes: [UInt8] = []
         append(value, to: &bytes)
         return Data(bytes)
+    }
+
+    /// Counts the exact canonical bytes without constructing the serialized value.
+    /// Measurement stops as soon as the caller's bound is exceeded.
+    public static func byteCount(
+        of value: CanonicalJSONValue,
+        maximumByteCount: Int,
+        maximumNestingDepth: Int = maximumMeasuredNestingDepth
+    ) throws -> Int {
+        guard maximumByteCount >= 0 else {
+            throw CanonicalJSONMeasurementError.invalidMaximumByteCount
+        }
+        guard maximumNestingDepth >= 0 else {
+            throw CanonicalJSONMeasurementError.nestingLimitExceeded
+        }
+        var counter = CanonicalJSONByteCounter(maximum: maximumByteCount)
+        try counter.measure(value, depth: 0, maximumDepth: maximumNestingDepth)
+        return counter.count
     }
 
     private static func append(_ value: CanonicalJSONValue, to bytes: inout [UInt8]) {
@@ -96,6 +128,78 @@ public enum CanonicalJSON {
     }
 
     private static func utf8Precedes(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.utf8.lexicographicallyPrecedes(rhs.utf8)
+    }
+}
+
+private struct CanonicalJSONByteCounter {
+    let maximum: Int
+    private(set) var count = 0
+
+    mutating func measure(
+        _ value: CanonicalJSONValue,
+        depth: Int,
+        maximumDepth: Int
+    ) throws {
+        guard depth <= maximumDepth else {
+            throw CanonicalJSONMeasurementError.nestingLimitExceeded
+        }
+        switch value {
+        case let .object(fields):
+            try add(1)
+            let keys = fields.keys.sorted(by: utf8Precedes)
+            for (index, key) in keys.enumerated() {
+                if index > 0 { try add(1) }
+                try measureJSONString(key)
+                try add(1)
+                try measure(fields[key]!, depth: depth + 1, maximumDepth: maximumDepth)
+            }
+            try add(1)
+        case let .array(values):
+            try add(1)
+            for (index, element) in values.enumerated() {
+                if index > 0 { try add(1) }
+                try measure(element, depth: depth + 1, maximumDepth: maximumDepth)
+            }
+            try add(1)
+        case let .string(string):
+            try measureJSONString(string)
+        case let .integer(integer):
+            try add(String(integer).utf8.count)
+        case let .boolean(boolean):
+            try add(boolean ? 4 : 5)
+        case .null:
+            try add(4)
+        }
+    }
+
+    private mutating func measureJSONString(_ value: String) throws {
+        try add(1)
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x08, 0x09, 0x0A, 0x0C, 0x0D, 0x22, 0x5C:
+                try add(2)
+            case 0x00 ... 0x1F:
+                try add(6)
+            default:
+                try add(String(scalar).utf8.count)
+            }
+        }
+        try add(1)
+    }
+
+    private mutating func add(_ amount: Int) throws {
+        let addition = count.addingReportingOverflow(amount)
+        guard !addition.overflow else {
+            throw CanonicalJSONMeasurementError.integerOverflow
+        }
+        guard addition.partialValue <= maximum else {
+            throw CanonicalJSONMeasurementError.byteLimitExceeded
+        }
+        count = addition.partialValue
+    }
+
+    private func utf8Precedes(_ lhs: String, _ rhs: String) -> Bool {
         lhs.utf8.lexicographicallyPrecedes(rhs.utf8)
     }
 }

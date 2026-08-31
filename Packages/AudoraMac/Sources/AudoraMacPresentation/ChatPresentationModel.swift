@@ -133,9 +133,33 @@ public final class ChatPresentationModel: ObservableObject {
         send(.sendDraft(context, aggregate.chat.id, draft))
     }
 
+    /// Re-resolves current Profile, Memory, history, attachments, and provider
+    /// configuration without changing the Chat or invoking a provider.
+    public func refreshContextQuote() {
+        guard let context = commandContext,
+              case let .open(aggregate) = snapshot.selection,
+              let draft = snapshot.composer?.draft
+        else {
+            return
+        }
+        send(.refreshContextQuote(context, aggregate.chat.id, draft))
+    }
+
     public func discardPendingUserTurn(_ pendingUserTurnID: PendingUserTurnID) {
         guard let context = commandContext else { return }
         send(.discardPendingUserTurn(context, pendingUserTurnID))
+    }
+
+    public func retryPendingUserTurn(_ pendingUserTurnID: PendingUserTurnID) {
+        guard let context = commandContext else { return }
+        send(.retryPendingUserTurn(context, pendingUserTurnID))
+    }
+
+    public func createNewChatFromCapacityFailure(
+        _ pendingUserTurnID: PendingUserTurnID
+    ) {
+        guard let context = commandContext else { return }
+        send(.createNewChatFromCapacityFailure(context, pendingUserTurnID))
     }
 
     private func send(_ command: ChatCommand) {

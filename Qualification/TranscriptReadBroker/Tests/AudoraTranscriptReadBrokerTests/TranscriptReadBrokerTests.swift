@@ -1,4 +1,5 @@
 import AudoraCodexCLIQualification
+@_spi(CoachContextQualification) import AudoraApplication
 @testable import AudoraTranscriptReadBroker
 import Darwin
 import Foundation

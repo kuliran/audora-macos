@@ -2,6 +2,26 @@ import AudoraDomain
 import XCTest
 
 final class DevelopmentChatTests: XCTestCase {
+    func testCapacityFailureReplacementPreservesPendingTurnIdentity() throws {
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: try ChatDraftID("drf-20260830T120000000Z-3DEF"),
+            draftVersion: 7,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            )
+        )
+
+        let failed = pending.replacingFailure(.coachContextCannotFit)
+        let retried = failed.replacingFailure(nil)
+
+        XCTAssertEqual(failed.id, pending.id)
+        XCTAssertEqual(failed.draftID, pending.draftID)
+        XCTAssertEqual(failed.draftVersion, pending.draftVersion)
+        XCTAssertEqual(failed.responsePositionID, pending.responsePositionID)
+        XCTAssertEqual(failed.failure, .coachContextCannotFit)
+        XCTAssertEqual(retried, pending)
+    }
     func testTypedChatIdentitiesValidateTheirCompletePortableShape() throws {
         XCTAssertEqual(try ChatID("cht-20260830T120000000Z-2ABC").rawValue,
                        "cht-20260830T120000000Z-2ABC")

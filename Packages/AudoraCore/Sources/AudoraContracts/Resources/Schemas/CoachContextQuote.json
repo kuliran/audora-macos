@@ -1,0 +1,198 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/CoachContextQuote.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "maximumUserMessageUtf8Bytes": {
+            "type": "number",
+            "const": 16384
+        },
+        "completeInputTokens": {
+            "$ref": "#/$defs/NonnegativeWholeNumber"
+        },
+        "inputCeilingTokens": {
+            "$ref": "#/$defs/PositiveWholeNumber"
+        },
+        "responseReservedTokens": {
+            "$ref": "#/$defs/PositiveWholeNumber"
+        },
+        "safetyMarginTokens": {
+            "$ref": "#/$defs/NonnegativeWholeNumber"
+        },
+        "totalContextTokens": {
+            "$ref": "#/$defs/PositiveWholeNumber"
+        },
+        "fits": {
+            "type": "boolean"
+        },
+        "messageLength": {
+            "$ref": "#/$defs/CoachContextMessageLength"
+        },
+        "categoryCosts": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/CoachContextCategoryCost"
+            },
+            "minItems": 9,
+            "maxItems": 9
+        },
+        "estimatorIdentifier": {
+            "type": "string",
+            "minLength": 1
+        },
+        "estimatorMode": {
+            "$ref": "#/$defs/CoachContextEstimatorMode"
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "maximumUserMessageUtf8Bytes",
+        "completeInputTokens",
+        "inputCeilingTokens",
+        "responseReservedTokens",
+        "safetyMarginTokens",
+        "totalContextTokens",
+        "fits",
+        "messageLength",
+        "categoryCosts",
+        "estimatorIdentifier",
+        "estimatorMode"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "App-only advisory projection. It is not a provider request or durable Chat record.",
+    "$defs": {
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "PositiveWholeNumber": {
+            "type": "integer",
+            "minimum": 1
+        },
+        "CoachContextMessageLength": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/CoachContextEligibleMessage"
+                },
+                {
+                    "$ref": "#/$defs/CoachContextMessageMustShorten"
+                }
+            ]
+        },
+        "CoachContextCategoryCost": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "$ref": "#/$defs/CoachContextCostCategory"
+                },
+                "utf8ByteCount": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "estimatedTokenCount": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                }
+            },
+            "required": [
+                "category",
+                "utf8ByteCount",
+                "estimatedTokenCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachContextEstimatorMode": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "exact"
+                },
+                {
+                    "type": "string",
+                    "const": "conservativeUpperBound"
+                }
+            ]
+        },
+        "CoachContextEligibleMessage": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "eligible"
+                }
+            },
+            "required": [
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachContextMessageMustShorten": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "mustShorten"
+                },
+                "maximumUtf8Bytes": {
+                    "type": "number",
+                    "const": 16384
+                }
+            },
+            "required": [
+                "status",
+                "maximumUtf8Bytes"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachContextCostCategory": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "profile"
+                },
+                {
+                    "type": "string",
+                    "const": "memory"
+                },
+                {
+                    "type": "string",
+                    "const": "history"
+                },
+                {
+                    "type": "string",
+                    "const": "draft"
+                },
+                {
+                    "type": "string",
+                    "const": "framing"
+                },
+                {
+                    "type": "string",
+                    "const": "attachments"
+                },
+                {
+                    "type": "string",
+                    "const": "transcriptExchange"
+                },
+                {
+                    "type": "string",
+                    "const": "responseReserve"
+                },
+                {
+                    "type": "string",
+                    "const": "safetyMargin"
+                }
+            ]
+        }
+    }
+}

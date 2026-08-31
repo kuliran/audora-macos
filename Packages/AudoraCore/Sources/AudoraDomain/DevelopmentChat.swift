@@ -298,6 +298,10 @@ public struct ChatDraft: Equatable, Sendable {
     }
 }
 
+public enum PendingUserTurnFailure: String, Equatable, Sendable {
+    case coachContextCannotFit
+}
+
 public struct PendingUserTurn: Equatable, Sendable {
     public static let schemaVersion: UInt32 = 1
 
@@ -305,17 +309,32 @@ public struct PendingUserTurn: Equatable, Sendable {
     public let draftID: ChatDraftID
     public let draftVersion: UInt64
     public let responsePositionID: ChatResponsePositionID
+    public let failure: PendingUserTurnFailure?
 
     public init(
         id: PendingUserTurnID,
         draftID: ChatDraftID,
         draftVersion: UInt64,
-        responsePositionID: ChatResponsePositionID
+        responsePositionID: ChatResponsePositionID,
+        failure: PendingUserTurnFailure? = nil
     ) {
         self.id = id
         self.draftID = draftID
         self.draftVersion = draftVersion
         self.responsePositionID = responsePositionID
+        self.failure = failure
+    }
+
+    public func replacingFailure(
+        _ failure: PendingUserTurnFailure?
+    ) -> PendingUserTurn {
+        PendingUserTurn(
+            id: id,
+            draftID: draftID,
+            draftVersion: draftVersion,
+            responsePositionID: responsePositionID,
+            failure: failure
+        )
     }
 }
 

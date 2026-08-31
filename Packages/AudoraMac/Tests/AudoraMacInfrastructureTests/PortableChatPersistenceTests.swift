@@ -387,6 +387,127 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testCapacityFailureReplacementPersistsWithoutChangingPendingIdentity() throws {
+        try withCreatedChat { root, scope, original in
+            let persistence = PortableChatPersistence()
+            let pending = PendingUserTurn(
+                id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+                draftID: original.chat.draft.draftID,
+                draftVersion: original.chat.draft.version,
+                responsePositionID: try ChatResponsePositionID(
+                    "rsp-20260830T120001000Z-6PQR"
+                )
+            )
+            guard case .committed = try persistence.lockPendingUserTurn(
+                LockPendingUserTurnMutation(
+                    library: scope,
+                    chatID: original.chat.id,
+                    pendingUserTurn: pending
+                ),
+                at: root
+            ) else {
+                return XCTFail("Pending User Turn did not lock")
+            }
+            let failed = pending.replacingFailure(.coachContextCannotFit)
+            let mutation = try ReplacePendingUserTurnMutation(
+                library: scope,
+                chatID: original.chat.id,
+                base: pending,
+                replacement: failed
+            )
+
+            guard case let .committed(replaced) = try persistence.replacePendingUserTurn(
+                mutation,
+                at: root
+            ) else {
+                return XCTFail("Pending User Turn failure did not replace")
+            }
+
+            XCTAssertEqual(replaced.pendingUserTurn, failed)
+            XCTAssertEqual(replaced.chat, original.chat)
+            XCTAssertEqual(replaced.memory, original.memory)
+            XCTAssertEqual(
+                try persistence.load(original.chat.id, at: root, in: scope),
+                .readWrite(replaced)
+            )
+            XCTAssertEqual(
+                try persistence.replacePendingUserTurn(mutation, at: root),
+                .committed(replaced)
+            )
+            let retryMutation = try ReplacePendingUserTurnMutation(
+                library: scope,
+                chatID: original.chat.id,
+                base: failed,
+                replacement: pending
+            )
+            guard case let .committed(retried) = try persistence.replacePendingUserTurn(
+                retryMutation,
+                at: root
+            ) else {
+                return XCTFail("Pending User Turn failure did not clear")
+            }
+            XCTAssertEqual(retried.pendingUserTurn, pending)
+            XCTAssertEqual(
+                try persistence.load(original.chat.id, at: root, in: scope),
+                .readWrite(retried)
+            )
+        }
+    }
+
+    func testCapacityFailureReplacementReconcilesPostcommitFault() throws {
+        try withCreatedChat { root, scope, original in
+            let baseline = PortableChatPersistence()
+            let pending = PendingUserTurn(
+                id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+                draftID: original.chat.draft.draftID,
+                draftVersion: original.chat.draft.version,
+                responsePositionID: try ChatResponsePositionID(
+                    "rsp-20260830T120001000Z-6PQR"
+                )
+            )
+            guard case .committed = try baseline.lockPendingUserTurn(
+                LockPendingUserTurnMutation(
+                    library: scope,
+                    chatID: original.chat.id,
+                    pendingUserTurn: pending
+                ),
+                at: root
+            ) else {
+                return XCTFail("Pending User Turn did not lock")
+            }
+            let failed = pending.replacingFailure(.coachContextCannotFit)
+            let mutation = try ReplacePendingUserTurnMutation(
+                library: scope,
+                chatID: original.chat.id,
+                base: pending,
+                replacement: failed
+            )
+            let faulting = PortableChatPersistence { point in
+                guard point == .afterPendingInstall else { return }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+
+            XCTAssertThrowsError(
+                try faulting.replacePendingUserTurn(mutation, at: root)
+            ) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .injectedFault(.afterPendingInstall)
+                )
+            }
+            XCTAssertEqual(
+                try baseline.load(original.chat.id, at: root, in: scope),
+                .readWrite(
+                    try ChatAggregate(
+                        chat: original.chat,
+                        memory: original.memory,
+                        pendingUserTurn: failed
+                    )
+                )
+            )
+        }
+    }
+
     func testReopenReconcilesExactDraftAndPendingPartialsLeftByACrashedProcess() throws {
         try withCreatedChat { root, scope, aggregate in
             let chat = chatRoot(root, aggregate.chat.id)

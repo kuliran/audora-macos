@@ -82,11 +82,17 @@ final class ChatPresentationModelTests: XCTestCase {
         await waitForCommandCount(4, in: feature)
         model.updateDraft("A synthetic coaching Draft")
         await waitForCommandCount(5, in: feature)
-        model.sendDraft()
+        model.refreshContextQuote()
         await waitForCommandCount(6, in: feature)
-        let pendingID = try PendingUserTurnID("ptu-20260830T120000000Z-5KMN")
-        model.discardPendingUserTurn(pendingID)
+        model.sendDraft()
         await waitForCommandCount(7, in: feature)
+        let pendingID = try PendingUserTurnID("ptu-20260830T120000000Z-5KMN")
+        model.retryPendingUserTurn(pendingID)
+        await waitForCommandCount(8, in: feature)
+        model.createNewChatFromCapacityFailure(pendingID)
+        await waitForCommandCount(9, in: feature)
+        model.discardPendingUserTurn(pendingID)
+        await waitForCommandCount(10, in: feature)
 
         let commands = await feature.commands
         XCTAssertEqual(
@@ -102,7 +108,14 @@ final class ChatPresentationModelTests: XCTestCase {
                     aggregate.chat.draft.draftID,
                     text: "A synthetic coaching Draft"
                 ),
+                .refreshContextQuote(
+                    context,
+                    aggregate.chat.id,
+                    aggregate.chat.draft
+                ),
                 .sendDraft(context, aggregate.chat.id, aggregate.chat.draft),
+                .retryPendingUserTurn(context, pendingID),
+                .createNewChatFromCapacityFailure(context, pendingID),
                 .discardPendingUserTurn(context, pendingID),
             ]
         )
@@ -133,6 +146,8 @@ final class ChatPresentationModelTests: XCTestCase {
             .chatFrozen,
             .catalogFailed,
             .readOnlyLibrary,
+            .coachContextUnavailable,
+            .messageMustBeShortened,
         ]
 
         for notice in notices {
@@ -143,6 +158,26 @@ final class ChatPresentationModelTests: XCTestCase {
                 notice.rawValue
             )
         }
+    }
+
+    func testCoachContextPresentationExplainsAllNineNonadditiveCategories() {
+        XCTAssertEqual(
+            CoachContextQuotePresentation.summary(
+                completeInputTokens: 642,
+                inputCeilingTokens: 4_032
+            ),
+            "~642 / 4032 input tokens"
+        )
+        XCTAssertEqual(
+            CoachContextCostCategory.allCases.map(
+                CoachContextQuotePresentation.categoryLabel
+            ),
+            [
+                "Profile", "Coach Memory", "Prior chat history", "Current Draft",
+                "Provider framing", "Attachments", "Transcript exchange reserve",
+                "Response reserve", "Safety margin",
+            ]
+        )
     }
 
     func testLaterScopeWinsWhenOlderStateSubscriptionIsSuspended() async throws {
@@ -429,7 +464,9 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
                 )
             }
             filterIsComplete = true
-        case .createDevelopmentChat, .rename, .open, .editDraft, .sendDraft,
+        case .createDevelopmentChat, .rename, .open, .editDraft,
+             .refreshContextQuote, .sendDraft,
+             .retryPendingUserTurn, .createNewChatFromCapacityFailure,
              .discardPendingUserTurn:
             break
         }

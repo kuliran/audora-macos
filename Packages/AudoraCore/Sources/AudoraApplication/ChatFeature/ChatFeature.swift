@@ -27,7 +27,10 @@ public enum ChatCommand: Equatable, Sendable {
         ChatDraftID,
         text: String
     )
+    case refreshContextQuote(ChatCommandContext, ChatID, ChatDraft)
     case sendDraft(ChatCommandContext, ChatID, ChatDraft)
+    case retryPendingUserTurn(ChatCommandContext, PendingUserTurnID)
+    case createNewChatFromCapacityFailure(ChatCommandContext, PendingUserTurnID)
     case discardPendingUserTurn(ChatCommandContext, PendingUserTurnID)
 }
 
