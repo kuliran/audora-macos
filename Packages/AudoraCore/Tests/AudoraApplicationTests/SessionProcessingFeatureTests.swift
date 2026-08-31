@@ -1073,6 +1073,260 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(selectedRevisionID, fixture.revisionID)
     }
 
+    func testRetryDoesNotLaunchAfterJobStoreRefreshFailure() async throws {
+        let fixture = try ProcessingFixture()
+        let loadFailures: [SessionProcessingJobLoadResult] = [
+            .integrityMismatch,
+            .unavailable,
+        ]
+
+        for loadFailure in loadFailures {
+            let source = SourceProbe([
+                .unavailable,
+                .available(fixture.source),
+            ])
+            let runtime = RuntimeProbe(.qualified(fixture.profile))
+            let model = ModelProbe(.ready)
+            let jobs = JobProbe(latestResult: loadFailure)
+            let revisions = RevisionProbe()
+            let engine = EngineProbe(
+                result: .success(
+                    VerifiedTranscriptionCandidate(
+                        candidate: fixture.candidate,
+                        artifactFingerprint: fixture.candidateFingerprint
+                    )
+                )
+            )
+            let feature = DefaultSessionProcessingFeature(
+                source: source,
+                runtime: runtime,
+                model: model,
+                acoustics: AcousticProbe(fixture.evidence),
+                jobs: jobs,
+                engine: engine,
+                publisher: TranscriptRevisionPublisher(repository: revisions),
+                clock: FixedProcessingClock(fixture.createdAt),
+                identifiers: FixedProcessingIdentifiers(
+                    jobID: fixture.jobID,
+                    revisionID: fixture.revisionID
+                )
+            )
+
+            await feature.send(.selectSession(fixture.selection))
+            await feature.send(.retry)
+
+            guard case let .failed(failure) = await feature.currentState else {
+                XCTFail("expected persistent Job-store failure for \(loadFailure)")
+                continue
+            }
+            let sourceLoadCount = await source.loadCount
+            let runtimeResolutionCount = await runtime.resolutionCount
+            let modelVerificationCount = await model.verificationCount
+            let persistedStates = await jobs.states
+            let engineRequestCount = await engine.requestCount()
+            let publishCount = await revisions.publishCountValue()
+            let selectedRevisionID = await revisions.selected?.revisionID
+            XCTAssertNil(failure.job, "\(loadFailure)")
+            XCTAssertEqual(failure.reason, .jobPersistenceFailed, "\(loadFailure)")
+            XCTAssertEqual(failure.actions, [.retry], "\(loadFailure)")
+            XCTAssertEqual(sourceLoadCount, 2, "\(loadFailure)")
+            XCTAssertEqual(runtimeResolutionCount, 0, "\(loadFailure)")
+            XCTAssertEqual(modelVerificationCount, 0, "\(loadFailure)")
+            XCTAssertEqual(persistedStates, [], "\(loadFailure)")
+            XCTAssertEqual(engineRequestCount, 0, "\(loadFailure)")
+            XCTAssertEqual(publishCount, 0, "\(loadFailure)")
+            XCTAssertNil(selectedRevisionID, "\(loadFailure)")
+        }
+    }
+
+    func testRetryDoesNotLaunchAfterQueuedReconciliationCASFailure() async throws {
+        let fixture = try ProcessingFixture()
+        let queued = fixture.job(state: .queued)
+        let source = SourceProbe([
+            .unavailable,
+            .available(fixture.source),
+        ])
+        let runtime = RuntimeProbe(.qualified(fixture.profile))
+        let model = ModelProbe(.ready)
+        let jobs = JobProbe(
+            latest: queued,
+            failingTransitionState: .interrupted,
+            transitionFailureCount: 1
+        )
+        let revisions = RevisionProbe()
+        let engine = EngineProbe(
+            result: .success(
+                VerifiedTranscriptionCandidate(
+                    candidate: fixture.candidate,
+                    artifactFingerprint: fixture.candidateFingerprint
+                )
+            )
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: runtime,
+            model: model,
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+        await feature.send(.retry)
+
+        guard case let .failed(failure) = await feature.currentState else {
+            return XCTFail("expected failed queued reconciliation")
+        }
+        let sourceLoadCount = await source.loadCount
+        let runtimeResolutionCount = await runtime.resolutionCount
+        let modelVerificationCount = await model.verificationCount
+        let persistedStates = await jobs.states
+        let engineRequestCount = await engine.requestCount()
+        let publishCount = await revisions.publishCountValue()
+        let selectedRevisionID = await revisions.selected?.revisionID
+        XCTAssertEqual(failure.job?.state, .queued)
+        XCTAssertEqual(failure.reason, .jobPersistenceFailed)
+        XCTAssertEqual(failure.actions, [.retry])
+        XCTAssertEqual(sourceLoadCount, 2)
+        XCTAssertEqual(runtimeResolutionCount, 0)
+        XCTAssertEqual(modelVerificationCount, 0)
+        XCTAssertEqual(persistedStates, [.interrupted])
+        XCTAssertEqual(engineRequestCount, 0)
+        XCTAssertEqual(publishCount, 0)
+        XCTAssertNil(selectedRevisionID)
+    }
+
+    func testRetryDoesNotLaunchAfterValidationFailureCASIsRejected() async throws {
+        let fixture = try ProcessingFixture()
+        let validating = fixture.job(
+            state: .validating,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+        let invalidCandidate = fixture.candidate.replacing(sessionID: "ses-wrong")
+        let source = SourceProbe([
+            .unavailable,
+            .available(fixture.source),
+        ])
+        let runtime = RuntimeProbe(.qualified(fixture.profile))
+        let model = ModelProbe(.ready)
+        let jobs = JobProbe(
+            latest: validating,
+            failingTransitionState: .failed,
+            transitionFailureCount: 1
+        )
+        let revisions = RevisionProbe()
+        let engine = EngineProbe(
+            result: .failure(.launchFailed),
+            recovered: .available(
+                VerifiedTranscriptionCandidate(
+                    candidate: invalidCandidate,
+                    artifactFingerprint: fixture.candidateFingerprint
+                )
+            )
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: runtime,
+            model: model,
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+        await feature.send(.retry)
+
+        guard case let .failed(failure) = await feature.currentState else {
+            return XCTFail("expected rejected validation-failure CAS")
+        }
+        let sourceLoadCount = await source.loadCount
+        let runtimeResolutionCount = await runtime.resolutionCount
+        let modelVerificationCount = await model.verificationCount
+        let persistedStates = await jobs.states
+        let engineRequestCount = await engine.requestCount()
+        let recoveryCount = await engine.recoveryCount()
+        let publishCount = await revisions.publishCountValue()
+        XCTAssertEqual(failure.job?.state, .validating)
+        XCTAssertEqual(failure.reason, .jobPersistenceFailed)
+        XCTAssertEqual(failure.actions, [.retry])
+        XCTAssertEqual(sourceLoadCount, 2)
+        XCTAssertEqual(runtimeResolutionCount, 1)
+        XCTAssertEqual(modelVerificationCount, 0)
+        XCTAssertEqual(persistedStates, [.failed])
+        XCTAssertEqual(engineRequestCount, 0)
+        XCTAssertEqual(recoveryCount, 1)
+        XCTAssertEqual(publishCount, 0)
+    }
+
+    func testRetryLaunchesAfterDurableRetryableTerminalRefresh() async throws {
+        let fixture = try ProcessingFixture()
+        let retryableJobs = [
+            fixture.job(state: .cancelled),
+            fixture.job(state: .interrupted),
+            fixture.job(state: .failed, failure: .engineFailed),
+        ]
+
+        for retryableJob in retryableJobs {
+            let source = SourceProbe(.available(fixture.source))
+            let jobs = JobProbe(latest: retryableJob)
+            let revisions = RevisionProbe()
+            let engine = EngineProbe(
+                result: .success(
+                    VerifiedTranscriptionCandidate(
+                        candidate: fixture.candidate,
+                        artifactFingerprint: fixture.candidateFingerprint
+                    )
+                )
+            )
+            let feature = DefaultSessionProcessingFeature(
+                source: source,
+                runtime: RuntimeProbe(.qualified(fixture.profile)),
+                model: ModelProbe(.ready),
+                acoustics: AcousticProbe(fixture.evidence),
+                jobs: jobs,
+                engine: engine,
+                publisher: TranscriptRevisionPublisher(repository: revisions),
+                clock: FixedProcessingClock(fixture.createdAt),
+                identifiers: FixedProcessingIdentifiers(
+                    jobID: fixture.jobID,
+                    revisionID: fixture.revisionID
+                )
+            )
+
+            await feature.send(.selectSession(fixture.selection))
+            await feature.send(.retry)
+
+            guard case .completed = await feature.currentState else {
+                XCTFail("expected durable \(retryableJob.state) Retry to launch")
+                continue
+            }
+            let sourceLoadCount = await source.loadCount
+            let persistedStates = await jobs.states
+            let engineRequestCount = await engine.requestCount()
+            let publishCount = await revisions.publishCountValue()
+            XCTAssertEqual(sourceLoadCount, 2, "\(retryableJob.state)")
+            XCTAssertEqual(
+                persistedStates,
+                [.queued, .running, .validating, .completed],
+                "\(retryableJob.state)"
+            )
+            XCTAssertEqual(engineRequestCount, 1, "\(retryableJob.state)")
+            XCTAssertEqual(publishCount, 1, "\(retryableJob.state)")
+        }
+    }
+
     func testRetryRereadsPreviouslyUnavailableSealedSourceBeforeStarting() async throws {
         let fixture = try ProcessingFixture()
         let source = SourceProbe([.unavailable, .available(fixture.source)])
@@ -1655,7 +1909,7 @@ private actor AcousticProbe: SessionAcousticEvidencePort {
 }
 
 private actor JobProbe: SessionProcessingJobPort {
-    private let latestValue: SessionProcessingJob?
+    private let latestResult: SessionProcessingJobLoadResult
     private let failingTransitionState: SessionProcessingJobState?
     private var remainingTransitionFailures: Int
     private(set) var states: [SessionProcessingJobState] = []
@@ -1663,10 +1917,13 @@ private actor JobProbe: SessionProcessingJobPort {
 
     init(
         latest: SessionProcessingJob? = nil,
+        latestResult: SessionProcessingJobLoadResult? = nil,
         failingTransitionState: SessionProcessingJobState? = nil,
         transitionFailureCount: Int = 0
     ) {
-        latestValue = latest
+        self.latestResult = latestResult ?? latest.map {
+            SessionProcessingJobLoadResult.loaded($0)
+        } ?? .none
         self.failingTransitionState = failingTransitionState
         remainingTransitionFailures = transitionFailureCount
     }
@@ -1674,7 +1931,7 @@ private actor JobProbe: SessionProcessingJobPort {
     func latest(for selection: SessionProcessingSelection) async
         -> SessionProcessingJobLoadResult
     {
-        latestValue.map(SessionProcessingJobLoadResult.loaded) ?? .none
+        latestResult
     }
 
     func create(_ job: SessionProcessingJob) async -> SessionProcessingJobWriteResult {

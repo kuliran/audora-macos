@@ -775,7 +775,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             transition(
                 to: .failed(
                     SessionProcessingFailedSnapshot(
-                        job: failed,
+                        job: job,
                         reason: .jobPersistenceFailed,
                         actions: [.retry]
                     )
@@ -973,8 +973,19 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     }
 
     private var acceptsRefreshedRetryLaunch: Bool {
-        if case .ready = state { return true }
-        return advertisedRecoveryActions.contains(.retry)
+        switch state {
+        case .ready:
+            true
+        case let .cancelled(snapshot):
+            snapshot.job.state == .cancelled && snapshot.actions.contains(.retry)
+        case let .interrupted(snapshot):
+            snapshot.job.state == .interrupted && snapshot.actions.contains(.retry)
+        case let .failed(snapshot):
+            snapshot.job?.state == .failed && snapshot.actions.contains(.retry)
+        case .unavailable, .preparing, .queued, .running, .cancelling,
+             .validating, .completed, .recoveryRequired:
+            false
+        }
     }
 
     private func runtimeUnavailable(
