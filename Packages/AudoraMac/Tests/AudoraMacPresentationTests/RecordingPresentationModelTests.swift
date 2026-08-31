@@ -116,6 +116,27 @@ final class RecordingPresentationModelTests: XCTestCase {
         XCTAssertFalse(projected.localizedCaseInsensitiveContains("resume"))
     }
 
+    func testResolvingRecoveryOffersNoConcurrentDecision() throws {
+        let item = RecordingRecoveryItem(
+            recordingID: try recordingID(),
+            sessionID: try sessionID(),
+            startedAt: try UTCInstant("2026-08-30T12:00:00.000Z"),
+            durableFrameCount: 32_000,
+            availability: .sealOrDiscard
+        )
+        let state = RecordingPresentationMapper.map(
+            .resolvingRecovery(
+                RecordingRecoveryCatalog(items: [item]),
+                recordingID: item.recordingID,
+                action: .seal
+            )
+        )
+
+        XCTAssertEqual(state.status, .resolvingRecovery)
+        XCTAssertFalse(state.recoveryItems[0].canSeal)
+        XCTAssertFalse(state.recoveryItems[0].canDiscard)
+    }
+
     func testLibraryInspectionDisablesRecordAndCommittedCleanupNeverOffersDiscard() throws {
         let scope = LibraryScope(libraryID: try libraryID())
         let selecting = RecordingPresentationMapper.map(.selectingLibrary(scope))

@@ -965,6 +965,71 @@ final class RecordingInfrastructureTests: XCTestCase {
         }
     }
 
+    func testRecoveryDiscardRemovesOnlyInvalidTargetAndNeverFollowsItsEvidenceSymlink() throws {
+        try withRecordingLibrary { root, request in
+            let persistence = RecordingPersistence()
+            let target = try persistence.prepare(request, under: root)
+            try persistence.append(observedSpan(frames: 4), to: target)
+            target.closeCaptureStream()
+
+            let siblingRequest = MicrophoneRecordingRequest(
+                libraryScope: request.libraryScope,
+                recordingID: try RecordingID("rec-20260830T120001000Z-4GHJ"),
+                sessionID: try SessionID("ses-20260830T120001000Z-5JKM"),
+                startedAt: try UTCInstant("2026-08-30T12:00:01.000Z")
+            )
+            let sibling = try persistence.prepare(siblingRequest, under: root)
+            try persistence.append(observedSpan(frames: 8), to: sibling)
+
+            let outside = root.deletingLastPathComponent().appendingPathComponent(
+                "outside-evidence.bin"
+            )
+            let outsideBytes = Data("not recording evidence".utf8)
+            try outsideBytes.write(to: outside)
+            let targetStream = root.appendingPathComponent(
+                "staging/recordings/\(request.recordingID.rawValue)/records.bin"
+            )
+            try FileManager.default.removeItem(at: targetStream)
+            try FileManager.default.createSymbolicLink(
+                at: targetStream,
+                withDestinationURL: outside
+            )
+
+            let catalog = persistence.inspectRecovery(
+                in: request.libraryScope,
+                under: root
+            )
+            XCTAssertEqual(
+                Dictionary(uniqueKeysWithValues: catalog.items.map {
+                    ($0.recordingID, $0.availability)
+                }),
+                [
+                    request.recordingID: .discardOnly,
+                    siblingRequest.recordingID: .sealOrDiscard,
+                ]
+            )
+
+            try persistence.discardRecovery(
+                recordingID: request.recordingID,
+                in: request.libraryScope,
+                under: root
+            )
+
+            XCTAssertEqual(try Data(contentsOf: outside), outsideBytes)
+            XCTAssertEqual(
+                try recordingStagingNames(root),
+                [siblingRequest.recordingID.rawValue]
+            )
+            let remaining = persistence.inspectRecovery(
+                in: siblingRequest.libraryScope,
+                under: root
+            )
+            XCTAssertEqual(remaining.items.count, 1)
+            XCTAssertEqual(remaining.items[0].recordingID, siblingRequest.recordingID)
+            XCTAssertEqual(remaining.items[0].availability, .sealOrDiscard)
+        }
+    }
+
     func testDiscardPreflightsUnexpectedChildAndLeavesRecoverableIdentityIntact() throws {
         try withRecordingLibrary { root, request in
             let persistence = RecordingPersistence()
