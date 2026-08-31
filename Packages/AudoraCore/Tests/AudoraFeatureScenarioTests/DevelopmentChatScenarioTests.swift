@@ -65,34 +65,37 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 guard let switchCommand = dto.commands.first else {
                     throw ScenarioFailure.script
                 }
-                await feature.send(
-                    try contextualizedCommand(
-                        switchCommand,
-                        activeContext: &commandContext,
-                        generation: &commandGeneration
-                    )
+                let switchState = await feature.currentState
+                let applicationSwitch = try contextualizedCommand(
+                    switchCommand,
+                    activeState: switchState,
+                    activeContext: &commandContext,
+                    generation: &commandGeneration
                 )
+                await feature.send(applicationSwitch)
                 await store.resumeFirstCatalogLoad()
                 await firstStart.value
                 for command in dto.commands.dropFirst() {
-                    await feature.send(
-                        try contextualizedCommand(
-                            command,
-                            activeContext: &commandContext,
-                            generation: &commandGeneration
-                        )
+                    let activeState = await feature.currentState
+                    let applicationCommand = try contextualizedCommand(
+                        command,
+                        activeState: activeState,
+                        activeContext: &commandContext,
+                        generation: &commandGeneration
                     )
+                    await feature.send(applicationCommand)
                 }
             } else {
                 await feature.send(.start(commandContext))
                 for command in dto.commands {
-                    await feature.send(
-                        try contextualizedCommand(
-                            command,
-                            activeContext: &commandContext,
-                            generation: &commandGeneration
-                        )
+                    let activeState = await feature.currentState
+                    let applicationCommand = try contextualizedCommand(
+                        command,
+                        activeState: activeState,
+                        activeContext: &commandContext,
+                        generation: &commandGeneration
                     )
+                    await feature.send(applicationCommand)
                 }
             }
 
@@ -318,7 +321,11 @@ private struct DevelopmentChatCommandDTO: Decodable {
     let text: String?
     let pendingUserTurnId: String?
 
-    func applicationCommand(context: ChatCommandContext) throws -> ChatCommand {
+    func applicationCommand(
+        context: ChatCommandContext,
+        activeChatID: ChatID?,
+        activeDraft: ChatDraft?
+    ) throws -> ChatCommand {
         switch kind {
             case "createDevelopmentChat":
                 guard libraryId == nil, chatId == nil, title == nil,
@@ -354,19 +361,19 @@ private struct DevelopmentChatCommandDTO: Decodable {
             case "editDraft":
                 guard libraryId == nil, chatId == nil, title == nil,
                       expectedRevision == nil, query == nil, let text,
-                      pendingUserTurnId == nil
+                      pendingUserTurnId == nil, let activeChatID, let activeDraft
                 else {
                     throw ScenarioFailure.command
                 }
-                return .editDraft(context, text: text)
+                return .editDraft(context, activeChatID, activeDraft.draftID, text: text)
             case "sendDraft":
                 guard libraryId == nil, chatId == nil, title == nil,
                       expectedRevision == nil, query == nil, text == nil,
-                      pendingUserTurnId == nil
+                      pendingUserTurnId == nil, let activeChatID, let activeDraft
                 else {
                     throw ScenarioFailure.command
                 }
-                return .sendDraft(context)
+                return .sendDraft(context, activeChatID, activeDraft)
             case "discardPendingUserTurn":
                 guard libraryId == nil, chatId == nil, title == nil,
                       expectedRevision == nil, query == nil, text == nil,
@@ -398,6 +405,7 @@ private struct DevelopmentChatCommandDTO: Decodable {
 
 private func contextualizedCommand(
     _ command: DevelopmentChatCommandDTO,
+    activeState: ChatFeatureState,
     activeContext: inout ChatCommandContext,
     generation: inout UInt64
 ) throws -> ChatCommand {
@@ -411,7 +419,20 @@ private func contextualizedCommand(
             generation: generation
         )
     }
-    return try command.applicationCommand(context: activeContext)
+    let identity: (ChatID, ChatDraft)? = {
+        guard case let .open(aggregate) = activeState.selection,
+              case let .editable(draft, _) = activeState.composer,
+              aggregate.chat.draft.draftID == draft.draftID
+        else {
+            return nil
+        }
+        return (aggregate.chat.id, draft)
+    }()
+    return try command.applicationCommand(
+        context: activeContext,
+        activeChatID: identity?.0,
+        activeDraft: identity?.1
+    )
 }
 
 private struct DevelopmentChatEventDTO: Decodable {

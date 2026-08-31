@@ -159,6 +159,78 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(try Self.rows(in: state).visibleRows, [])
     }
 
+    func testRenamePreservesAnExistingPendingUserTurn() async throws {
+        let original = try Self.aggregate(draftText: "Locked synthetic Draft")
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: original.chat.draft.draftID,
+            draftVersion: original.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            )
+        )
+        let locked = try ChatAggregate(
+            chat: original.chat,
+            memory: original.memory,
+            pendingUserTurn: pending
+        )
+        let store = RecordingChatStore(catalog: [.available(locked)])
+        let feature = makeFeature(store: store)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, locked.chat.id))
+
+        await feature.send(
+            .rename(
+                Self.context,
+                locked.chat.id,
+                title: "Pending Reflection",
+                expectedRevision: locked.chat.manifestRevision
+            )
+        )
+
+        let state = await feature.currentState
+        let renamed = try XCTUnwrap(Self.openAggregate(in: state))
+        XCTAssertEqual(renamed.chat.title, try ChatTitle("Pending Reflection"))
+        XCTAssertEqual(renamed.pendingUserTurn, pending)
+        XCTAssertEqual(renamed.chat.draft, locked.chat.draft)
+    }
+
+    func testRenameRebasesOnlyItsOwnedDirtyDraftFlush() async throws {
+        let original = try Self.aggregate()
+        let store = RecordingChatStore(catalog: [.available(original)])
+        let scheduler = ControlledChatAutosaveScheduler()
+        let feature = makeFeature(store: store, autosaveScheduler: scheduler)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, original.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                original.chat.id,
+                original.chat.draft.draftID,
+                text: "Keep this Draft while renaming."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+
+        await feature.send(
+            .rename(
+                Self.context,
+                original.chat.id,
+                title: "Renamed After Draft",
+                expectedRevision: original.chat.manifestRevision
+            )
+        )
+
+        let state = await feature.currentState
+        let renamed = try XCTUnwrap(Self.openAggregate(in: state))
+        XCTAssertEqual(renamed.chat.title, try ChatTitle("Renamed After Draft"))
+        XCTAssertEqual(renamed.chat.draft.text, "Keep this Draft while renaming.")
+        XCTAssertEqual(renamed.chat.manifestRevision, 2)
+        XCTAssertNil(state.notice)
+        let calls = await store.calls
+        XCTAssertEqual(calls, [.loadCatalog, .load, .saveDraft, .rename])
+    }
+
     func testFilterIsPureCaseAndDiacriticInsensitive() async throws {
         let first = try Self.aggregate(title: "Café Practice")
         let second = try Self.aggregate(
@@ -330,6 +402,8 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(
             .editDraft(
                 Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
                 text: "Help me sharpen this synthetic opening."
             )
         )
@@ -360,6 +434,49 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(cleanDraft, saved.replacement)
     }
 
+    func testEditDuringInFlightAutosaveStartsItsOwnTwoSecondDeadline() async throws {
+        let aggregate = try Self.aggregate()
+        let store = RecordingChatStore(
+            catalog: [.available(aggregate)],
+            suspendNextDraftSave: true
+        )
+        let scheduler = ControlledChatAutosaveScheduler()
+        let feature = makeFeature(store: store, autosaveScheduler: scheduler)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "First version"
+            )
+        )
+        await scheduler.waitForScheduleCount(1)
+        await scheduler.resume()
+        await store.waitUntilDraftSaveStarts()
+
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Second version"
+            )
+        )
+
+        await scheduler.waitForScheduleCount(2)
+        let requested = await scheduler.requestedNanoseconds
+        XCTAssertEqual(requested, [2_000_000_000, 2_000_000_000])
+
+        await scheduler.resume()
+        await store.resumeDraftSave()
+        await store.waitForSavedDraftCount(2)
+        let saved = await store.savedDrafts
+        XCTAssertEqual(saved.map(\.replacement.version), [1, 2])
+        XCTAssertEqual(saved.map(\.replacement.text), ["First version", "Second version"])
+    }
+
     func testRapidEditsAreQueuedWhileTheClockIsSuspendedWithoutDroppingText() async throws {
         let aggregate = try Self.aggregate()
         let store = RecordingChatStore(catalog: [.available(aggregate)])
@@ -374,12 +491,22 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.open(Self.context, aggregate.chat.id))
 
         async let firstEdit: Void = feature.send(
-            .editDraft(Self.context, text: "First synthetic keystroke")
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "First synthetic keystroke"
+            )
         )
         await clock.waitUntilFirstRequestIsSuspended()
 
         await feature.send(
-            .editDraft(Self.context, text: "First synthetic keystroke, then the rest")
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "First synthetic keystroke, then the rest"
+            )
         )
         await clock.resumeFirstRequest()
         await firstEdit
@@ -393,7 +520,7 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(draft.text, "First synthetic keystroke, then the rest")
     }
 
-    func testSendQueuedBehindSuspendedEditLocksThatExactDraft() async throws {
+    func testSendCapturedBeforeSuspendedEditCannotLockTheLaterDraft() async throws {
         let aggregate = try Self.aggregate()
         let store = RecordingChatStore(catalog: [.available(aggregate)])
         let scheduler = ControlledChatAutosaveScheduler()
@@ -407,23 +534,29 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.open(Self.context, aggregate.chat.id))
 
         async let edit: Void = feature.send(
-            .editDraft(Self.context, text: "Send this complete synthetic Draft.")
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Send this complete synthetic Draft."
+            )
         )
         await clock.waitUntilFirstRequestIsSuspended()
-        await feature.send(.sendDraft(Self.context))
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
         await clock.resumeFirstRequest()
         await edit
 
         let state = await feature.currentState
-        guard case let .locked(draft, pending) = state.composer else {
-            return XCTFail("expected queued Send to lock the Draft")
+        guard case let .editable(draft, isDirty) = state.composer else {
+            return XCTFail("expected the later Draft to remain editable")
         }
+        XCTAssertTrue(isDirty)
         XCTAssertEqual(draft.text, "Send this complete synthetic Draft.")
         XCTAssertEqual(draft.version, 1)
-        XCTAssertEqual(pending.draftID, draft.draftID)
-        XCTAssertEqual(pending.draftVersion, draft.version)
         let calls = await store.calls
-        XCTAssertEqual(calls, [.loadCatalog, .load, .saveDraft, .lockPendingUserTurn])
+        XCTAssertEqual(calls, [.loadCatalog, .load])
     }
 
     func testOpenQueuedBehindSuspendedEditFlushesBeforeChangingSelection() async throws {
@@ -446,7 +579,12 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.open(Self.context, first.chat.id))
 
         async let edit: Void = feature.send(
-            .editDraft(Self.context, text: "Flush before opening the second Chat.")
+            .editDraft(
+                Self.context,
+                first.chat.id,
+                first.chat.draft.draftID,
+                text: "Flush before opening the second Chat."
+            )
         )
         await clock.waitUntilFirstRequestIsSuspended()
         await feature.send(.open(Self.context, second.chat.id))
@@ -484,12 +622,22 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.open(Self.context, first.chat.id))
 
         async let edit: Void = feature.send(
-            .editDraft(Self.context, text: "Belongs only to the first Chat.")
+            .editDraft(
+                Self.context,
+                first.chat.id,
+                first.chat.draft.draftID,
+                text: "Belongs only to the first Chat."
+            )
         )
         await clock.waitUntilFirstRequestIsSuspended()
         await feature.send(.open(Self.context, second.chat.id))
         await feature.send(
-            .editDraft(Self.context, text: "Stale text must not cross Chat identity.")
+            .editDraft(
+                Self.context,
+                first.chat.id,
+                first.chat.draft.draftID,
+                text: "Stale text must not cross Chat identity."
+            )
         )
         await clock.resumeFirstRequest()
         await edit
@@ -519,7 +667,12 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.open(Self.context, aggregate.chat.id))
 
         async let edit: Void = feature.send(
-            .editDraft(Self.context, text: "Flush before orderly termination.")
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Flush before orderly termination."
+            )
         )
         await clock.waitUntilFirstRequestIsSuspended()
         async let mayTerminate: Bool = feature.flushForOrderlyTermination()
@@ -547,11 +700,19 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(Self.context))
         await feature.send(.open(Self.context, aggregate.chat.id))
         await feature.send(
-            .editDraft(Self.context, text: "Keep this exact synthetic Draft.")
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Keep this exact synthetic Draft."
+            )
         )
         await scheduler.waitUntilScheduled()
+        let expectedDraft = try await Self.editableDraft(in: feature)
 
-        await feature.send(.sendDraft(Self.context))
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, expectedDraft)
+        )
 
         let state = await feature.currentState
         guard case let .open(lockedAggregate) = state.selection,
@@ -568,6 +729,286 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(calls, [.loadCatalog, .load, .saveDraft, .lockPendingUserTurn])
     }
 
+    func testCanceledAutosaveReconciliationNeverClearsSendLockingActivity() async throws {
+        let aggregate = try Self.aggregate()
+        let store = RecordingChatStore(
+            catalog: [.available(aggregate)],
+            suspendNextDraftSave: true
+        )
+        let scheduler = ControlledChatAutosaveScheduler()
+        let pendingIDs = SuspendedPendingUserTurnIDGenerator()
+        let feature = makeFeature(
+            store: store,
+            pendingUserTurnIDGenerator: pendingIDs,
+            autosaveScheduler: scheduler
+        )
+        let recorder = ChatStateRecorder()
+        let collector = Task {
+            for await state in feature.states {
+                await recorder.append(state)
+            }
+        }
+        await recorder.waitForStateCount(1)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Lock this exact Draft."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        await scheduler.resume()
+        await store.waitUntilDraftSaveStarts()
+        let expectedDraft = try await Self.editableDraft(in: feature)
+
+        async let send: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, expectedDraft)
+        )
+        await recorder.waitUntilActivity(.lockingDraft(aggregate.chat.id))
+        await store.resumeDraftSave()
+        await pendingIDs.waitUntilRequested()
+
+        let activities = await recorder.activitiesAfterFirst(
+            .lockingDraft(aggregate.chat.id)
+        )
+        XCTAssertFalse(activities.contains(nil), "Send transiently became editable")
+
+        await pendingIDs.resume()
+        await send
+        collector.cancel()
+    }
+
+    func testCanceledFailedAutosaveNeverClearsSendLockingActivity() async throws {
+        let aggregate = try Self.aggregate()
+        let store = RecordingChatStore(
+            catalog: [.available(aggregate)],
+            draftSaveOutcomes: [.failed],
+            suspendNextDraftSave: true
+        )
+        let scheduler = ControlledChatAutosaveScheduler()
+        let pendingIDs = SuspendedPendingUserTurnIDGenerator()
+        let feature = makeFeature(
+            store: store,
+            pendingUserTurnIDGenerator: pendingIDs,
+            autosaveScheduler: scheduler
+        )
+        let recorder = ChatStateRecorder()
+        let collector = Task {
+            for await state in feature.states {
+                await recorder.append(state)
+            }
+        }
+        await recorder.waitForStateCount(1)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Lock this Draft after the failed autosave."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        await scheduler.resume()
+        await store.waitUntilDraftSaveStarts()
+        let expectedDraft = try await Self.editableDraft(in: feature)
+
+        async let send: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, expectedDraft)
+        )
+        await recorder.waitUntilActivity(.lockingDraft(aggregate.chat.id))
+        await store.resumeDraftSave()
+        await pendingIDs.waitUntilRequested()
+
+        let activities = await recorder.activitiesAfterFirst(
+            .lockingDraft(aggregate.chat.id)
+        )
+        XCTAssertFalse(activities.contains(nil), "Send transiently became editable")
+        let saved = await store.savedDrafts
+        XCTAssertEqual(saved.count, 2, "foreground Send must retry the canceled autosave")
+
+        await pendingIDs.resume()
+        await send
+        collector.cancel()
+    }
+
+    func testCanceledAutosaveStalePendingEndsSendWithNoActiveCommand() async throws {
+        let aggregate = try Self.aggregate()
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: 1,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            )
+        )
+        let externallyLockedDraft = try aggregate.chat.draft.edited(
+            text: "Already locked elsewhere.",
+            at: UTCInstant("2026-08-30T12:00:01.000Z")
+        )
+        let externallyLocked = try ChatAggregate(
+            chat: aggregate.chat.replacingDraft(with: externallyLockedDraft),
+            memory: aggregate.memory,
+            pendingUserTurn: pending
+        )
+        let store = RecordingChatStore(
+            catalog: [.available(aggregate)],
+            draftSaveOutcomes: [.stale(externallyLocked)],
+            suspendNextDraftSave: true
+        )
+        let scheduler = ControlledChatAutosaveScheduler()
+        let feature = makeFeature(store: store, autosaveScheduler: scheduler)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Attempt to send this Draft."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        await scheduler.resume()
+        await store.waitUntilDraftSaveStarts()
+        let expectedDraft = try await Self.editableDraft(in: feature)
+
+        async let send: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, expectedDraft)
+        )
+        while await feature.currentState.activity != .lockingDraft(aggregate.chat.id) {
+            await Task.yield()
+        }
+        await store.resumeDraftSave()
+        await send
+
+        let state = await feature.currentState
+        guard case let .locked(draft, installedPending) = state.composer else {
+            return XCTFail("expected the externally locked Draft")
+        }
+        XCTAssertEqual(draft, externallyLockedDraft)
+        XCTAssertEqual(installedPending, pending)
+        XCTAssertNil(state.activity)
+    }
+
+    func testSendNeverLocksANewerSameIdentityDraftFromStaleAutosave() async throws {
+        let aggregate = try Self.aggregate()
+        let instant = try UTCInstant("2026-08-30T12:00:00.000Z")
+        let capturedDraft = try aggregate.chat.draft.edited(
+            text: "Send this exact Draft.",
+            at: instant
+        )
+        let concurrentDraft = try capturedDraft.edited(
+            text: "Changed by another writer.",
+            at: instant
+        )
+        let concurrent = try ChatAggregate(
+            chat: aggregate.chat.replacingDraft(with: concurrentDraft),
+            memory: aggregate.memory
+        )
+        let store = RecordingChatStore(
+            catalog: [.available(aggregate)],
+            draftSaveOutcomes: [.stale(concurrent)],
+            suspendNextDraftSave: true
+        )
+        let scheduler = ControlledChatAutosaveScheduler()
+        let feature = makeFeature(store: store, autosaveScheduler: scheduler)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: capturedDraft.text
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        await scheduler.resume()
+        await store.waitUntilDraftSaveStarts()
+
+        async let send: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, capturedDraft)
+        )
+        while await feature.currentState.activity != .lockingDraft(aggregate.chat.id) {
+            await Task.yield()
+        }
+        await store.resumeDraftSave()
+        await send
+
+        let pendingLocks = await store.pendingLocks
+        XCTAssertTrue(pendingLocks.isEmpty, "Send must not rebind to a newer Draft version")
+        let state = await feature.currentState
+        guard case let .editable(draft, false) = state.composer else {
+            return XCTFail("expected the concurrent Draft as clean recovery state")
+        }
+        XCTAssertEqual(draft, concurrentDraft)
+        XCTAssertEqual(state.notice, .draftChanged)
+        XCTAssertNil(state.activity)
+    }
+
+    func testOpenRefusesCanceledAutosaveConflictAndKeepsRecoveryVisible() async throws {
+        let first = try Self.aggregate()
+        let second = try Self.aggregate(
+            chat: "cht-20260830T120100000Z-5KMN",
+            draft: "drf-20260830T120100000Z-6PQR",
+            memory: "mem-20260830T120100000Z-7STV",
+            title: "Second Chat"
+        )
+        let externallyLockedDraft = try first.chat.draft.edited(
+            text: "Locked by another writer.",
+            at: UTCInstant("2026-08-30T12:00:01.000Z")
+        )
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: externallyLockedDraft.draftID,
+            draftVersion: externallyLockedDraft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            )
+        )
+        let externallyLocked = try ChatAggregate(
+            chat: first.chat.replacingDraft(with: externallyLockedDraft),
+            memory: first.memory,
+            pendingUserTurn: pending
+        )
+        let store = RecordingChatStore(
+            catalog: [.available(first), .available(second)],
+            draftSaveOutcomes: [.stale(externallyLocked)],
+            suspendNextDraftSave: true
+        )
+        let scheduler = ControlledChatAutosaveScheduler()
+        let feature = makeFeature(store: store, autosaveScheduler: scheduler)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, first.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                first.chat.id,
+                first.chat.draft.draftID,
+                text: "Do not hide this conflict."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        await scheduler.resume()
+        await store.waitUntilDraftSaveStarts()
+
+        async let open: Void = feature.send(.open(Self.context, second.chat.id))
+        await store.resumeDraftSave()
+        await open
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), externallyLocked)
+        XCTAssertEqual(state.composer, .locked(externallyLockedDraft, pending))
+        XCTAssertEqual(state.notice, .draftChanged)
+        let calls = await store.calls
+        XCTAssertEqual(calls, [.loadCatalog, .load, .saveDraft])
+    }
+
     func testDiscardUnlocksTheSamePopulatedDraftWithoutAbandonmentHistory() async throws {
         let aggregate = try Self.aggregate()
         let store = RecordingChatStore(catalog: [.available(aggregate)])
@@ -575,9 +1016,19 @@ final class ChatFeatureTests: XCTestCase {
         let feature = makeFeature(store: store, autosaveScheduler: scheduler)
         await feature.send(.start(Self.context))
         await feature.send(.open(Self.context, aggregate.chat.id))
-        await feature.send(.editDraft(Self.context, text: "Do not abandon this Draft."))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Do not abandon this Draft."
+            )
+        )
         await scheduler.waitUntilScheduled()
-        await feature.send(.sendDraft(Self.context))
+        let expectedDraft = try await Self.editableDraft(in: feature)
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, expectedDraft)
+        )
         let lockedState = await feature.currentState
         guard case let .locked(_, pending) = lockedState.composer else {
             return XCTFail("expected locked Draft")
@@ -610,7 +1061,14 @@ final class ChatFeatureTests: XCTestCase {
         let feature = makeFeature(store: store, autosaveScheduler: scheduler)
         await feature.send(.start(Self.context))
         await feature.send(.open(Self.context, first.chat.id))
-        await feature.send(.editDraft(Self.context, text: "Flush me before navigation."))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                first.chat.id,
+                first.chat.draft.draftID,
+                text: "Flush me before navigation."
+            )
+        )
         await scheduler.waitUntilScheduled()
 
         await feature.send(.open(Self.context, second.chat.id))
@@ -633,7 +1091,14 @@ final class ChatFeatureTests: XCTestCase {
         let feature = makeFeature(store: store, autosaveScheduler: scheduler)
         await feature.send(.start(Self.context))
         await feature.send(.open(Self.context, aggregate.chat.id))
-        await feature.send(.editDraft(Self.context, text: "Library A durable text"))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Library A durable text"
+            )
+        )
         await scheduler.waitUntilScheduled()
         await scheduler.resume()
         await store.waitUntilDraftSaveStarts()
@@ -662,7 +1127,14 @@ final class ChatFeatureTests: XCTestCase {
         )
         await feature.send(.start(returnedContext))
         await feature.send(.open(returnedContext, aggregate.chat.id))
-        await feature.send(.editDraft(Self.context, text: "stale model must be ignored"))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "stale model must be ignored"
+            )
+        )
 
         let reopened = await feature.currentState
         guard case let .editable(reopenedDraft, _) = reopened.composer else {
@@ -728,6 +1200,7 @@ final class ChatFeatureTests: XCTestCase {
     private func makeFeature(
         store: any ChatStorePort,
         clock: any ChatClock = FixedChatClock(),
+        pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator = FixedChatIDs(),
         autosaveScheduler: any ChatAutosaveScheduling = ImmediateChatAutosaveScheduler()
     ) -> DefaultChatFeature {
         DefaultChatFeature(
@@ -737,7 +1210,7 @@ final class ChatFeatureTests: XCTestCase {
             chatIDGenerator: FixedChatIDs(),
             draftIDGenerator: FixedChatIDs(),
             memoryIDGenerator: FixedChatIDs(),
-            pendingUserTurnIDGenerator: FixedChatIDs(),
+            pendingUserTurnIDGenerator: pendingUserTurnIDGenerator,
             responsePositionIDGenerator: FixedChatIDs(),
             autosaveScheduler: autosaveScheduler
         )
@@ -817,6 +1290,15 @@ final class ChatFeatureTests: XCTestCase {
     private static func openAggregate(in state: ChatFeatureState) -> ChatAggregate? {
         guard case let .open(aggregate) = state.selection else { return nil }
         return aggregate
+    }
+
+    private static func editableDraft(
+        in feature: DefaultChatFeature
+    ) async throws -> ChatDraft {
+        guard case let .editable(draft, _) = await feature.currentState.composer else {
+            throw TestError.unexpectedState
+        }
+        return draft
     }
 }
 
@@ -900,6 +1382,7 @@ private actor RecordingChatStore: ChatStorePort {
     private var createOutcomes: [ChatMutationOutcome]
     private var renameOutcomes: [ChatMutationOutcome]
     private var loadOutcomes: [ChatLoadOutcome]
+    private var draftSaveOutcomes: [ChatMutationOutcome]
     private var suspendNextDraftSave: Bool
     private var draftSaveStarted = false
     private var draftSaveContinuation: CheckedContinuation<Void, Never>?
@@ -914,6 +1397,7 @@ private actor RecordingChatStore: ChatStorePort {
         createOutcomes: [ChatMutationOutcome] = [],
         renameOutcomes: [ChatMutationOutcome] = [],
         loadOutcomes: [ChatLoadOutcome] = [],
+        draftSaveOutcomes: [ChatMutationOutcome] = [],
         suspendNextDraftSave: Bool = false
     ) {
         self.catalog = catalog
@@ -926,6 +1410,7 @@ private actor RecordingChatStore: ChatStorePort {
         self.createOutcomes = createOutcomes
         self.renameOutcomes = renameOutcomes
         self.loadOutcomes = loadOutcomes
+        self.draftSaveOutcomes = draftSaveOutcomes
         self.suspendNextDraftSave = suspendNextDraftSave
     }
 
@@ -963,6 +1448,7 @@ private actor RecordingChatStore: ChatStorePort {
             draftSaveStarted = true
             await withCheckedContinuation { draftSaveContinuation = $0 }
         }
+        if !draftSaveOutcomes.isEmpty { return draftSaveOutcomes.removeFirst() }
         guard let existing = aggregates[mutation.chatID] else { return .failed }
         guard existing.pendingUserTurn == nil,
               mutation.replacement.draftID == existing.chat.draft.draftID
@@ -1129,6 +1615,10 @@ private actor ControlledChatAutosaveScheduler: ChatAutosaveScheduling {
         while requestedNanoseconds.isEmpty { await Task.yield() }
     }
 
+    func waitForScheduleCount(_ count: Int) async {
+        while requestedNanoseconds.count < count { await Task.yield() }
+    }
+
     func resume() {
         continuation?.resume()
         continuation = nil
@@ -1137,5 +1627,52 @@ private actor ControlledChatAutosaveScheduler: ChatAutosaveScheduling {
     private func cancel() {
         continuation?.resume(throwing: CancellationError())
         continuation = nil
+    }
+}
+
+private actor SuspendedPendingUserTurnIDGenerator: PendingUserTurnIDGenerator {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var wasRequested = false
+
+    func generatePendingUserTurnID(at instant: UTCInstant) async -> PendingUserTurnID {
+        wasRequested = true
+        await withCheckedContinuation { continuation = $0 }
+        return try! PendingUserTurnID("ptu-20260830T120000000Z-5KMN")
+    }
+
+    func waitUntilRequested() async {
+        while !wasRequested { await Task.yield() }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor ChatStateRecorder {
+    private var states: [ChatFeatureState] = []
+
+    func append(_ state: ChatFeatureState) {
+        states.append(state)
+    }
+
+    func waitForStateCount(_ count: Int) async {
+        while states.count < count { await Task.yield() }
+    }
+
+    func waitUntilActivity(_ activity: ChatFeatureState.Activity) async {
+        while !states.contains(where: { $0.activity == activity }) {
+            await Task.yield()
+        }
+    }
+
+    func activitiesAfterFirst(
+        _ activity: ChatFeatureState.Activity
+    ) -> [ChatFeatureState.Activity?] {
+        guard let index = states.firstIndex(where: { $0.activity == activity }) else {
+            return []
+        }
+        return states[index...].map(\.activity)
     }
 }

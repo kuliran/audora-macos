@@ -21,8 +21,13 @@ public enum ChatCommand: Equatable, Sendable {
     )
     case setFilter(ChatCommandContext, ChatFilterQuery)
     case open(ChatCommandContext, ChatID)
-    case editDraft(ChatCommandContext, text: String)
-    case sendDraft(ChatCommandContext)
+    case editDraft(
+        ChatCommandContext,
+        ChatID,
+        ChatDraftID,
+        text: String
+    )
+    case sendDraft(ChatCommandContext, ChatID, ChatDraft)
     case discardPendingUserTurn(ChatCommandContext, PendingUserTurnID)
 }
 

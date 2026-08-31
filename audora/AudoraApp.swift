@@ -68,9 +68,13 @@ struct AudoraApp: App {
             pendingUserTurnIDGenerator: chatIdentityGenerator,
             responsePositionIDGenerator: chatIdentityGenerator
         )
-        let chatDispatcher = ChatCommandDispatcher(feature: chatFeature)
+        let librarySelectionFeature = DefaultLibrarySelectionFeature(
+            library: feature,
+            chat: chatFeature
+        )
+        let chatDispatcher = ChatCommandDispatcher(feature: librarySelectionFeature)
         let librarySelectionDispatcher = LibrarySelectionCommandDispatcher(
-            feature: feature,
+            feature: librarySelectionFeature,
             chatDispatcher: chatDispatcher
         )
         let windowCoordinator = MainWindowCoordinator(

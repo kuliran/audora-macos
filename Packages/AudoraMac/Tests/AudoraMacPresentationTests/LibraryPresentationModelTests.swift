@@ -98,8 +98,9 @@ final class LibraryPresentationModelTests: XCTestCase {
             snapshots: [LibraryFeatureState(selection: .awaitingBootstrap)]
         )
         let chatDispatcher = ChatCommandDispatcher(feature: chat)
+        let selection = DefaultLibrarySelectionFeature(library: library, chat: chat)
         let dispatcher = LibrarySelectionCommandDispatcher(
-            feature: library,
+            feature: selection,
             chatDispatcher: chatDispatcher
         )
 
@@ -124,8 +125,9 @@ final class LibraryPresentationModelTests: XCTestCase {
             snapshots: [LibraryFeatureState(selection: .awaitingBootstrap)]
         )
         let chatDispatcher = ChatCommandDispatcher(feature: chat)
+        let selection = DefaultLibrarySelectionFeature(library: library, chat: chat)
         let dispatcher = LibrarySelectionCommandDispatcher(
-            feature: library,
+            feature: selection,
             chatDispatcher: chatDispatcher
         )
         let token = try XCTUnwrap(LibraryOpenRequestToken("external_1"))
@@ -146,8 +148,9 @@ final class LibraryPresentationModelTests: XCTestCase {
         let chat = RecordingNavigationChatFeature()
         let chatDispatcher = ChatCommandDispatcher(feature: chat)
         let library = SuspendedLibrarySelectionFeature()
+        let selection = DefaultLibrarySelectionFeature(library: library, chat: chat)
         let dispatcher = LibrarySelectionCommandDispatcher(
-            feature: library,
+            feature: selection,
             chatDispatcher: chatDispatcher
         )
         let context = ChatCommandContext(
@@ -156,11 +159,13 @@ final class LibraryPresentationModelTests: XCTestCase {
             ),
             generation: 1
         )
+        let chatID = try ChatID("cht-20260830T120000000Z-2ABC")
+        let draftID = try ChatDraftID("drf-20260830T120000000Z-3DEF")
 
         let navigation = dispatcher.enqueue(.close)
         await library.waitUntilCommandIsSuspended()
         let lateEdit = chatDispatcher.enqueue(
-            .editDraft(context, text: "must not cross Libraries")
+            .editDraft(context, chatID, draftID, text: "must not cross Libraries")
         )
         let deferredStart = chatDispatcher.enqueue(.start(context))
         await lateEdit.value

@@ -51,15 +51,25 @@ final class ChatPresentationModelTests: XCTestCase {
     }
 
     func testUserActionsCaptureTheCurrentLibraryCommandContext() async throws {
-        let state = ChatFeatureState(
-            catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
-        )
-        let feature = RecordingPresentationChatFeature(initial: state)
-        let model = ChatPresentationModel(feature: feature)
         let scope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
         )
         let chatID = try ChatID("cht-20260830T120000000Z-2ABC")
+        let aggregate = try aggregate(
+            in: scope,
+            chatID: chatID.rawValue,
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "New Chat"
+        )
+        let row = ChatRowSnapshot(aggregate: aggregate)
+        let state = ChatFeatureState(
+            catalog: .ready(ChatCatalogSnapshot(allRows: [row], visibleRows: [row])),
+            selection: .open(aggregate),
+            composer: .editable(aggregate.chat.draft, isDirty: false)
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let model = ChatPresentationModel(feature: feature)
         await model.start(in: scope)
         let startCommands = await feature.commands
         let context = try XCTUnwrap(startContexts(in: startCommands).first)
@@ -86,23 +96,41 @@ final class ChatPresentationModelTests: XCTestCase {
                 .createDevelopmentChat(context),
                 .open(context, chatID),
                 .rename(context, chatID, title: "Focused Practice", expectedRevision: 4),
-                .editDraft(context, text: "A synthetic coaching Draft"),
-                .sendDraft(context),
+                .editDraft(
+                    context,
+                    aggregate.chat.id,
+                    aggregate.chat.draft.draftID,
+                    text: "A synthetic coaching Draft"
+                ),
+                .sendDraft(context, aggregate.chat.id, aggregate.chat.draft),
                 .discardPendingUserTurn(context, pendingID),
             ]
         )
     }
 
     func testSharedDispatcherOrdersRapidDraftSendLibrarySwitchAndTermination() async throws {
-        let feature = SuspendedOrderedPresentationChatFeature()
-        let dispatcher = ChatCommandDispatcher(feature: feature)
-        let firstModel = ChatPresentationModel(dispatcher: dispatcher)
         let firstScope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
         )
         let secondScope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T121000000Z-3DEF")
         )
+        let aggregate = try aggregate(
+            in: firstScope,
+            chatID: "cht-20260830T120000000Z-2ABC",
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "New Chat"
+        )
+        let row = ChatRowSnapshot(aggregate: aggregate)
+        let readyState = ChatFeatureState(
+            catalog: .ready(ChatCatalogSnapshot(allRows: [row], visibleRows: [row])),
+            selection: .open(aggregate),
+            composer: .editable(aggregate.chat.draft, isDirty: false)
+        )
+        let feature = SuspendedOrderedPresentationChatFeature(state: readyState)
+        let dispatcher = ChatCommandDispatcher(feature: feature)
+        let firstModel = ChatPresentationModel(dispatcher: dispatcher)
         await firstModel.start(in: firstScope)
         let initialCommands = await feature.commands
         let firstContext = try XCTUnwrap(startContexts(in: initialCommands).first)
@@ -113,7 +141,7 @@ final class ChatPresentationModelTests: XCTestCase {
         firstModel.sendDraft()
         let secondModel = ChatPresentationModel(dispatcher: dispatcher)
         let switchTask = Task { await secondModel.start(in: secondScope) }
-        while dispatcher.admittedCommandCount < 5 { await Task.yield() }
+        while dispatcher.admittedCommandCount < 4 { await Task.yield() }
         async let terminationAllowed: Bool = dispatcher.flushForOrderlyTermination()
         await Task.yield()
 
@@ -121,7 +149,13 @@ final class ChatPresentationModelTests: XCTestCase {
         let commandsWhileSuspended = await feature.commands
         XCTAssertEqual(flushesWhileSuspended, 0)
         XCTAssertEqual(commandsWhileSuspended, [
-            .start(firstContext), .editDraft(firstContext, text: "A"),
+            .start(firstContext),
+            .editDraft(
+                firstContext,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "A"
+            ),
         ])
 
         await feature.resumeFirstEdit()
@@ -135,13 +169,158 @@ final class ChatPresentationModelTests: XCTestCase {
         XCTAssertEqual(secondContext.libraryScope, secondScope)
         XCTAssertEqual(commands, [
             .start(firstContext),
-            .editDraft(firstContext, text: "A"),
-            .editDraft(firstContext, text: "AB"),
-            .sendDraft(firstContext),
+            .editDraft(
+                firstContext,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "A"
+            ),
+            .editDraft(
+                firstContext,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "AB"
+            ),
+            .sendDraft(firstContext, aggregate.chat.id, aggregate.chat.draft),
             .start(secondContext),
         ])
         let finalFlushCount = await feature.flushCallCount
         XCTAssertEqual(finalFlushCount, 1)
+    }
+
+    func testOpenSynchronouslyFencesLateDraftCommandsWithCapturedIdentity() async throws {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let first = try aggregate(
+            in: scope,
+            chatID: "cht-20260830T120000000Z-2ABC",
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "First Chat"
+        )
+        let secondID = try ChatID("cht-20260830T120100000Z-5KMN")
+        let row = ChatRowSnapshot(aggregate: first)
+        let initial = ChatFeatureState(
+            catalog: .ready(ChatCatalogSnapshot(allRows: [row], visibleRows: [row])),
+            selection: .open(first),
+            composer: .editable(first.chat.draft, isDirty: false)
+        )
+        let feature = SuspendedOpenPresentationChatFeature(initial: initial)
+        let dispatcher = ChatCommandDispatcher(feature: feature)
+        let model = ChatPresentationModel(dispatcher: dispatcher)
+        await model.start(in: scope)
+        let initialCommands = await feature.commands
+        let context = try XCTUnwrap(startContexts(in: initialCommands).first)
+
+        model.open(secondID)
+        XCTAssertTrue(dispatcher.isChatBoundaryPending)
+        await feature.waitUntilOpenIsSuspended()
+        model.updateDraft("Must stay with the first Chat")
+        model.sendDraft()
+        await Task.yield()
+
+        let commandsWhileOpenIsSuspended = await feature.commands
+        XCTAssertEqual(commandsWhileOpenIsSuspended, [.start(context), .open(context, secondID)])
+        await feature.resumeOpen()
+        while dispatcher.isChatBoundaryPending { await Task.yield() }
+        XCTAssertFalse(dispatcher.isChatBoundaryPending)
+    }
+
+    func testNewAndSendSynchronouslyFenceLateDraftEdits() async throws {
+        let context = ChatCommandContext(
+            libraryScope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let chatID = try ChatID("cht-20260830T120000000Z-2ABC")
+        let draftID = try ChatDraftID("drf-20260830T120000000Z-3DEF")
+        let draft = try ChatDraft(
+            draftID: draftID,
+            version: 0,
+            text: "",
+            updatedAt: UTCInstant("2026-08-30T12:00:00.000Z")
+        )
+        let boundaries: [ChatCommand] = [
+            .createDevelopmentChat(context),
+            .sendDraft(context, chatID, draft),
+        ]
+
+        for boundary in boundaries {
+            let feature = SuspendedChatBoundaryPresentationFeature()
+            let dispatcher = ChatCommandDispatcher(feature: feature)
+            let operation = dispatcher.enqueue(boundary)
+            XCTAssertTrue(dispatcher.isChatBoundaryPending)
+            await feature.waitUntilCommandIsSuspended()
+
+            await dispatcher.enqueue(
+                .editDraft(context, chatID, draftID, text: "Rejected late edit")
+            ).value
+            let commandsWhileSuspended = await feature.commands
+            XCTAssertEqual(commandsWhileSuspended, [boundary])
+
+            await feature.resumeCommand()
+            await operation.value
+            XCTAssertFalse(dispatcher.isChatBoundaryPending)
+        }
+    }
+
+    func testSuccessfulTerminationClosesAdmissionBeforeItsFirstAwait() async throws {
+        let feature = SuspendedTerminationPresentationChatFeature()
+        let dispatcher = ChatCommandDispatcher(feature: feature)
+        let context = ChatCommandContext(
+            libraryScope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let chatID = try ChatID("cht-20260830T120000000Z-2ABC")
+        let draftID = try ChatDraftID("drf-20260830T120000000Z-3DEF")
+
+        let termination = Task { await dispatcher.flushForOrderlyTermination() }
+        while !dispatcher.isOrderlyTerminationPending { await Task.yield() }
+        XCTAssertTrue(dispatcher.isOrderlyTerminationPending)
+        await feature.waitUntilFlushIsSuspended()
+        await dispatcher.enqueue(
+            .editDraft(context, chatID, draftID, text: "Too late for termination")
+        ).value
+        await feature.resumeFlush(succeeded: true)
+
+        let terminationSucceeded = await termination.value
+        XCTAssertTrue(terminationSucceeded)
+        XCTAssertTrue(dispatcher.isOrderlyTerminationPending)
+        let commands = await feature.commands
+        XCTAssertEqual(commands, [])
+    }
+
+    func testFailedTerminationReopensCommandAdmission() async throws {
+        let feature = SuspendedTerminationPresentationChatFeature()
+        let dispatcher = ChatCommandDispatcher(feature: feature)
+        let context = ChatCommandContext(
+            libraryScope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let chatID = try ChatID("cht-20260830T120000000Z-2ABC")
+        let draftID = try ChatDraftID("drf-20260830T120000000Z-3DEF")
+
+        let termination = Task { await dispatcher.flushForOrderlyTermination() }
+        await feature.waitUntilFlushIsSuspended()
+        await feature.resumeFlush(succeeded: false)
+        let terminationSucceeded = await termination.value
+        XCTAssertFalse(terminationSucceeded)
+        XCTAssertFalse(dispatcher.isOrderlyTerminationPending)
+
+        await dispatcher.enqueue(
+            .editDraft(context, chatID, draftID, text: "Retry after failed flush")
+        ).value
+        let commands = await feature.commands
+        XCTAssertEqual(
+            commands,
+            [.editDraft(context, chatID, draftID, text: "Retry after failed flush")]
+        )
     }
 
     func testRenameEditorTaskIdentityChangesBetweenRevisionZeroChats() throws {
@@ -491,26 +670,27 @@ private actor RecordingPresentationChatFeature: ChatFeature {
 }
 
 private actor SuspendedOrderedPresentationChatFeature: ChatFeature {
-    nonisolated var states: AsyncStream<ChatFeatureState> {
-        AsyncStream { continuation in
-            continuation.yield(Self.readyState)
-            continuation.finish()
-        }
-    }
+    nonisolated let states: AsyncStream<ChatFeatureState>
 
-    private static let readyState = ChatFeatureState(
-        catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
-    )
+    private let state: ChatFeatureState
     private var activeScope: LibraryScope?
     private var firstEditContinuation: CheckedContinuation<Void, Never>?
     private var didSuspendFirstEdit = false
     private(set) var commands: [ChatCommand] = []
     private(set) var flushCallCount = 0
 
-    var currentState: ChatFeatureState { Self.readyState }
+    init(state: ChatFeatureState) {
+        self.state = state
+        states = AsyncStream { continuation in
+            continuation.yield(state)
+            continuation.finish()
+        }
+    }
+
+    var currentState: ChatFeatureState { state }
 
     func currentState(in scope: LibraryScope) -> ChatFeatureState? {
-        activeScope == scope ? Self.readyState : nil
+        activeScope == scope ? state : nil
     }
 
     func send(_ command: ChatCommand) async {
@@ -536,6 +716,109 @@ private actor SuspendedOrderedPresentationChatFeature: ChatFeature {
     func resumeFirstEdit() {
         firstEditContinuation?.resume()
         firstEditContinuation = nil
+    }
+}
+
+private actor SuspendedOpenPresentationChatFeature: ChatFeature {
+    nonisolated let states: AsyncStream<ChatFeatureState>
+
+    private let state: ChatFeatureState
+    private var activeScope: LibraryScope?
+    private var openContinuation: CheckedContinuation<Void, Never>?
+    private(set) var commands: [ChatCommand] = []
+
+    init(initial: ChatFeatureState) {
+        state = initial
+        states = AsyncStream { continuation in
+            continuation.yield(initial)
+            continuation.finish()
+        }
+    }
+
+    var currentState: ChatFeatureState { state }
+
+    func currentState(in scope: LibraryScope) -> ChatFeatureState? {
+        activeScope == scope ? state : nil
+    }
+
+    func send(_ command: ChatCommand) async {
+        commands.append(command)
+        if case let .start(context) = command {
+            activeScope = context.libraryScope
+        }
+        if case .open = command {
+            await withCheckedContinuation { openContinuation = $0 }
+        }
+    }
+
+    func flushForOrderlyTermination() async -> Bool { true }
+
+    func waitUntilOpenIsSuspended() async {
+        while openContinuation == nil { await Task.yield() }
+    }
+
+    func resumeOpen() {
+        openContinuation?.resume()
+        openContinuation = nil
+    }
+}
+
+private actor SuspendedTerminationPresentationChatFeature: ChatFeature {
+    nonisolated let states = AsyncStream<ChatFeatureState> { continuation in
+        continuation.finish()
+    }
+
+    private var flushContinuation: CheckedContinuation<Bool, Never>?
+    private(set) var commands: [ChatCommand] = []
+
+    var currentState: ChatFeatureState { ChatFeatureState() }
+
+    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+
+    func send(_ command: ChatCommand) {
+        commands.append(command)
+    }
+
+    func flushForOrderlyTermination() async -> Bool {
+        await withCheckedContinuation { flushContinuation = $0 }
+    }
+
+    func waitUntilFlushIsSuspended() async {
+        while flushContinuation == nil { await Task.yield() }
+    }
+
+    func resumeFlush(succeeded: Bool) {
+        flushContinuation?.resume(returning: succeeded)
+        flushContinuation = nil
+    }
+}
+
+private actor SuspendedChatBoundaryPresentationFeature: ChatFeature {
+    nonisolated let states = AsyncStream<ChatFeatureState> { continuation in
+        continuation.finish()
+    }
+
+    private var commandContinuation: CheckedContinuation<Void, Never>?
+    private(set) var commands: [ChatCommand] = []
+
+    var currentState: ChatFeatureState { ChatFeatureState() }
+
+    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+
+    func send(_ command: ChatCommand) async {
+        commands.append(command)
+        await withCheckedContinuation { commandContinuation = $0 }
+    }
+
+    func flushForOrderlyTermination() async -> Bool { true }
+
+    func waitUntilCommandIsSuspended() async {
+        while commandContinuation == nil { await Task.yield() }
+    }
+
+    func resumeCommand() {
+        commandContinuation?.resume()
+        commandContinuation = nil
     }
 }
 

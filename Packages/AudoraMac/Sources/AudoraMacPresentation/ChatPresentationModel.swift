@@ -118,13 +118,25 @@ public final class ChatPresentationModel: ObservableObject {
     }
 
     public func updateDraft(_ text: String) {
-        guard let context = commandContext else { return }
-        send(.editDraft(context, text: text))
+        guard let context = commandContext,
+              case let .open(aggregate) = snapshot.selection,
+              case let .editable(draft, _) = snapshot.composer,
+              aggregate.chat.draft.draftID == draft.draftID
+        else {
+            return
+        }
+        send(.editDraft(context, aggregate.chat.id, draft.draftID, text: text))
     }
 
     public func sendDraft() {
-        guard let context = commandContext else { return }
-        send(.sendDraft(context))
+        guard let context = commandContext,
+              case let .open(aggregate) = snapshot.selection,
+              case let .editable(draft, _) = snapshot.composer,
+              aggregate.chat.draft.draftID == draft.draftID
+        else {
+            return
+        }
+        send(.sendDraft(context, aggregate.chat.id, draft))
     }
 
     public func discardPendingUserTurn(_ pendingUserTurnID: PendingUserTurnID) {

@@ -291,6 +291,8 @@ public struct ChatRootView: View {
 
     private var allowsNavigationAndMutation: Bool {
         !dispatcher.isLibraryNavigationPending &&
+            !dispatcher.isChatBoundaryPending &&
+            !dispatcher.isOrderlyTerminationPending &&
             ChatInteractionPolicy.allowsNavigationAndMutation(in: model.snapshot)
     }
 

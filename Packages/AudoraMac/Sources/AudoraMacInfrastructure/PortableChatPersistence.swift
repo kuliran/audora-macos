@@ -137,7 +137,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
     ) throws -> [LoadedPortableChat] {
         let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
         defer { Darwin.close(rootDescriptor) }
-        try reconcileStagedChatCandidates(under: rootDescriptor)
+        try reconcileStagedChatCandidatesExclusively(under: rootDescriptor)
         let chatsDescriptor = try openDirectory(named: "chats", under: rootDescriptor)
         defer { Darwin.close(chatsDescriptor) }
 
@@ -154,7 +154,10 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 do {
                     let descriptor = try openDirectory(named: name, under: chatsDescriptor)
                     defer { Darwin.close(descriptor) }
-                    return try loadChat(from: descriptor, expectedID: chatID)
+                    return try loadChatReconcilingTransients(
+                        from: descriptor,
+                        expectedID: chatID
+                    )
                 } catch let error as PortableChatPersistenceError {
                     guard let frozen = frozenChatSnapshot(for: error, chatID: chatID) else {
                         throw error
@@ -173,7 +176,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
     ) throws -> LoadedPortableChat {
         let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
         defer { Darwin.close(rootDescriptor) }
-        try reconcileStagedChatCandidates(under: rootDescriptor)
+        try reconcileStagedChatCandidatesExclusively(under: rootDescriptor)
         let chatsDescriptor = try openDirectory(named: "chats", under: rootDescriptor)
         defer { Darwin.close(chatsDescriptor) }
         guard try entryExists(named: chatID.rawValue, under: chatsDescriptor) else {
@@ -182,7 +185,10 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let descriptor = try openDirectory(named: chatID.rawValue, under: chatsDescriptor)
         defer { Darwin.close(descriptor) }
         do {
-            return try loadChat(from: descriptor, expectedID: chatID)
+            return try loadChatReconcilingTransients(
+                from: descriptor,
+                expectedID: chatID
+            )
         } catch let error as PortableChatPersistenceError {
             guard let frozen = frozenChatSnapshot(for: error, chatID: chatID) else {
                 throw error
@@ -204,9 +210,11 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 seed.aggregate.chat.profileStatementGenerationAtCreation
         )
         defer { Darwin.close(rootDescriptor) }
-        try reconcileStagedChatCandidates(under: rootDescriptor)
         let stagingDescriptor = try openDirectory(named: "staging", under: rootDescriptor)
         defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        try reconcileStagedChatCandidates(under: rootDescriptor)
         let publicationsDescriptor = try openDirectory(
             named: "publications",
             under: stagingDescriptor
@@ -287,7 +295,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         try fault(.beforeStagedRead)
         guard case let .readWrite(staged) = try loadChat(
             from: candidateDescriptor,
-            expectedID: seed.aggregate.chat.id
+            expectedID: seed.aggregate.chat.id,
+            reconcileTransients: false
         ), staged == seed.aggregate else {
             throw PortableChatPersistenceError.invalidLayout
         }
@@ -328,7 +337,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         ) == validatedCandidateIdentity else {
             throw PortableChatPersistenceError.invalidLayout
         }
-        guard case let .readWrite(installed) = try loadChat(
+        guard case let .readWrite(installed) = try loadChatReconcilingTransients(
             from: finalDescriptor,
             expectedID: seed.aggregate.chat.id
         ), installed == seed.aggregate else {
@@ -435,7 +444,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
         guard case let .readWrite(reopened) = try loadChat(
             from: chatDescriptor,
-            expectedID: mutation.chatID
+            expectedID: mutation.chatID,
+            reconcileTransients: true
         ), reopened == renamed else {
             throw PortableChatPersistenceError.invalidLayout
         }
@@ -542,7 +552,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         try fault(.beforeDraftFinalRead)
         guard case let .readWrite(reopened) = try loadChat(
             from: chatDescriptor,
-            expectedID: mutation.chatID
+            expectedID: mutation.chatID,
+            reconcileTransients: true
         ), reopened == replacement else {
             throw PortableChatPersistenceError.invalidLayout
         }
@@ -639,7 +650,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         try fault(.beforePendingFinalRead)
         guard case let .readWrite(reopened) = try loadChat(
             from: chatDescriptor,
-            expectedID: mutation.chatID
+            expectedID: mutation.chatID,
+            reconcileTransients: true
         ), reopened == replacement else {
             throw PortableChatPersistenceError.invalidLayout
         }
@@ -699,7 +711,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         try fault(.afterPendingRemovalDirectoryFlush)
         guard case let .readWrite(reopened) = try loadChat(
             from: chatDescriptor,
-            expectedID: mutation.chatID
+            expectedID: mutation.chatID,
+            reconcileTransients: true
         ), reopened == replacement else {
             throw PortableChatPersistenceError.invalidLayout
         }
@@ -725,7 +738,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let chatDescriptor = try openDirectory(named: finalName, under: chatsDescriptor)
         defer { Darwin.close(chatDescriptor) }
         guard try directoryIdentity(of: chatDescriptor) == installedIdentity,
-              case let .readWrite(installed) = try loadChat(
+              case let .readWrite(installed) = try loadChatReconcilingTransients(
                   from: chatDescriptor,
                   expectedID: seed.aggregate.chat.id
               ),
@@ -739,7 +752,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             named: finalName,
             under: chatsDescriptor
         ) == installedIdentity,
-              case let .readWrite(confirmed) = try loadChat(
+              case let .readWrite(confirmed) = try loadChatReconcilingTransients(
                   from: chatDescriptor,
                   expectedID: seed.aggregate.chat.id
               ),
@@ -766,7 +779,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let chatDescriptor = try openDirectory(named: chatName, under: chatsDescriptor)
         defer { Darwin.close(chatDescriptor) }
         guard try directoryIdentity(of: chatDescriptor) == chatIdentity,
-              case let .readWrite(renamed) = try loadChat(
+              case let .readWrite(renamed) = try loadChatReconcilingTransients(
                   from: chatDescriptor,
                   expectedID: mutation.chatID
               ),
@@ -777,7 +790,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
         try flushDescriptor(chatDescriptor)
         guard try directoryIdentity(named: chatName, under: chatsDescriptor) == chatIdentity,
-              case let .readWrite(confirmed) = try loadChat(
+              case let .readWrite(confirmed) = try loadChatReconcilingTransients(
                   from: chatDescriptor,
                   expectedID: mutation.chatID
               ),
@@ -855,7 +868,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
               try directoryIdentity(of: chatDescriptor) == chatIdentity,
               case let .readWrite(installed) = try loadChat(
                   from: chatDescriptor,
-                  expectedID: chatID
+                  expectedID: chatID,
+                  reconcileTransients: true
               ),
               matches(installed)
         else {
@@ -868,7 +882,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
               try directoryIdentity(of: chatDescriptor) == chatIdentity,
               case let .readWrite(confirmed) = try loadChat(
                   from: chatDescriptor,
-                  expectedID: chatID
+                  expectedID: chatID,
+                  reconcileTransients: true
               ),
               matches(confirmed)
         else {
@@ -1018,7 +1033,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
     private func loadChat(
         from chatDescriptor: Int32,
         expectedID: ChatID,
-        reconcileTransients: Bool = true
+        reconcileTransients: Bool
     ) throws -> LoadedPortableChat {
         let chatData = try boundedData(named: "chat.json", under: chatDescriptor)
         let chatVersion = try schemaVersion(in: chatData)
@@ -1095,6 +1110,19 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return .readWrite(aggregate)
     }
 
+    private func loadChatReconcilingTransients(
+        from chatDescriptor: Int32,
+        expectedID: ChatID
+    ) throws -> LoadedPortableChat {
+        try acquireExclusiveMutationLock(on: chatDescriptor)
+        defer { releaseMutationLock(on: chatDescriptor) }
+        return try loadChat(
+            from: chatDescriptor,
+            expectedID: expectedID,
+            reconcileTransients: true
+        )
+    }
+
     private func loadChatForRename(
         from chatDescriptor: Int32,
         expectedID: ChatID,
@@ -1154,6 +1182,16 @@ public struct PortableChatPersistence: @unchecked Sendable {
             removed = true
         }
         if removed { try flushDescriptor(publicationsDescriptor) }
+    }
+
+    private func reconcileStagedChatCandidatesExclusively(
+        under rootDescriptor: Int32
+    ) throws {
+        let stagingDescriptor = try openDirectory(named: "staging", under: rootDescriptor)
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        try reconcileStagedChatCandidates(under: rootDescriptor)
     }
 
     private func reconcileRootMutationPartials(under chatDescriptor: Int32) throws {

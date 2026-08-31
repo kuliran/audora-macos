@@ -103,7 +103,9 @@ public struct LibraryRootView: View {
         .padding(32)
         .disabled(
             model.snapshot?.activity != nil ||
-                chatDispatcher.isLibraryNavigationPending
+                chatDispatcher.isLibraryNavigationPending ||
+                chatDispatcher.isChatBoundaryPending ||
+                chatDispatcher.isOrderlyTerminationPending
         )
         .task {
             windowCoordinator.registerReopenAction {

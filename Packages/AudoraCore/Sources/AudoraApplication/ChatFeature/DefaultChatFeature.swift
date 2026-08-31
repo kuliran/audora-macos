@@ -12,8 +12,20 @@ private enum QueuedChatAction: Sendable {
     case sendDraft(
         context: ChatCommandContext,
         chatID: ChatID,
-        draftID: ChatDraftID
+        draft: ChatDraft
     )
+}
+
+private struct ScheduledAutosave: Sendable {
+    let context: ChatCommandContext
+    let chatID: ChatID
+}
+
+private enum DraftSaveDisposition: Equatable, Sendable {
+    case notAttempted
+    case durable
+    case retryable
+    case terminal
 }
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
@@ -39,7 +51,9 @@ public actor DefaultChatFeature: ChatFeature {
     private var operationIdleWaiters: [CheckedContinuation<Void, Never>] = []
     private var pendingStart: ChatCommandContext?
     private var queuedActions: [QueuedChatAction] = []
-    private var autosaveTask: (id: UInt64, task: Task<Void, Never>)?
+    private var autosaveTimer: (id: UInt64, task: Task<Void, Never>)?
+    private var autosaveWrite: (id: UInt64, task: Task<DraftSaveDisposition, Never>)?
+    private var autosaveDueAfterWrite: ScheduledAutosave?
     private var nextAutosaveID: UInt64 = 0
     private var suppressAutosaveScheduling = false
     private var continuations: [Int: AsyncStream<ChatFeatureState>.Continuation] = [:]
@@ -100,11 +114,13 @@ public actor DefaultChatFeature: ChatFeature {
         }
         guard isCurrent(command.context) else { return }
         switch command {
-        case let .editDraft(context, text):
+        case let .editDraft(context, chatID, draftID, text):
             guard case let .open(aggregate) = state.selection,
                   case let .editable(draft, _) = state.composer,
+                  aggregate.chat.id == chatID,
                   aggregate.pendingUserTurn == nil,
-                  aggregate.chat.draft.draftID == draft.draftID
+                  aggregate.chat.draft.draftID == draftID,
+                  draft.draftID == draftID
             else {
                 return
             }
@@ -112,23 +128,25 @@ public actor DefaultChatFeature: ChatFeature {
                 .draftEdit(
                     context: context,
                     text: text,
-                    chatID: aggregate.chat.id,
-                    draftID: draft.draftID
+                    chatID: chatID,
+                    draftID: draftID
                 )
             )
-        case let .sendDraft(context):
+        case let .sendDraft(context, chatID, expectedDraft):
             guard case let .open(aggregate) = state.selection,
                   case let .editable(draft, _) = state.composer,
+                  aggregate.chat.id == chatID,
                   aggregate.pendingUserTurn == nil,
-                  aggregate.chat.draft.draftID == draft.draftID
+                  aggregate.chat.draft.draftID == expectedDraft.draftID,
+                  draft == expectedDraft
             else {
                 return
             }
             queuedActions.append(
                 .sendDraft(
                     context: context,
-                    chatID: aggregate.chat.id,
-                    draftID: draft.draftID
+                    chatID: chatID,
+                    draft: expectedDraft
                 )
             )
         case .start, .setFilter:
@@ -168,12 +186,20 @@ public actor DefaultChatFeature: ChatFeature {
                     continue
                 }
                 await editDraft(text, context: context)
-            case let .sendDraft(context, chatID, draftID):
-                guard activeContext == context else { continue }
+            case let .sendDraft(context, chatID, expectedDraft):
+                guard activeContext == context,
+                      case let .open(aggregate) = state.selection,
+                      aggregate.chat.id == chatID,
+                      aggregate.pendingUserTurn == nil,
+                      case let .editable(draft, _) = state.composer,
+                      draft == expectedDraft
+                else {
+                    continue
+                }
                 await sendDraft(
                     context: context,
                     expectedChatID: chatID,
-                    expectedDraftID: draftID
+                    expectedDraft: expectedDraft
                 )
             case let .command(command):
                 guard activeContext == command.context else { continue }
@@ -343,6 +369,16 @@ public actor DefaultChatFeature: ChatFeature {
         context: ChatCommandContext
     ) async {
         guard isActive(context), case .ready = state.catalog else { return }
+        let ownedDirtyDraftBeforeFlush: (aggregate: ChatAggregate, draft: ChatDraft)? = {
+            guard case let .open(aggregate) = state.selection,
+                  aggregate.chat.id == chatID,
+                  case let .editable(draft, true) = state.composer,
+                  aggregate.chat.draft.draftID == draft.draftID
+            else {
+                return nil
+            }
+            return (aggregate, draft)
+        }()
         guard await flushSelectedDraft(in: context) else { return }
         let library = context.libraryScope
         let title: ChatTitle
@@ -379,7 +415,20 @@ public actor DefaultChatFeature: ChatFeature {
                 return
             }
         }
-        guard base.chat.manifestRevision == expectedRevision else {
+        let effectiveExpectedRevision: UInt64 = {
+            guard let before = ownedDirtyDraftBeforeFlush,
+                  before.aggregate.chat.manifestRevision == expectedRevision,
+                  before.aggregate.chat.title == base.chat.title,
+                  base.chat.draft == before.draft
+            else {
+                return expectedRevision
+            }
+            let (ownedRevision, overflow) = expectedRevision.addingReportingOverflow(1)
+            return !overflow && base.chat.manifestRevision == ownedRevision
+                ? ownedRevision
+                : expectedRevision
+        }()
+        guard base.chat.manifestRevision == effectiveExpectedRevision else {
             install(
                 base,
                 selection: selectionReplacing(chatID, with: .open(base)),
@@ -571,13 +620,13 @@ public actor DefaultChatFeature: ChatFeature {
     private func sendDraft(
         context: ChatCommandContext,
         expectedChatID: ChatID,
-        expectedDraftID: ChatDraftID
+        expectedDraft: ChatDraft
     ) async {
         guard isActive(context),
               case let .open(aggregate) = state.selection,
               aggregate.chat.id == expectedChatID,
               case let .editable(draft, _) = state.composer,
-              draft.draftID == expectedDraftID,
+              draft == expectedDraft,
               aggregate.pendingUserTurn == nil,
               draft.text.unicodeScalars.contains(where: { !$0.properties.isWhitespace })
         else {
@@ -591,10 +640,14 @@ public actor DefaultChatFeature: ChatFeature {
               case let .open(flushed) = state.selection,
               case let .editable(flushedDraft, false) = state.composer,
               flushed.chat.id == expectedChatID,
-              flushedDraft.draftID == expectedDraftID,
               flushed.chat.draft == flushedDraft,
               flushed.pendingUserTurn == nil
         else {
+            return
+        }
+        guard flushedDraft == expectedDraft else {
+            state = replacing(activity: nil, notice: .draftChanged)
+            publish()
             return
         }
 
@@ -665,7 +718,12 @@ public actor DefaultChatFeature: ChatFeature {
     }
 
     private func scheduleAutosave(for context: ChatCommandContext, chatID: ChatID) {
-        guard !suppressAutosaveScheduling, autosaveTask == nil else { return }
+        guard !suppressAutosaveScheduling,
+              autosaveTimer == nil,
+              autosaveDueAfterWrite == nil
+        else {
+            return
+        }
         nextAutosaveID &+= 1
         let id = nextAutosaveID
         let scheduler = autosaveScheduler
@@ -675,54 +733,107 @@ public actor DefaultChatFeature: ChatFeature {
                     forNanoseconds: Self.draftAutosaveIntervalNanoseconds
                 )
                 guard !Task.isCancelled else {
-                    await self?.finishAutosave(id: id, shouldReschedule: false)
+                    await self?.finishAutosaveTimer(id: id)
                     return
                 }
-                await self?.autosaveDue(id: id, context: context, chatID: chatID)
+                await self?.autosaveDeadlineReached(
+                    id: id,
+                    request: ScheduledAutosave(context: context, chatID: chatID)
+                )
             } catch {
-                await self?.finishAutosave(id: id, shouldReschedule: false)
+                await self?.finishAutosaveTimer(id: id)
             }
         }
-        autosaveTask = (id, task)
+        autosaveTimer = (id, task)
     }
 
-    private func autosaveDue(
+    private func autosaveDeadlineReached(
         id: UInt64,
-        context: ChatCommandContext,
-        chatID: ChatID
-    ) async {
-        guard autosaveTask?.id == id,
-              isCurrent(context),
+        request: ScheduledAutosave
+    ) {
+        guard autosaveTimer?.id == id else { return }
+        autosaveTimer = nil
+        guard !suppressAutosaveScheduling,
+              isCurrent(request.context),
               case let .open(aggregate) = state.selection,
-              aggregate.chat.id == chatID,
+              aggregate.chat.id == request.chatID,
+              case .editable(_, true) = state.composer
+        else {
+            return
+        }
+        guard autosaveWrite == nil else {
+            autosaveDueAfterWrite = request
+            return
+        }
+        startAutosaveWrite(request)
+    }
+
+    private func startAutosaveWrite(_ request: ScheduledAutosave) {
+        guard !suppressAutosaveScheduling, autosaveWrite == nil else { return }
+        nextAutosaveID &+= 1
+        let id = nextAutosaveID
+        let task = Task<DraftSaveDisposition, Never> { [weak self] in
+            guard let self else { return .notAttempted }
+            return await self.performAutosaveWrite(id: id, request: request)
+        }
+        autosaveWrite = (id, task)
+    }
+
+    private func performAutosaveWrite(
+        id: UInt64,
+        request: ScheduledAutosave
+    ) async -> DraftSaveDisposition {
+        guard autosaveWrite?.id == id,
+              isCurrent(request.context),
+              case let .open(aggregate) = state.selection,
+              aggregate.chat.id == request.chatID,
               case let .editable(draft, true) = state.composer
         else {
-            finishAutosave(id: id, shouldReschedule: false)
-            return
+            finishAutosaveWrite(id: id, shouldReschedule: false)
+            return .notAttempted
         }
         let outcome = await store.saveDraft(
             SaveChatDraftMutation(
-                library: context.libraryScope,
-                chatID: chatID,
+                library: request.context.libraryScope,
+                chatID: request.chatID,
                 replacement: draft
             )
         )
         let wasCancelled = Task.isCancelled
-        if activeContext == context {
-            _ = reconcileDraftSave(
+        let disposition: DraftSaveDisposition
+        if activeContext == request.context {
+            disposition = reconcileDraftSave(
                 outcome,
-                expectedChatID: chatID,
+                expectedChatID: request.chatID,
                 expectedDraft: draft,
-                failureNotice: .draftSaveFailed
+                failureNotice: .draftSaveFailed,
+                preserveActivityForRetry: wasCancelled
             )
+        } else {
+            disposition = .notAttempted
         }
-        finishAutosave(id: id, shouldReschedule: !wasCancelled)
+        finishAutosaveWrite(id: id, shouldReschedule: !wasCancelled)
+        return disposition
     }
 
-    private func finishAutosave(id: UInt64, shouldReschedule: Bool) {
-        guard autosaveTask?.id == id else { return }
-        autosaveTask = nil
-        guard shouldReschedule, !suppressAutosaveScheduling,
+    private func finishAutosaveTimer(id: UInt64) {
+        guard autosaveTimer?.id == id else { return }
+        autosaveTimer = nil
+    }
+
+    private func finishAutosaveWrite(id: UInt64, shouldReschedule: Bool) {
+        guard autosaveWrite?.id == id else { return }
+        autosaveWrite = nil
+        guard !suppressAutosaveScheduling else {
+            autosaveDueAfterWrite = nil
+            return
+        }
+        if let due = autosaveDueAfterWrite {
+            autosaveDueAfterWrite = nil
+            startAutosaveWrite(due)
+            return
+        }
+        guard shouldReschedule,
               let activeContext,
               requestedContext == activeContext,
               case let .open(aggregate) = state.selection,
@@ -733,27 +844,41 @@ public actor DefaultChatFeature: ChatFeature {
         scheduleAutosave(for: activeContext, chatID: aggregate.chat.id)
     }
 
-    private func quiesceAutosave() async {
+    private func quiesceAutosave() async -> DraftSaveDisposition {
         suppressAutosaveScheduling = true
-        while let active = autosaveTask {
+        autosaveDueAfterWrite = nil
+        var disposition = DraftSaveDisposition.notAttempted
+        while let active = autosaveTimer {
             active.task.cancel()
             await active.task.value
-            if autosaveTask?.id == active.id {
-                autosaveTask = nil
+            if autosaveTimer?.id == active.id {
+                autosaveTimer = nil
+            }
+        }
+        while let active = autosaveWrite {
+            active.task.cancel()
+            let completed = await active.task.value
+            if completed != .notAttempted {
+                disposition = completed
+            }
+            if autosaveWrite?.id == active.id {
+                autosaveWrite = nil
             }
         }
         suppressAutosaveScheduling = false
+        return disposition
     }
 
     private func flushSelectedDraft(in context: ChatCommandContext) async -> Bool {
-        await quiesceAutosave()
+        let quiesced = await quiesceAutosave()
         guard activeContext == context else { return false }
+        guard quiesced != .terminal else { return false }
         guard case let .open(aggregate) = state.selection,
               case let .editable(draft, isDirty) = state.composer
         else {
-            return true
+            return quiesced != .retryable
         }
-        guard isDirty else { return true }
+        guard isDirty else { return quiesced != .retryable }
         let outcome = await store.saveDraft(
             SaveChatDraftMutation(
                 library: context.libraryScope,
@@ -762,19 +887,19 @@ public actor DefaultChatFeature: ChatFeature {
             )
         )
         guard activeContext == context else { return false }
-        let committed = reconcileDraftSave(
+        let disposition = reconcileDraftSave(
             outcome,
             expectedChatID: aggregate.chat.id,
             expectedDraft: draft,
             failureNotice: .draftSaveFailed
         )
-        if !committed,
+        if disposition == .retryable,
            requestedContext == activeContext,
            case .editable(_, true) = state.composer
         {
             scheduleAutosave(for: context, chatID: aggregate.chat.id)
         }
-        return committed
+        return disposition == .durable
     }
 
     @discardableResult
@@ -782,24 +907,31 @@ public actor DefaultChatFeature: ChatFeature {
         _ outcome: ChatMutationOutcome,
         expectedChatID: ChatID,
         expectedDraft: ChatDraft,
-        failureNotice: ChatNotice
-    ) -> Bool {
+        failureNotice: ChatNotice,
+        preserveActivityForRetry: Bool = false
+    ) -> DraftSaveDisposition {
+        let preservedActivity = state.activity
+        let retryActivity = preserveActivityForRetry ? preservedActivity : nil
         switch outcome {
         case let .committed(current), let .stale(current):
             guard current.chat.id == expectedChatID,
                   current.chat.draft.draftID == expectedDraft.draftID
             else {
-                state = replacing(activity: nil, notice: failureNotice)
+                state = replacing(activity: retryActivity, notice: failureNotice)
                 publish()
-                return false
+                return .retryable
             }
             let notice: ChatNotice? = {
                 if case .stale = outcome { return .draftChanged }
                 return nil
             }()
             if current.pendingUserTurn != nil {
-                install(current, selection: .open(current), notice: .draftChanged)
-                return false
+                install(
+                    current,
+                    selection: .open(current),
+                    notice: .draftChanged
+                )
+                return .terminal
             }
             if case let .editable(local, _) = state.composer,
                local.draftID == current.chat.draft.draftID,
@@ -809,22 +941,30 @@ public actor DefaultChatFeature: ChatFeature {
                     current,
                     selection: .open(current),
                     notice: notice,
-                    composer: .editable(local, isDirty: true)
+                    composer: .editable(local, isDirty: true),
+                    activity: retryActivity
                 )
-                return false
+                return .retryable
             }
-            install(current, selection: .open(current), notice: notice)
-            return current.chat.draft == expectedDraft
+            let isExpectedDraft = current.chat.draft == expectedDraft
+            install(
+                current,
+                selection: .open(current),
+                notice: notice,
+                activity: isExpectedDraft ? preservedActivity : nil
+            )
+            return isExpectedDraft ? .durable : .terminal
         case let .frozen(frozen):
             install(frozen, selection: .frozen(frozen), notice: .chatFrozen)
+            return .terminal
         case .readOnlyLibrary:
-            state = replacing(activity: nil, notice: .readOnlyLibrary)
+            state = replacing(activity: retryActivity, notice: .readOnlyLibrary)
             publish()
         case .collision, .profileStatementGenerationChanged, .failed:
-            state = replacing(activity: nil, notice: failureNotice)
+            state = replacing(activity: retryActivity, notice: failureNotice)
             publish()
         }
-        return false
+        return .retryable
     }
 
     private func applyPendingMutationOutcome(
@@ -875,7 +1015,8 @@ public actor DefaultChatFeature: ChatFeature {
         _ aggregate: ChatAggregate,
         selection: ChatFeatureState.Selection,
         notice: ChatNotice?,
-        composer override: ChatComposerState? = nil
+        composer override: ChatComposerState? = nil,
+        activity: ChatFeatureState.Activity? = nil
     ) {
         var rows = currentAllRows.filter { $0.chatID != aggregate.chat.id }
         rows.append(ChatRowSnapshot(aggregate: aggregate))
@@ -889,6 +1030,7 @@ public actor DefaultChatFeature: ChatFeature {
             rows: rows,
             selection: selection,
             composer: installedComposer,
+            activity: activity,
             notice: notice
         )
     }
@@ -906,13 +1048,20 @@ public actor DefaultChatFeature: ChatFeature {
         } else {
             composer = state.composer
         }
-        finishInstall(rows: rows, selection: selection, composer: composer, notice: notice)
+        finishInstall(
+            rows: rows,
+            selection: selection,
+            composer: composer,
+            activity: nil,
+            notice: notice
+        )
     }
 
     private func finishInstall(
         rows: [ChatRowSnapshot],
         selection: ChatFeatureState.Selection,
         composer: ChatComposerState?,
+        activity: ChatFeatureState.Activity?,
         notice: ChatNotice?
     ) {
         let sorted = sortedRows(rows)
@@ -926,6 +1075,7 @@ public actor DefaultChatFeature: ChatFeature {
             filterQuery: state.filterQuery,
             selection: selection,
             composer: composer,
+            activity: activity,
             notice: notice
         )
         publish()
@@ -1050,8 +1200,8 @@ private extension ChatCommand {
         case let .start(context), let .createDevelopmentChat(context):
             context
         case let .rename(context, _, _, _), let .setFilter(context, _),
-             let .open(context, _), let .editDraft(context, _),
-             let .sendDraft(context), let .discardPendingUserTurn(context, _):
+             let .open(context, _), let .editDraft(context, _, _, _),
+             let .sendDraft(context, _, _), let .discardPendingUserTurn(context, _):
             context
         }
     }
