@@ -4,9 +4,12 @@ public enum ContractResource: CaseIterable, Sendable {
     case audioImportFeatureScenarioSchema
     case audioManifestSchema
     case audioNormalizationVectorsSchema
+    case chatManifestSchema
+    case coachMemoryEnvelopeSchema
     case coachProviderDescriptorSchema
     case coachRequestSchema
     case coachResponseSchema
+    case developmentChatFeatureScenarioSchema
     case libraryFeatureScenarioSchema
     case libraryManifestSchema
     case libraryPreferencesSchema
@@ -25,6 +28,17 @@ public enum ContractResource: CaseIterable, Sendable {
     case audioImportInstallFailureScenario
     case audioImportPostcommitFailureScenario
     case audioImportCollisionRegenerationScenario
+    case createDevelopmentChatScenario
+    case renameDevelopmentChatScenario
+    case filterDevelopmentChatsScenario
+    case relaunchDevelopmentChatScenario
+    case staleRenameDevelopmentChatScenario
+    case wrongLibraryDevelopmentChatScenario
+    case corruptDevelopmentChatScenario
+    case newerDevelopmentChatScenario
+    case collisionDevelopmentChatScenario
+    case providerUnavailableDevelopmentChatScenario
+    case suspendedLibrarySwitchDevelopmentChatScenario
     case libraryLaunchNoSelectionScenario
     case libraryCreateScenario
     case libraryRelaunchScenario
@@ -65,6 +79,17 @@ public enum ContractResource: CaseIterable, Sendable {
     case rejectedNegativeProfileGeneration
     case newerPreferencesExample
 
+    case developmentChatExample
+    case developmentChatMemoryExample
+    case renamedDevelopmentChatExample
+    case sessionAnalysisChatExample
+    case rejectedChatExplicitNullOrigin
+    case rejectedChatMissingAttachments
+    case rejectedNewChatWithOrigin
+    case rejectedNewerChatSchema
+    case rejectedChatUnknownKey
+    case rejectedDanglingMemorySummary
+
     case importedAudioManifestExample
     case importedSessionManifestExample
     case audioNormalizationVectorsExample
@@ -104,12 +129,18 @@ public enum ContractResource: CaseIterable, Sendable {
             "AudioManifest.json"
         case .audioNormalizationVectorsSchema:
             "AudioNormalizationVectors.json"
+        case .chatManifestSchema:
+            "ChatManifest.json"
+        case .coachMemoryEnvelopeSchema:
+            "CoachMemoryEnvelope.json"
         case .coachProviderDescriptorSchema:
             "CoachProviderDescriptor.json"
         case .coachRequestSchema:
             "CoachRequest.json"
         case .coachResponseSchema:
             "CoachResponse.json"
+        case .developmentChatFeatureScenarioSchema:
+            "DevelopmentChatFeatureScenario.json"
         case .libraryFeatureScenarioSchema:
             "LibraryFeatureScenario.json"
         case .libraryManifestSchema:
@@ -144,6 +175,28 @@ public enum ContractResource: CaseIterable, Sendable {
             "postcommit-reopen-failure-keeps-session.v1.json"
         case .audioImportCollisionRegenerationScenario:
             "session-id-collision-regenerates.v1.json"
+        case .createDevelopmentChatScenario:
+            "create-empty-development-chat.v1.json"
+        case .renameDevelopmentChatScenario:
+            "rename-preserves-identity.v1.json"
+        case .filterDevelopmentChatsScenario:
+            "filter-is-pure.v1.json"
+        case .relaunchDevelopmentChatScenario:
+            "relaunch-reopens-exact-aggregate.v1.json"
+        case .staleRenameDevelopmentChatScenario:
+            "stale-rename-cannot-overwrite.v1.json"
+        case .wrongLibraryDevelopmentChatScenario:
+            "wrong-library-load-fails.v1.json"
+        case .corruptDevelopmentChatScenario:
+            "corrupt-chat-freezes.v1.json"
+        case .newerDevelopmentChatScenario:
+            "newer-chat-freezes.v1.json"
+        case .collisionDevelopmentChatScenario:
+            "create-collision-limit.v1.json"
+        case .providerUnavailableDevelopmentChatScenario:
+            "provider-unavailable-creates-locally.v1.json"
+        case .suspendedLibrarySwitchDevelopmentChatScenario:
+            "library-switch-during-suspended-load.v1.json"
         case .libraryLaunchNoSelectionScenario:
             "library-launch-no-selection.v1.json"
         case .libraryCreateScenario:
@@ -220,6 +273,26 @@ public enum ContractResource: CaseIterable, Sendable {
             "profile-head-negative-generation.json"
         case .newerPreferencesExample:
             "preferences-newer-schema.json"
+        case .developmentChatExample:
+            "chat.json"
+        case .developmentChatMemoryExample:
+            "memory.json"
+        case .renamedDevelopmentChatExample:
+            "renamed-chat.json"
+        case .sessionAnalysisChatExample:
+            "session-analysis-chat.json"
+        case .rejectedChatExplicitNullOrigin:
+            "chat-explicit-null-origin.json"
+        case .rejectedChatMissingAttachments:
+            "chat-missing-attachments.json"
+        case .rejectedNewChatWithOrigin:
+            "chat-newchat-with-origin.json"
+        case .rejectedNewerChatSchema:
+            "chat-newer-schema.json"
+        case .rejectedChatUnknownKey:
+            "chat-unknown-key.json"
+        case .rejectedDanglingMemorySummary:
+            "memory-dangling-summary.json"
         case .importedAudioManifestExample, .recordingAudioExample:
             "audio.json"
         case .importedSessionManifestExample, .recordingSessionExample:
@@ -278,8 +351,10 @@ public enum ContractResource: CaseIterable, Sendable {
     public var subdirectory: String {
         switch self {
         case .audioImportFeatureScenarioSchema, .audioManifestSchema,
-             .audioNormalizationVectorsSchema, .coachProviderDescriptorSchema,
-             .coachRequestSchema, .coachResponseSchema, .libraryFeatureScenarioSchema,
+             .audioNormalizationVectorsSchema, .chatManifestSchema,
+             .coachMemoryEnvelopeSchema, .coachProviderDescriptorSchema,
+             .coachRequestSchema, .coachResponseSchema,
+             .developmentChatFeatureScenarioSchema, .libraryFeatureScenarioSchema,
              .libraryManifestSchema, .libraryPreferencesSchema, .profileHeadSchema,
              .readSessionTranscriptsRequestSchema, .readSessionTranscriptsResponseSchema,
              .recordingFeatureScenarioSchema, .recordingStagingIdentityManifestSchema,
@@ -290,6 +365,14 @@ public enum ContractResource: CaseIterable, Sendable {
              .audioImportInstallFailureScenario, .audioImportPostcommitFailureScenario,
              .audioImportCollisionRegenerationScenario:
             "Scenarios/AudioImport"
+        case .createDevelopmentChatScenario, .renameDevelopmentChatScenario,
+             .filterDevelopmentChatsScenario, .relaunchDevelopmentChatScenario,
+             .staleRenameDevelopmentChatScenario, .wrongLibraryDevelopmentChatScenario,
+             .corruptDevelopmentChatScenario, .newerDevelopmentChatScenario,
+             .collisionDevelopmentChatScenario,
+             .providerUnavailableDevelopmentChatScenario,
+             .suspendedLibrarySwitchDevelopmentChatScenario:
+            "Scenarios/Chat"
         case .libraryLaunchNoSelectionScenario:
             "Scenarios"
         case .libraryCreateScenario, .libraryRelaunchScenario,
@@ -315,6 +398,13 @@ public enum ContractResource: CaseIterable, Sendable {
              .rejectedUnknownPreferenceKey, .rejectedInvalidLibraryInstant,
              .rejectedNegativeProfileGeneration, .newerPreferencesExample:
             "Examples/PortableLibrary/v1/rejected"
+        case .developmentChatExample, .developmentChatMemoryExample,
+             .renamedDevelopmentChatExample, .sessionAnalysisChatExample:
+            "Examples/DevelopmentChat/v1"
+        case .rejectedChatExplicitNullOrigin, .rejectedChatMissingAttachments,
+             .rejectedNewChatWithOrigin, .rejectedNewerChatSchema,
+             .rejectedChatUnknownKey, .rejectedDanglingMemorySummary:
+            "Examples/DevelopmentChat/v1/rejected"
         case .importedAudioManifestExample, .importedSessionManifestExample,
              .audioNormalizationVectorsExample:
             "Examples/AudioImport/v1"

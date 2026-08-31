@@ -42,6 +42,13 @@ public struct SessionSealedNotifications: AsyncSequence, Sendable {
     public func makeAsyncIterator() -> AsyncIterator {
         AsyncIterator(subscription: channel.subscribe())
     }
+
+    /// Test-only synchronization seam used to prove that the active iterator
+    /// has returned to `next()` after observing every receipt published so far.
+    /// Callers must first await the Application operation that owns publication.
+    func waitUntilCurrentReceiptsAreObserved() async {
+        await channel.waitUntilCurrentReceiptsAreObserved()
+    }
 }
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
@@ -84,6 +91,10 @@ final class SessionSealedNotificationChannel: @unchecked Sendable {
         // `DefaultRecordingFeature` serializes publication, so at most one
         // producer may be suspended behind the single buffered receipt.
         var waitingProducer: PendingProducer?
+        // A waiter completes only after the consumer asks for the element
+        // following all receipts that preceded the wait. This acknowledges
+        // consumer processing rather than merely observing an empty buffer.
+        var observationWaiters: [CheckedContinuation<Void, Never>] = []
     }
 
     private static let capacity = 1
@@ -123,6 +134,7 @@ final class SessionSealedNotificationChannel: @unchecked Sendable {
     func finish() {
         var consumers: [CheckedContinuation<SessionSealedReceipt?, Never>] = []
         var producers: [CheckedContinuation<Void, Never>] = []
+        var observationWaiters: [CheckedContinuation<Void, Never>] = []
         lock.lock()
         guard !isFinished else {
             lock.unlock()
@@ -136,11 +148,39 @@ final class SessionSealedNotificationChannel: @unchecked Sendable {
             if let producer = subscriber.waitingProducer {
                 producers.append(producer.continuation)
             }
+            observationWaiters.append(contentsOf: subscriber.observationWaiters)
         }
         subscribers.removeAll(keepingCapacity: false)
         lock.unlock()
         for consumer in consumers { consumer.resume(returning: nil) }
         for producer in producers { producer.resume() }
+        for waiter in observationWaiters { waiter.resume() }
+    }
+
+    func waitUntilCurrentReceiptsAreObserved() async {
+        await withCheckedContinuation { continuation in
+            var completesImmediately = false
+            lock.lock()
+            if isFinished || subscribers.isEmpty {
+                completesImmediately = true
+            } else if let subscriberID = subscribers.keys.first,
+                      var subscriber = subscribers[subscriberID]
+            {
+                if subscriber.buffer.isEmpty,
+                   subscriber.waitingProducer == nil,
+                   subscriber.waitingConsumer != nil
+                {
+                    completesImmediately = true
+                } else {
+                    subscriber.observationWaiters.append(continuation)
+                    subscribers[subscriberID] = subscriber
+                }
+            } else {
+                completesImmediately = true
+            }
+            lock.unlock()
+            if completesImmediately { continuation.resume() }
+        }
     }
 
     fileprivate func next(for subscriberID: UInt64) async -> SessionSealedReceipt? {
@@ -148,6 +188,7 @@ final class SessionSealedNotificationChannel: @unchecked Sendable {
             await withCheckedContinuation { continuation in
                 var result: SessionSealedReceipt??
                 var resumedProducer: CheckedContinuation<Void, Never>?
+                var observationWaiters: [CheckedContinuation<Void, Never>] = []
                 lock.lock()
                 if Task.isCancelled || isFinished || subscribers[subscriberID] == nil {
                     result = .some(nil)
@@ -163,10 +204,13 @@ final class SessionSealedNotificationChannel: @unchecked Sendable {
                     subscribers[subscriberID] = subscriber
                     result = .some(receipt)
                 } else if var subscriber = subscribers[subscriberID] {
+                    observationWaiters = subscriber.observationWaiters
+                    subscriber.observationWaiters.removeAll(keepingCapacity: false)
                     if let previous = subscriber.waitingConsumer {
                         subscriber.waitingConsumer = nil
                         subscribers[subscriberID] = subscriber
                         lock.unlock()
+                        for waiter in observationWaiters { waiter.resume() }
                         previous.resume(returning: nil)
                         continuation.resume(returning: nil)
                         cancelSubscriber(subscriberID)
@@ -177,6 +221,7 @@ final class SessionSealedNotificationChannel: @unchecked Sendable {
                 }
                 lock.unlock()
                 resumedProducer?.resume()
+                for waiter in observationWaiters { waiter.resume() }
                 if let result { continuation.resume(returning: result) }
             }
         } onCancel: {
@@ -187,16 +232,19 @@ final class SessionSealedNotificationChannel: @unchecked Sendable {
     fileprivate func cancelSubscriber(_ subscriberID: UInt64) {
         var consumer: CheckedContinuation<SessionSealedReceipt?, Never>?
         var producers: [CheckedContinuation<Void, Never>] = []
+        var observationWaiters: [CheckedContinuation<Void, Never>] = []
         lock.lock()
         if let subscriber = subscribers.removeValue(forKey: subscriberID) {
             consumer = subscriber.waitingConsumer
             if let producer = subscriber.waitingProducer {
                 producers.append(producer.continuation)
             }
+            observationWaiters = subscriber.observationWaiters
         }
         lock.unlock()
         consumer?.resume(returning: nil)
         for producer in producers { producer.resume() }
+        for waiter in observationWaiters { waiter.resume() }
     }
 
     private func currentSubscriberIDs() -> [UInt64] {

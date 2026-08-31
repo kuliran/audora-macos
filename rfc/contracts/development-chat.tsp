@@ -1,0 +1,319 @@
+import "./portable-library.tsp";
+import "@typespec/json-schema";
+
+using TypeSpec.JsonSchema;
+
+namespace Audora.Contracts {
+  @jsonSchema
+  @id("ChatManifest.json")
+  union ChatManifest {
+    newChat: NewChatManifest,
+    sessionAnalysis: SessionAnalysisChatManifest,
+  }
+
+  model NewChatManifest {
+    ...ChatManifestFields;
+    creationKind: "newChat";
+  }
+
+  model SessionAnalysisChatManifest {
+    ...ChatManifestFields;
+    creationKind: "sessionAnalysis";
+    originAttachmentId: ChatSessionAttachmentId;
+  }
+
+  model ChatManifestFields {
+    schemaVersion: 1;
+    chatId: ChatId;
+    manifestRevision: NonnegativeWholeNumber;
+    title: ChatTitleText;
+    createdAt: UTCInstant;
+    updatedAt: UTCInstant;
+    profileStatementGenerationAtCreation: NonnegativeWholeNumber;
+    attachments: ChatSessionAttachment[];
+    draft: PersistedChatDraft;
+    messageIds: ChatMessageId[];
+    currentMemoryId: CoachMemoryId;
+  }
+
+  model ChatSessionAttachment {
+    attachmentId: ChatSessionAttachmentId;
+    sessionId: SessionId;
+    transcriptRevisionId: TranscriptRevisionId;
+  }
+
+  model PersistedChatDraft {
+    draftId: ChatDraftId;
+    version: NonnegativeWholeNumber;
+    text: ChatDraftText;
+    updatedAt: UTCInstant;
+  }
+
+  @pattern("^cht-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar ChatId extends string;
+
+  @pattern("^drf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar ChatDraftId extends string;
+
+  @pattern("^mem-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar CoachMemoryId extends string;
+
+  @pattern("^msg-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar ChatMessageId extends string;
+
+  @pattern("^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar TranscriptRevisionId extends string;
+
+  @minLength(1)
+  @maxLength(64)
+  @pattern("^[0-9A-Za-z_-]+$")
+  scalar ChatSessionAttachmentId extends string;
+
+  @minLength(1)
+  @maxLength(256)
+  scalar ChatTitleText extends string;
+
+  @maxLength(32768)
+  scalar ChatDraftText extends string;
+
+  @jsonSchema
+  @id("CoachMemoryEnvelope.json")
+  model CoachMemoryEnvelope {
+    schemaVersion: 1;
+    memoryId: CoachMemoryId;
+    chatId: ChatId;
+
+    @maxLength(32768)
+    generalNotes: string;
+
+    sessionSummaries: PersistedCoachMemorySessionSummary[];
+  }
+
+  model PersistedCoachMemorySessionSummary {
+    sessionAttachmentId: ChatSessionAttachmentId;
+
+    @maxLength(32768)
+    notes: string;
+  }
+
+  /** Portable zero-Session Development Chat behavior shared by feature implementations. */
+  @jsonSchema
+  @id("DevelopmentChatFeatureScenario.json")
+  model DevelopmentChatFeatureScenario {
+    schemaVersion: 1;
+    scenarioId: string;
+    libraryId: LibraryId;
+    initialChats: DevelopmentChatScenarioSnapshot[];
+    commands: DevelopmentChatScenarioCommand[];
+    dependencyTrace: DevelopmentChatDependencyEvent[];
+    expectedState: DevelopmentChatScenarioState;
+    expectedProviderCalls: 0;
+    expectedInvocationCalls: 0;
+    expectedAdmissionCalls: 0;
+    providerAvailability?: DevelopmentChatScenarioProviderAvailability;
+    suspendedEffect?: DevelopmentChatScenarioSuspendedEffect;
+  }
+
+  model DevelopmentChatScenarioSnapshot {
+    chatId: ChatId;
+    draftId: ChatDraftId;
+    memoryId: CoachMemoryId;
+    manifestRevision: NonnegativeWholeNumber;
+    title: ChatTitleText;
+    createdAt: UTCInstant;
+    updatedAt: UTCInstant;
+    creationKind: "newChat";
+    attachments: ChatSessionAttachment[];
+    draftText: ChatDraftText;
+    draftVersion: NonnegativeWholeNumber;
+    messageIds: ChatMessageId[];
+    memoryGeneralNotes: string;
+    memorySessionSummaries: PersistedCoachMemorySessionSummary[];
+  }
+
+  @oneOf
+  union DevelopmentChatScenarioCommand {
+    createDevelopmentChat: CreateDevelopmentChatScenarioCommand,
+    rename: RenameDevelopmentChatScenarioCommand,
+    setFilter: SetDevelopmentChatFilterScenarioCommand,
+    open: OpenDevelopmentChatScenarioCommand,
+    start: StartDevelopmentChatScenarioCommand,
+  }
+
+  @oneOf
+  union DevelopmentChatDependencyEvent {
+    catalogLoaded: ChatStoreCatalogLoadedEvent,
+    catalogFailed: ChatStoreCatalogFailedEvent,
+    chatLoaded: ChatStoreChatLoadedEvent,
+    chatFrozen: ChatStoreChatFrozenEvent,
+    chatCreated: ChatStoreChatCreatedEvent,
+    createCollision: ChatStoreCreateCollisionEvent,
+    chatRenamed: ChatStoreChatRenamedEvent,
+    renameStale: ChatStoreRenameStaleEvent,
+    profileStatementGenerationRead: ProfileStatementGenerationReadEvent,
+    currentInstantRead: CurrentInstantReadEvent,
+    chatIdGenerated: ChatIdGeneratedEvent,
+    chatDraftIdGenerated: ChatDraftIdGeneratedEvent,
+    coachMemoryIdGenerated: CoachMemoryIdGeneratedEvent,
+  }
+
+  model DevelopmentChatScenarioState {
+    allChatIds: ChatId[];
+    visibleChatIds: ChatId[];
+    catalogStatus?: DevelopmentChatScenarioCatalogStatus;
+    selectedChatId?: ChatId;
+    selectedTitle?: ChatTitleText;
+    selectedRevision?: NonnegativeWholeNumber;
+    selectedAvailability?: DevelopmentChatScenarioSelectionAvailability;
+    selectedFrozenReason?: DevelopmentChatScenarioFrozenReason;
+    notice?: DevelopmentChatScenarioNotice;
+  }
+
+  model CreateDevelopmentChatScenarioCommand {
+    kind: "createDevelopmentChat";
+  }
+
+  model RenameDevelopmentChatScenarioCommand {
+    kind: "rename";
+    chatId: ChatId;
+    title: string;
+    expectedRevision: NonnegativeWholeNumber;
+  }
+
+  model SetDevelopmentChatFilterScenarioCommand {
+    kind: "setFilter";
+    query: string;
+  }
+
+  model OpenDevelopmentChatScenarioCommand {
+    kind: "open";
+    chatId: ChatId;
+  }
+
+  model StartDevelopmentChatScenarioCommand {
+    kind: "start";
+    libraryId: LibraryId;
+  }
+
+  model ChatStoreCatalogLoadedEvent {
+    port: "chatStore";
+    effect: "loadCatalog";
+    outcome: "loaded";
+    libraryId?: LibraryId;
+    chatIds?: ChatId[];
+  }
+
+  model ChatStoreCatalogFailedEvent {
+    port: "chatStore";
+    effect: "loadCatalog";
+    outcome: "failed";
+    reason: "wrongLibrary";
+    libraryId?: LibraryId;
+  }
+
+  model ChatStoreChatLoadedEvent {
+    port: "chatStore";
+    effect: "load";
+    outcome: "loaded";
+  }
+
+  model ChatStoreChatFrozenEvent {
+    port: "chatStore";
+    effect: "load";
+    outcome: "frozen";
+    reason: DevelopmentChatScenarioFrozenReason;
+  }
+
+  model ChatStoreChatCreatedEvent {
+    port: "chatStore";
+    effect: "create";
+    outcome: "committed";
+    chat: DevelopmentChatScenarioSnapshot;
+  }
+
+  model ChatStoreCreateCollisionEvent {
+    port: "chatStore";
+    effect: "create";
+    outcome: "collision";
+  }
+
+  model ChatStoreChatRenamedEvent {
+    port: "chatStore";
+    effect: "rename";
+    outcome: "committed";
+  }
+
+  model ChatStoreRenameStaleEvent {
+    port: "chatStore";
+    effect: "rename";
+    outcome: "stale";
+  }
+
+  model ProfileStatementGenerationReadEvent {
+    port: "profileHead";
+    effect: "readStatementGeneration";
+    outcome: NonnegativeWholeNumber;
+  }
+
+  model CurrentInstantReadEvent {
+    port: "clock";
+    effect: "now";
+    outcome: UTCInstant;
+  }
+
+  model ChatIdGeneratedEvent {
+    port: "chatIdGenerator";
+    effect: "next";
+    outcome: ChatId;
+  }
+
+  model ChatDraftIdGeneratedEvent {
+    port: "chatDraftIdGenerator";
+    effect: "next";
+    outcome: ChatDraftId;
+  }
+
+  model CoachMemoryIdGeneratedEvent {
+    port: "coachMemoryIdGenerator";
+    effect: "next";
+    outcome: CoachMemoryId;
+  }
+
+  union DevelopmentChatScenarioProviderAvailability {
+    available: "available",
+    unavailable: "unavailable",
+  }
+
+  union DevelopmentChatScenarioSuspendedEffect {
+    firstCatalogLoad: "firstCatalogLoad",
+  }
+
+  union DevelopmentChatScenarioCatalogStatus {
+    ready: "ready",
+    failed: "failed",
+  }
+
+  union DevelopmentChatScenarioSelectionAvailability {
+    open: "open",
+    frozen: "frozen",
+  }
+
+  union DevelopmentChatScenarioFrozenReason {
+    newerSchema: "newerSchema",
+    unsupportedSchema: "unsupportedSchema",
+    corrupt: "corrupt",
+  }
+
+  union DevelopmentChatScenarioNotice {
+    invalidTitle: "invalidTitle",
+    createFailed: "createFailed",
+    createCollisionLimitReached: "createCollisionLimitReached",
+    renameFailed: "renameFailed",
+    staleRename: "staleRename",
+    chatMissing: "chatMissing",
+    chatOpenFailed: "chatOpenFailed",
+    chatFrozen: "chatFrozen",
+    catalogFailed: "catalogFailed",
+    readOnlyLibrary: "readOnlyLibrary",
+  }
+}

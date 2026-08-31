@@ -1,4 +1,4 @@
-import AudoraApplication
+@testable import AudoraApplication
 import AudoraContracts
 import AudoraDomain
 import Foundation
@@ -389,8 +389,11 @@ private struct ScenarioExecutor {
             activity: LibraryActivityCoordinator()
         )
         let receipts = ReceiptCollector()
+        var receiptIterator = feature.sealedSessions.makeAsyncIterator()
         let receiptTask = Task {
-            for await receipt in feature.sealedSessions { await receipts.append(receipt) }
+            while let receipt = await receiptIterator.next() {
+                await receipts.append(receipt)
+            }
         }
         defer { receiptTask.cancel() }
 
@@ -418,7 +421,7 @@ private struct ScenarioExecutor {
             await capture.finishCommand(index)
         }
 
-        try await settle()
+        await feature.sealedSessions.waitUntilCurrentReceiptsAreObserved()
         let audit = await capture.audit
         try require(audit.violations.isEmpty, "\(scenario.scenarioId): \(audit.violations)")
         try require(audit.remaining == 0, "\(scenario.scenarioId): \(audit.remaining) trace events left")
@@ -428,12 +431,41 @@ private struct ScenarioExecutor {
             "\(scenario.scenarioId): expected \(scenario.expectedState), got \(project(finalState))"
         )
         let sealed = await receipts.values
+        try require(
+            sealed.count == expectedReceiptCount,
+            "\(scenario.scenarioId): expected \(expectedReceiptCount) sealed receipt(s), got \(sealed.count)"
+        )
         try assertEffects(
             state: finalState,
             audit: audit,
             receipts: sealed,
             evidence: evidence
         )
+    }
+
+    private var expectedReceiptCount: Int {
+        scenario.expectedEffects.reduce(into: 0) { count, effect in
+            switch effect.kind {
+            case .twoTakesProduceTwoSeals:
+                count = max(count, 2)
+            case .sessionSealedExactlyOnce, .sameRecoveredSessionPublishedOnce,
+                 .firstSessionSealedOnce, .lateEventsCannotMutateCompletion:
+                count = max(count, 1)
+            case .captureStarted, .liveLevelMeasured, .muteCommandsAcknowledged,
+                 .mutedLevelUnavailable, .normalizedUnavailablePartition,
+                 .gapLevelUnavailable, .warningPersistsAfterBoundary,
+                 .countdownUsesCeilingAtExactFrames,
+                 .persistentDurationLimitExplanation, .neverExceedsMaximumFrames,
+                 .noPublicationBeforeCommittedReceipt,
+                 .bothTerminalOrderingsDeterministic, .noDiscardCommand,
+                 .timelineContinuesBehindConfirmation, .discardedWithoutSeal,
+                 .discardCommandSentOnce, .discardFailureDoesNotClaimIdle,
+                 .permissionFailurePublishesNothing, .recoveryOffersSealAndDiscard,
+                 .resumeAbsent, .offerDiscardOnly, .newRecordingAndSessionIdentity,
+                 .librarySwitchBlockedWhileActive:
+                break
+            }
+        }
     }
 
     private func featureCommand(

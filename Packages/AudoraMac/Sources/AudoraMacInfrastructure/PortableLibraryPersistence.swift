@@ -198,6 +198,31 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         at root: URL,
         requirePackageExtension: Bool = true
     ) throws -> LoadedPortableLibrary {
+        try open(
+            at: root,
+            requirePackageExtension: requirePackageExtension,
+            reconcileAbandonedImports: true
+        )
+    }
+
+    /// Feature-owned validation must not reconcile another feature's staging
+    /// while the caller holds active Library authority.
+    func openWithoutReconcilingImports(
+        at root: URL,
+        requirePackageExtension: Bool = true
+    ) throws -> LoadedPortableLibrary {
+        try open(
+            at: root,
+            requirePackageExtension: requirePackageExtension,
+            reconcileAbandonedImports: false
+        )
+    }
+
+    private func open(
+        at root: URL,
+        requirePackageExtension: Bool,
+        reconcileAbandonedImports: Bool
+    ) throws -> LoadedPortableLibrary {
         do {
             if requirePackageExtension, root.pathExtension != "audoralibrary" {
                 throw PortableLibraryPersistenceError.invalidPackage
@@ -205,7 +230,10 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
             let rootDescriptor = try openDirectoryDescriptor(at: root)
             defer { Darwin.close(rootDescriptor) }
             try fault(.afterRootDescriptorOpened)
-            return try load(from: rootDescriptor)
+            return try load(
+                from: rootDescriptor,
+                reconcileAbandonedImports: reconcileAbandonedImports
+            )
         } catch let error as PortableLibraryPersistenceError {
             throw error
         } catch {

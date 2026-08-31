@@ -7,7 +7,7 @@
   },
   "scripts": {
     "contracts:generate": "tsp compile rfc/contracts",
-    "contracts:check": "tsp format --check \"rfc/contracts/*.tsp\" && sh rfc/contracts/check-generated.sh && node rfc/contracts/validate-instances.mjs"
+    "contracts:check": "tsp format --check \"rfc/contracts/*.tsp\" && sh rfc/contracts/check-generated.sh && node rfc/contracts/validate-instances.mjs && node rfc/contracts/validate-chat-instances.mjs"
   },
   "devDependencies": {
     "@typespec/compiler": "1.15.0",

@@ -4,7 +4,9 @@
 the provider aggregate in [`coach-provider.tsp`](coach-provider.tsp), the
 portable Library document roots in
 [`portable-library.tsp`](portable-library.tsp), and the Library lifecycle
-scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp).
+scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp), and
+the portable Chat roots and scenarios in
+[`development-chat.tsp`](development-chat.tsp).
 [`session-audio.tsp`](session-audio.tsp) is the single source of truth for
 shared Session identity and the imported/microphone audio and Session manifest
 variants. Imported-audio normalization and feature behavior live in
@@ -28,9 +30,12 @@ at runtime.
 - [`AudioImportFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioImportFeatureScenario.json)
 - [`AudioManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json)
 - [`AudioNormalizationVectors.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioNormalizationVectors.json)
+- [`ChatManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ChatManifest.json)
+- [`CoachMemoryEnvelope.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachMemoryEnvelope.json)
 - [`CoachProviderDescriptor.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json)
 - [`CoachRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json)
 - [`CoachResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json)
+- [`DevelopmentChatFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/DevelopmentChatFeatureScenario.json)
 - [`LibraryFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json)
 - [`LibraryManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json)
 - [`LibraryPreferences.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json)
@@ -49,6 +54,9 @@ at runtime.
 | `CoachProviderDescriptor` | Application configuration | No |
 | `CoachRequest` | Application -> coach | Yes |
 | `CoachResponse` | Coach -> Application | Yes |
+| `ChatManifest` | Portable Library storage | No |
+| `CoachMemoryEnvelope` | Portable Library storage | No |
+| `DevelopmentChatFeatureScenario` | Portable cross-implementation behavior | No |
 | `LibraryFeatureScenario` | Portable cross-implementation behavior | No |
 | `LibraryManifest` | Portable Library storage | No |
 | `LibraryPreferences` | Portable Library storage | No |
@@ -130,6 +138,23 @@ Recording scenarios cover live state, mute gaps, duration warnings and limits,
 stop races, cancellation, recovery, repeated takes, late-event fencing, and
 Library-switch serialization.
 
+## Development Chat roots and scenarios
+
+A Development Chat created from the Chat UI starts with `creationKind: newChat`,
+no `originAttachmentId`, exactly zero attachments and messages, an empty stable
+Draft, and an empty stable Coach Memory. Its portable roots are
+`chats/<chat-id>/chat.json`, an empty `messages/` directory, and
+`memory/<memory-id>.json`. Pending-turn, Proposal, and Profile-write operational
+files are absent. Rename changes only the title, manifest revision, and update
+instant; filter is a pure in-memory projection; reopen restores the same IDs and
+local Draft without invoking a provider.
+
+Checked-in fixtures cover create, rename, filter, relaunch, and stale rename.
+Each scenario declares zero provider, Invocation, and admission calls. Rejected
+examples cover ambiguous creation shapes, unknown keys, missing attachments,
+dangling Memory summaries, and newer schemas that must remain byte-identical
+while frozen.
+
 `CoachProviderDescriptor` is app-only configuration. JSON Schema validates each
 field's shape. `displayName` is a bounded Presentation label for provider health
 and errors; no behavior branches on its text. Application additionally rejects the
@@ -175,8 +200,8 @@ The compiler and JSON Schema emitter are pinned in `package.json`. The resolved
 dependency graph is committed in `pnpm-lock.yaml`. `generated-json-files.txt`
 enumerates the canonical package-resource schemas and makes the check fail when
 generated roots change unexpectedly or their committed bytes drift. The same
-check runs every checked-in audio-import and Recording scenario and golden
-through the generated Draft 2020-12 schemas. It also checks exact imported
+check runs every checked-in audio-import, Recording, and Development Chat
+scenario and golden through the generated Draft 2020-12 schemas. It also checks exact imported
 cross-root hashes, rejects mixed manifest families, and keeps runtime-only
 Recording rejection fixtures schema-valid for the production Swift validators.
 

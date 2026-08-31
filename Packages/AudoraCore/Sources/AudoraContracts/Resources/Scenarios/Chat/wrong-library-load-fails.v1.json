@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "wrong-library-load-fails",
+  "libraryId": "lib-20260830T100000000Z-1ABC",
+  "initialChats": [],
+  "commands": [],
+  "dependencyTrace": [
+    {"port": "chatStore", "effect": "loadCatalog", "outcome": "failed", "reason": "wrongLibrary", "libraryId": "lib-20260830T100000000Z-1ABC"}
+  ],
+  "expectedState": {
+    "allChatIds": [],
+    "visibleChatIds": [],
+    "catalogStatus": "failed",
+    "notice": "catalogFailed"
+  },
+  "expectedProviderCalls": 0,
+  "expectedInvocationCalls": 0,
+  "expectedAdmissionCalls": 0
+}

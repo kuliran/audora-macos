@@ -3,6 +3,7 @@ public enum LibraryIdentityError: Error, Equatable, Sendable {
     case invalidSessionID
     case invalidProfileRevisionID
     case invalidRecordingID
+    case invalidTranscriptRevisionID
     case invalidInstant
 }
 
@@ -51,6 +52,19 @@ public struct SessionID: Hashable, Sendable, CustomStringConvertible {
     public init(_ rawValue: String) throws {
         guard TypedIdentifierValidator.isValid(rawValue, prefix: "ses-") else {
             throw LibraryIdentityError.invalidSessionID
+        }
+        self.rawValue = rawValue
+    }
+
+    public var description: String { rawValue }
+}
+
+public struct TranscriptRevisionID: Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard TypedIdentifierValidator.isValid(rawValue, prefix: "trv-") else {
+            throw LibraryIdentityError.invalidTranscriptRevisionID
         }
         self.rawValue = rawValue
     }

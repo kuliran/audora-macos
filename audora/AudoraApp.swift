@@ -13,6 +13,7 @@ struct AudoraApp: App {
     private let feature: DefaultLibraryFeature
     private let audioImportFeature: DefaultAudioImportFeature
     private let recordingFeature: DefaultRecordingFeature
+    private let chatFeature: DefaultChatFeature
     private let windowCoordinator: MainWindowCoordinator
 
     init() {
@@ -53,6 +54,17 @@ struct AudoraApp: App {
             sessionIDGenerator: RandomSessionIDGenerator(),
             activityCoordinator: activityCoordinator
         )
+        let chatIdentityGenerator = RandomChatIdentityGenerator()
+        let chatFeature = DefaultChatFeature(
+            store: PortableChatStore(workspace: workspace),
+            profileReader: ActiveLibraryProfileStatementGenerationReader(
+                workspace: workspace
+            ),
+            clock: SystemLibraryClock(),
+            chatIDGenerator: chatIdentityGenerator,
+            draftIDGenerator: chatIdentityGenerator,
+            memoryIDGenerator: chatIdentityGenerator
+        )
         let windowCoordinator = MainWindowCoordinator(
             access: AppKitMainWindowAccess()
         )
@@ -60,6 +72,7 @@ struct AudoraApp: App {
         self.feature = feature
         self.audioImportFeature = audioImportFeature
         self.recordingFeature = recordingFeature
+        self.chatFeature = chatFeature
         self.windowCoordinator = windowCoordinator
         appDelegate.configure(
             feature: feature,
@@ -74,10 +87,11 @@ struct AudoraApp: App {
                 feature: feature,
                 audioImportFeature: audioImportFeature,
                 recordingFeature: recordingFeature,
+                chatFeature: chatFeature,
                 windowCoordinator: windowCoordinator
             )
         }
-        .defaultSize(width: 720, height: 480)
+        .defaultSize(width: 920, height: 640)
         .commands {
             CommandGroup(replacing: .newItem) { }
         }

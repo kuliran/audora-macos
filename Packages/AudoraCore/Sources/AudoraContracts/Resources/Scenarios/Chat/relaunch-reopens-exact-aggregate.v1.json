@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "relaunch-reopens-exact-aggregate",
+  "libraryId": "lib-20260830T100000000Z-1ABC",
+  "initialChats": [{
+    "chatId": "cht-20260830T120000000Z-2ABC",
+    "draftId": "drf-20260830T120000000Z-3DEF",
+    "memoryId": "mem-20260830T120000000Z-4GHJ",
+    "manifestRevision": 1,
+    "title": "Weekly reflection",
+    "createdAt": "2026-08-30T12:00:00.000Z",
+    "updatedAt": "2026-08-30T12:05:00.000Z",
+    "creationKind": "newChat",
+    "attachments": [],
+    "draftText": "restored local thought",
+    "draftVersion": 1,
+    "messageIds": [],
+    "memoryGeneralNotes": "",
+    "memorySessionSummaries": []
+  }],
+  "commands": [{"kind": "open", "chatId": "cht-20260830T120000000Z-2ABC"}],
+  "dependencyTrace": [
+    {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded"},
+    {"port": "chatStore", "effect": "load", "outcome": "loaded"}
+  ],
+  "expectedState": {
+    "allChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "visibleChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "selectedChatId": "cht-20260830T120000000Z-2ABC",
+    "selectedTitle": "Weekly reflection",
+    "selectedRevision": 1
+  },
+  "expectedProviderCalls": 0,
+  "expectedInvocationCalls": 0,
+  "expectedAdmissionCalls": 0
+}

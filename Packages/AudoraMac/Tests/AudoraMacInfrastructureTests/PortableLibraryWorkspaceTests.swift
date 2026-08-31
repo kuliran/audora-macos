@@ -306,6 +306,256 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testProfileStatementGenerationReadReloadsTheCurrentValidatedHead() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("CurrentProfile.audoralibrary")
+            let persistence = PortableLibraryPersistence()
+            let authority = try persistence.create(at: root, seed: makeSeed())
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let changedHead = ProfileHead(
+                generation: 9,
+                statementGeneration: 7,
+                selection: .null,
+                updatedAt: try UTCInstant("2026-08-30T12:10:00.000Z")
+            )
+            try persistence.atomicallyReplaceRoot(
+                persistence.encodeProfileHead(changedHead),
+                relativePath: LibraryRelativePath("profile/head.json"),
+                under: root
+            )
+
+            let generation = await workspace.activeProfileStatementGeneration(
+                in: LibraryScope(libraryID: authority.manifest.libraryID)
+            )
+
+            XCTAssertEqual(generation, 7)
+        }
+    }
+
+    func testProfileStatementGenerationReadNeverReconcilesActiveAudioImportStaging() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("ActiveImport.audoralibrary")
+            let authority = try PortableLibraryPersistence().create(at: root, seed: makeSeed())
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let activeImport = try makeRecognizedAbandonedAudioImportTree(in: root)
+
+            let generation = await workspace.activeProfileStatementGeneration(
+                in: LibraryScope(libraryID: authority.manifest.libraryID)
+            )
+
+            XCTAssertEqual(generation, 0)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: activeImport.path))
+        }
+    }
+
+    func testChatLoadPreservesTheActiveReadOnlyLibraryOutcome() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("ReadOnly.audoralibrary")
+            let authority = try PortableLibraryPersistence().create(at: root, seed: makeSeed())
+            let preferences = root.appendingPathComponent("preferences.json")
+            try Data(
+                #"{"annotationsVisible":false,"futurePortablePreference":"preserve","language":"en","playbackRate":1.25,"schemaVersion":2}"#.utf8
+            ).write(to: preferences)
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let store = PortableChatStore(workspace: workspace)
+
+            let outcome = await store.load(
+                try ChatID("cht-20260830T120000000Z-2ABC"),
+                in: LibraryScope(libraryID: authority.manifest.libraryID)
+            )
+
+            XCTAssertEqual(outcome, .readOnlyLibrary)
+        }
+    }
+
+    func testChatStoreReconcilesCreateCommittedBeforePostcommitFault() async throws {
+        let points: [PortableChatFaultPoint] = [
+            .afterFinalInstall,
+            .afterChatsFlush,
+            .beforeFinalRead,
+        ]
+        for point in points {
+            try await withTemporaryParent { parent in
+                let root = parent.appendingPathComponent("Create-\(point).audoralibrary")
+                let authority = try PortableLibraryPersistence().create(
+                    at: root,
+                    seed: makeSeed()
+                )
+                let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+                let workspace = PortableLibraryWorkspace(
+                    locations: QueueLocations(existing: [root]),
+                    bookmarks: SyntheticBookmarks(),
+                    access: RecordingAccessGrantor(),
+                    locatorStore: MemoryLocatorStore(),
+                    revealer: RecordingRevealer()
+                )
+                _ = await workspace.chooseLibrary()
+                let seed = try makeChatSeed(scope: scope)
+                let store = PortableChatStore(
+                    persistence: PortableChatPersistence { reached in
+                        if reached == point {
+                            throw PortableChatPersistenceError.injectedFault(point)
+                        }
+                    },
+                    workspace: workspace
+                )
+
+                let outcome = await store.create(seed)
+                let reopened = await store.load(seed.aggregate.chat.id, in: scope)
+
+                XCTAssertEqual(
+                    outcome,
+                    .committed(seed.aggregate),
+                    String(describing: point)
+                )
+                XCTAssertEqual(
+                    reopened,
+                    .loaded(seed.aggregate),
+                    String(describing: point)
+                )
+            }
+        }
+    }
+
+    func testChatStoreReconcilesRenameCommittedBeforePostcommitFault() async throws {
+        let points: [PortableChatFaultPoint] = [
+            .afterRenameInstall,
+            .afterRenameDirectoryFlush,
+            .beforeRenameFinalRead,
+        ]
+        for point in points {
+            try await withTemporaryParent { parent in
+                let root = parent.appendingPathComponent("Rename-\(point).audoralibrary")
+                let authority = try PortableLibraryPersistence().create(
+                    at: root,
+                    seed: makeSeed()
+                )
+                let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+                let workspace = PortableLibraryWorkspace(
+                    locations: QueueLocations(existing: [root]),
+                    bookmarks: SyntheticBookmarks(),
+                    access: RecordingAccessGrantor(),
+                    locatorStore: MemoryLocatorStore(),
+                    revealer: RecordingRevealer()
+                )
+                _ = await workspace.chooseLibrary()
+                let seed = try makeChatSeed(scope: scope)
+                let initialStore = PortableChatStore(workspace: workspace)
+                let created = await initialStore.create(seed)
+                XCTAssertEqual(created, .committed(seed.aggregate))
+                let mutation = try RenameChatMutation(
+                    library: scope,
+                    base: seed.aggregate,
+                    title: ChatTitle("Speaking Goals"),
+                    updatedAt: UTCInstant("2026-08-30T12:01:00.000Z")
+                )
+                let store = PortableChatStore(
+                    persistence: PortableChatPersistence { reached in
+                        if reached == point {
+                            throw PortableChatPersistenceError.injectedFault(point)
+                        }
+                    },
+                    workspace: workspace
+                )
+
+                let outcome = await store.rename(mutation)
+                let reopened = await store.load(mutation.chatID, in: scope)
+
+                XCTAssertEqual(
+                    outcome,
+                    .committed(mutation.replacement),
+                    String(describing: point)
+                )
+                XCTAssertEqual(
+                    reopened,
+                    .loaded(mutation.replacement),
+                    String(describing: point)
+                )
+            }
+        }
+    }
+
+    func testChatStoreMapsLibraryIdentityMismatchToFailedInsteadOfCorruptChat() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Retargeted.audoralibrary")
+            let authority = try PortableLibraryPersistence().create(at: root, seed: makeSeed())
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+            let seed = try makeChatSeed(scope: scope)
+            _ = try PortableChatPersistence().create(seed, at: root)
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let replacement = LibraryManifest(
+                libraryID: try LibraryID("lib-20260830T121000000Z-5KMN"),
+                createdAt: authority.manifest.createdAt
+            )
+            try PortableLibraryPersistence().encodeManifest(replacement).write(
+                to: root.appendingPathComponent("library.json"),
+                options: .atomic
+            )
+            let store = PortableChatStore(workspace: workspace)
+
+            let outcome = await store.load(seed.aggregate.chat.id, in: scope)
+
+            XCTAssertEqual(outcome, .failed)
+        }
+    }
+
+    func testChatStoreMapsActiveLibraryRootSymlinkToFailedInsteadOfCorruptChat() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("RetargetedRoot.audoralibrary")
+            let authority = try PortableLibraryPersistence().create(at: root, seed: makeSeed())
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let movedRoot = parent.appendingPathComponent("MovedRoot.audoralibrary")
+            try FileManager.default.moveItem(at: root, to: movedRoot)
+            try FileManager.default.createSymbolicLink(
+                at: root,
+                withDestinationURL: movedRoot
+            )
+            let store = PortableChatStore(workspace: workspace)
+
+            let outcome = await store.load(
+                try ChatID("cht-20260830T120000000Z-2ABC"),
+                in: LibraryScope(libraryID: authority.manifest.libraryID)
+            )
+
+            XCTAssertEqual(outcome, .failed)
+        }
+    }
+
     private func withTwoLibraries(
         _ body: (
             URL,
@@ -354,6 +604,51 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 updatedAt: instant
             )
         )
+    }
+
+    private func makeChatSeed(scope: LibraryScope) throws -> NewDevelopmentChatSeed {
+        try NewDevelopmentChatSeed(
+            library: scope,
+            chatID: ChatID("cht-20260830T120000000Z-2ABC"),
+            draftID: ChatDraftID("drf-20260830T120000000Z-3DEF"),
+            memoryID: CoachMemoryID("mem-20260830T120000000Z-4GHJ"),
+            instant: UTCInstant("2026-08-30T12:00:00.000Z"),
+            profileStatementGeneration: 0
+        )
+    }
+
+    private func makeRecognizedAbandonedAudioImportTree(in root: URL) throws -> URL {
+        let transaction = root
+            .appendingPathComponent("staging/publications", isDirectory: true)
+            .appendingPathComponent(
+                "audio_staging_0123456789ABCDEF0123456789ABCDEF",
+                isDirectory: true
+            )
+        let session = transaction.appendingPathComponent(
+            "ses-20260830T120000000Z-3DEF",
+            isDirectory: true
+        )
+        for directory in [
+            session.appendingPathComponent("audio", isDirectory: true),
+            session.appendingPathComponent("transcripts", isDirectory: true),
+            session.appendingPathComponent("annotations", isDirectory: true),
+        ] {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+        }
+        try Data("incomplete".utf8).write(
+            to: session.appendingPathComponent(
+                ".session.json.11111111-1111-1111-1111-111111111111.partial"
+            )
+        )
+        try Data("incomplete".utf8).write(
+            to: session.appendingPathComponent("audio").appendingPathComponent(
+                ".audio.json.22222222-2222-2222-2222-222222222222.partial"
+            )
+        )
+        return transaction
     }
 }
 

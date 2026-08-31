@@ -146,9 +146,6 @@ namespace Audora.Contracts {
     sourceChannelCount: integer;
   }
 
-  @pattern("^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
-  scalar SessionId extends string;
-
   @pattern("^src-0001$")
   scalar AudioSourceId extends string;
 

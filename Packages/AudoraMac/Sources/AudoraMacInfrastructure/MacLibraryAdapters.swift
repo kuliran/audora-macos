@@ -304,7 +304,7 @@ public struct NSWorkspaceLibraryRevealer: LibraryRevealing {
     }
 }
 
-public struct SystemLibraryClock: LibraryClock {
+public struct SystemLibraryClock: LibraryClock, ChatClock {
     public init() {}
 
     public func now() async -> UTCInstant {
@@ -312,6 +312,50 @@ public struct SystemLibraryClock: LibraryClock {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         return try! UTCInstant(formatter.string(from: Date()))
+    }
+}
+
+public struct RandomChatIdentityGenerator:
+    ChatIDGenerator,
+    ChatDraftIDGenerator,
+    CoachMemoryIDGenerator
+{
+    private static let crockford = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+    public init() {}
+
+    public func generateChatID(at instant: UTCInstant) async -> ChatID {
+        try! ChatID(Self.identifier(prefix: "cht-", instant: instant))
+    }
+
+    public func generateChatDraftID(at instant: UTCInstant) async -> ChatDraftID {
+        try! ChatDraftID(Self.identifier(prefix: "drf-", instant: instant))
+    }
+
+    public func generateCoachMemoryID(at instant: UTCInstant) async -> CoachMemoryID {
+        try! CoachMemoryID(Self.identifier(prefix: "mem-", instant: instant))
+    }
+
+    private static func identifier(prefix: String, instant: UTCInstant) -> String {
+        let compact = instant.rawValue
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: ":", with: "")
+            .replacingOccurrences(of: ".", with: "")
+        var generator = SystemRandomNumberGenerator()
+        let suffix = String((0..<4).map { _ in crockford.randomElement(using: &generator)! })
+        return "\(prefix)\(compact)-\(suffix)"
+    }
+}
+
+public struct ActiveLibraryProfileStatementGenerationReader: ProfileStatementGenerationReading {
+    private let workspace: PortableLibraryWorkspace
+
+    public init(workspace: PortableLibraryWorkspace) {
+        self.workspace = workspace
+    }
+
+    public func statementGeneration(in library: LibraryScope) async -> UInt64? {
+        await workspace.activeProfileStatementGeneration(in: library)
     }
 }
 

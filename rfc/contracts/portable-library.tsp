@@ -9,6 +9,9 @@ namespace Audora.Contracts {
   @pattern("^prf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
   scalar ProfileRevisionId extends string;
 
+  @pattern("^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar SessionId extends string;
+
   @pattern("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$")
   scalar UTCInstant extends string;
 
