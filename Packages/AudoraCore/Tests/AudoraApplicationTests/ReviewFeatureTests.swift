@@ -72,7 +72,7 @@ final class ReviewFeatureTests: XCTestCase {
         XCTAssertEqual(writes, [false])
     }
 
-    func testAnnotationVisibilityReconcilesDurableValueAfterReportedWriteFailure() async throws {
+    func testAnnotationVisibilityUsesObservableValueFromCommitAmbiguousWrite() async throws {
         let revision = try reviewRevision(
             id: "trv-20260830T121000000Z-4FGH",
             text: "Hello, world!"
@@ -107,7 +107,7 @@ final class ReviewFeatureTests: XCTestCase {
         let writes = await visibility.writes
         let readCount = await visibility.readCount
         XCTAssertEqual(writes, [false])
-        XCTAssertEqual(readCount, 2)
+        XCTAssertEqual(readCount, 1)
     }
 
     func testVisibilityWriteCannotRewindLatestPlaybackState() async throws {
@@ -1105,10 +1105,10 @@ private actor ReviewAnnotationVisibilityStub: ReviewAnnotationVisibilityPort {
     func setAnnotationsVisible(
         _ visible: Bool,
         in scope: LibraryScope
-    ) async -> Bool {
+    ) async -> ReviewAnnotationVisibilityWriteResult {
         self.visible = visible
         writes.append(visible)
-        return true
+        return .committed(visible: visible)
     }
 }
 
@@ -1129,10 +1129,10 @@ private actor PostcommitReviewAnnotationVisibilityStub:
     func setAnnotationsVisible(
         _ visible: Bool,
         in scope: LibraryScope
-    ) async -> Bool {
+    ) async -> ReviewAnnotationVisibilityWriteResult {
         self.visible = visible
         writes.append(visible)
-        return false
+        return .commitAmbiguous(visible: visible)
     }
 }
 
@@ -1147,10 +1147,10 @@ private actor SuspendedReviewAnnotationVisibilityStub:
     func setAnnotationsVisible(
         _ visible: Bool,
         in scope: LibraryScope
-    ) async -> Bool {
+    ) async -> ReviewAnnotationVisibilityWriteResult {
         didStartWrite = true
         await withCheckedContinuation { continuation = $0 }
-        return true
+        return .committed(visible: visible)
     }
 
     func waitUntilWriteStarts() async {
@@ -1179,9 +1179,9 @@ private actor SuspendedReviewAnnotationReadStub: ReviewAnnotationVisibilityPort 
     func setAnnotationsVisible(
         _ visible: Bool,
         in scope: LibraryScope
-    ) async -> Bool {
+    ) async -> ReviewAnnotationVisibilityWriteResult {
         writes += 1
-        return true
+        return .committed(visible: visible)
     }
 
     func writeCount() -> Int { writes }

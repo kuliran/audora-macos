@@ -236,17 +236,17 @@ public actor DefaultReviewFeature: ReviewFeature {
                 replacing(ready, activity: .settingAnnotationVisibility)
             )
         )
-        let persisted = await annotationVisibility.setAnnotationsVisible(
+        let writeResult = await annotationVisibility.setAnnotationsVisible(
             visible,
             in: ready.selection.scope
         )
-        let durableVisibility: Bool?
-        if persisted {
-            durableVisibility = visible
-        } else {
-            durableVisibility = await annotationVisibility.annotationsVisible(
-                in: ready.selection.scope
-            )
+        let currentVisibility: Bool? = switch writeResult {
+        case let .committed(visible),
+             let .notCommitted(visible),
+             let .commitAmbiguous(visible):
+            visible
+        case .unavailable:
+            nil
         }
         guard let current = readySnapshot,
               current.selection == ready.selection,
@@ -260,7 +260,7 @@ public actor DefaultReviewFeature: ReviewFeature {
             to: .ready(
                 replacing(
                     current,
-                    annotations: durableVisibility.map {
+                    annotations: currentVisibility.map {
                         current.annotations.settingVisibility($0)
                     } ?? current.annotations,
                     activity: nil

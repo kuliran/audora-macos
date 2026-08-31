@@ -2,11 +2,11 @@ import AudoraDomain
 import Darwin
 import Foundation
 
-public struct SessionProcessingRootIdentity: Equatable, Sendable {
+public struct LibraryRootIdentity: Equatable, Sendable {
     public let device: UInt64
     public let inode: UInt64
 
-    static func capture(_ root: URL) -> SessionProcessingRootIdentity? {
+    static func capture(_ root: URL) -> LibraryRootIdentity? {
         let descriptor = root.withUnsafeFileSystemRepresentation { path -> Int32 in
             guard let path else { return -1 }
             return Darwin.open(
@@ -16,16 +16,22 @@ public struct SessionProcessingRootIdentity: Equatable, Sendable {
         }
         guard descriptor >= 0 else { return nil }
         defer { Darwin.close(descriptor) }
+        return capture(descriptor)
+    }
+
+    static func capture(_ descriptor: Int32) -> LibraryRootIdentity? {
         var metadata = stat()
         guard fstat(descriptor, &metadata) == 0,
               (metadata.st_mode & S_IFMT) == S_IFDIR
         else { return nil }
-        return SessionProcessingRootIdentity(
+        return LibraryRootIdentity(
             device: UInt64(truncatingIfNeeded: metadata.st_dev),
             inode: UInt64(truncatingIfNeeded: metadata.st_ino)
         )
     }
 }
+
+public typealias SessionProcessingRootIdentity = LibraryRootIdentity
 
 public struct SessionProcessingScopeIdentity: Equatable, Sendable {
     public let libraryID: LibraryID

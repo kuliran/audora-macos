@@ -49,12 +49,21 @@ public protocol ReviewRetranscriptionPort: Sendable {
     func retranscribe(_ selection: ReviewSelection) async -> ReviewRetranscriptionResult
 }
 
-/// Global portable preference seam. The selected Review remains authoritative
-/// when this preference cannot be read or written.
+public enum ReviewAnnotationVisibilityWriteResult: Equatable, Sendable {
+    case committed(visible: Bool)
+    case notCommitted(visible: Bool)
+    case commitAmbiguous(visible: Bool)
+    case unavailable
+}
+
+/// Global portable preference seam. Write outcomes include the current
+/// observable value without requiring a second, independently retargetable
+/// read. The selected Review remains authoritative when persistence authority
+/// is unavailable.
 public protocol ReviewAnnotationVisibilityPort: Sendable {
     func annotationsVisible(in scope: LibraryScope) async -> Bool?
     func setAnnotationsVisible(
         _ visible: Bool,
         in scope: LibraryScope
-    ) async -> Bool
+    ) async -> ReviewAnnotationVisibilityWriteResult
 }

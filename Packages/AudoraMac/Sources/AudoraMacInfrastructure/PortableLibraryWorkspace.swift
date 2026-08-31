@@ -62,6 +62,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     private struct ActiveScope: Sendable {
         let lease: any LibraryAccessLease
         let loaded: LoadedPortableLibrary
+        let rootIdentity: LibraryRootIdentity
 
         var root: URL { lease.url }
 
@@ -220,7 +221,17 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         }
         do {
             let authority = try persistence.create(at: destination, seed: seed)
-            let scope = ActiveScope(lease: candidateLease, loaded: .readWrite(authority))
+            guard let rootIdentity = LibraryRootIdentity.capture(
+                candidateLease.url
+            ) else {
+                candidateLease.release()
+                return .failed(.createFailed)
+            }
+            let scope = ActiveScope(
+                lease: candidateLease,
+                loaded: .readWrite(authority),
+                rootIdentity: rootIdentity
+            )
             replaceActiveScope(with: scope)
             let locatorResult = await persistLocator(
                 root: destination,
@@ -328,7 +339,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
               authority.manifest.libraryID == scope.libraryID,
               let processingLease = try? access.acquireAccess(to: activeScope.root)
         else { return nil }
-        guard let rootIdentity = SessionProcessingRootIdentity.capture(
+        guard let rootIdentity = LibraryRootIdentity.capture(
             processingLease.url
         ) else {
             processingLease.release()
@@ -400,6 +411,12 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         } catch {
             return .failed(.candidateUnavailable)
         }
+        guard let rootIdentity = LibraryRootIdentity.capture(
+            candidateLease.url
+        ) else {
+            candidateLease.release()
+            return .failed(.candidateUnavailable)
+        }
         let loaded: LoadedPortableLibrary
         do {
             loaded = try persistence.open(at: candidateLease.url)
@@ -413,8 +430,18 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
             candidateLease.release()
             return .failed(.candidateCorrupt)
         }
+        guard LibraryRootIdentity.capture(candidateLease.url) ==
+            rootIdentity
+        else {
+            candidateLease.release()
+            return .failed(.candidateUnavailable)
+        }
 
-        let candidate = ActiveScope(lease: candidateLease, loaded: loaded)
+        let candidate = ActiveScope(
+            lease: candidateLease,
+            loaded: loaded,
+            rootIdentity: rootIdentity
+        )
         if let expectedID, candidate.libraryID != expectedID {
             candidateLease.release()
             return .failed(.identityMismatch)
@@ -492,13 +519,21 @@ extension PortableLibraryWorkspace: ReviewAnnotationVisibilityPort {
         defer { operationInFlight = false }
         guard let activeScope,
               activeScope.libraryID == scope.libraryID,
+              LibraryRootIdentity.capture(activeScope.root) ==
+                activeScope.rootIdentity,
               case let .readWrite(authority) = try? persistence
-                .openWithoutReconcilingImports(at: activeScope.root),
-              authority.manifest.libraryID == scope.libraryID
+                .openWithoutReconcilingImports(
+                    at: activeScope.root,
+                    expectedRootIdentity: activeScope.rootIdentity
+                ),
+              authority.manifest.libraryID == scope.libraryID,
+              LibraryRootIdentity.capture(activeScope.root) ==
+                activeScope.rootIdentity
         else { return nil }
         self.activeScope = ActiveScope(
             lease: activeScope.lease,
-            loaded: .readWrite(authority)
+            loaded: .readWrite(authority),
+            rootIdentity: activeScope.rootIdentity
         )
         return authority.preferences.annotationsVisible
     }
@@ -506,41 +541,75 @@ extension PortableLibraryWorkspace: ReviewAnnotationVisibilityPort {
     public func setAnnotationsVisible(
         _ visible: Bool,
         in scope: LibraryScope
-    ) -> Bool {
-        guard reserveOperation() else { return false }
+    ) -> ReviewAnnotationVisibilityWriteResult {
+        guard reserveOperation() else { return .unavailable }
         defer { operationInFlight = false }
         guard let activeScope,
               activeScope.libraryID == scope.libraryID,
+              LibraryRootIdentity.capture(activeScope.root) ==
+                activeScope.rootIdentity,
               case let .readWrite(authority) = try? persistence
-                .openWithoutReconcilingImports(at: activeScope.root),
+                .openWithoutReconcilingImports(
+                    at: activeScope.root,
+                    expectedRootIdentity: activeScope.rootIdentity
+                ),
               authority.manifest.libraryID == scope.libraryID,
+              LibraryRootIdentity.capture(activeScope.root) ==
+                activeScope.rootIdentity,
               let preferences = try? LibraryPreferences(
                   language: authority.preferences.language,
                   annotationsVisible: visible,
                   playbackRate: authority.preferences.playbackRate
               ),
               let encoded = try? persistence.encodePreferences(preferences)
-        else { return false }
+        else { return .unavailable }
+        let writeOutcome: PortableMutableRootWriteOutcome
         do {
-            try persistence.atomicallyReplaceRoot(
+            writeOutcome = try persistence.atomicallyReplaceRoot(
                 encoded,
                 relativePath: try LibraryRelativePath("preferences.json"),
                 under: activeScope.root,
+                expectedRootIdentity: activeScope.rootIdentity,
                 reconcileAbandonedImports: false
             )
         } catch {
-            // Installation precedes the final durability checks, so failure is
-            // commit-ambiguous. Reopen the confined active root below and report
-            // the durable preference rather than the thrown operation outcome.
+            return reconcileAnnotationVisibility(
+                writeOutcome: nil,
+                activeScope: activeScope,
+                scope: scope
+            )
         }
+        return reconcileAnnotationVisibility(
+            writeOutcome: writeOutcome,
+            activeScope: activeScope,
+            scope: scope
+        )
+    }
+
+    private func reconcileAnnotationVisibility(
+        writeOutcome: PortableMutableRootWriteOutcome?,
+        activeScope: ActiveScope,
+        scope: LibraryScope
+    ) -> ReviewAnnotationVisibilityWriteResult {
         guard case let .readWrite(reopened) = try? persistence
-            .openWithoutReconcilingImports(at: activeScope.root),
-              reopened.manifest.libraryID == scope.libraryID
-        else { return false }
+            .openWithoutReconcilingImports(
+                at: activeScope.root,
+                expectedRootIdentity: activeScope.rootIdentity
+            ),
+              reopened.manifest.libraryID == scope.libraryID,
+              LibraryRootIdentity.capture(activeScope.root) ==
+                activeScope.rootIdentity
+        else { return .unavailable }
         self.activeScope = ActiveScope(
             lease: activeScope.lease,
-            loaded: .readWrite(reopened)
+            loaded: .readWrite(reopened),
+            rootIdentity: activeScope.rootIdentity
         )
-        return reopened.preferences == preferences
+        let current = reopened.preferences.annotationsVisible
+        return switch writeOutcome {
+        case .committed: .committed(visible: current)
+        case .commitAmbiguous: .commitAmbiguous(visible: current)
+        case nil: .notCommitted(visible: current)
+        }
     }
 }
