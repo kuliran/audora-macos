@@ -1,5 +1,6 @@
 import AudoraApplication
 import AudoraDomain
+import Foundation
 import SwiftUI
 
 struct ChatRenameEditorTaskID: Hashable {
@@ -26,6 +27,9 @@ enum ChatNoticePresentation {
         case .pendingUserTurnFailed: "The pending Chat turn could not be changed."
         case .coachContextUnavailable: "Context capacity is unavailable for this Coach configuration."
         case .messageMustBeShortened: "Message is too long. Shorten it to send."
+        case .attachmentCatalogFailed: "Sessions could not be loaded for Chat creation."
+        case .attachmentUnavailable: "A selected Session changed or is no longer available."
+        case .chatContextCannotFit: "That Session combination exceeds Coach context capacity."
         }
     }
 
@@ -84,7 +88,7 @@ public struct ChatRootView: View {
                         .font(.headline)
                     Spacer()
                     Button("New Chat") {
-                        model.createDevelopmentChat()
+                        model.beginNewChat()
                     }
                     .accessibilityLabel("Create New Development Chat")
                     .disabled(!allowsNavigationAndMutation)
@@ -125,6 +129,9 @@ public struct ChatRootView: View {
                 .padding(.leading, 12)
         }
         .task { await model.start(in: scope) }
+        .sheet(isPresented: newChatSheetIsPresented) {
+            newChatSheet
+        }
     }
 
     @ViewBuilder
@@ -202,9 +209,7 @@ public struct ChatRootView: View {
                     }
                     .disabled(!allowsNavigationAndMutation)
                 }
-                Text("No Sessions attached")
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Chat attachments: No Sessions attached")
+                openedAttachmentsView(aggregate)
                 GroupBox("Successful history") {
                     if aggregate.chat.messageIDs.isEmpty {
                         Text("No completed Coach turns yet.")
@@ -365,6 +370,230 @@ public struct ChatRootView: View {
             !dispatcher.isChatBoundaryPending &&
             !dispatcher.isOrderlyTerminationPending &&
             ChatInteractionPolicy.allowsNavigationAndMutation(in: model.snapshot)
+    }
+
+    private var newChatSheetIsPresented: Binding<Bool> {
+        Binding(
+            get: {
+                if case .closed = model.snapshot.newChatPicker { return false }
+                return true
+            },
+            set: { presented in
+                if !presented { model.cancelNewChat() }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var newChatSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("New Chat")
+                .font(.title2.weight(.semibold))
+            Text("Choose any number of Sessions. The exact selected transcript revisions stay pinned to this Chat.")
+                .foregroundStyle(.secondary)
+
+            TextField(
+                "Search Sessions",
+                text: Binding(
+                    get: { model.newChatAttachmentFilterText },
+                    set: { model.updateNewChatAttachmentFilter($0) }
+                )
+            )
+            .textFieldStyle(.roundedBorder)
+            .accessibilityLabel("Search Sessions for New Chat")
+
+            switch model.snapshot.newChatPicker {
+            case .closed:
+                EmptyView()
+            case .loading:
+                VStack {
+                    ProgressView("Loading Sessions…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    HStack {
+                        Spacer()
+                        Button("Cancel") { model.cancelNewChat() }
+                            .keyboardShortcut(.cancelAction)
+                    }
+                }
+            case .failed:
+                VStack {
+                    ContentUnavailableView(
+                        "Sessions Unavailable",
+                        systemImage: "exclamationmark.bubble"
+                    )
+                    HStack {
+                        Spacer()
+                        Button("Cancel") { model.cancelNewChat() }
+                            .keyboardShortcut(.cancelAction)
+                    }
+                }
+            case let .ready(picker):
+                if picker.visibleRows.isEmpty {
+                    ContentUnavailableView(
+                        picker.allRows.isEmpty ? "No Sessions" : "No Matching Sessions",
+                        systemImage: "waveform"
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(picker.visibleRows) { row in
+                        Button {
+                            model.performNewChatAttachmentPickerAction(.toggle(row.id))
+                        } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(
+                                    systemName: picker.selectedAttachmentIDs.contains(row.id)
+                                        ? "checkmark.circle.fill"
+                                        : "circle"
+                                )
+                                .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(row.displayLabel)
+                                    HStack(spacing: 12) {
+                                        Text(Self.durationText(row.durationMilliseconds))
+                                        Text("~\(row.approximateTranscriptTokens) tokens")
+                                        Text(row.delivery == .inline ? "Inline" : "On demand")
+                                    }
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(
+                            "\(picker.selectedAttachmentIDs.contains(row.id) ? "Selected" : "Not selected"), \(row.displayLabel), \(Self.durationText(row.durationMilliseconds)), approximately \(row.approximateTranscriptTokens) transcript tokens, \(row.delivery == .inline ? "inline" : "on demand")"
+                        )
+                    }
+                }
+
+                creationQuote(picker)
+                HStack {
+                    Text("\(picker.selectionCount) selected")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("\(picker.selectionCount) Sessions selected")
+                    Spacer()
+                    Button("Cancel") {
+                        model.performNewChatAttachmentPickerAction(.cancelAction)
+                    }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Create Chat") {
+                        model.performNewChatAttachmentPickerAction(.defaultAction)
+                    }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!picker.feasibility.permitsCreation)
+                        .accessibilityHint("Creates a Chat without sending a message")
+                }
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 620, minHeight: 520)
+    }
+
+    @ViewBuilder
+    private func creationQuote(_ picker: ChatAttachmentPickerSnapshot) -> some View {
+        switch picker.feasibility {
+        case .quoting:
+            ProgressView("Estimating current Profile and Session context…")
+                .controlSize(.small)
+        case let .available(quote):
+            VStack(alignment: .leading, spacing: 4) {
+                Text(CoachContextQuotePresentation.summary(quote.context))
+                    .font(.callout.monospacedDigit())
+                if let profile = quote.context.categoryCosts[.profile] {
+                    Text("Current Profile: ~\(profile.estimatedTokenCount) tokens")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                if !quote.context.fits {
+                    Text("This combination does not fit the current Coach context.")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Selected Sessions exceed current Coach context capacity")
+                }
+            }
+        case .unavailable(.providerUnavailable):
+            Text("Coach capacity is unavailable until a provider is configured.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .unavailable:
+            Text("Current Coach context could not be verified. Try again.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private static func durationText(_ milliseconds: UInt64) -> String {
+        let totalSeconds = milliseconds / 1_000
+        return String(
+            format: "%llu:%02llu",
+            totalSeconds / 60,
+            totalSeconds % 60
+        )
+    }
+
+    @ViewBuilder
+    private func openedAttachmentsView(_ aggregate: ChatAggregate) -> some View {
+        if aggregate.chat.attachments.values.isEmpty {
+            Text("No Sessions attached")
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Chat attachments: No Sessions attached")
+        } else {
+            GroupBox("Pinned Sessions") {
+                switch model.snapshot.openedAttachments {
+                case .notRequested, .resolving:
+                    ProgressView("Checking exact transcript revisions…")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .failed:
+                    Label("Pinned Sessions could not be verified", systemImage: "exclamationmark.triangle")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityLabel("Pinned Chat attachments could not be verified")
+                case let .resolved(resolutions):
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(resolutions.enumerated()), id: \.element.attachment.attachmentID) {
+                            index, resolved in
+                            switch resolved.resolution {
+                            case let .available(candidate):
+                                HStack {
+                                    Image(systemName: "pin.fill")
+                                        .accessibilityHidden(true)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(candidate.displayLabel)
+                                        Text(
+                                            "\(Self.durationText(candidate.durationMilliseconds)) · ~\(candidate.approximateTranscriptTokens) tokens · \(candidate.delivery == .inline ? "Inline" : "On demand")"
+                                        )
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .accessibilityLabel(
+                                    "Pinned Session \(index + 1), \(candidate.displayLabel), exact transcript revision available"
+                                )
+                            case let .unavailable(reason):
+                                Label(
+                                    "Pinned Session \(index + 1): \(Self.attachmentUnavailableText(reason))",
+                                    systemImage: "exclamationmark.triangle"
+                                )
+                                .accessibilityLabel(
+                                    "Pinned Session \(index + 1), \(Self.attachmentUnavailableText(reason))"
+                                )
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private static func attachmentUnavailableText(
+        _ reason: ChatAttachmentUnavailableReason
+    ) -> String {
+        switch reason {
+        case .missing: "missing"
+        case .inTrash: "in Trash"
+        case .corrupt: "corrupt"
+        case .unsupportedSchema: "requires a newer Audora version"
+        }
     }
 
     @ViewBuilder

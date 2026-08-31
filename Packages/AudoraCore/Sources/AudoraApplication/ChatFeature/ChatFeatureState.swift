@@ -72,6 +72,9 @@ public enum ChatNotice: String, Equatable, Sendable {
     case pendingUserTurnFailed
     case coachContextUnavailable
     case messageMustBeShortened
+    case attachmentCatalogFailed
+    case attachmentUnavailable
+    case chatContextCannotFit
 }
 
 public enum CoachContextAdvisoryState: Equatable, Sendable {
@@ -122,6 +125,8 @@ public struct ChatFeatureState: Equatable, Sendable {
     public let composer: ChatComposerState?
     public let contextAdvisory: CoachContextAdvisoryState
     public let createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent?
+    public let newChatPicker: NewChatAttachmentPickerState
+    public let openedAttachments: OpenedChatAttachmentsState
     public let activity: Activity?
     public let notice: ChatNotice?
 
@@ -132,6 +137,8 @@ public struct ChatFeatureState: Equatable, Sendable {
         composer: ChatComposerState? = nil,
         contextAdvisory: CoachContextAdvisoryState = .notRequested,
         createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
+        newChatPicker: NewChatAttachmentPickerState = .closed,
+        openedAttachments: OpenedChatAttachmentsState = .notRequested,
         activity: Activity? = nil,
         notice: ChatNotice? = nil
     ) {
@@ -141,6 +148,8 @@ public struct ChatFeatureState: Equatable, Sendable {
         self.composer = composer
         self.contextAdvisory = contextAdvisory
         self.createNewChatRecoveryIntent = createNewChatRecoveryIntent
+        self.newChatPicker = newChatPicker
+        self.openedAttachments = openedAttachments
         self.activity = activity
         self.notice = notice
     }

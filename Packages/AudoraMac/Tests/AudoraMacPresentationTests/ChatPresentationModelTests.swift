@@ -50,6 +50,55 @@ final class ChatPresentationModelTests: XCTestCase {
         XCTAssertEqual(commandsAfterInvalidInput, validCommands)
     }
 
+    func testNewChatKeyboardInteractionsDispatchSearchManyToggleDefaultAndCancel() async throws {
+        let feature = RecordingPresentationChatFeature(
+            initial: ChatFeatureState(
+                catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
+            )
+        )
+        let model = makeChatPresentationModel(feature: feature)
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let first = try ChatSessionAttachmentID("attachment-000001")
+        let second = try ChatSessionAttachmentID("attachment-000002")
+        await model.start(in: scope)
+        let startCommands = await feature.commands
+        let context = try XCTUnwrap(
+            startContexts(in: startCommands).first
+        )
+
+        model.beginNewChat()
+        await waitForCommandCount(2, in: feature)
+        model.updateNewChatAttachmentFilter("café")
+        await waitForCommandCount(3, in: feature)
+        model.performNewChatAttachmentPickerAction(.toggle(first))
+        await waitForCommandCount(4, in: feature)
+        model.performNewChatAttachmentPickerAction(.toggle(second))
+        await waitForCommandCount(5, in: feature)
+        model.performNewChatAttachmentPickerAction(.defaultAction)
+        await waitForCommandCount(6, in: feature)
+        model.performNewChatAttachmentPickerAction(.cancelAction)
+        await waitForCommandCount(7, in: feature)
+
+        let commands = await feature.commands
+        XCTAssertEqual(
+            commands,
+            [
+                .start(context),
+                .beginNewChat(context),
+                .setNewChatAttachmentFilter(
+                    context,
+                    try ChatAttachmentFilterQuery("café")
+                ),
+                .toggleNewChatAttachment(context, first),
+                .toggleNewChatAttachment(context, second),
+                .confirmNewChat(context),
+                .cancelNewChat(context),
+            ]
+        )
+    }
+
     func testUserActionsCaptureTheCurrentLibraryCommandContext() async throws {
         let scope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
@@ -148,6 +197,9 @@ final class ChatPresentationModelTests: XCTestCase {
             .readOnlyLibrary,
             .coachContextUnavailable,
             .messageMustBeShortened,
+            .attachmentCatalogFailed,
+            .attachmentUnavailable,
+            .chatContextCannotFit,
         ]
 
         for notice in notices {
@@ -464,7 +516,10 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
                 )
             }
             filterIsComplete = true
-        case .createDevelopmentChat, .rename, .open, .editDraft,
+        case .createDevelopmentChat, .beginNewChat,
+             .setNewChatAttachmentFilter, .toggleNewChatAttachment,
+             .cancelNewChat, .confirmNewChat,
+             .rename, .open, .editDraft,
              .refreshContextQuote, .sendDraft,
              .retryPendingUserTurn, .createNewChatFromCapacityFailure,
              .discardPendingUserTurn:

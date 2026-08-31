@@ -39,7 +39,8 @@
                     "type": "array",
                     "items": {
                         "$ref": "#/$defs/ChatSessionAttachment"
-                    }
+                    },
+                    "maxItems": 128
                 },
                 "draft": {
                     "$ref": "#/$defs/PersistedChatDraft"
@@ -105,7 +106,8 @@
                     "type": "array",
                     "items": {
                         "$ref": "#/$defs/ChatSessionAttachment"
-                    }
+                    },
+                    "maxItems": 128
                 },
                 "draft": {
                     "$ref": "#/$defs/PersistedChatDraft"

@@ -6,6 +6,177 @@ import Foundation
 import XCTest
 
 final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
+    func testChatAttachmentReopensExactHistoricalRevisionAfterSelectionChanges() async throws {
+        try await withRecordedSession { root, receipt in
+            let first = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121000000Z-4FGH"
+            )
+            let second = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121100000Z-5GHJ"
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                first,
+                expectedSelectedRevisionID: nil
+            )
+            _ = try await repository.publishAndSelect(
+                second,
+                expectedSelectedRevisionID: first.revisionID
+            )
+            let attachment = ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-1"),
+                sessionID: receipt.sessionID,
+                transcriptRevisionID: first.revisionID
+            )
+            let attachments = try ChatAttachments(validating: [attachment])
+
+            let resolved = repository.resolveChatAttachmentsSynchronously(attachments)
+
+            XCTAssertEqual(resolved.map(\.attachment), [attachment])
+            guard case let .available(candidate) = resolved[0].resolution else {
+                return XCTFail("expected the exact historical Revision")
+            }
+            XCTAssertEqual(candidate.sessionID, receipt.sessionID)
+            XCTAssertEqual(candidate.transcriptRevisionID, first.revisionID)
+        }
+    }
+
+    func testChatAttachmentReportsMissingExactRevisionWithoutChangingItsPin() async throws {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            let attachment = ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-1"),
+                sessionID: receipt.sessionID,
+                transcriptRevisionID: revision.revisionID
+            )
+            let attachments = try ChatAttachments(validating: [attachment])
+            try FileManager.default.removeItem(
+                at: root.appendingPathComponent(
+                    "sessions/\(receipt.sessionID.rawValue)/transcripts/" +
+                        revision.revisionID.rawValue
+                )
+            )
+
+            let resolved = repository.resolveChatAttachmentsSynchronously(attachments)
+
+            XCTAssertEqual(resolved.map(\.attachment), [attachment])
+            XCTAssertEqual(resolved.map(\.resolution), [.unavailable(.missing)])
+        }
+    }
+
+    func testChatAttachmentDistinguishesPersistentTrashWithoutMutatingIt() async throws {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            let attachment = ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-1"),
+                sessionID: receipt.sessionID,
+                transcriptRevisionID: revision.revisionID
+            )
+            let attachments = try ChatAttachments(validating: [attachment])
+            let source = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)"
+            )
+            let destination = root.appendingPathComponent(
+                "trash/sessions/\(receipt.sessionID.rawValue)"
+            )
+            try FileManager.default.moveItem(at: source, to: destination)
+            let sessionBefore = try Data(
+                contentsOf: destination.appendingPathComponent("session.json")
+            )
+            let revisionBefore = try Data(
+                contentsOf: destination.appendingPathComponent(
+                    "transcripts/\(revision.revisionID.rawValue)/revision.json"
+                )
+            )
+
+            let resolved = repository.resolveChatAttachmentsSynchronously(attachments)
+
+            XCTAssertEqual(resolved.map(\.attachment), [attachment])
+            XCTAssertEqual(resolved.map(\.resolution), [.unavailable(.inTrash)])
+            XCTAssertEqual(
+                try Data(contentsOf: destination.appendingPathComponent("session.json")),
+                sessionBefore
+            )
+            XCTAssertEqual(
+                try Data(contentsOf: destination.appendingPathComponent(
+                    "transcripts/\(revision.revisionID.rawValue)/revision.json"
+                )),
+                revisionBefore
+            )
+        }
+    }
+
+    func testChatAttachmentCatalogSkipsOneCorruptIndependentSession() async throws {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            try FileManager.default.createDirectory(
+                at: root.appendingPathComponent(
+                    "sessions/ses-20260830T130000000Z-6PQR"
+                ),
+                withIntermediateDirectories: false
+            )
+
+            let catalog = try repository.loadChatAttachmentCatalogSynchronously()
+
+            XCTAssertEqual(catalog.count, 1)
+            XCTAssertEqual(catalog[0].sessionID, receipt.sessionID)
+            XCTAssertEqual(catalog[0].transcriptRevisionID, revision.revisionID)
+        }
+    }
+
+    func testChatAttachmentCatalogSkipsMalformedIndependentSessionEntry() async throws {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            try FileManager.default.createDirectory(
+                at: root.appendingPathComponent("sessions/not-a-session-id"),
+                withIntermediateDirectories: false
+            )
+
+            let catalog = try repository.loadChatAttachmentCatalogSynchronously()
+
+            XCTAssertEqual(catalog.count, 1)
+            XCTAssertEqual(catalog[0].sessionID, receipt.sessionID)
+            XCTAssertEqual(catalog[0].transcriptRevisionID, revision.revisionID)
+        }
+    }
+
     func testReviewReadReturnsOneVerifiedAudioRevisionAndInventorySnapshot() async throws {
         try await withRecordedSession { root, receipt in
             let first = try transcriptRevision(

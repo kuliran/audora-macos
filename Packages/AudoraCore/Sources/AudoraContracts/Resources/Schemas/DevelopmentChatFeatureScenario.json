@@ -109,7 +109,8 @@
                     "type": "array",
                     "items": {
                         "$ref": "#/$defs/ChatSessionAttachment"
-                    }
+                    },
+                    "maxItems": 128
                 },
                 "draftText": {
                     "$ref": "#/$defs/ChatDraftText"

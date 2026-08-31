@@ -98,7 +98,8 @@ struct AudoraApp: App {
             draftIDGenerator: chatIdentityGenerator,
             memoryIDGenerator: chatIdentityGenerator,
             pendingUserTurnIDGenerator: chatIdentityGenerator,
-            responsePositionIDGenerator: chatIdentityGenerator
+            responsePositionIDGenerator: chatIdentityGenerator,
+            attachmentSource: PortableChatSessionAttachmentSource(workspace: workspace)
         )
         let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,

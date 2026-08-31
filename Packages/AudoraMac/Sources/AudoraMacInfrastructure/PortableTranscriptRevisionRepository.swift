@@ -43,6 +43,11 @@ struct PortableVerifiedReviewSession: Sendable {
     let canonicalWAV: Data
 }
 
+enum PortableChatAttachmentRead: Sendable {
+    case available(ChatAttachmentCandidate)
+    case unavailable(ChatAttachmentUnavailableReason)
+}
+
 /// The one persistence boundary that turns a validated Transcript Revision into
 /// selected portable Session state. Revision bytes are installed immutably before
 /// the Session manifest's logical compare-and-swap commit. All Audora Session
@@ -443,6 +448,328 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         }
     }
 
+    /// Lists only active Sessions and projects each currently selected immutable
+    /// Transcript Revision. The descriptor-confined Session reader remains the
+    /// authority for identity, hashes, duration, and revision integrity.
+    func loadChatAttachmentCatalogSynchronously() throws -> [ChatAttachmentCandidate] {
+        try activeSessionIDsSynchronously().compactMap { sessionID in
+            switch loadChatAttachmentSynchronously(
+                sessionID: sessionID,
+                transcriptRevisionID: nil
+            ) {
+            case let .available(candidate): candidate
+            // One unreadable independent entity must not hide healthy Sessions
+            // from a creation catalog. Every selected pin is re-resolved before
+            // the Chat is installed.
+            case .unavailable: nil
+            }
+        }
+    }
+
+    /// Reopens the exact historical revision pinned by a Chat, even if the
+    /// Session later selects a different revision.
+    func resolveChatAttachmentsSynchronously(
+        _ attachments: ChatAttachments
+    ) -> [ResolvedChatAttachment] {
+        attachments.values.map { attachment in
+            let read = loadChatAttachmentSynchronously(
+                sessionID: attachment.sessionID,
+                transcriptRevisionID: attachment.transcriptRevisionID
+            )
+            let resolution: ChatAttachmentResolution
+            switch read {
+            case let .available(candidate): resolution = .available(candidate)
+            case let .unavailable(reason): resolution = .unavailable(reason)
+            }
+            return try! ResolvedChatAttachment(
+                attachment: attachment,
+                resolution: resolution
+            )
+        }
+    }
+
+    private func activeSessionIDsSynchronously() throws -> [SessionID] {
+        let authority = try openRoot()
+        defer {
+            Darwin.close(authority.rootDescriptor)
+            Darwin.close(authority.parentDescriptor)
+        }
+        do {
+            let loaded = try PortableLibraryPersistence().load(
+                from: authority.rootDescriptor,
+                reconcileAbandonedImports: false
+            )
+            guard case let .readWrite(library) = loaded,
+                  library.manifest.libraryID == libraryID
+            else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+        } catch let failure as TranscriptRevisionRepositoryFailure {
+            throw failure
+        } catch {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        let sessions = try readConfined.openDirectory(
+            named: "sessions",
+            under: authority.rootDescriptor
+        )
+        defer { Darwin.close(sessions) }
+        let sessionsIdentity = try Self.identity(of: sessions)
+        let names = try readConfined.listEntryNames(
+            under: sessions,
+            maximumCount: 32_768
+        )
+        // A malformed independent entry is unavailable, not authority over the
+        // healthy Session aggregates beside it.
+        let identifiers = names.compactMap { try? SessionID($0) }
+        guard try configuredRootIdentity() == authority.identity,
+              try Self.identity(named: authority.name, under: authority.parentDescriptor)
+                == authority.identity,
+              try Self.identity(named: "sessions", under: authority.rootDescriptor)
+                == sessionsIdentity,
+              try Self.identity(of: sessions) == sessionsIdentity
+        else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        return identifiers.sorted { $0.rawValue < $1.rawValue }
+    }
+
+    private func loadChatAttachmentSynchronously(
+        sessionID: SessionID,
+        transcriptRevisionID expectedRevisionID: TranscriptRevisionID?
+    ) -> PortableChatAttachmentRead {
+        do {
+            return try withLockedSession(sessionID: sessionID, exclusive: false) {
+                authority in
+                let loaded = try loadSession(
+                    sessionID: sessionID,
+                    sessionDescriptor: authority.sessionDescriptor
+                )
+                let revisionID: TranscriptRevisionID
+                let expectedSHA256: String?
+                if let expectedRevisionID {
+                    guard loaded.manifest.transcriptRevisionIDs.contains(expectedRevisionID)
+                    else { return .unavailable(.missing) }
+                    revisionID = expectedRevisionID
+                    expectedSHA256 = loaded.manifest.selectedTranscriptRevision
+                        .flatMap { $0.revisionID == expectedRevisionID ? $0.revisionSHA256 : nil }
+                } else {
+                    guard let selected = loaded.manifest.selectedTranscriptRevision else {
+                        return .unavailable(.missing)
+                    }
+                    revisionID = selected.revisionID
+                    expectedSHA256 = selected.revisionSHA256
+                }
+                let transcripts = try readConfined.openDirectory(
+                    named: "transcripts",
+                    under: authority.sessionDescriptor
+                )
+                defer { Darwin.close(transcripts) }
+                let transcriptsIdentity = try Self.identity(of: transcripts)
+                switch try directoryPresence(
+                    named: revisionID.rawValue,
+                    under: transcripts
+                ) {
+                case .absent:
+                    try revalidate(authority, expectedSessionID: sessionID)
+                    try revalidateDirectoryEntry(
+                        named: "transcripts",
+                        under: authority.sessionDescriptor,
+                        descriptor: transcripts,
+                        expectedIdentity: transcriptsIdentity
+                    )
+                    guard try directoryPresence(
+                        named: revisionID.rawValue,
+                        under: transcripts
+                    ) == .absent else {
+                        throw TranscriptRevisionRepositoryFailure
+                            .sessionIntegrityMismatch
+                    }
+                    return .unavailable(.missing)
+                case .invalid:
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                case .directory:
+                    break
+                }
+                let installed = try loadInstalledRevision(
+                    revisionID: revisionID,
+                    expectedSHA256: expectedSHA256,
+                    sessionID: sessionID,
+                    audio: loaded.audio,
+                    under: transcripts
+                )
+                defer { Darwin.close(installed.authority.descriptor) }
+                try revalidate(authority, expectedSessionID: sessionID)
+                try revalidateDirectoryEntry(
+                    named: "transcripts",
+                    under: authority.sessionDescriptor,
+                    descriptor: transcripts,
+                    expectedIdentity: transcriptsIdentity
+                )
+                try revalidateInstalledRevision(
+                    installed.authority,
+                    revisionID: revisionID,
+                    expectedData: installed.data,
+                    expectedSHA256: installed.sha256,
+                    under: transcripts
+                )
+                return .available(
+                    try ChatAttachmentCandidate(
+                        sessionID: sessionID,
+                        transcriptRevisionID: revisionID,
+                        displayLabel: loaded.manifest.chatDisplayLabel,
+                        durationMilliseconds: loaded.audio.durationMilliseconds,
+                        approximateTranscriptTokens: Self.approximateTranscriptTokens(
+                            installed.revision
+                        ),
+                        delivery: Self.chatDelivery(
+                            for: installed.revision
+                        )
+                    )
+                )
+            }
+        } catch TranscriptRevisionRepositoryFailure.unsupportedSchema {
+            return .unavailable(.unsupportedSchema)
+        } catch TranscriptRevisionRepositoryFailure.sessionUnavailable {
+            return .unavailable(
+                unavailableSessionReasonSynchronously(sessionID: sessionID)
+            )
+        } catch {
+            return .unavailable(.corrupt)
+        }
+    }
+
+    private func unavailableSessionReasonSynchronously(
+        sessionID: SessionID
+    ) -> ChatAttachmentUnavailableReason {
+        do {
+            let authority = try openRoot()
+            defer {
+                Darwin.close(authority.rootDescriptor)
+                Darwin.close(authority.parentDescriptor)
+            }
+            do {
+                let loaded = try PortableLibraryPersistence().load(
+                    from: authority.rootDescriptor,
+                    reconcileAbandonedImports: false
+                )
+                guard case let .readWrite(library) = loaded,
+                      library.manifest.libraryID == libraryID
+                else {
+                    throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+                }
+            } catch let failure as TranscriptRevisionRepositoryFailure {
+                throw failure
+            } catch {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+
+            let sessions = try readConfined.openDirectory(
+                named: "sessions",
+                under: authority.rootDescriptor
+            )
+            defer { Darwin.close(sessions) }
+            let sessionsIdentity = try Self.identity(of: sessions)
+            let trash = try readConfined.openDirectory(
+                named: "trash",
+                under: authority.rootDescriptor
+            )
+            defer { Darwin.close(trash) }
+            let trashIdentity = try Self.identity(of: trash)
+            let trashedSessions = try readConfined.openDirectory(
+                named: "sessions",
+                under: trash
+            )
+            defer { Darwin.close(trashedSessions) }
+            let trashedSessionsIdentity = try Self.identity(of: trashedSessions)
+            let activePresence = try directoryPresence(
+                named: sessionID.rawValue,
+                under: sessions
+            )
+            let trashPresence = try directoryPresence(
+                named: sessionID.rawValue,
+                under: trashedSessions
+            )
+
+            guard try configuredRootIdentity() == authority.identity,
+                  try Self.identity(
+                      named: authority.name,
+                      under: authority.parentDescriptor
+                  ) == authority.identity,
+                  try Self.identity(of: authority.rootDescriptor) == authority.identity,
+                  try Self.identity(
+                      named: "sessions",
+                      under: authority.rootDescriptor
+                  ) == sessionsIdentity,
+                  try Self.identity(of: sessions) == sessionsIdentity,
+                  try Self.identity(
+                      named: "trash",
+                      under: authority.rootDescriptor
+                  ) == trashIdentity,
+                  try Self.identity(of: trash) == trashIdentity,
+                  try Self.identity(
+                      named: "sessions",
+                      under: trash
+                  ) == trashedSessionsIdentity,
+                  try Self.identity(of: trashedSessions) == trashedSessionsIdentity,
+                  try directoryPresence(
+                      named: sessionID.rawValue,
+                      under: sessions
+                  ) == activePresence,
+                  try directoryPresence(
+                      named: sessionID.rawValue,
+                      under: trashedSessions
+                  ) == trashPresence
+            else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+
+            switch (activePresence, trashPresence) {
+            case (.absent, .directory): return .inTrash
+            case (.absent, .absent): return .missing
+            case (.directory, _), (.invalid, _), (_, .invalid): return .corrupt
+            }
+        } catch {
+            return .corrupt
+        }
+    }
+
+    private func directoryPresence(
+        named name: String,
+        under parent: Int32
+    ) throws -> DirectoryPresence {
+        var metadata = stat()
+        let result = name.withCString {
+            Darwin.fstatat(parent, $0, &metadata, AT_SYMLINK_NOFOLLOW)
+        }
+        if result != 0 {
+            if errno == ENOENT { return .absent }
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
+        guard (metadata.st_mode & S_IFMT) == S_IFDIR else { return .invalid }
+        return .directory(EntryIdentity(metadata))
+    }
+
+    private static func approximateTranscriptTokens(_ revision: TranscriptRevision) -> Int {
+        var bytes = 0
+        for line in revision.lines {
+            let (sum, overflow) = bytes.addingReportingOverflow(line.text.utf8.count + 1)
+            if overflow { return Int.max }
+            bytes = sum
+        }
+        let eventBytes = revision.audioEvents.count.multipliedReportingOverflow(by: 48)
+        if eventBytes.overflow { return Int.max }
+        let total = bytes.addingReportingOverflow(eventBytes.partialValue)
+        if total.overflow { return Int.max }
+        return total.partialValue / 4 + (total.partialValue % 4 == 0 ? 0 : 1)
+    }
+
+    private static func chatDelivery(
+        for revision: TranscriptRevision
+    ) -> ChatAttachmentDelivery {
+        approximateTranscriptTokens(revision) <= 8_192 ? .inline : .onDemand
+    }
+
     private func reopenSelectedLocked(
         sessionID: SessionID,
         sessionDescriptor: Int32
@@ -621,6 +948,12 @@ private extension PortableTranscriptRevisionRepository {
         let manifestData: Data
         let manifest: PortableSessionManifest
         let audio: TrustedSessionAudio
+    }
+
+    enum DirectoryPresence: Equatable {
+        case absent
+        case directory(EntryIdentity)
+        case invalid
     }
 
     struct EntryIdentity: Equatable {
@@ -2007,6 +2340,15 @@ private enum PortableSessionManifest {
 
     var selectedRevisionID: TranscriptRevisionID? {
         selectedTranscriptRevision?.revisionID
+    }
+
+    var chatDisplayLabel: String {
+        switch self {
+        case let .recorded(dto, _, _):
+            "Session \(dto.createdAt) · \(dto.sessionId)"
+        case let .imported(dto, _, _):
+            "Session \(dto.createdAt) · \(dto.sessionId)"
+        }
     }
 
     func selecting(_ selected: SelectedTranscriptRevision) throws -> Self {

@@ -67,15 +67,17 @@ public struct NewDevelopmentChatSeed: Equatable, Sendable {
         draftID: ChatDraftID,
         memoryID: CoachMemoryID,
         instant: UTCInstant,
-        profileStatementGeneration: UInt64
+        profileStatementGeneration: UInt64,
+        attachments: ChatAttachments = .empty
     ) throws {
         self.library = library
-        aggregate = try ChatAggregate.emptyDevelopmentChat(
+        aggregate = try ChatAggregate.developmentChat(
             chatID: chatID,
             draftID: draftID,
             memoryID: memoryID,
             instant: instant,
-            profileStatementGeneration: profileStatementGeneration
+            profileStatementGeneration: profileStatementGeneration,
+            attachments: attachments
         )
     }
 }

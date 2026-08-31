@@ -30,7 +30,10 @@ namespace Audora.Contracts {
     createdAt: UTCInstant;
     updatedAt: UTCInstant;
     profileStatementGenerationAtCreation: NonnegativeWholeNumber;
+
+    @maxItems(128)
     attachments: ChatSessionAttachment[];
+
     draft: PersistedChatDraft;
     messageIds: ChatMessageId[];
     currentMemoryId: CoachMemoryId;
@@ -142,7 +145,10 @@ namespace Audora.Contracts {
     createdAt: UTCInstant;
     updatedAt: UTCInstant;
     creationKind: "newChat";
+
+    @maxItems(128)
     attachments: ChatSessionAttachment[];
+
     draftText: ChatDraftText;
     draftVersion: NonnegativeWholeNumber;
     messageIds: ChatMessageId[];

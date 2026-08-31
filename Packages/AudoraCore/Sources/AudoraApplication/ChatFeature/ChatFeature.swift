@@ -13,6 +13,11 @@ public struct ChatCommandContext: Equatable, Sendable {
 public enum ChatCommand: Equatable, Sendable {
     case start(ChatCommandContext)
     case createDevelopmentChat(ChatCommandContext)
+    case beginNewChat(ChatCommandContext)
+    case setNewChatAttachmentFilter(ChatCommandContext, ChatAttachmentFilterQuery)
+    case toggleNewChatAttachment(ChatCommandContext, ChatSessionAttachmentID)
+    case cancelNewChat(ChatCommandContext)
+    case confirmNewChat(ChatCommandContext)
     case rename(
         ChatCommandContext,
         ChatID,
