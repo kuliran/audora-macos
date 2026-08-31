@@ -343,6 +343,7 @@ public final class SystemAccessibilityAnnouncementPoster: AccessibilityAnnouncem
 @MainActor
 public final class RecordingPresentationModel: ObservableObject {
     @Published public private(set) var snapshot: RecordingPresentationState
+    public private(set) var featureState: RecordingFeatureState
 
     private let feature: any RecordingFeature
     private let announcements: any AccessibilityAnnouncementPosting
@@ -355,7 +356,8 @@ public final class RecordingPresentationModel: ObservableObject {
     ) {
         self.feature = feature
         self.announcements = announcements ?? SystemAccessibilityAnnouncementPoster()
-        snapshot = RecordingPresentationMapper.map(.unavailable(.noWritableLibrary))
+        featureState = .unavailable(.noWritableLibrary)
+        snapshot = RecordingPresentationMapper.map(featureState)
     }
 
     public func start() async {
@@ -363,6 +365,7 @@ public final class RecordingPresentationModel: ObservableObject {
         started = true
         for await state in feature.states {
             guard !Task.isCancelled else { return }
+            featureState = state
             let mapped = RecordingPresentationMapper.map(state)
             snapshot = mapped
             if let key = mapped.announcementKey,

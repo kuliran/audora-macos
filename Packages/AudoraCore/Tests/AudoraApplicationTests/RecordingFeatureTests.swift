@@ -1235,6 +1235,36 @@ final class RecordingFeatureTests: XCTestCase {
         }
     }
 
+    func testStateSubscriptionsRacingAndFollowingShutdownFinishWithTerminalSnapshot() async throws {
+        let feature = makeFeature(capture: FakeAudioCapturePort())
+        let racingStream = feature.states
+
+        await feature.shutdown()
+
+        let lateStream = feature.states
+        let racingProbe = RecordingStateStreamProbe()
+        let lateProbe = RecordingStateStreamProbe()
+        let racingConsumer = Task { await racingProbe.collect(racingStream) }
+        let lateConsumer = Task { await lateProbe.collect(lateStream) }
+        defer {
+            racingConsumer.cancel()
+            lateConsumer.cancel()
+        }
+
+        try await eventually {
+            let racingFinished = await racingProbe.isFinished
+            let lateFinished = await lateProbe.isFinished
+            return racingFinished && lateFinished
+        }
+        let expected = RecordingFeatureState.unavailable(.noWritableLibrary)
+        let racingSnapshot = await racingProbe.snapshot
+        let lateSnapshot = await lateProbe.snapshot
+        XCTAssertTrue(racingSnapshot.finished)
+        XCTAssertEqual(racingSnapshot.values.last, expected)
+        XCTAssertTrue(lateSnapshot.finished)
+        XCTAssertEqual(lateSnapshot.values, [expected])
+    }
+
     func testShutdownKeepsLeaseUntilActiveCaptureBecomesRecoverable() async throws {
         let scope = LibraryScope(libraryID: try libraryID())
         let capture = FakeAudioCapturePort()
@@ -1997,6 +2027,22 @@ private actor QueueRecordingIDs: RecordingIDGenerator {
 private actor ReceiptCollector {
     private(set) var values: [SessionSealedReceipt] = []
     func append(_ receipt: SessionSealedReceipt) { values.append(receipt) }
+}
+
+private actor RecordingStateStreamProbe {
+    private var values: [RecordingFeatureState] = []
+    private(set) var isFinished = false
+
+    func collect(_ stream: AsyncStream<RecordingFeatureState>) async {
+        for await value in stream {
+            values.append(value)
+        }
+        isFinished = true
+    }
+
+    var snapshot: (values: [RecordingFeatureState], finished: Bool) {
+        (values, isFinished)
+    }
 }
 
 private func eventually(

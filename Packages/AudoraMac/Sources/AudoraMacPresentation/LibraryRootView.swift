@@ -61,9 +61,9 @@ public struct LibraryRootView: View {
                     .foregroundStyle(.secondary)
                 libraryActions
                 audioImportActions
-                    .disabled(recordingBlocksOtherLibraryActivities)
+                    .disabled(!interactionAvailability.canUseAudioImportControls)
                 RecordingView(model: recordingModel)
-                    .disabled(audioImportModel.isImporting)
+                    .disabled(!interactionAvailability.canUseRecordingControls)
 
             case .some(.readOnly):
                 ContentUnavailableView(
@@ -122,10 +122,12 @@ public struct LibraryRootView: View {
     private var libraryActions: some View {
         HStack {
             Button("Reveal Library") { model.send(.reveal) }
+                .disabled(!interactionAvailability.canRevealLibrary)
             Button("Choose Another…") { model.send(.chooseExisting) }
+                .disabled(!interactionAvailability.canMutateLibrarySelection)
             Button("Close Library") { model.send(.close) }
+                .disabled(!interactionAvailability.canMutateLibrarySelection)
         }
-        .disabled(audioImportModel.isImporting || recordingBlocksOtherLibraryActivities)
     }
 
     @ViewBuilder
@@ -168,14 +170,12 @@ public struct LibraryRootView: View {
         return library.libraryID.rawValue
     }
 
-    private var recordingBlocksOtherLibraryActivities: Bool {
-        switch recordingModel.snapshot.status {
-        case .selectingLibrary, .starting, .active, .finishing, .sealing,
-             .recoveryRequired, .resolvingRecovery:
-            true
-        case .unavailable, .idle, .completed, .failed:
-            false
-        }
+    private var interactionAvailability: LibraryInteractionAvailability {
+        LibraryInteractionPolicy.availability(
+            library: model.snapshot,
+            audioImport: audioImportModel.snapshot,
+            recording: recordingModel.featureState
+        )
     }
 
     private func profileDescription(_ profile: ActiveLibrarySnapshot.ProfileSummary) -> String {

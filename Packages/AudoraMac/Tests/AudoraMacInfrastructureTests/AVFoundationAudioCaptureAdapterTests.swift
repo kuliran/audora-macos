@@ -422,6 +422,134 @@ final class AVFoundationAudioCaptureAdapterTests: XCTestCase {
         }
     }
 
+    func testBufferedChunkCapturedWhileMutedCannotBecomePersistableAfterUnmute() async throws {
+        try await withAdapterLibrary { root, request in
+            let source = FakeMicrophoneInputSource(deliveryPaused: true)
+            let adapter = AVFoundationAudioCaptureAdapter(
+                roots: FixedRecordingRoot(root: root),
+                sources: FixedInputFactory(source: source)
+            )
+            guard case let .started(feed) = await adapter.begin(request) else {
+                return XCTFail("capture did not start")
+            }
+            var observations = feed.observations.makeAsyncIterator()
+            _ = await observations.next()
+
+            let mute = await adapter.apply(.setMuted(true), to: request.recordingID)
+            XCTAssertEqual(mute, .accepted)
+            await source.emit(
+                .chunk(
+                    try MicrophoneInputChunk(
+                        sampleRateHz: 16_000,
+                        startSampleFrame: 0,
+                        channels: [[0.75, -0.75]]
+                    )
+                )
+            )
+            let unmute = await adapter.apply(.setMuted(false), to: request.recordingID)
+            XCTAssertEqual(unmute, .accepted)
+
+            await source.releaseBufferedEvents()
+            let stop = await adapter.apply(.stop, to: request.recordingID)
+            XCTAssertEqual(stop, .accepted)
+
+            var candidate: StagedRecordingSealCandidate?
+            while let observation = await observations.next() {
+                if case let .sealCandidate(value) = observation { candidate = value }
+            }
+            let sealed = try XCTUnwrap(candidate)
+            XCTAssertEqual(sealed.frameCount, 2)
+            XCTAssertEqual(
+                sealed.unavailableIntervals,
+                [
+                    StagedUnavailableInterval(
+                        startFrame: 0,
+                        endFrame: 2,
+                        reasons: [UnavailableReason.muted.rawValue]
+                    ),
+                ]
+            )
+        }
+    }
+
+    func testMonotonicDeadlinesAdvanceStalledOpenFeedAndSealAtFortyFiveMinutes() async throws {
+        try await withAdapterLibrary { root, request in
+            let source = FakeMicrophoneInputSource()
+            let clock = FakeCaptureMonotonicClock()
+            let adapter = AVFoundationAudioCaptureAdapter(
+                roots: FixedRecordingRoot(root: root),
+                sources: FixedInputFactory(source: source),
+                monotonicClock: clock
+            )
+            guard case let .started(feed) = await adapter.begin(request) else {
+                return XCTFail("capture did not start")
+            }
+            var observations = feed.observations.makeAsyncIterator()
+            let initial = await observations.next()
+            XCTAssertEqual(initial, .progress(frameCount: 0, level: .unavailable(.stale)))
+
+            await clock.advance(toElapsedSeconds: 40 * 60)
+            let warning = await observations.next()
+            XCTAssertEqual(
+                warning,
+                .progress(
+                    frameCount: CanonicalRecordingLimits.fiveMinuteWarningFrame,
+                    level: .unavailable(.captureGap)
+                )
+            )
+            await clock.advance(toElapsedSeconds: 44 * 60)
+            let countdown = await observations.next()
+            XCTAssertEqual(
+                countdown,
+                .progress(
+                    frameCount: CanonicalRecordingLimits.oneMinuteCountdownFrame,
+                    level: .unavailable(.captureGap)
+                )
+            )
+            await clock.advance(toElapsedSeconds: 45 * 60)
+            let automaticStop = await observations.next()
+            XCTAssertEqual(
+                automaticStop,
+                .progress(
+                    frameCount: CanonicalRecordingLimits.maximumFrames,
+                    level: .unavailable(.captureGap)
+                )
+            )
+            let finishing = await observations.next()
+            XCTAssertEqual(
+                finishing,
+                .finishing(
+                    reason: .durationLimit,
+                    frameCount: CanonicalRecordingLimits.maximumFrames
+                )
+            )
+            let stopCount = await source.stopCount
+            XCTAssertEqual(stopCount, 1)
+            let sealing = await observations.next()
+            XCTAssertEqual(
+                sealing,
+                .sealing(
+                    reason: .durationLimit,
+                    frameCount: CanonicalRecordingLimits.maximumFrames
+                )
+            )
+            guard case let .sealCandidate(candidate) = await observations.next() else {
+                return XCTFail("missing duration-limit seal candidate")
+            }
+            XCTAssertEqual(candidate.frameCount, CanonicalRecordingLimits.maximumFrames)
+            XCTAssertEqual(
+                candidate.unavailableIntervals,
+                [
+                    StagedUnavailableInterval(
+                        startFrame: 0,
+                        endFrame: CanonicalRecordingLimits.maximumFrames,
+                        reasons: [UnavailableReason.captureGap.rawValue]
+                    ),
+                ]
+            )
+        }
+    }
+
     func testUserStopDrainsBufferedFinalFramesBeforeFreezingSealWatermark() async throws {
         try await withAdapterLibrary { root, request in
             let source = FakeMicrophoneInputSource()
@@ -669,6 +797,9 @@ private actor FakeMicrophoneInputSource: MicrophoneInputSource {
     nonisolated let events: AsyncStream<MicrophoneInputEvent>
     private let continuation: AsyncStream<MicrophoneInputEvent>.Continuation
     private let configuredOutcome: ConfiguredOutcome
+    private var deliveryPaused: Bool
+    private var bufferedEvents: [MicrophoneInputEvent] = []
+    private var muteEpoch = MicrophoneMuteEpoch.initial
     private(set) var stopCount = 0
 
     enum ConfiguredOutcome {
@@ -677,11 +808,15 @@ private actor FakeMicrophoneInputSource: MicrophoneInputSource {
         case unavailable
     }
 
-    init(startOutcome: ConfiguredOutcome = .started) {
+    init(
+        startOutcome: ConfiguredOutcome = .started,
+        deliveryPaused: Bool = false
+    ) {
         var stored: AsyncStream<MicrophoneInputEvent>.Continuation!
         events = AsyncStream { stored = $0 }
         continuation = stored
         configuredOutcome = startOutcome
+        self.deliveryPaused = deliveryPaused
     }
 
     func start() -> MicrophoneInputStartOutcome {
@@ -697,7 +832,73 @@ private actor FakeMicrophoneInputSource: MicrophoneInputSource {
         continuation.finish()
     }
 
-    func emit(_ event: MicrophoneInputEvent) { continuation.yield(event) }
+    func setMuted(_ muted: Bool) -> Bool {
+        guard muteEpoch.isMuted != muted else { return true }
+        muteEpoch = MicrophoneMuteEpoch(sequence: muteEpoch.sequence + 1, isMuted: muted)
+        emit(.muteChanged(epoch: muteEpoch, effectiveInputFrame: 0))
+        return true
+    }
+
+    func emit(_ event: MicrophoneInputEvent) {
+        let tagged = tag(event)
+        if deliveryPaused {
+            bufferedEvents.append(tagged)
+        } else {
+            continuation.yield(tagged)
+        }
+    }
+
+    func releaseBufferedEvents() {
+        deliveryPaused = false
+        for event in bufferedEvents { continuation.yield(event) }
+        bufferedEvents.removeAll(keepingCapacity: false)
+    }
+
+    private func tag(_ event: MicrophoneInputEvent) -> MicrophoneInputEvent {
+        switch event {
+        case let .chunk(chunk):
+            guard chunk.muteEpoch == .initial,
+                  let tagged = try? MicrophoneInputChunk(
+                      sampleRateHz: chunk.sampleRateHz,
+                      startSampleFrame: chunk.startSampleFrame,
+                      channels: chunk.channels,
+                      muteEpoch: muteEpoch
+                  )
+            else { return event }
+            return .chunk(tagged)
+        case let .captureGap(rate, start, count, channels, epoch):
+            return .captureGap(
+                sampleRateHz: rate,
+                startSampleFrame: start,
+                frameCount: count,
+                channelCount: channels,
+                muteEpoch: epoch == .initial ? muteEpoch : epoch
+            )
+        case .muteChanged, .interrupted, .clockBecameInvalid:
+            return event
+        }
+    }
+}
+
+private actor FakeCaptureMonotonicClock: CaptureMonotonicClock {
+    private var nowNanoseconds: UInt64 = 0
+    private var sleepers: [(deadline: UInt64, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func now() -> UInt64 { nowNanoseconds }
+
+    func sleep(until deadline: UInt64) async {
+        guard deadline > nowNanoseconds else { return }
+        await withCheckedContinuation { continuation in
+            sleepers.append((deadline, continuation))
+        }
+    }
+
+    func advance(toElapsedSeconds seconds: UInt64) {
+        nowNanoseconds = seconds * 1_000_000_000
+        let ready = sleepers.filter { $0.deadline <= nowNanoseconds }
+        sleepers.removeAll { $0.deadline <= nowNanoseconds }
+        ready.forEach { $0.continuation.resume() }
+    }
 }
 
 private struct FixedInputFactory: MicrophoneInputSourceFactory {

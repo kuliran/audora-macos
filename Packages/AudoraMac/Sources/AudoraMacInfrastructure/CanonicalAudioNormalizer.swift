@@ -12,15 +12,9 @@ struct CanonicalNormalizationResult: Equatable, Sendable {
 }
 
 final class StreamingCanonicalAudioNormalizer {
-    static let converterInputFrameCount = 4_096
-
     private let description: InspectedAudio
     private let writer: CanonicalWAVWriter
-    private let converter: AVAudioConverter?
-    private let sourceFormat: AVAudioFormat?
-    private let destinationFormat: AVAudioFormat?
-    private var pendingMono: [Double] = []
-    private var pendingMonoOffset = 0
+    private let resampler: StreamingCanonicalSampleRateConverter
     private var finished = false
 
     init(
@@ -33,35 +27,9 @@ final class StreamingCanonicalAudioNormalizer {
             descriptor: destinationDescriptor,
             maximumFrameCount: maximumFrameCount
         )
-        if description.sampleRateHz == CanonicalAudioFormat.sampleRateHz {
-            converter = nil
-            sourceFormat = nil
-            destinationFormat = nil
-        } else {
-            guard let source = AVAudioFormat(
-                commonFormat: .pcmFormatFloat64,
-                sampleRate: Double(description.sampleRateHz),
-                channels: 1,
-                interleaved: false
-            ),
-                let destination = AVAudioFormat(
-                commonFormat: .pcmFormatFloat64,
-                    sampleRate: Double(CanonicalAudioFormat.sampleRateHz),
-                    channels: 1,
-                    interleaved: false
-                ),
-                let converter = AVAudioConverter(from: source, to: destination)
-            else {
-                throw AudioImportFailure.unsupportedMedia
-            }
-            converter.sampleRateConverterAlgorithm = AVSampleRateConverterAlgorithm_Normal
-            converter.sampleRateConverterQuality = Int(kAudioConverterQuality_Max)
-            converter.primeMethod = .normal
-            converter.dither = false
-            self.converter = converter
-            sourceFormat = source
-            destinationFormat = destination
-        }
+        resampler = try StreamingCanonicalSampleRateConverter(
+            sourceSampleRateHz: description.sampleRateHz
+        )
     }
 
     func consume(_ chunk: DecodedPCMChunk) throws {
@@ -78,141 +46,13 @@ final class StreamingCanonicalAudioNormalizer {
             frameCount: chunk.frameCount,
             channelCount: chunk.channelCount
         )
-        guard let converter, let sourceFormat, let destinationFormat else {
-            try writer.append(mono)
-            return
-        }
-
-        pendingMono.append(contentsOf: mono)
-        while pendingMono.count - pendingMonoOffset >= Self.converterInputFrameCount {
-            let end = pendingMonoOffset + Self.converterInputFrameCount
-            try convert(
-                Array(pendingMono[pendingMonoOffset..<end]),
-                with: converter,
-                sourceFormat: sourceFormat,
-                destinationFormat: destinationFormat
-            )
-            pendingMonoOffset = end
-        }
-        if pendingMonoOffset >= Self.converterInputFrameCount * 2 {
-            pendingMono.removeFirst(pendingMonoOffset)
-            pendingMonoOffset = 0
-        }
-    }
-
-    private func convert(
-        _ mono: [Double],
-        with converter: AVAudioConverter,
-        sourceFormat: AVAudioFormat,
-        destinationFormat: AVAudioFormat
-    ) throws {
-        guard mono.count <= Int(UInt32.max),
-              let input = AVAudioPCMBuffer(
-                  pcmFormat: sourceFormat,
-                  frameCapacity: AVAudioFrameCount(mono.count)
-              ),
-              let channel = Self.float64Channel(in: input)
-        else {
-            throw AudioImportFailure.decodeFailed
-        }
-        input.frameLength = AVAudioFrameCount(mono.count)
-        for (index, value) in mono.enumerated() {
-            channel[index] = value
-        }
-        let estimated = Int(
-            ceil(
-                Double(mono.count) *
-                    Double(CanonicalAudioFormat.sampleRateHz) /
-                    Double(description.sampleRateHz)
-            )
-        ) + 512
-        guard estimated > 0,
-              estimated <= Int(UInt32.max),
-              let output = AVAudioPCMBuffer(
-                  pcmFormat: destinationFormat,
-                  frameCapacity: AVAudioFrameCount(estimated)
-              )
-        else {
-            throw AudioImportFailure.decodeFailed
-        }
-
-        let inputBox = ConverterInputBox(input)
-        var iteration = 0
-        while iteration < 32 {
-            iteration += 1
-            output.frameLength = 0
-            var conversionError: NSError?
-            let status = converter.convert(to: output, error: &conversionError) {
-                _, inputStatus in
-                inputBox.supply(inputStatus)
-            }
-            try appendOutput(output)
-            switch status {
-            case .haveData:
-                guard output.frameLength > 0 else {
-                    throw AudioImportFailure.decodeFailed
-                }
-            case .inputRanDry:
-                return
-            case .endOfStream:
-                throw AudioImportFailure.decodeFailed
-            case .error:
-                throw AudioImportFailure.decodeFailed
-            @unknown default:
-                throw AudioImportFailure.decodeFailed
-            }
-        }
-        throw AudioImportFailure.decodeFailed
+        try writer.append(resampler.consume(mono))
     }
 
     func finish() throws -> CanonicalNormalizationResult {
         guard !finished else { throw AudioImportFailure.writeFailed }
         finished = true
-        if let converter, let sourceFormat, let destinationFormat {
-            if pendingMonoOffset < pendingMono.count {
-                try convert(
-                    Array(pendingMono[pendingMonoOffset...]),
-                    with: converter,
-                    sourceFormat: sourceFormat,
-                    destinationFormat: destinationFormat
-                )
-            }
-            pendingMono.removeAll(keepingCapacity: false)
-            pendingMonoOffset = 0
-            guard let output = AVAudioPCMBuffer(
-                pcmFormat: destinationFormat,
-                frameCapacity: 4_096
-            ) else {
-                throw AudioImportFailure.decodeFailed
-            }
-            var iteration = 0
-            while iteration < 64 {
-                iteration += 1
-                output.frameLength = 0
-                var conversionError: NSError?
-                let status = converter.convert(to: output, error: &conversionError) {
-                    _, inputStatus in
-                    inputStatus.pointee = .endOfStream
-                    return nil
-                }
-                try appendOutput(output)
-                switch status {
-                case .haveData:
-                    guard output.frameLength > 0 else {
-                        throw AudioImportFailure.decodeFailed
-                    }
-                case .endOfStream:
-                    return try writer.finish()
-                case .inputRanDry:
-                    continue
-                case .error:
-                    throw AudioImportFailure.decodeFailed
-                @unknown default:
-                    throw AudioImportFailure.decodeFailed
-                }
-            }
-            throw AudioImportFailure.decodeFailed
-        }
+        try writer.append(resampler.finish())
         return try writer.finish()
     }
 
@@ -248,19 +88,177 @@ final class StreamingCanonicalAudioNormalizer {
         return mono
     }
 
-    private func appendOutput(_ output: AVAudioPCMBuffer) throws {
-        let count = Int(output.frameLength)
-        guard count > 0 else { return }
-        guard let channel = Self.float64Channel(in: output) else {
-            throw AudioImportFailure.decodeFailed
+}
+
+/// One acquisition-independent streaming resampler. Import and microphone
+/// capture share this exact converter configuration and batching policy.
+final class StreamingCanonicalSampleRateConverter {
+    static let inputFrameCount = 4_096
+
+    private let sourceSampleRateHz: UInt32
+    private let converter: AVAudioConverter?
+    private let sourceFormat: AVAudioFormat?
+    private let destinationFormat: AVAudioFormat?
+    private var pending: [Double] = []
+    private var pendingOffset = 0
+    private var finished = false
+
+    init(sourceSampleRateHz: UInt32) throws {
+        guard sourceSampleRateHz > 0 else { throw AudioImportFailure.unsupportedMedia }
+        self.sourceSampleRateHz = sourceSampleRateHz
+        guard sourceSampleRateHz != CanonicalAudioFormat.sampleRateHz else {
+            converter = nil
+            sourceFormat = nil
+            destinationFormat = nil
+            return
         }
-        let samples = Array(UnsafeBufferPointer(start: channel, count: count))
-        try writer.append(samples)
+        guard let source = AVAudioFormat(
+            commonFormat: .pcmFormatFloat64,
+            sampleRate: Double(sourceSampleRateHz),
+            channels: 1,
+            interleaved: false
+        ), let destination = AVAudioFormat(
+            commonFormat: .pcmFormatFloat64,
+            sampleRate: Double(CanonicalAudioFormat.sampleRateHz),
+            channels: 1,
+            interleaved: false
+        ), let converter = AVAudioConverter(from: source, to: destination) else {
+            throw AudioImportFailure.unsupportedMedia
+        }
+        converter.sampleRateConverterAlgorithm = AVSampleRateConverterAlgorithm_Normal
+        converter.sampleRateConverterQuality = Int(kAudioConverterQuality_Max)
+        converter.primeMethod = .normal
+        converter.dither = false
+        self.converter = converter
+        sourceFormat = source
+        destinationFormat = destination
     }
 
-    private static func float64Channel(
-        in buffer: AVAudioPCMBuffer
-    ) -> UnsafeMutablePointer<Double>? {
+    func consume(_ samples: [Double]) throws -> [Double] {
+        guard !finished, !samples.isEmpty else { throw AudioImportFailure.decodeFailed }
+        guard samples.allSatisfy(\.isFinite) else { throw AudioImportFailure.nonfiniteSamples }
+        guard let converter, let sourceFormat, let destinationFormat else { return samples }
+
+        pending.append(contentsOf: samples)
+        var output: [Double] = []
+        while pending.count - pendingOffset >= Self.inputFrameCount {
+            let end = pendingOffset + Self.inputFrameCount
+            output.append(contentsOf: try convert(
+                Array(pending[pendingOffset..<end]),
+                with: converter,
+                sourceFormat: sourceFormat,
+                destinationFormat: destinationFormat
+            ))
+            pendingOffset = end
+        }
+        if pendingOffset >= Self.inputFrameCount * 2 {
+            pending.removeFirst(pendingOffset)
+            pendingOffset = 0
+        }
+        return output
+    }
+
+    func finish() throws -> [Double] {
+        guard !finished else { throw AudioImportFailure.writeFailed }
+        finished = true
+        guard let converter, let sourceFormat, let destinationFormat else { return [] }
+
+        var output: [Double] = []
+        if pendingOffset < pending.count {
+            output.append(contentsOf: try convert(
+                Array(pending[pendingOffset...]),
+                with: converter,
+                sourceFormat: sourceFormat,
+                destinationFormat: destinationFormat
+            ))
+        }
+        pending.removeAll(keepingCapacity: false)
+        pendingOffset = 0
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: destinationFormat,
+            frameCapacity: 4_096
+        ) else { throw AudioImportFailure.decodeFailed }
+        for _ in 0..<64 {
+            buffer.frameLength = 0
+            var conversionError: NSError?
+            let status = converter.convert(to: buffer, error: &conversionError) { _, inputStatus in
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            output.append(contentsOf: try Self.samples(in: buffer))
+            switch status {
+            case .haveData:
+                guard buffer.frameLength > 0 else { throw AudioImportFailure.decodeFailed }
+            case .endOfStream:
+                return output
+            case .inputRanDry:
+                continue
+            case .error:
+                throw AudioImportFailure.decodeFailed
+            @unknown default:
+                throw AudioImportFailure.decodeFailed
+            }
+        }
+        throw AudioImportFailure.decodeFailed
+    }
+
+    private func convert(
+        _ mono: [Double],
+        with converter: AVAudioConverter,
+        sourceFormat: AVAudioFormat,
+        destinationFormat: AVAudioFormat
+    ) throws -> [Double] {
+        guard mono.count <= Int(UInt32.max),
+              let input = AVAudioPCMBuffer(
+                  pcmFormat: sourceFormat,
+                  frameCapacity: AVAudioFrameCount(mono.count)
+              ), let channel = Self.float64Channel(in: input)
+        else { throw AudioImportFailure.decodeFailed }
+        input.frameLength = AVAudioFrameCount(mono.count)
+        for (index, value) in mono.enumerated() { channel[index] = value }
+        let capacity = Int(ceil(
+            Double(mono.count) * Double(CanonicalAudioFormat.sampleRateHz) /
+                Double(sourceSampleRateHz)
+        )) + 512
+        guard capacity > 0, capacity <= Int(UInt32.max),
+              let output = AVAudioPCMBuffer(
+                  pcmFormat: destinationFormat,
+                  frameCapacity: AVAudioFrameCount(capacity)
+              )
+        else { throw AudioImportFailure.decodeFailed }
+        let inputBox = ConverterInputBox(input)
+        var samples: [Double] = []
+        for _ in 0..<32 {
+            output.frameLength = 0
+            var conversionError: NSError?
+            let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+                inputBox.supply(inputStatus)
+            }
+            samples.append(contentsOf: try Self.samples(in: output))
+            switch status {
+            case .haveData:
+                guard output.frameLength > 0 else { throw AudioImportFailure.decodeFailed }
+            case .inputRanDry:
+                return samples
+            case .endOfStream, .error:
+                throw AudioImportFailure.decodeFailed
+            @unknown default:
+                throw AudioImportFailure.decodeFailed
+            }
+        }
+        throw AudioImportFailure.decodeFailed
+    }
+
+    private static func samples(in buffer: AVAudioPCMBuffer) throws -> [Double] {
+        let count = Int(buffer.frameLength)
+        guard count > 0 else { return [] }
+        guard let channel = float64Channel(in: buffer) else {
+            throw AudioImportFailure.decodeFailed
+        }
+        return Array(UnsafeBufferPointer(start: channel, count: count))
+    }
+
+    private static func float64Channel(in buffer: AVAudioPCMBuffer) -> UnsafeMutablePointer<Double>? {
         guard buffer.format.commonFormat == .pcmFormatFloat64,
               !buffer.format.isInterleaved,
               buffer.format.channelCount == 1

@@ -1041,6 +1041,11 @@ public actor DefaultRecordingFeature: RecordingFeature {
     private func addStateSubscriber(
         _ continuation: AsyncStream<RecordingFeatureState>.Continuation
     ) {
+        guard !isShutdown else {
+            continuation.yield(state)
+            continuation.finish()
+            return
+        }
         let id = nextSubscriberID
         nextSubscriberID &+= 1
         continuation.onTermination = { @Sendable [weak self] _ in

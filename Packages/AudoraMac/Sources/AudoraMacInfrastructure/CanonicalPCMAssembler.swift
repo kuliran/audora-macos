@@ -41,6 +41,9 @@ struct CanonicalPCMAssembler {
     private var inputSampleRate: UInt32?
     private var inputChannelCount: Int?
     private var greatestInputEnd: UInt64 = 0
+    private var resampler: StreamingCanonicalSampleRateConverter?
+    private var pending: [PendingSpan] = []
+    private var finished = false
 
     mutating func consume(
         _ chunk: MicrophoneInputChunk,
@@ -57,102 +60,39 @@ struct CanonicalPCMAssembler {
         {
             throw CanonicalPCMAssemblerError.unsupportedInputFormat
         }
-        inputSampleRate = chunk.sampleRateHz
-        inputChannelCount = chunk.channels.count
-
         let (inputEnd, overflow) = chunk.startSampleFrame.addingReportingOverflow(chunk.frameCount)
         guard !overflow else { throw CanonicalPCMAssemblerError.inputClockOverflow }
         if inputEnd <= greatestInputEnd {
             return []
         }
-
-        let earliestCanonical = try canonicalCeiling(
-            inputFrame: max(chunk.startSampleFrame, greatestInputEnd),
-            inputRate: chunk.sampleRateHz
-        )
-        let canonicalEnd = try canonicalCeiling(
-            inputFrame: inputEnd,
-            inputRate: chunk.sampleRateHz
-        )
-        greatestInputEnd = inputEnd
-
+        try configure(sampleRateHz: chunk.sampleRateHz, channelCount: chunk.channels.count)
+        let effectiveStart = max(chunk.startSampleFrame, greatestInputEnd)
         var spans: [CanonicalPCMSpan] = []
-        if earliestCanonical > frameCount {
-            let gapCount = earliestCanonical - frameCount
+        if effectiveStart > greatestInputEnd {
             var reasons: Set<UnavailableReason> = [.captureGap]
             if muted { reasons.insert(.muted) }
-            spans.append(
-                CanonicalPCMSpan(
-                    frameCount: gapCount,
-                    pcmLittleEndian: nil,
-                    reasons: reasons,
-                    level: nil
-                )
-            )
-            frameCount = earliestCanonical
+            spans.append(try unavailableSpan(
+                sourceStart: greatestInputEnd, sourceEnd: effectiveStart, reasons: reasons
+            ))
+            greatestInputEnd = effectiveStart
         }
-
-        let outputStart = max(frameCount, earliestCanonical)
-        guard outputStart < canonicalEnd else { return spans }
-        let outputCount = canonicalEnd - outputStart
-        guard outputCount <= UInt64(Int.max) else {
-            throw CanonicalPCMAssemblerError.inputClockOverflow
-        }
-
+        let offset = Int(effectiveStart - chunk.startSampleFrame)
+        let source: [Double]
         if muted {
-            spans.append(
-                CanonicalPCMSpan(
-                    frameCount: outputCount,
-                    pcmLittleEndian: nil,
-                    reasons: [.muted],
-                    level: nil
-                )
-            )
+            source = Array(repeating: 0, count: Int(inputEnd - effectiveStart))
+        } else if chunk.channels.count == 1 {
+            source = chunk.channels[0][offset...].map(Double.init)
         } else {
-            var pcm = Data()
-            pcm.reserveCapacity(Int(outputCount) * MemoryLayout<Int16>.size)
-            var energy = 0.0
-            for canonicalFrame in outputStart..<canonicalEnd {
-                let sourceFrame = try sourceFloor(
-                    canonicalFrame: canonicalFrame,
-                    inputRate: chunk.sampleRateHz
-                )
-                guard sourceFrame >= chunk.startSampleFrame,
-                      sourceFrame < inputEnd
-                else {
-                    throw CanonicalPCMAssemblerError.inputClockOverflow
-                }
-                let index = Int(sourceFrame - chunk.startSampleFrame)
-                let sample: Float
-                if chunk.channels.count == 1 {
-                    sample = chunk.channels[0][index]
-                } else {
-                    sample = (chunk.channels[0][index] + chunk.channels[1][index]) / 2
-                }
-                let bounded = max(-1, min(1, sample))
-                energy += Double(bounded * bounded)
-                var integer: Int16
-                if bounded <= -1 {
-                    integer = .min
-                } else if bounded >= 1 {
-                    integer = .max
-                } else {
-                    integer = Int16((bounded * Float(Int16.max)).rounded())
-                }
-                integer = integer.littleEndian
-                withUnsafeBytes(of: integer) { pcm.append(contentsOf: $0) }
+            source = zip(chunk.channels[0][offset...], chunk.channels[1][offset...]).map {
+                (Double($0.0) + Double($0.1)) / 2
             }
-            let rms = min(1, max(0, (energy / Double(outputCount)).squareRoot()))
-            spans.append(
-                CanonicalPCMSpan(
-                    frameCount: outputCount,
-                    pcmLittleEndian: pcm,
-                    reasons: [],
-                    level: rms
-                )
-            )
         }
-        frameCount = canonicalEnd
+        spans += try append(
+            sourceFrames: source,
+            sourceStart: effectiveStart,
+            sourceEnd: inputEnd,
+            reasons: muted ? [.muted] : []
+        )
         return spans
     }
 
@@ -175,52 +115,141 @@ struct CanonicalPCMAssembler {
         {
             throw CanonicalPCMAssemblerError.unsupportedInputFormat
         }
-        inputSampleRate = sampleRateHz
-        inputChannelCount = Int(channelCount)
-
         let (inputEnd, overflow) = startSampleFrame.addingReportingOverflow(inputFrameCount)
         guard !overflow else { throw CanonicalPCMAssemblerError.inputClockOverflow }
         if inputEnd <= greatestInputEnd { return [] }
-
+        try configure(sampleRateHz: sampleRateHz, channelCount: Int(channelCount))
         let effectiveStart = max(startSampleFrame, greatestInputEnd)
-        let canonicalStart = try canonicalCeiling(
-            inputFrame: effectiveStart,
-            inputRate: sampleRateHz
-        )
-        let canonicalEnd = try canonicalCeiling(
-            inputFrame: inputEnd,
-            inputRate: sampleRateHz
-        )
-        greatestInputEnd = inputEnd
-
         var spans: [CanonicalPCMSpan] = []
-        if canonicalStart > frameCount {
+        if effectiveStart > greatestInputEnd {
             var reasons: Set<UnavailableReason> = [.captureGap]
             if muted { reasons.insert(.muted) }
-            spans.append(
-                CanonicalPCMSpan(
-                    frameCount: canonicalStart - frameCount,
-                    pcmLittleEndian: nil,
-                    reasons: reasons,
-                    level: nil
-                )
-            )
-            frameCount = canonicalStart
+            spans.append(try unavailableSpan(
+                sourceStart: greatestInputEnd, sourceEnd: effectiveStart, reasons: reasons
+            ))
+            greatestInputEnd = effectiveStart
         }
-        if canonicalEnd > frameCount {
-            var reasons: Set<UnavailableReason> = [.captureGap]
-            if muted { reasons.insert(.muted) }
-            spans.append(
-                CanonicalPCMSpan(
-                    frameCount: canonicalEnd - frameCount,
-                    pcmLittleEndian: nil,
-                    reasons: reasons,
-                    level: nil
-                )
-            )
-            frameCount = canonicalEnd
+        var reasons: Set<UnavailableReason> = [.captureGap]
+        if muted { reasons.insert(.muted) }
+        spans.append(try unavailableSpan(
+            sourceStart: effectiveStart, sourceEnd: inputEnd, reasons: reasons
+        ))
+        greatestInputEnd = inputEnd
+        return spans
+    }
+
+    mutating func finish() throws -> [CanonicalPCMSpan] {
+        guard !finished, let resampler else { return [] }
+        finished = true
+        return try drain(resampler.finish())
+    }
+
+    private mutating func configure(sampleRateHz: UInt32, channelCount: Int) throws {
+        if let inputSampleRate,
+           inputSampleRate != sampleRateHz || inputChannelCount != channelCount {
+            throw CanonicalPCMAssemblerError.unsupportedInputFormat
+        }
+        if inputSampleRate == nil {
+            resampler = try StreamingCanonicalSampleRateConverter(sourceSampleRateHz: sampleRateHz)
+        }
+        inputSampleRate = sampleRateHz
+        inputChannelCount = channelCount
+    }
+
+    private mutating func append(
+        sourceFrames: [Double],
+        sourceStart: UInt64,
+        sourceEnd: UInt64,
+        reasons: Set<UnavailableReason>
+    ) throws -> [CanonicalPCMSpan] {
+        guard let inputSampleRate, let resampler else {
+            throw CanonicalPCMAssemblerError.unsupportedInputFormat
+        }
+        let start = try canonicalCeiling(inputFrame: sourceStart, inputRate: inputSampleRate)
+        let end = try canonicalCeiling(inputFrame: sourceEnd, inputRate: inputSampleRate)
+        if end > start { pending.append(PendingSpan(frameCount: end - start, reasons: reasons)) }
+        greatestInputEnd = sourceEnd
+        return try drain(resampler.consume(sourceFrames))
+    }
+
+    private mutating func unavailableSpan(
+        sourceStart: UInt64,
+        sourceEnd: UInt64,
+        reasons: Set<UnavailableReason>
+    ) throws -> CanonicalPCMSpan {
+        guard let inputSampleRate else { throw CanonicalPCMAssemblerError.unsupportedInputFormat }
+        let start = try canonicalCeiling(inputFrame: sourceStart, inputRate: inputSampleRate)
+        let end = try canonicalCeiling(inputFrame: sourceEnd, inputRate: inputSampleRate)
+        guard end > start else { throw CanonicalPCMAssemblerError.inputClockOverflow }
+        let span = CanonicalPCMSpan(
+            frameCount: end - start, pcmLittleEndian: nil, reasons: reasons, level: nil
+        )
+        frameCount += span.frameCount
+        return span
+    }
+
+    private mutating func drain(_ samples: [Double]) throws -> [CanonicalPCMSpan] {
+        var cursor = 0
+        var spans: [CanonicalPCMSpan] = []
+        while cursor < samples.count {
+            guard !pending.isEmpty else { throw CanonicalPCMAssemblerError.inputClockOverflow }
+            let count = min(Int(pending[0].frameCount), samples.count - cursor)
+            let section = Array(samples[cursor..<(cursor + count)])
+            let entry = pending[0]
+            if entry.reasons.isEmpty {
+                var pcm = Data()
+                pcm.reserveCapacity(count * MemoryLayout<Int16>.size)
+                var energy = 0.0
+                for sample in section {
+                    let bounded = max(-1, min(1, sample))
+                    energy += bounded * bounded
+                    var integer = try CanonicalWAVWriter.quantize(sample).littleEndian
+                    withUnsafeBytes(of: &integer) { pcm.append(contentsOf: $0) }
+                }
+                spans.append(CanonicalPCMSpan(
+                    frameCount: UInt64(count), pcmLittleEndian: pcm, reasons: [],
+                    level: (energy / Double(count)).squareRoot()
+                ))
+            } else {
+                spans.append(CanonicalPCMSpan(
+                    frameCount: UInt64(count), pcmLittleEndian: nil, reasons: entry.reasons, level: nil
+                ))
+            }
+            pending[0].frameCount -= UInt64(count)
+            if pending[0].frameCount == 0 { pending.removeFirst() }
+            cursor += count
+            frameCount += UInt64(count)
         }
         return spans
+    }
+
+    /// Materializes elapsed monotonic time for a source that remains open but
+    /// produces no callbacks. The existing input format is retained when one
+    /// is known; otherwise canonical mono timing is the conservative baseline.
+    mutating func consumeTimedGap(
+        throughCanonicalFrame target: UInt64,
+        muted: Bool = false
+    ) throws -> [CanonicalPCMSpan] {
+        guard target > frameCount else { return [] }
+        let rate = inputSampleRate ?? UInt32(CanonicalRecordingLimits.sampleRate)
+        let channels = UInt8(inputChannelCount ?? 1)
+        let (scaled, overflow) = target.multipliedReportingOverflow(by: UInt64(rate))
+        guard !overflow else { throw CanonicalPCMAssemblerError.inputClockOverflow }
+        let (rounded, roundingOverflow) = scaled.addingReportingOverflow(
+            CanonicalRecordingLimits.sampleRate - 1
+        )
+        guard !roundingOverflow else {
+            throw CanonicalPCMAssemblerError.inputClockOverflow
+        }
+        let inputEnd = rounded / CanonicalRecordingLimits.sampleRate
+        guard inputEnd > greatestInputEnd else { return [] }
+        return try consumeGap(
+            sampleRateHz: rate,
+            startSampleFrame: greatestInputEnd,
+            frameCount: inputEnd - greatestInputEnd,
+            channelCount: channels,
+            muted: muted
+        )
     }
 
     private func canonicalCeiling(
@@ -239,14 +268,9 @@ struct CanonicalPCMAssembler {
         return rounded / denominator
     }
 
-    private func sourceFloor(
-        canonicalFrame: UInt64,
-        inputRate: UInt32
-    ) throws -> UInt64 {
-        let (scaled, overflow) = canonicalFrame.multipliedReportingOverflow(
-            by: UInt64(inputRate)
-        )
-        guard !overflow else { throw CanonicalPCMAssemblerError.inputClockOverflow }
-        return scaled / CanonicalRecordingLimits.sampleRate
-    }
+}
+
+private struct PendingSpan {
+    var frameCount: UInt64
+    let reasons: Set<UnavailableReason>
 }

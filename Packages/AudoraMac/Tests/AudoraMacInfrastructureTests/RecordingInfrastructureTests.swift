@@ -2,6 +2,7 @@ import AudoraApplication
 import AudoraDomain
 @testable import AudoraMacInfrastructure
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
 
@@ -84,11 +85,73 @@ final class RecordingInfrastructureTests: XCTestCase {
         XCTAssertEqual(partitioned.frameCount, whole.frameCount)
     }
 
+    func testMicrophoneAndImportShareCanonicalNativeRateGoldenPCM() throws {
+        let halfLSB = Float(1.0 / 65_536.0)
+        let left: [Float] = [0, 0, -1, 1, 0.5, -0.5]
+        let right: [Float] = [halfLSB * 2, -halfLSB * 2, -1, 1, -0.5, 0.5]
+        let interleaved = zip(left, right).flatMap { [$0, $1] }
+        let imported = try canonicalImportPCM(
+            sampleRateHz: 16_000,
+            channelCount: 2,
+            interleavedChunks: [interleaved]
+        )
+
+        var microphone = CanonicalPCMAssembler()
+        let microphonePCM = try microphone.consume(
+            MicrophoneInputChunk(
+                sampleRateHz: 16_000,
+                startSampleFrame: 0,
+                channels: [left, right]
+            ),
+            muted: false
+        ).reduce(into: Data()) { bytes, span in
+            bytes.append(try XCTUnwrap(span.pcmLittleEndian))
+        }
+
+        XCTAssertEqual(microphonePCM, imported)
+        XCTAssertEqual(
+            Array(imported),
+            [0x01, 0x00, 0xFF, 0xFF, 0x00, 0x80, 0xFF, 0x7F, 0x00, 0x00, 0x00, 0x00]
+        )
+    }
+
+    func testMicrophoneAndImportShareResampledGoldenAcrossChunkPartitions() throws {
+        let sampleRate = UInt32(48_000)
+        let samples = (0..<Int(sampleRate / 100)).map { index in
+            Float(sin(Double(index) * 0.071) * 0.4)
+        }
+        let interleaved = samples.flatMap { [$0, $0] }
+        let imported = try canonicalImportPCM(
+            sampleRateHz: sampleRate,
+            channelCount: 2,
+            interleavedChunks: [interleaved]
+        )
+        let whole = try canonicalMicrophonePCM(
+            sampleRateHz: sampleRate,
+            channels: [samples, samples],
+            partitions: [0..<samples.count]
+        )
+        let partitioned = try canonicalMicrophonePCM(
+            sampleRateHz: sampleRate,
+            channels: [samples, samples],
+            partitions: [0..<37, 37..<173, 173..<311, 311..<samples.count]
+        )
+
+        XCTAssertEqual(whole, imported)
+        XCTAssertEqual(partitioned, imported)
+        var canonicalWAV = CanonicalWAVWriter.header(dataByteCount: UInt32(imported.count))
+        canonicalWAV.append(imported)
+        XCTAssertEqual(
+            SHA256.hash(data: canonicalWAV).map { String(format: "%02x", $0) }.joined(),
+            "b0fb6b2abba998d79b09f14401a799059356d8f30798ba6af54f59c544fc9fd0"
+        )
+    }
+
     func testStereoResamplingHasPartitionInvariantGoldenFingerprint() throws {
         let left: [Float] = (0..<96).map { Float(($0 % 11) - 5) / 5 }
         let right: [Float] = (0..<96).map { Float(($0 % 7) - 3) / 3 }
         var whole = CanonicalPCMAssembler()
-        let wholeBytes = try whole.consume(
+        var wholeBytes = try whole.consume(
             MicrophoneInputChunk(
                 sampleRateHz: 48_000,
                 startSampleFrame: 0,
@@ -97,6 +160,9 @@ final class RecordingInfrastructureTests: XCTestCase {
             muted: false
         ).reduce(into: Data()) { bytes, span in
             bytes.append(try XCTUnwrap(span.pcmLittleEndian))
+        }
+        for span in try whole.finish() {
+            wholeBytes.append(try XCTUnwrap(span.pcmLittleEndian))
         }
 
         var partitioned = CanonicalPCMAssembler()
@@ -114,19 +180,22 @@ final class RecordingInfrastructureTests: XCTestCase {
                 partitionedBytes.append(try XCTUnwrap(span.pcmLittleEndian))
             }
         }
+        for span in try partitioned.finish() {
+            partitionedBytes.append(try XCTUnwrap(span.pcmLittleEndian))
+        }
         XCTAssertEqual(partitionedBytes, wholeBytes)
         let digest = Data(SHA256.hash(data: wholeBytes)).map {
             String(format: "%02x", $0)
         }.joined()
         XCTAssertEqual(
             digest,
-            "f7d2c8ec69aad4a3b4ad8665ba13df4fba002dc7edd0b43901e368415190551c"
+            "c01ff6cd2f5aea8aabf1d33d41179c74d7d483b712d33cb4693fd5fae0f78898"
         )
     }
 
     func testStereoResamplingUsesAbsoluteFramesAndRejectsMidstreamFormatChange() throws {
         var assembler = CanonicalPCMAssembler()
-        let spans = try assembler.consume(
+        var spans = try assembler.consume(
             MicrophoneInputChunk(
                 sampleRateHz: 48_000,
                 startSampleFrame: 0,
@@ -137,6 +206,7 @@ final class RecordingInfrastructureTests: XCTestCase {
             ),
             muted: false
         )
+        spans += try assembler.finish()
         XCTAssertEqual(spans.first?.frameCount, 2)
         XCTAssertEqual(spans.first?.pcmLittleEndian?.count, 4)
         XCTAssertThrowsError(
@@ -806,6 +876,26 @@ final class RecordingInfrastructureTests: XCTestCase {
         }
     }
 
+    func testRecoveryRecordStreamIsOpenedReadOnly() throws {
+        try withRecordingLibrary { root, request in
+            let persistence = RecordingPersistence()
+            let capture = try persistence.prepare(request, under: root)
+            try persistence.append(observedSpan(frames: 4), to: capture)
+            try persistence.markRecoverable(capture, availability: .sealOrDiscard)
+            capture.closeCaptureStream()
+
+            let recovery = try persistence.openRecovery(
+                recordingID: request.recordingID,
+                in: request.libraryScope,
+                under: root
+            )
+
+            let flags = fcntl(recovery.streamDescriptor, F_GETFL)
+            XCTAssertGreaterThanOrEqual(flags, 0)
+            XCTAssertEqual(flags & O_ACCMODE, O_RDONLY)
+        }
+    }
+
     func testCommittedCleanupExposesReceiptBeforeExactCleanupCompletes() throws {
         try withRecordingLibrary { root, request in
             let staging = root.appendingPathComponent(
@@ -988,6 +1078,88 @@ final class RecordingInfrastructureTests: XCTestCase {
             expected: handle.request
         )
         return try persistence.install(publication, using: handle)
+    }
+
+    private func authoritativeSeal(
+        _ persistence: RecordingPersistence,
+        _ handle: RecordingRecoveryHandle,
+        reason: CaptureTerminalReason
+    ) throws -> SessionSealedReceipt {
+        let candidate = try persistence.stageSeal(handle, reason: reason)
+        let publication = try RecordingSealCandidateValidator.validate(
+            candidate,
+            expected: handle.request
+        )
+        return try persistence.install(publication, using: handle)
+    }
+
+    private func canonicalImportPCM(
+        sampleRateHz: UInt32,
+        channelCount: UInt32,
+        interleavedChunks: [[Float]]
+    ) throws -> Data {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "audora-cross-acquisition-\(UUID().uuidString).wav"
+        )
+        let descriptor = Darwin.open(
+            url.path,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+            0o600
+        )
+        guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        defer {
+            _ = Darwin.close(descriptor)
+            try? FileManager.default.removeItem(at: url)
+        }
+        let frameCount = interleavedChunks.reduce(0) {
+            $0 + $1.count / Int(channelCount)
+        }
+        let normalizer = try StreamingCanonicalAudioNormalizer(
+            description: InspectedAudio(
+                codec: .linearPCM,
+                sampleRateHz: sampleRateHz,
+                channelCount: channelCount,
+                metadataDurationSeconds: Double(frameCount) / Double(sampleRateHz)
+            ),
+            destinationDescriptor: descriptor,
+            maximumFrameCount: UInt64(frameCount * 4)
+        )
+        for chunk in interleavedChunks {
+            try normalizer.consume(
+                DecodedPCMChunk(
+                    interleavedSamples: chunk,
+                    frameCount: chunk.count / Int(channelCount),
+                    channelCount: Int(channelCount),
+                    sampleRateHz: sampleRateHz
+                )
+            )
+        }
+        _ = try normalizer.finish()
+        return Data(try Data(contentsOf: url).dropFirst(44))
+    }
+
+    private func canonicalMicrophonePCM(
+        sampleRateHz: UInt32,
+        channels: [[Float]],
+        partitions: [Range<Int>]
+    ) throws -> Data {
+        var assembler = CanonicalPCMAssembler()
+        var pcm = Data()
+        for range in partitions {
+            let spans = try assembler.consume(
+                MicrophoneInputChunk(
+                    sampleRateHz: sampleRateHz,
+                    startSampleFrame: UInt64(range.lowerBound),
+                    channels: channels.map { Array($0[range]) }
+                ),
+                muted: false
+            )
+            for span in spans { pcm.append(try XCTUnwrap(span.pcmLittleEndian)) }
+        }
+        for span in try assembler.finish() {
+            pcm.append(try XCTUnwrap(span.pcmLittleEndian))
+        }
+        return pcm
     }
 }
 

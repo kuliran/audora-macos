@@ -107,6 +107,10 @@ public actor AVFoundationMicrophoneInputSource: MicrophoneInputSource {
         relay = nil
     }
 
+    public func setMuted(_ muted: Bool) async -> Bool {
+        relay?.setMuted(muted) ?? false
+    }
+
     private func microphoneAuthorization() async -> MicrophoneAuthorizationOutcome {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
@@ -137,6 +141,7 @@ struct BufferedMicrophoneInputBlock: Equatable {
     let absoluteSampleFrame: Int64
     let hostTime: UInt64
     let channels: [[Float]]
+    let muteEpoch: MicrophoneMuteEpoch
 
     var frameCount: Int { channels.first?.count ?? 0 }
 }
@@ -154,6 +159,7 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
         var hostTime: UInt64 = 0
         var channelCount = 0
         var frameCount = 0
+        var muteEpoch = MicrophoneMuteEpoch.initial
 
         init(sampleCapacity: Int) {
             samples = .allocate(capacity: sampleCapacity)
@@ -170,6 +176,7 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
     private let latestEndSampleFrame = Atomic<Int64>(0)
     private let latestSampleRate = Atomic<UInt32>(0)
     private let latestChannelCount = Atomic<Int>(0)
+    private let latestMuteEpoch = Atomic<UInt64>(0)
     private let callbacksSeen = Atomic<Int>(0)
     private let drops = Atomic<Int>(0)
 
@@ -189,6 +196,7 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
         hostTime: UInt64,
         channelCount: Int,
         frameCount: Int,
+        muteEpoch: MicrophoneMuteEpoch,
         channelData: UnsafePointer<UnsafeMutablePointer<Float>>
     ) -> EnqueueResult {
         guard absoluteSampleFrame >= 0,
@@ -201,6 +209,10 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
         latestEndSampleFrame.store(end, ordering: .relaxed)
         latestSampleRate.store(sampleRateHz, ordering: .relaxed)
         latestChannelCount.store(channelCount, ordering: .relaxed)
+        latestMuteEpoch.store(
+            AVFoundationInputRelay.encode(muteEpoch),
+            ordering: .relaxed
+        )
         callbacksSeen.wrappingAdd(1, ordering: .relaxed)
 
         let write = producer.load(ordering: .relaxed)
@@ -216,6 +228,7 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
         slot.hostTime = hostTime
         slot.channelCount = channelCount
         slot.frameCount = frameCount
+        slot.muteEpoch = muteEpoch
         for channel in 0..<channelCount {
             slot.samples
                 .advanced(by: channel * maximumFrames)
@@ -246,7 +259,8 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
             sampleRateHz: slot.sampleRateHz,
             absoluteSampleFrame: slot.absoluteSampleFrame,
             hostTime: slot.hostTime,
-            channels: channels
+            channels: channels,
+            muteEpoch: slot.muteEpoch
         )
         consumer.store(read + 1, ordering: .releasing)
         return block
@@ -254,12 +268,20 @@ final class BoundedMicrophoneInputQueue: @unchecked Sendable {
 
     var droppedCallbackCount: Int { drops.load(ordering: .acquiring) }
 
-    var latestCallbackEnd: (sampleRateHz: UInt32, endSampleFrame: Int64, channelCount: Int)? {
+    var latestCallbackEnd: (
+        sampleRateHz: UInt32,
+        endSampleFrame: Int64,
+        channelCount: Int,
+        muteEpoch: MicrophoneMuteEpoch
+    )? {
         guard callbacksSeen.load(ordering: .acquiring) > 0 else { return nil }
         return (
             latestSampleRate.load(ordering: .acquiring),
             latestEndSampleFrame.load(ordering: .acquiring),
-            latestChannelCount.load(ordering: .acquiring)
+            latestChannelCount.load(ordering: .acquiring),
+            AVFoundationInputRelay.decode(
+                latestMuteEpoch.load(ordering: .acquiring)
+            )
         )
     }
 }
@@ -277,6 +299,7 @@ final class AVFoundationInputRelay: @unchecked Sendable {
     private var drainSource: DispatchSourceUserDataAdd!
     private let terminal = Atomic<Int>(0)
     private let timelineOriginHostTime = Atomic<UInt64>(0)
+    private let encodedMuteEpoch = Atomic<UInt64>(0)
     private var baselineSampleFrame: Int64?
     private var baselineRelativeFrame: UInt64 = 0
     private var deliveredInputEnd: UInt64 = 0
@@ -314,10 +337,34 @@ final class AVFoundationInputRelay: @unchecked Sendable {
         )
     }
 
+    func setMuted(_ muted: Bool) -> Bool {
+        guard terminal.load(ordering: .acquiring) == 0 else { return false }
+        let current = Self.decode(encodedMuteEpoch.load(ordering: .acquiring))
+        guard current.isMuted != muted else { return true }
+        guard current.sequence < UInt64.max >> 1 else { return false }
+        let epoch = MicrophoneMuteEpoch(
+            sequence: current.sequence + 1,
+            isMuted: muted
+        )
+        encodedMuteEpoch.store(Self.encode(epoch), ordering: .releasing)
+        drainQueue.sync {
+            drainAcceptedBlocks()
+            emitTrailingOverflowGapIfNeeded()
+            continuation.yield(
+                .muteChanged(
+                    epoch: epoch,
+                    effectiveInputFrame: deliveredInputEnd
+                )
+            )
+        }
+        return true
+    }
+
     func accept(buffer: AVAudioPCMBuffer, time: AVAudioTime) {
         let frameCount = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)
         guard terminal.load(ordering: .acquiring) == 0 else { return }
+        let muteEpoch = Self.decode(encodedMuteEpoch.load(ordering: .acquiring))
         guard time.isSampleTimeValid,
               Int64(time.sampleTime) >= 0,
               Int64(frameCount) <= Int64.max - Int64(time.sampleTime),
@@ -347,6 +394,7 @@ final class AVFoundationInputRelay: @unchecked Sendable {
             hostTime: time.isHostTimeValid ? time.hostTime : 0,
             channelCount: channelCount,
             frameCount: frameCount,
+            muteEpoch: muteEpoch,
             channelData: UnsafePointer(channelData)
         )
         if enqueue == .invalidClock {
@@ -442,7 +490,8 @@ final class AVFoundationInputRelay: @unchecked Sendable {
               let chunk = try? MicrophoneInputChunk(
                   sampleRateHz: block.sampleRateHz,
                   startSampleFrame: relative,
-                  channels: block.channels
+                  channels: block.channels,
+                  muteEpoch: block.muteEpoch
               ),
               chunk.frameCount <= UInt64.max - relative
         else { return false }
@@ -465,9 +514,21 @@ final class AVFoundationInputRelay: @unchecked Sendable {
                 sampleRateHz: latest.sampleRateHz,
                 startSampleFrame: deliveredInputEnd,
                 frameCount: latestRelativeEnd - deliveredInputEnd,
-                channelCount: UInt8(latest.channelCount)
+                channelCount: UInt8(latest.channelCount),
+                muteEpoch: latest.muteEpoch
             )
         )
         deliveredInputEnd = latestRelativeEnd
+    }
+
+    static func encode(_ epoch: MicrophoneMuteEpoch) -> UInt64 {
+        (epoch.sequence << 1) | (epoch.isMuted ? 1 : 0)
+    }
+
+    static func decode(_ encoded: UInt64) -> MicrophoneMuteEpoch {
+        MicrophoneMuteEpoch(
+            sequence: encoded >> 1,
+            isMuted: encoded & 1 == 1
+        )
     }
 }

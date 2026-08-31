@@ -47,6 +47,50 @@ final class LibraryPresentationModelTests: XCTestCase {
         XCTAssertEqual(access.reopenCount, 1)
         XCTAssertEqual(access.windowConstructionCount, 1)
     }
+
+    func testRootInteractionPolicyKeepsRevealAvailableDuringRecordingAndImport() throws {
+        let libraryID = try LibraryID("lib-20260830T120000000Z-1ABC")
+        let library = LibraryFeatureState(
+            selection: .active(
+                ActiveLibrarySnapshot(
+                    libraryID: libraryID,
+                    preferences: .defaults,
+                    profile: .nullProfile(statementCount: 0)
+                )
+            )
+        )
+        let recording = RecordingFeatureState.active(
+            RecordingSnapshot(
+                recordingID: try RecordingID("rec-20260830T120000000Z-2ABC"),
+                sessionID: try SessionID("ses-20260830T120000000Z-3DEF"),
+                elapsedFrames: 16_000,
+                level: .measured(0.25),
+                mute: .live,
+                noticeID: 1
+            ),
+            confirmation: .none
+        )
+
+        let duringRecording = LibraryInteractionPolicy.availability(
+            library: library,
+            audioImport: AudioImportFeatureState(status: .idle),
+            recording: recording
+        )
+        XCTAssertTrue(duringRecording.canRevealLibrary)
+        XCTAssertFalse(duringRecording.canMutateLibrarySelection)
+        XCTAssertFalse(duringRecording.canUseAudioImportControls)
+        XCTAssertTrue(duringRecording.canUseRecordingControls)
+
+        let duringImport = LibraryInteractionPolicy.availability(
+            library: library,
+            audioImport: AudioImportFeatureState(status: .copying),
+            recording: .idle
+        )
+        XCTAssertTrue(duringImport.canRevealLibrary)
+        XCTAssertFalse(duringImport.canMutateLibrarySelection)
+        XCTAssertTrue(duringImport.canUseAudioImportControls)
+        XCTAssertFalse(duringImport.canUseRecordingControls)
+    }
 }
 
 private actor ScriptedLibraryFeature: LibraryFeature {

@@ -18,7 +18,7 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
         let source: any MicrophoneInputSource
         let continuation: AsyncStream<CaptureObservation>.Continuation
         var assembler: CanonicalPCMAssembler
-        var muted: Bool
+        var acknowledgedMuteEpoch: MicrophoneMuteEpoch
         var terminalIntent: TerminalIntent?
         var finalizing: Bool
     }
@@ -26,17 +26,21 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
     private let roots: any RecordingLibraryRootProviding
     private let sources: any MicrophoneInputSourceFactory
     private let persistence: RecordingPersistence
+    private let monotonicClock: any CaptureMonotonicClock
     private var active: ActiveCapture?
     private var feedTask: Task<Void, Never>?
+    private var deadlineTask: Task<Void, Never>?
     private var nextGeneration: UInt64 = 1
 
     public init(
         roots: any RecordingLibraryRootProviding,
         sources: any MicrophoneInputSourceFactory,
+        monotonicClock: any CaptureMonotonicClock = SystemCaptureMonotonicClock(),
         persistenceFault: @escaping @Sendable (RecordingPersistenceFaultPoint) throws -> Void = { _ in }
     ) {
         self.roots = roots
         self.sources = sources
+        self.monotonicClock = monotonicClock
         persistence = RecordingPersistence(fault: persistenceFault)
     }
 
@@ -79,7 +83,7 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
                 source: source,
                 continuation: continuation,
                 assembler: CanonicalPCMAssembler(),
-                muted: false,
+                acknowledgedMuteEpoch: .initial,
                 terminalIntent: nil,
                 finalizing: false
             )
@@ -92,6 +96,21 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
         active?.continuation.yield(
             .progress(frameCount: 0, level: .unavailable(.stale))
         )
+        let captureStartedAt = await monotonicClock.now()
+        deadlineTask = Task { [weak self] in
+            for seconds in [UInt64(40 * 60), UInt64(44 * 60), UInt64(45 * 60)] {
+                let (deadline, overflow) = captureStartedAt.addingReportingOverflow(
+                    seconds * 1_000_000_000
+                )
+                guard !overflow else { return }
+                await self?.monotonicClock.sleep(until: deadline)
+                guard !Task.isCancelled else { return }
+                await self?.deadlineReached(
+                    generation: generation,
+                    targetFrame: seconds * CanonicalRecordingLimits.sampleRate
+                )
+            }
+        }
         feedTask = Task { [weak self] in
             for await event in inputFeed.events {
                 guard !Task.isCancelled else { break }
@@ -117,13 +136,9 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
         }
         switch command {
         case let .setMuted(muted):
-            guard current.muted != muted else { return .accepted }
-            active?.muted = muted
-            let frame = current.handle.durableFrameCount
-            current.continuation.yield(
-                .muteChanged(isMuted: muted, effectiveFrame: frame)
-            )
-            return .accepted
+            return await current.source.setMuted(muted)
+                ? .accepted
+                : .rejected(.stagingWriteFailedRecoverable)
 
         case .stop:
             active?.terminalIntent = .seal(.userStop)
@@ -263,7 +278,10 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
                 return
             }
             do {
-                let spans = try current.assembler.consume(chunk, muted: current.muted)
+                let spans = try current.assembler.consume(
+                    chunk,
+                    muted: chunk.muteEpoch.isMuted
+                )
                 active?.assembler = current.assembler
                 for span in spans {
                     guard let live = active,
@@ -282,7 +300,7 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
                     let bounded = try span.prefix(maximumFrames: remaining)
                     let frameCount = try persistence.append(bounded, to: live.handle)
                     let level: CaptureLevel
-                    if live.muted {
+                    if bounded.reasons.contains(.muted) {
                         level = .unavailable(.muted)
                     } else if bounded.reasons.contains(.captureGap) {
                         level = .unavailable(.captureGap)
@@ -310,7 +328,13 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
             await requestRecovery(generation: generation)
         case .clockBecameInvalid:
             await requestRecovery(generation: generation)
-        case let .captureGap(sampleRateHz, startSampleFrame, frameCount, channelCount):
+        case let .captureGap(
+            sampleRateHz,
+            startSampleFrame,
+            frameCount,
+            channelCount,
+            muteEpoch
+        ):
             if current.terminalIntent == .discard || current.terminalIntent == .recover {
                 return
             }
@@ -320,7 +344,7 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
                     startSampleFrame: startSampleFrame,
                     frameCount: frameCount,
                     channelCount: channelCount,
-                    muted: current.muted
+                    muted: muteEpoch.isMuted
                 )
                 active?.assembler = current.assembler
                 for span in spans {
@@ -337,7 +361,7 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
                         .progress(
                             frameCount: frames,
                             level: .unavailable(
-                                live.muted ? .muted : .captureGap
+                                bounded.reasons.contains(.muted) ? .muted : .captureGap
                             )
                         )
                     )
@@ -352,6 +376,59 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
             } catch {
                 await requestRecovery(generation: generation)
             }
+        case let .muteChanged(epoch, _):
+            current.acknowledgedMuteEpoch = epoch
+            active = current
+            current.continuation.yield(
+                .muteChanged(
+                    isMuted: epoch.isMuted,
+                    effectiveFrame: current.handle.durableFrameCount
+                )
+            )
+        }
+    }
+
+    private func deadlineReached(generation: UInt64, targetFrame: UInt64) async {
+        guard var current = active,
+              current.generation == generation,
+              current.terminalIntent == nil,
+              !current.finalizing
+        else { return }
+        do {
+            let spans = try current.assembler.consumeTimedGap(
+                throughCanonicalFrame: targetFrame,
+                muted: current.acknowledgedMuteEpoch.isMuted
+            )
+            active?.assembler = current.assembler
+            for span in spans {
+                guard let live = active,
+                      live.generation == generation,
+                      !live.finalizing
+                else { return }
+                let bounded = try span.prefix(
+                    maximumFrames: CanonicalRecordingLimits.maximumFrames -
+                        live.handle.durableFrameCount
+                )
+                let frames = try persistence.append(bounded, to: live.handle)
+                live.continuation.yield(
+                    .progress(
+                        frameCount: frames,
+                        level: .unavailable(
+                            bounded.reasons.contains(.muted) ? .muted : .captureGap
+                        )
+                    )
+                )
+            }
+            if targetFrame >= CanonicalRecordingLimits.maximumFrames,
+               let live = active,
+               live.generation == generation,
+               live.terminalIntent == nil
+            {
+                active?.terminalIntent = .seal(.durationLimit)
+                await live.source.stop()
+            }
+        } catch {
+            await requestRecovery(generation: generation)
         }
     }
 
@@ -360,12 +437,21 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
               current.generation == generation,
               !current.finalizing
         else { return }
+        if case .seal = current.terminalIntent {
+            do {
+                try flushAssembler(&current)
+            } catch {
+                current.terminalIntent = .recover
+            }
+        }
         if current.terminalIntent == nil {
             current.terminalIntent = .recover
         }
         current.finalizing = true
         active = current
         feedTask = nil
+        deadlineTask?.cancel()
+        deadlineTask = nil
 
         switch current.terminalIntent! {
         case let .seal(reason):
@@ -374,6 +460,36 @@ public actor AVFoundationAudioCaptureAdapter: AudioCapturePort {
             discardAfterDrain(current)
         case .recover:
             exposeRecoveryAfterDrain(current)
+        }
+    }
+
+    private func flushAssembler(_ current: inout ActiveCapture) throws {
+        let spans = try current.assembler.finish()
+        active?.assembler = current.assembler
+        for span in spans {
+            let remaining = CanonicalRecordingLimits.maximumFrames -
+                current.handle.durableFrameCount
+            guard remaining > 0 else {
+                current.terminalIntent = .seal(.durationLimit)
+                return
+            }
+            let bounded = try span.prefix(maximumFrames: remaining)
+            let frames = try persistence.append(bounded, to: current.handle)
+            let level: CaptureLevel
+            if bounded.reasons.contains(.muted) {
+                level = .unavailable(.muted)
+            } else if bounded.reasons.contains(.captureGap) {
+                level = .unavailable(.captureGap)
+            } else if let measured = bounded.level {
+                level = .measured(measured)
+            } else {
+                level = .unavailable(.stale)
+            }
+            current.continuation.yield(.progress(frameCount: frames, level: level))
+            if frames == CanonicalRecordingLimits.maximumFrames {
+                current.terminalIntent = .seal(.durationLimit)
+                return
+            }
         }
     }
 

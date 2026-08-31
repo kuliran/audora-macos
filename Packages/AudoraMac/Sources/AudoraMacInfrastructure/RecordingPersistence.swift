@@ -36,7 +36,17 @@ enum RecordingPersistenceError: Error, Equatable {
 /// Descriptor-owned capability for exactly one staging aggregate. It is kept
 /// internal so machine-local paths and file descriptors cannot cross into
 /// portable Domain/Application values.
-final class RecordingStagingHandle: @unchecked Sendable {
+protocol RecordingSealingHandle: AnyObject, Sendable {
+    var rootDescriptor: Int32 { get }
+    var recordingsDescriptor: Int32 { get }
+    var sessionsDescriptor: Int32 { get }
+    var stagingDescriptor: Int32 { get }
+    var streamDescriptor: Int32 { get }
+    var request: MicrophoneRecordingRequest { get }
+    var durableFrameCount: UInt64 { get }
+}
+
+final class RecordingStagingHandle: RecordingSealingHandle, @unchecked Sendable {
     let rootDescriptor: Int32
     let recordingsDescriptor: Int32
     let sessionsDescriptor: Int32
@@ -44,6 +54,51 @@ final class RecordingStagingHandle: @unchecked Sendable {
     private(set) var streamDescriptor: Int32
     let request: MicrophoneRecordingRequest
     var durableFrameCount: UInt64
+
+    init(
+        rootDescriptor: Int32,
+        recordingsDescriptor: Int32,
+        sessionsDescriptor: Int32,
+        stagingDescriptor: Int32,
+        streamDescriptor: Int32,
+        request: MicrophoneRecordingRequest,
+        durableFrameCount: UInt64
+    ) {
+        self.rootDescriptor = rootDescriptor
+        self.recordingsDescriptor = recordingsDescriptor
+        self.sessionsDescriptor = sessionsDescriptor
+        self.stagingDescriptor = stagingDescriptor
+        self.streamDescriptor = streamDescriptor
+        self.request = request
+        self.durableFrameCount = durableFrameCount
+    }
+
+    deinit {
+        closeCaptureStream()
+        Darwin.close(stagingDescriptor)
+        Darwin.close(sessionsDescriptor)
+        Darwin.close(recordingsDescriptor)
+        Darwin.close(rootDescriptor)
+    }
+
+    func closeCaptureStream() {
+        guard streamDescriptor >= 0 else { return }
+        Darwin.close(streamDescriptor)
+        streamDescriptor = -1
+    }
+}
+
+/// Read-only authority over an abandoned capture aggregate. Unlike a live
+/// staging handle, this capability cannot satisfy `append(_:to:)`; callers can
+/// only scan and seal its durable evidence or discard it by immutable identity.
+final class RecordingRecoveryHandle: RecordingSealingHandle, @unchecked Sendable {
+    let rootDescriptor: Int32
+    let recordingsDescriptor: Int32
+    let sessionsDescriptor: Int32
+    let stagingDescriptor: Int32
+    private(set) var streamDescriptor: Int32
+    let request: MicrophoneRecordingRequest
+    let durableFrameCount: UInt64
 
     init(
         rootDescriptor: Int32,
@@ -286,7 +341,7 @@ struct RecordingPersistence: @unchecked Sendable {
     }
 
     func markRecoverable(
-        _ handle: RecordingStagingHandle,
+        _ handle: any RecordingSealingHandle,
         availability: RecordingRecoveryAvailability
     ) throws {
         guard availability == .sealOrDiscard || availability == .discardOnly else {
@@ -327,7 +382,7 @@ struct RecordingPersistence: @unchecked Sendable {
     /// that already names an installed final can only be retried for cleanup;
     /// Recording Cancel never gains authority over that immutable Session.
     func recoveryAvailability(
-        for handle: RecordingStagingHandle
+        for handle: any RecordingSealingHandle
     ) -> RecordingRecoveryAvailability {
         guard let identity = try? readIdentity(under: handle.stagingDescriptor),
               let manifest = try? readManifest(
@@ -575,7 +630,7 @@ struct RecordingPersistence: @unchecked Sendable {
         recordingID: RecordingID,
         in scope: LibraryScope,
         under root: URL
-    ) throws -> RecordingStagingHandle {
+    ) throws -> RecordingRecoveryHandle {
         let rootFD = try openDirectory(at: root)
         var owned: [Int32] = [rootFD]
         do {
@@ -602,11 +657,11 @@ struct RecordingPersistence: @unchecked Sendable {
             let streamFD = try openRegular(
                 named: "records.bin",
                 under: stagingFD,
-                flags: O_RDWR | O_APPEND
+                flags: O_RDONLY
             )
             owned.append(streamFD)
             owned.removeAll(keepingCapacity: false)
-            return RecordingStagingHandle(
+            return RecordingRecoveryHandle(
                 rootDescriptor: rootFD,
                 recordingsDescriptor: recordingsFD,
                 sessionsDescriptor: sessionsFD,
@@ -674,7 +729,7 @@ struct RecordingPersistence: @unchecked Sendable {
     }
 
     func stageSeal(
-        _ handle: RecordingStagingHandle,
+        _ handle: any RecordingSealingHandle,
         reason: CaptureTerminalReason
     ) throws -> StagedRecordingSealCandidate {
         guard handle.durableFrameCount > 0 else {
@@ -775,7 +830,7 @@ struct RecordingPersistence: @unchecked Sendable {
 
     func install(
         _ publication: ValidatedRecordingPublication,
-        using handle: RecordingStagingHandle
+        using handle: any RecordingSealingHandle
     ) throws -> SessionSealedReceipt {
         try validateLibraryIdentity(
             handle.request.libraryScope.libraryID,
@@ -1541,7 +1596,7 @@ private extension RecordingPersistence {
 
     func reconcileCommittedPublication(
         _ publishing: RecordingManifestDTO,
-        handle: RecordingStagingHandle,
+        handle: any RecordingSealingHandle,
         injectCleanupFault: Bool = false
     ) throws -> SessionSealedReceipt {
         try validateLibraryIdentity(
