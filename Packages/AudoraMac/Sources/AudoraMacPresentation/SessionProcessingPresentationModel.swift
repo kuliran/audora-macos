@@ -1,4 +1,5 @@
 import AudoraApplication
+import AudoraDomain
 import Combine
 import SwiftUI
 
@@ -164,11 +165,16 @@ public enum SessionProcessingPresentationMapper {
                 phase: .validating,
                 progress: .indeterminate
             )
-        case .completed:
+        case let .completed(snapshot):
+            let isSelected = snapshot.selectedRevisionID == snapshot.revisionID
             return SessionProcessingPresentationState(
                 status: .completed,
-                title: "Transcript ready",
-                detail: "The validated revision is selected for this Session.",
+                title: isSelected ? "Transcript ready" : "Transcription completed",
+                detail: isSelected
+                    ? "The validated revision is selected for this Session."
+                    : snapshot.selectedRevisionID == nil
+                        ? "The validated revision was retained; no transcript revision is currently selected."
+                        : "The validated revision was retained; another transcript revision is currently selected.",
                 actions: []
             )
         case let .failed(snapshot):
@@ -305,6 +311,13 @@ public final class SessionProcessingPresentationModel: ObservableObject {
 
     public func selectSession(_ selection: SessionProcessingSelection) {
         Task { await feature.send(.selectSession(selection)) }
+    }
+
+    /// Library activation is a system lifecycle event, not a user Session
+    /// selection. It triggers bounded durable-Job reconciliation while leaving
+    /// this panel's selected Session unchanged.
+    public func activateLibrary(_ scope: LibraryScope) {
+        Task { await feature.send(.activateLibrary(scope)) }
     }
 
     public func clearSelection() {

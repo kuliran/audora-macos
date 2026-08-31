@@ -245,6 +245,86 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(sourceLoadCount, 2)
     }
 
+    func testLibraryActivationRunsAfterUnconfirmedCancellationWhileOldRunRemains()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let activationScope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T120000000Z-9XYZ")
+        )
+        let abandoned = SessionProcessingJob(
+            jobID: try TranscriptionJobID("job-20260830T120800000Z-8NPQ"),
+            sessionID: try SessionID("ses-20260830T120800000Z-8NPQ"),
+            revisionID: try TranscriptRevisionID(
+                "trv-20260830T120800000Z-8NPQ"
+            ),
+            profileID: fixture.profile.profileID,
+            createdAt: try UTCInstant("2026-08-30T12:08:00.000Z"),
+            state: .queued,
+            cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                "cancel-abandoned-next-library"
+            )
+        )
+        let reconciliationID = try SessionProcessingReconciliationID(
+            "reconcile-after-unconfirmed-cancel"
+        )
+        let jobs = JobProbe(
+            inventoryResult: .available(
+                SessionProcessingJobInventory(
+                    reconciliationID: reconciliationID,
+                    scope: activationScope,
+                    jobs: [abandoned]
+                )
+            )
+        )
+        let engine = UnconfirmedCancellationEngineProbe(
+            lateResult: VerifiedTranscriptionCandidate(
+                candidate: fixture.candidate,
+                artifactFingerprint: fixture.candidateFingerprint
+            )
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: SourceProbe(.available(fixture.source)),
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: SequencedProcessingClock([
+                fixture.createdAt,
+                try UTCInstant("2026-08-30T12:07:00.000Z"),
+            ]),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+        let run = Task { await feature.send(.start) }
+        await engine.waitUntilTranscriptionStarts()
+        let cancellation = Task { await feature.send(.cancel) }
+        await engine.waitUntilCancellationStarts()
+
+        await feature.send(.activateLibrary(activationScope))
+        await engine.releaseCancellationAsUnconfirmed()
+        await cancellation.value
+
+        let finished = await jobs.finishedReconciliationIDs
+        let abandonedTransitions = await jobs.snapshots.filter {
+            $0.jobID == abandoned.jobID
+        }
+        XCTAssertEqual(finished, [reconciliationID])
+        XCTAssertEqual(abandonedTransitions.map(\.state), [.interrupted])
+        guard case .recoveryRequired = await feature.currentState else {
+            return XCTFail("old unconfirmed worker must retain recovery authority")
+        }
+
+        await engine.releaseTranscription()
+        await run.value
+    }
+
     func testUnqualifiedPinnedProfileNeverCreatesAJobOrLaunchesAnEngine() async throws {
         let fixture = try ProcessingFixture()
         let runtime = RuntimeProbe(
@@ -600,17 +680,232 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(persistedStates, [.interrupted])
     }
 
-    func testRelaunchResumesHashValidConfinedCandidatePublicationIdempotently()
+    func testLibraryActivationReconcilesEveryQueuedJobWithoutSelectingASession()
         async throws
     {
-        let fixture = try ProcessingFixture(selectedRevisionID: true)
+        let fixture = try ProcessingFixture()
+        let secondSelection = SessionProcessingSelection(
+            scope: fixture.selection.scope,
+            sessionID: try SessionID("ses-20260830T120200000Z-3DEF")
+        )
+        let secondSource = SessionTranscriptionSource(
+            selection: secondSelection,
+            audioCapabilityID: try SessionTranscriptionAudioCapabilityID(
+                "cap-second-relaunch-source"
+            ),
+            durationMilliseconds: fixture.source.durationMilliseconds,
+            audioFingerprint: fixture.source.audioFingerprint,
+            sourceFingerprints: fixture.source.sourceFingerprints,
+            expectedSelectedRevisionID: nil
+        )
+        let firstJob = fixture.job(state: .queued)
+        let secondJob = SessionProcessingJob(
+            jobID: try TranscriptionJobID("job-20260830T120700000Z-7MNP"),
+            sessionID: secondSelection.sessionID,
+            revisionID: try TranscriptRevisionID("trv-20260830T120700000Z-7MNP"),
+            profileID: fixture.profile.profileID,
+            createdAt: try UTCInstant("2026-08-30T12:07:00.000Z"),
+            state: .queued,
+            cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                "cancel-second-relaunch"
+            )
+        )
+        let reconciliationID = try SessionProcessingReconciliationID(
+            "reconcile-synthetic-library"
+        )
+        let source = ReconciliationSourceProbe(
+            sources: [fixture.source, secondSource],
+            reconciliationID: reconciliationID
+        )
+        let jobs = JobProbe(
+            inventoryResult: .available(
+                SessionProcessingJobInventory(
+                    reconciliationID: reconciliationID,
+                    scope: fixture.selection.scope,
+                    jobs: [firstJob, secondJob]
+                )
+            )
+        )
+        let engine = EngineProbe(
+            result: .failure(.launchFailed),
+            presence: .present,
+            cancellation: .reaped
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.activateLibrary(fixture.selection.scope))
+
+        let current = await feature.currentState
+        let reconciled = await jobs.snapshots
+        let loadedSelections = await source.selections
+        let finished = await jobs.finishedReconciliationIDs
+        let presenceCount = await engine.presenceQueryCount()
+        let requestCount = await engine.requestCount()
+        XCTAssertEqual(
+            current,
+            .unavailable(
+                SessionProcessingUnavailableSnapshot(
+                    selection: nil,
+                    reason: .noSession,
+                    actions: []
+                )
+            )
+        )
+        XCTAssertEqual(reconciled.map(\.jobID), [firstJob.jobID, secondJob.jobID])
+        XCTAssertEqual(reconciled.map(\.state), [.interrupted, .interrupted])
+        XCTAssertEqual(loadedSelections, [])
+        XCTAssertEqual(finished, [reconciliationID])
+        XCTAssertEqual(presenceCount, 0)
+        XCTAssertEqual(requestCount, 0)
+    }
+
+    func testLibraryActivationReapsRunningWorkerWhenSessionAudioIsUnavailable()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let running = fixture.job(state: .running)
+        let reconciliationID = try SessionProcessingReconciliationID(
+            "reconcile-missing-session"
+        )
+        let source = ReconciliationSourceProbe(
+            sources: [],
+            reconciliationID: reconciliationID
+        )
+        let jobs = JobProbe(
+            inventoryResult: .available(
+                SessionProcessingJobInventory(
+                    reconciliationID: reconciliationID,
+                    scope: fixture.selection.scope,
+                    jobs: [running]
+                )
+            )
+        )
+        let engine = EngineProbe(
+            result: .failure(.launchFailed),
+            presence: .present,
+            cancellation: .reaped
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.activateLibrary(fixture.selection.scope))
+
+        let persisted = await jobs.snapshots
+        let presenceQueries = await engine.presenceQueries
+        let cancellations = await engine.cancelledExecutions
+        let sourceLoads = await source.selections
+        XCTAssertEqual(persisted.map(\.state), [.interrupted])
+        XCTAssertEqual(presenceQueries, [running.executionReference])
+        XCTAssertEqual(cancellations, [running.executionReference])
+        XCTAssertEqual(sourceLoads, [])
+    }
+
+    func testLibraryActivationLeavesManyTerminalJobsWithoutAudioOrRevisionIO()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let terminalJobs = try (0..<128).map { index in
+            let suffix = String(format: "%04d", index)
+            return SessionProcessingJob(
+                jobID: try TranscriptionJobID(
+                    "job-20260830T120500000Z-\(suffix)"
+                ),
+                sessionID: fixture.selection.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T120500000Z-\(suffix)"
+                ),
+                profileID: fixture.profile.profileID,
+                createdAt: fixture.createdAt,
+                state: .completed,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-terminal-\(index)"
+                ),
+                candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+            )
+        }
+        let reconciliationID = try SessionProcessingReconciliationID(
+            "reconcile-many-terminal"
+        )
+        let source = ReconciliationSourceProbe(
+            sources: [fixture.source],
+            reconciliationID: reconciliationID
+        )
+        let jobs = JobProbe(
+            inventoryResult: .available(
+                SessionProcessingJobInventory(
+                    reconciliationID: reconciliationID,
+                    scope: fixture.selection.scope,
+                    jobs: terminalJobs
+                )
+            )
+        )
+        let revisions = RevisionProbe()
+        let engine = EngineProbe(result: .failure(.launchFailed))
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.activateLibrary(fixture.selection.scope))
+
+        let sourceLoads = await source.selections
+        let exactReopens = await revisions.exactReopenCount
+        let transitions = await jobs.snapshots
+        let presenceCount = await engine.presenceQueryCount()
+        let requestCount = await engine.requestCount()
+        XCTAssertEqual(sourceLoads, [])
+        XCTAssertEqual(exactReopens, 0)
+        XCTAssertEqual(transitions, [])
+        XCTAssertEqual(presenceCount, 0)
+        XCTAssertEqual(requestCount, 0)
+    }
+
+    func testRelaunchCompletesExactInstalledValidatingRevisionWithNoSelection()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
         let validating = fixture.job(
             state: .validating,
             expectedSelectedRevisionID: nil,
             candidateArtifactSHA256: fixture.candidateFingerprint.sha256
         )
         let jobs = JobProbe(latest: validating)
-        let revisions = RevisionProbe(selected: try fixture.validatedRevision())
+        let revisions = RevisionProbe(retained: [try fixture.validatedRevision()])
         let engine = EngineProbe(
             result: .failure(.launchFailed),
             recovered: .unavailable
@@ -626,13 +921,16 @@ final class SessionProcessingFeatureTests: XCTestCase {
         guard case let .completed(completed) = await feature.currentState else {
             return XCTFail("expected resumed idempotent publication")
         }
-        XCTAssertEqual(completed.selectedRevisionID, fixture.revisionID)
+        XCTAssertEqual(completed.revisionID, fixture.revisionID)
+        XCTAssertNil(completed.selectedRevisionID)
         let recoveryCount = await engine.recoveryCount()
         let publishCount = await revisions.publishCountValue()
+        let exactReopenCount = await revisions.exactReopenCount
         let persistedStates = await jobs.states
         let expectedSelections = await revisions.expectedSelectedRevisionIDs
         XCTAssertEqual(recoveryCount, 0)
         XCTAssertEqual(publishCount, 0)
+        XCTAssertEqual(exactReopenCount, 1)
         XCTAssertEqual(persistedStates, [.completed])
         XCTAssertEqual(expectedSelections, [])
     }
@@ -1467,27 +1765,43 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(selections, [fixture.selection, secondSelection])
     }
 
-    func testRetryRereadsSelectionAfterPublicationCommittedButJobCompletionFailed()
+    func testInstalledNeedsRefreshKeepsValidatingAndExactReopenCompletesOriginalJob()
         async throws
     {
         let fixture = try ProcessingFixture()
+        let newerRevisionID = try TranscriptRevisionID(
+            "trv-20260830T120700000Z-7MNP"
+        )
+        let installedRevision = try fixture.validatedRevision()
+        let newerRevision = try TranscriptRevision(
+            revisionID: newerRevisionID,
+            sessionID: installedRevision.sessionID,
+            jobID: try TranscriptionJobID("job-20260830T120700000Z-7MNP"),
+            createdAt: try UTCInstant("2026-08-30T12:07:00.000Z"),
+            durationMilliseconds: installedRevision.durationMilliseconds,
+            audioFingerprint: installedRevision.audioFingerprint,
+            sourceFingerprints: installedRevision.sourceFingerprints,
+            candidateArtifactFingerprint: try AudioFingerprint(
+                sha256: String(repeating: "7", count: 64)
+            ),
+            engine: installedRevision.engine,
+            lines: installedRevision.lines,
+            audioEvents: installedRevision.audioEvents
+        )
         let refreshedSource = SessionTranscriptionSource(
             selection: fixture.selection,
             audioCapabilityID: fixture.source.audioCapabilityID,
             durationMilliseconds: fixture.source.durationMilliseconds,
             audioFingerprint: fixture.source.audioFingerprint,
             sourceFingerprints: fixture.source.sourceFingerprints,
-            expectedSelectedRevisionID: fixture.revisionID
+            expectedSelectedRevisionID: newerRevisionID
         )
         let source = SourceProbe([
             .available(fixture.source),
             .available(refreshedSource),
         ])
-        let jobs = JobProbe(
-            failingTransitionState: .completed,
-            transitionFailureCount: 1
-        )
-        let revisions = RevisionProbe()
+        let jobs = JobProbe(tracksLatestWrites: true)
+        let revisions = InstalledNeedsRefreshRevisionProbe()
         let engine = EngineProbe(
             result: .success(
                 VerifiedTranscriptionCandidate(
@@ -1513,20 +1827,44 @@ final class SessionProcessingFeatureTests: XCTestCase {
 
         await feature.send(.selectSession(fixture.selection))
         await feature.send(.start)
-        guard case let .failed(failure) = await feature.currentState else {
-            return XCTFail("expected installed selection needing refresh")
+        guard case let .recoveryRequired(authoritative) = await feature.currentState else {
+            return XCTFail("expected validating recovery authority after install")
         }
-        XCTAssertEqual(failure.reason, .installedNeedsRefresh)
+        XCTAssertEqual(authoritative.state, .validating)
+        XCTAssertEqual(authoritative.jobID, fixture.jobID)
 
+        // Recovery authority is not a retranscription affordance. A stale or
+        // programmatic Retry must remain inert until a fresh sealed-source read.
         await feature.send(.retry)
+        let loadCountAfterRetry = await source.loadCount
+        let requestCountAfterRetry = await engine.requestCount()
+        XCTAssertEqual(loadCountAfterRetry, 1)
+        XCTAssertEqual(requestCountAfterRetry, 1)
 
-        guard case .completed = await feature.currentState else {
-            return XCTFail("expected Retry to use the refreshed selected Revision")
+        // A later review may select another retained Revision before relaunch.
+        // Recovery must complete this exact installed Job without republishing
+        // against its stale start-time selection baseline.
+        await revisions.select(newerRevision)
+        await feature.send(.selectSession(fixture.selection))
+
+        guard case let .completed(completed) = await feature.currentState else {
+            return XCTFail("expected exact installed Revision reopen to complete the Job")
         }
+        XCTAssertEqual(completed.revisionID, fixture.revisionID)
+        XCTAssertEqual(completed.selectedRevisionID, newerRevisionID)
         let loadCount = await source.loadCount
-        let expectedSelections = await revisions.expectedSelectedRevisionIDs
+        let publishCount = await revisions.publishCount
+        let exactReopenCount = await revisions.exactReopenCount
+        let selectedReopenCount = await revisions.selectedReopenCount
+        let persistedStates = await jobs.states
         XCTAssertEqual(loadCount, 2)
-        XCTAssertEqual(expectedSelections, [nil, fixture.revisionID])
+        XCTAssertEqual(publishCount, 1)
+        XCTAssertEqual(exactReopenCount, 1)
+        XCTAssertEqual(selectedReopenCount, 0)
+        XCTAssertEqual(
+            persistedStates,
+            [.queued, .running, .validating, .completed]
+        )
     }
 
     func testLatestSelectionIsReplayedAfterCurrentEngineRunFinishes() async throws {
@@ -1910,33 +2248,59 @@ private actor AcousticProbe: SessionAcousticEvidencePort {
 
 private actor JobProbe: SessionProcessingJobPort {
     private let latestResult: SessionProcessingJobLoadResult
+    private let inventoryResult: SessionProcessingJobInventoryResult
+    private let tracksLatestWrites: Bool
     private let failingTransitionState: SessionProcessingJobState?
     private var remainingTransitionFailures: Int
+    private var durableLatest: SessionProcessingJob?
     private(set) var states: [SessionProcessingJobState] = []
     private(set) var snapshots: [SessionProcessingJob] = []
+    private(set) var finishedReconciliationIDs: [SessionProcessingReconciliationID]
+        = []
 
     init(
         latest: SessionProcessingJob? = nil,
         latestResult: SessionProcessingJobLoadResult? = nil,
+        inventoryResult: SessionProcessingJobInventoryResult = .unavailable,
+        tracksLatestWrites: Bool = false,
         failingTransitionState: SessionProcessingJobState? = nil,
         transitionFailureCount: Int = 0
     ) {
         self.latestResult = latestResult ?? latest.map {
             SessionProcessingJobLoadResult.loaded($0)
         } ?? .none
+        self.inventoryResult = inventoryResult
+        self.tracksLatestWrites = tracksLatestWrites
+        durableLatest = latest
         self.failingTransitionState = failingTransitionState
         remainingTransitionFailures = transitionFailureCount
+    }
+
+    func inventory(
+        for scope: LibraryScope
+    ) async -> SessionProcessingJobInventoryResult {
+        inventoryResult
+    }
+
+    func finishReconciliation(
+        _ reconciliationID: SessionProcessingReconciliationID
+    ) async {
+        finishedReconciliationIDs.append(reconciliationID)
     }
 
     func latest(for selection: SessionProcessingSelection) async
         -> SessionProcessingJobLoadResult
     {
-        latestResult
+        if tracksLatestWrites {
+            return durableLatest.map(SessionProcessingJobLoadResult.loaded) ?? .none
+        }
+        return latestResult
     }
 
     func create(_ job: SessionProcessingJob) async -> SessionProcessingJobWriteResult {
         states.append(job.state)
         snapshots.append(job)
+        if tracksLatestWrites { durableLatest = job }
         return .written(job)
     }
 
@@ -1950,6 +2314,7 @@ private actor JobProbe: SessionProcessingJobPort {
             remainingTransitionFailures -= 1
             return .failed
         }
+        if tracksLatestWrites { durableLatest = job }
         return .written(job)
     }
 }
@@ -1973,6 +2338,37 @@ private actor SourceProbe: SessionTranscriptionSourcePort {
         guard !results.isEmpty else { return .unavailable }
         if results.count == 1 { return results[0] }
         return results.removeFirst()
+    }
+}
+
+private actor ReconciliationSourceProbe: SessionTranscriptionSourcePort {
+    private let sources: [SessionTranscriptionSource]
+    private let reconciliationID: SessionProcessingReconciliationID
+    private(set) var selections: [SessionProcessingSelection] = []
+
+    init(
+        sources: [SessionTranscriptionSource],
+        reconciliationID: SessionProcessingReconciliationID
+    ) {
+        self.sources = sources
+        self.reconciliationID = reconciliationID
+    }
+
+    func load(_ selection: SessionProcessingSelection) async
+        -> SessionTranscriptionSourceResult
+    {
+        .unavailable
+    }
+
+    func load(
+        _ selection: SessionProcessingSelection,
+        reconciliationID: SessionProcessingReconciliationID
+    ) async -> SessionTranscriptionSourceResult {
+        selections.append(selection)
+        guard reconciliationID == self.reconciliationID,
+              let source = sources.first(where: { $0.selection == selection })
+        else { return .unavailable }
+        return .available(source)
     }
 }
 
@@ -2166,6 +2562,53 @@ private actor CancellableEngineProbe: TranscriptionEngine {
     }
 }
 
+private actor UnconfirmedCancellationEngineProbe: TranscriptionEngine {
+    private let lateResult: VerifiedTranscriptionCandidate
+    private var transcriptionContinuation: CheckedContinuation<Void, Never>?
+    private var cancellationContinuation:
+        CheckedContinuation<TranscriptionCancellationOutcome, Never>?
+
+    init(lateResult: VerifiedTranscriptionCandidate) {
+        self.lateResult = lateResult
+    }
+
+    func transcribe(
+        _ request: TranscriptionRequest,
+        events: @escaping @Sendable (TranscriptionEvent) async -> Void
+    ) async throws -> VerifiedTranscriptionCandidate {
+        await withCheckedContinuation { continuation in
+            transcriptionContinuation = continuation
+        }
+        return lateResult
+    }
+
+    func cancel(
+        _ execution: TranscriptionExecutionReference
+    ) async -> TranscriptionCancellationOutcome {
+        await withCheckedContinuation { continuation in
+            cancellationContinuation = continuation
+        }
+    }
+
+    func waitUntilTranscriptionStarts() async {
+        while transcriptionContinuation == nil { await Task.yield() }
+    }
+
+    func waitUntilCancellationStarts() async {
+        while cancellationContinuation == nil { await Task.yield() }
+    }
+
+    func releaseCancellationAsUnconfirmed() {
+        cancellationContinuation?.resume(returning: .unableToConfirm)
+        cancellationContinuation = nil
+    }
+
+    func releaseTranscription() {
+        transcriptionContinuation?.resume()
+        transcriptionContinuation = nil
+    }
+}
+
 private actor RevisionProbe: TranscriptRevisionRepository {
     private(set) var selected: TranscriptRevision?
     private var retained: [TranscriptRevisionID: TranscriptRevision]
@@ -2263,6 +2706,56 @@ private actor SelectionCASRevisionProbe: TranscriptRevisionRepository {
         revisionID: TranscriptRevisionID
     ) async throws -> TranscriptRevision {
         throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+    }
+}
+
+/// Simulates the manifest-last crash boundary where the immutable Revision and
+/// selected pointer are already installed, but the repository cannot complete
+/// its mandatory reopen before returning to Application.
+private actor InstalledNeedsRefreshRevisionProbe: TranscriptRevisionRepository {
+    private var installed: TranscriptRevision?
+    private var selected: TranscriptRevision?
+    private(set) var publishCount = 0
+    private(set) var selectedReopenCount = 0
+    private(set) var exactReopenCount = 0
+
+    func publishAndSelect(
+        _ revision: TranscriptRevision,
+        expectedSelectedRevisionID: TranscriptRevisionID?
+    ) async throws -> ReopenedTranscriptRevisionSnapshot {
+        publishCount += 1
+        installed = revision
+        selected = revision
+        throw TranscriptRevisionRepositoryFailure.installedNeedsRefresh
+    }
+
+    func reopenSelected(
+        sessionID: SessionID
+    ) async throws -> ReopenedTranscriptRevisionSnapshot {
+        selectedReopenCount += 1
+        guard let selected, selected.sessionID == sessionID else {
+            throw TranscriptRevisionRepositoryFailure.sessionUnavailable
+        }
+        return ReopenedTranscriptRevisionSnapshot(
+            revisionIDs: [selected.revisionID],
+            selectedRevisionID: selected.revisionID,
+            selectedRevision: selected
+        )
+    }
+
+    func reopenRevision(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID
+    ) async throws -> TranscriptRevision {
+        exactReopenCount += 1
+        guard let installed, installed.sessionID == sessionID,
+              installed.revisionID == revisionID
+        else { throw TranscriptRevisionRepositoryFailure.sessionUnavailable }
+        return installed
+    }
+
+    func select(_ revision: TranscriptRevision) {
+        selected = revision
     }
 }
 

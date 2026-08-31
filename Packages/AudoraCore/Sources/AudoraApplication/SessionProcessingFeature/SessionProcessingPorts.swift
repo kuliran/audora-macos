@@ -9,6 +9,21 @@ public enum SessionTranscriptionSourceResult: Equatable, Sendable {
 public protocol SessionTranscriptionSourcePort: Sendable {
     func load(_ selection: SessionProcessingSelection) async
         -> SessionTranscriptionSourceResult
+
+    /// Resolves through the exact retained Library authority that produced a
+    /// durable-Job inventory. Reacquiring an ambient same-ID Library is not
+    /// permitted when that authority has expired.
+    func load(
+        _ selection: SessionProcessingSelection,
+        reconciliationID: SessionProcessingReconciliationID
+    ) async -> SessionTranscriptionSourceResult
+}
+
+public extension SessionTranscriptionSourcePort {
+    func load(
+        _ selection: SessionProcessingSelection,
+        reconciliationID: SessionProcessingReconciliationID
+    ) async -> SessionTranscriptionSourceResult { .unavailable }
 }
 
 public enum SessionAcousticEvidenceResolution: Equatable, Sendable {
@@ -80,7 +95,21 @@ public enum SessionProcessingJobLoadResult: Equatable, Sendable {
     case integrityMismatch
 }
 
+public enum SessionProcessingJobInventoryResult: Equatable, Sendable {
+    case available(SessionProcessingJobInventory)
+    case unavailable
+    case integrityMismatch
+}
+
 public protocol SessionProcessingJobPort: Sendable {
+    func inventory(
+        for scope: LibraryScope
+    ) async -> SessionProcessingJobInventoryResult
+
+    func finishReconciliation(
+        _ reconciliationID: SessionProcessingReconciliationID
+    ) async
+
     func latest(for selection: SessionProcessingSelection) async
         -> SessionProcessingJobLoadResult
 
@@ -92,6 +121,16 @@ public protocol SessionProcessingJobPort: Sendable {
         _ job: SessionProcessingJob,
         from expected: SessionProcessingJobState
     ) async -> SessionProcessingJobWriteResult
+}
+
+public extension SessionProcessingJobPort {
+    func inventory(
+        for scope: LibraryScope
+    ) async -> SessionProcessingJobInventoryResult { .unavailable }
+
+    func finishReconciliation(
+        _ reconciliationID: SessionProcessingReconciliationID
+    ) async {}
 }
 
 public protocol TranscriptionEngine: Sendable {

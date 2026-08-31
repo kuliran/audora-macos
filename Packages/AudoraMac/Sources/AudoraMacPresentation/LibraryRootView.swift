@@ -136,9 +136,11 @@ public struct LibraryRootView: View {
         .onChange(of: model.snapshot?.selection, initial: true) { _, selection in
             switch selection {
             case let .active(library):
+                let scope = LibraryScope(libraryID: library.libraryID)
                 recordingModel.selectLibrary(
-                    .writable(LibraryScope(libraryID: library.libraryID))
+                    .writable(scope)
                 )
+                sessionProcessingModel.activateLibrary(scope)
             case .readOnly:
                 recordingModel.selectLibrary(.readOnly)
             case .awaitingBootstrap, .noLibrarySelected, nil:

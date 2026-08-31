@@ -229,13 +229,24 @@ public actor PortableSessionProcessingWorkspace:
     private struct Binding {
         let selection: SessionProcessingSelection
         let scope: ActiveLibraryProcessingScope
+        let reconciliationID: SessionProcessingReconciliationID?
         let revisions: PortableTranscriptRevisionRepository
         let jobs: PortableSessionProcessingJobRepository
         let audio: ConfinedCanonicalAudioInput
     }
 
+    private struct ReconciliationBinding {
+        let reconciliationID: SessionProcessingReconciliationID
+        let scope: LibraryScope
+        let active: ActiveLibraryProcessingScope
+        let jobs: PortableSessionProcessingJobRepository
+        let jobIDs: Set<TranscriptionJobID>
+    }
+
     private let scopes: any SessionProcessingLibraryScopeProviding
     private var binding: Binding?
+    private var reconciliationBinding: ReconciliationBinding?
+    private var reconciliationSessionBinding: Binding?
 
     public init(scopes: any SessionProcessingLibraryScopeProviding) {
         self.scopes = scopes
@@ -245,10 +256,102 @@ public actor PortableSessionProcessingWorkspace:
         _ selection: SessionProcessingSelection
     ) async -> SessionTranscriptionSourceResult {
         binding = nil
+        reconciliationBinding = nil
+        reconciliationSessionBinding = nil
         guard let active = await scopes.acquireSessionProcessingScope(
             for: selection.scope
         ) else {
             return .unavailable
+        }
+        return await load(
+            selection,
+            active: active,
+            reconciliationID: nil
+        )
+    }
+
+    public func load(
+        _ selection: SessionProcessingSelection,
+        reconciliationID: SessionProcessingReconciliationID
+    ) async -> SessionTranscriptionSourceResult {
+        guard let reconciliationBinding,
+              reconciliationBinding.reconciliationID == reconciliationID,
+              reconciliationBinding.scope == selection.scope,
+              await scopes.isCurrentSessionProcessingScope(
+                  reconciliationBinding.active.identity
+              )
+        else { return .unavailable }
+        return await load(
+            selection,
+            active: reconciliationBinding.active,
+            reconciliationID: reconciliationID
+        )
+    }
+
+    public func inventory(
+        for scope: LibraryScope
+    ) async -> SessionProcessingJobInventoryResult {
+        reconciliationBinding = nil
+        reconciliationSessionBinding = nil
+        guard let active = await scopes.acquireSessionProcessingScope(for: scope) else {
+            return .unavailable
+        }
+        guard let reconciliationID = try? SessionProcessingReconciliationID(
+            "reconcile-\(UUID().uuidString)"
+        ) else { return .integrityMismatch }
+        let repository = PortableSessionProcessingJobRepository(
+            root: active.root,
+            libraryID: scope.libraryID
+        )
+        let result: SessionProcessingJobInventoryResult
+        do {
+            result = try await scopes.withCurrentSessionProcessingScope(active.identity) {
+                repository.inventorySynchronously(
+                    for: scope,
+                    reconciliationID: reconciliationID
+                )
+            }
+        } catch {
+            return .unavailable
+        }
+        guard await scopes.isCurrentSessionProcessingScope(active.identity) else {
+            return .unavailable
+        }
+        guard case let .available(inventory) = result,
+              inventory.reconciliationID == reconciliationID,
+              inventory.scope == scope
+        else { return result }
+        reconciliationBinding = ReconciliationBinding(
+            reconciliationID: reconciliationID,
+            scope: scope,
+            active: active,
+            jobs: repository,
+            jobIDs: Set(inventory.jobs.map(\.jobID))
+        )
+        return result
+    }
+
+    public func finishReconciliation(
+        _ reconciliationID: SessionProcessingReconciliationID
+    ) async {
+        guard reconciliationBinding?.reconciliationID == reconciliationID else {
+            return
+        }
+        reconciliationBinding = nil
+        if reconciliationSessionBinding?.reconciliationID == reconciliationID {
+            reconciliationSessionBinding = nil
+        }
+    }
+
+    private func load(
+        _ selection: SessionProcessingSelection,
+        active: ActiveLibraryProcessingScope,
+        reconciliationID: SessionProcessingReconciliationID?
+    ) async -> SessionTranscriptionSourceResult {
+        if reconciliationID == nil {
+            binding = nil
+        } else {
+            reconciliationSessionBinding = nil
         }
         let root = active.root
         let revisions = PortableTranscriptRevisionRepository(
@@ -281,9 +384,10 @@ public actor PortableSessionProcessingWorkspace:
                 )
                 guard await scopes.isCurrentSessionProcessingScope(active.identity)
                 else { return .unavailable }
-                binding = Binding(
+                let nextBinding = Binding(
                     selection: selection,
                     scope: active,
+                    reconciliationID: reconciliationID,
                     revisions: revisions,
                     jobs: PortableSessionProcessingJobRepository(
                         root: root,
@@ -291,6 +395,11 @@ public actor PortableSessionProcessingWorkspace:
                     ),
                     audio: audio
                 )
+                if reconciliationID == nil {
+                    binding = nextBinding
+                } else {
+                    reconciliationSessionBinding = nextBinding
+                }
                 return .available(
                     SessionTranscriptionSource(
                         selection: selection,
@@ -302,7 +411,11 @@ public actor PortableSessionProcessingWorkspace:
                     )
                 )
             } catch {
-                binding = nil
+                if reconciliationID == nil {
+                    binding = nil
+                } else {
+                    reconciliationSessionBinding = nil
+                }
                 return .integrityMismatch
             }
         case .unavailable:
@@ -356,6 +469,29 @@ public actor PortableSessionProcessingWorkspace:
         _ job: SessionProcessingJob,
         from expected: SessionProcessingJobState
     ) async -> SessionProcessingJobWriteResult {
+        if let reconciliationBinding,
+           reconciliationBinding.jobIDs.contains(job.jobID),
+           await scopes.isCurrentSessionProcessingScope(
+               reconciliationBinding.active.identity
+           )
+        {
+            do {
+                let result = try await scopes.withCurrentSessionProcessingScope(
+                    reconciliationBinding.active.identity
+                ) {
+                    reconciliationBinding.jobs.transitionSynchronously(
+                        job,
+                        from: expected
+                    )
+                }
+                guard await scopes.isCurrentSessionProcessingScope(
+                    reconciliationBinding.active.identity
+                ) else { return .failed }
+                return result
+            } catch {
+                return .failed
+            }
+        }
         guard let binding, binding.selection.sessionID == job.sessionID,
               await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
         else { return .failed }
@@ -377,7 +513,7 @@ public actor PortableSessionProcessingWorkspace:
         _ revision: TranscriptRevision,
         expectedSelectedRevisionID: TranscriptRevisionID?
     ) async throws -> ReopenedTranscriptRevisionSnapshot {
-        guard let binding, binding.selection.sessionID == revision.sessionID,
+        guard let binding = sessionBinding(for: revision.sessionID),
               await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
         else { throw TranscriptRevisionRepositoryFailure.sessionUnavailable }
         let result = try await scopes.withCurrentSessionProcessingScope(
@@ -396,7 +532,7 @@ public actor PortableSessionProcessingWorkspace:
     public func reopenSelected(
         sessionID: SessionID
     ) async throws -> ReopenedTranscriptRevisionSnapshot {
-        guard let binding, binding.selection.sessionID == sessionID,
+        guard let binding = sessionBinding(for: sessionID),
               await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
         else { throw TranscriptRevisionRepositoryFailure.sessionUnavailable }
         let result = try await scopes.withCurrentSessionProcessingScope(
@@ -413,7 +549,7 @@ public actor PortableSessionProcessingWorkspace:
         sessionID: SessionID,
         revisionID: TranscriptRevisionID
     ) async throws -> TranscriptRevision {
-        guard let binding, binding.selection.sessionID == sessionID,
+        guard let binding = sessionBinding(for: sessionID),
               await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
         else { throw TranscriptRevisionRepositoryFailure.sessionUnavailable }
         let result = try await scopes.withCurrentSessionProcessingScope(
@@ -434,12 +570,24 @@ public actor PortableSessionProcessingWorkspace:
         selection: SessionProcessingSelection,
         fingerprint: AudioFingerprint
     ) async -> ConfinedCanonicalAudioInput? {
-        guard let binding, binding.selection == selection,
-              binding.audio.capabilityID == capabilityID,
-              binding.audio.fingerprint == fingerprint,
+        let candidates = [reconciliationSessionBinding, binding].compactMap { $0 }
+        guard let binding = candidates.first(where: {
+            $0.selection == selection && $0.audio.capabilityID == capabilityID &&
+                $0.audio.fingerprint == fingerprint
+        }),
               await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
         else { return nil }
         return binding.audio
+    }
+
+    private func sessionBinding(for sessionID: SessionID) -> Binding? {
+        if let reconciliationSessionBinding,
+           reconciliationSessionBinding.selection.sessionID == sessionID
+        {
+            return reconciliationSessionBinding
+        }
+        guard let binding, binding.selection.sessionID == sessionID else { return nil }
+        return binding
     }
 }
 

@@ -352,6 +352,47 @@ final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
         XCTAssertEqual(closeCount, 1)
     }
 
+    func testUnconfirmedCancellationIsRetriedUntilHostProvesWorkerReaped()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let host = SequencedCancellationWorkerHostProbe(
+            outcomes: [.unableToConfirm, .reaped]
+        )
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+
+        let first = await engine.cancel(fixture.request.execution)
+        let second = await engine.cancel(fixture.request.execution)
+        let presence = await engine.workerPresence(for: fixture.request.execution)
+        let cancelCount = await host.cancelCountValue()
+
+        XCTAssertEqual(first, .unableToConfirm)
+        XCTAssertEqual(second, .reaped)
+        XCTAssertEqual(presence, .absent)
+        XCTAssertEqual(cancelCount, 2)
+    }
+
+    func testQualificationBlockedHostProvesItsNeverLaunchedAuthorityAbsent()
+        async throws
+    {
+        let execution = try WorkerFixture().request.execution
+        let host = QualificationBlockedTranscriptionWorkerHost()
+
+        let presence = await host.workerPresence(for: execution)
+        let cancellation = await host.cancelAndReap(
+            execution,
+            graceMilliseconds: 50
+        )
+
+        XCTAssertEqual(presence, .absent)
+        XCTAssertEqual(cancellation, .alreadyAbsent)
+    }
+
     func testCancelWhileLiveEventIsObservedStillRejectsLaterCandidate() async throws {
         let fixture = try WorkerFixture()
         let artifact = try fixture.candidateArtifact()
@@ -657,6 +698,40 @@ private actor SuspendedStartupWorkerHostProbe:
     }
     func executionCount() -> Int { executions }
     func closeCountValue() -> Int { closeCount }
+}
+
+private actor SequencedCancellationWorkerHostProbe:
+    ConfinedTranscriptionWorkerHost
+{
+    private var outcomes: [TranscriptionCancellationOutcome]
+    private(set) var cancelCount = 0
+
+    init(outcomes: [TranscriptionCancellationOutcome]) {
+        self.outcomes = outcomes
+    }
+
+    func start(
+        _ invocation: ConfinedTranscriptionWorkerInvocation
+    ) async throws -> ConfinedTranscriptionWorkerStarted {
+        throw TranscriptionEngineFailure.launchFailed
+    }
+
+    func cancelAndReap(
+        _ execution: TranscriptionExecutionReference,
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome {
+        cancelCount += 1
+        guard !outcomes.isEmpty else { return .unableToConfirm }
+        return outcomes.removeFirst()
+    }
+
+    func workerPresence(
+        for execution: TranscriptionExecutionReference
+    ) async -> TranscriptionWorkerPresence {
+        .unknown
+    }
+
+    func cancelCountValue() -> Int { cancelCount }
 }
 
 private actor LiveStreamingWorkerHostProbe:

@@ -6,6 +6,11 @@ import Foundation
 @_silgen_name("flock")
 private func sessionProcessingJobFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 
+enum JobReconciliationFault: Hashable, Sendable {
+    case beforeCreationPartialUnlink
+    case beforeTransitionPartialUnlink
+}
+
 /// Portable, descriptor-confined durable job state. Each state change is a
 /// compare-and-swap under the job directory lock; no caller can replace an
 /// unobserved state. Issue #16 can deepen reconciliation behind this same port.
@@ -17,10 +22,56 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
 
     private let root: URL
     private let libraryID: LibraryID
+    private let reconciliationFault: @Sendable (JobReconciliationFault) throws -> Void
 
     public init(root: URL, libraryID: LibraryID) {
+        self.init(root: root, libraryID: libraryID, reconciliationFault: { _ in })
+    }
+
+    init(
+        root: URL,
+        libraryID: LibraryID,
+        reconciliationFault: @escaping @Sendable (JobReconciliationFault) throws
+            -> Void
+    ) {
         self.root = root
         self.libraryID = libraryID
+        self.reconciliationFault = reconciliationFault
+    }
+
+    public func inventory(
+        for scope: LibraryScope
+    ) async -> SessionProcessingJobInventoryResult {
+        guard let reconciliationID = try? SessionProcessingReconciliationID(
+            "reconcile-\(UUID().uuidString)"
+        ) else { return .integrityMismatch }
+        return inventorySynchronously(
+            for: scope,
+            reconciliationID: reconciliationID
+        )
+    }
+
+    func inventorySynchronously(
+        for scope: LibraryScope,
+        reconciliationID: SessionProcessingReconciliationID
+    ) -> SessionProcessingJobInventoryResult {
+        guard scope.libraryID == libraryID else { return .unavailable }
+        do {
+            let jobs = try withJobs(exclusive: true) {
+                try reconcileOwnedPartialsAndLoadJobs($0)
+            }
+            return .available(
+                SessionProcessingJobInventory(
+                    reconciliationID: reconciliationID,
+                    scope: scope,
+                    jobs: jobs
+                )
+            )
+        } catch JobPersistenceError.unavailable {
+            return .unavailable
+        } catch {
+            return .integrityMismatch
+        }
     }
 
     public func latest(
@@ -34,23 +85,9 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
     ) -> SessionProcessingJobLoadResult {
         guard selection.scope.libraryID == libraryID else { return .unavailable }
         do {
-            return try withJobs(exclusive: false) { authority in
-                let names = try confined.listEntryNames(
-                    under: authority.jobsDescriptor,
-                    maximumCount: Self.maximumJobCount
-                )
+            return try withJobs(exclusive: true) { authority in
                 var latest: SessionProcessingJob?
-                for name in names {
-                    guard let jobID = try? TranscriptionJobID(name) else {
-                        throw JobPersistenceError.integrityMismatch
-                    }
-                    let job = try loadJob(
-                        named: name,
-                        under: authority.jobsDescriptor
-                    )
-                    guard job.jobID == jobID else {
-                        throw JobPersistenceError.integrityMismatch
-                    }
+                for job in try reconcileOwnedPartialsAndLoadJobs(authority) {
                     guard job.sessionID == selection.sessionID else { continue }
                     if let current = latest {
                         if (job.createdAt.rawValue, job.jobID.rawValue) >
@@ -246,6 +283,11 @@ private extension PortableSessionProcessingJobRepository {
     struct FileIdentity: Equatable {
         let device: UInt64
         let inode: UInt64
+    }
+
+    struct OpenedRegularFile {
+        let descriptor: Int32
+        let identity: FileIdentity
     }
 
     struct JobV2DTO: Codable {
@@ -497,6 +539,346 @@ private extension PortableSessionProcessingJobRepository {
             throw JobPersistenceError.integrityMismatch
         }
         return try loadJob(under: descriptor)
+    }
+
+    /// Reconciles only byte-exact repository-owned crash names. Every entry is
+    /// classified before mutation, so an unknown or near-match name preserves
+    /// the directory unchanged and fails closed.
+    func reconcileOwnedPartialsAndLoadJobs(
+        _ authority: RootAuthority
+    ) throws -> [SessionProcessingJob] {
+        let names = try confined.listEntryNames(
+            under: authority.jobsDescriptor,
+            maximumCount: Self.maximumJobCount
+        )
+        var jobNames: [(String, TranscriptionJobID)] = []
+        var creationPartials: [(String, TranscriptionJobID)] = []
+        for name in names {
+            if let jobID = try? TranscriptionJobID(name) {
+                jobNames.append((name, jobID))
+                continue
+            }
+            if let jobID = creationPartialJobID(name) {
+                creationPartials.append((name, jobID))
+                continue
+            }
+            throw JobPersistenceError.integrityMismatch
+        }
+
+        // A create partial and installed directory for the same Job cannot be
+        // produced by renameat; retaining both is adversarial ambiguity.
+        let installedIDs = Set(jobNames.map(\.1))
+        guard creationPartials.allSatisfy({ !installedIDs.contains($0.1) }) else {
+            throw JobPersistenceError.integrityMismatch
+        }
+        for (name, jobID) in creationPartials {
+            try discardVerifiedCreationPartial(
+                named: name,
+                jobID: jobID,
+                authority: authority
+            )
+        }
+
+        var jobs: [SessionProcessingJob] = []
+        jobs.reserveCapacity(jobNames.count)
+        for (name, jobID) in jobNames {
+            let job = try loadJobReconcilingTransitionPartial(
+                named: name,
+                expectedJobID: jobID,
+                authority: authority
+            )
+            guard job.jobID == jobID else {
+                throw JobPersistenceError.integrityMismatch
+            }
+            jobs.append(job)
+        }
+        try revalidate(authority)
+        return jobs
+    }
+
+    func creationPartialJobID(_ name: String) -> TranscriptionJobID? {
+        let prefix = "."
+        let suffix = ".partial"
+        guard name.hasPrefix(prefix), name.hasSuffix(suffix),
+              name.utf8.count > prefix.utf8.count + suffix.utf8.count
+        else { return nil }
+        let start = name.index(after: name.startIndex)
+        let end = name.index(name.endIndex, offsetBy: -suffix.count)
+        let raw = String(name[start..<end])
+        guard let jobID = try? TranscriptionJobID(raw),
+              name == ".\(jobID.rawValue).partial"
+        else { return nil }
+        return jobID
+    }
+
+    func discardVerifiedCreationPartial(
+        named name: String,
+        jobID: TranscriptionJobID,
+        authority: RootAuthority
+    ) throws {
+        let descriptor = try confined.openDirectory(
+            named: name,
+            under: authority.jobsDescriptor
+        )
+        defer { Darwin.close(descriptor) }
+        try lock(descriptor, operation: LOCK_EX)
+        defer { _ = sessionProcessingJobFlock(descriptor, LOCK_UN) }
+        let partialIdentity = try identity(descriptor)
+        let entries = try confined.listEntryNames(
+            under: descriptor,
+            maximumCount: 1
+        )
+        guard entries.isEmpty || entries == ["job.json"] else {
+            throw JobPersistenceError.integrityMismatch
+        }
+        var manifest: OpenedRegularFile?
+        var manifestBytes: Data?
+        defer {
+            if let manifest { Darwin.close(manifest.descriptor) }
+        }
+        if entries == ["job.json"] {
+            let opened = try openRegularFile(named: "job.json", under: descriptor)
+            manifest = opened
+            let bytes = try boundedData(
+                from: opened.descriptor,
+                maximumBytes: Self.maximumJobBytes
+            )
+            manifestBytes = bytes
+            let staged = try decode(bytes)
+            guard staged.jobID == jobID, staged.state == .queued else {
+                throw JobPersistenceError.integrityMismatch
+            }
+        }
+        try revalidate(authority)
+        try revalidateDirectory(
+            named: name,
+            identity: partialIdentity,
+            under: authority.jobsDescriptor
+        )
+        try reconciliationFault(.beforeCreationPartialUnlink)
+        try revalidate(authority)
+        try revalidateDirectory(
+            named: name,
+            identity: partialIdentity,
+            under: authority.jobsDescriptor
+        )
+        if let manifest {
+            guard let manifestBytes,
+                  try boundedData(
+                from: manifest.descriptor,
+                maximumBytes: Self.maximumJobBytes
+            ) == manifestBytes else {
+                throw JobPersistenceError.integrityMismatch
+            }
+            try revalidateRegularFile(
+                named: "job.json",
+                identity: manifest.identity,
+                under: descriptor
+            )
+        }
+        guard try confined.listEntryNames(
+            under: descriptor,
+            maximumCount: 2
+        ) == entries else {
+            throw JobPersistenceError.integrityMismatch
+        }
+        if entries == ["job.json"], unlinkat(descriptor, "job.json", 0) != 0 {
+            throw JobPersistenceError.io
+        }
+        if let manifest {
+            var metadata = stat()
+            guard fstat(manifest.descriptor, &metadata) == 0,
+                  metadata.st_nlink == 0
+            else { throw JobPersistenceError.integrityMismatch }
+        }
+        guard unlinkat(authority.jobsDescriptor, name, AT_REMOVEDIR) == 0 else {
+            throw JobPersistenceError.io
+        }
+        try confined.flush(authority.jobsDescriptor)
+    }
+
+    func loadJobReconcilingTransitionPartial(
+        named name: String,
+        expectedJobID: TranscriptionJobID,
+        authority: RootAuthority
+    ) throws -> SessionProcessingJob {
+        let descriptor = try confined.openDirectory(
+            named: name,
+            under: authority.jobsDescriptor
+        )
+        defer { Darwin.close(descriptor) }
+        let jobIdentity = try identity(descriptor)
+        try lock(descriptor, operation: LOCK_EX)
+        defer { _ = sessionProcessingJobFlock(descriptor, LOCK_UN) }
+        let entries = try confined.listEntryNames(
+            under: descriptor,
+            maximumCount: 2
+        )
+        guard entries == ["job.json"] ||
+            entries == ["job.json", "job.json.partial"]
+        else { throw JobPersistenceError.integrityMismatch }
+
+        let currentFile = try openRegularFile(named: "job.json", under: descriptor)
+        defer { Darwin.close(currentFile.descriptor) }
+        let currentData = try boundedData(
+            from: currentFile.descriptor,
+            maximumBytes: Self.maximumJobBytes
+        )
+        let current = try decode(currentData)
+        guard current.jobID == expectedJobID else {
+            throw JobPersistenceError.integrityMismatch
+        }
+        if entries.contains("job.json.partial") {
+            let partialFile = try openRegularFile(
+                named: "job.json.partial",
+                under: descriptor
+            )
+            defer { Darwin.close(partialFile.descriptor) }
+            let partialData = try boundedData(
+                from: partialFile.descriptor,
+                maximumBytes: Self.maximumJobBytes
+            )
+            let replacement = try decode(partialData)
+            guard replacement.jobID == expectedJobID,
+                  sameIdentity(current, replacement),
+                  isAllowedTransition(from: current, to: replacement),
+                  preservesCandidateIntegrity(from: current, to: replacement),
+                  preservesControlIntegrity(from: current, to: replacement)
+            else { throw JobPersistenceError.integrityMismatch }
+            try revalidate(authority)
+            try revalidateJob(
+                named: name,
+                identity: jobIdentity,
+                under: authority.jobsDescriptor
+            )
+            try reconciliationFault(.beforeTransitionPartialUnlink)
+            try revalidate(authority)
+            try revalidateJob(
+                named: name,
+                identity: jobIdentity,
+                under: authority.jobsDescriptor
+            )
+            guard try boundedData(
+                from: currentFile.descriptor,
+                maximumBytes: Self.maximumJobBytes
+            ) == currentData,
+                try boundedData(
+                    from: partialFile.descriptor,
+                    maximumBytes: Self.maximumJobBytes
+                ) == partialData
+            else { throw JobPersistenceError.integrityMismatch }
+            try revalidateRegularFile(
+                named: "job.json",
+                identity: currentFile.identity,
+                under: descriptor
+            )
+            try revalidateRegularFile(
+                named: "job.json.partial",
+                identity: partialFile.identity,
+                under: descriptor
+            )
+            guard try confined.listEntryNames(
+                under: descriptor,
+                maximumCount: 3
+            ) == entries else {
+                throw JobPersistenceError.integrityMismatch
+            }
+            guard unlinkat(descriptor, "job.json.partial", 0) == 0 else {
+                throw JobPersistenceError.io
+            }
+            var partialMetadata = stat()
+            guard fstat(partialFile.descriptor, &partialMetadata) == 0,
+                  partialMetadata.st_nlink == 0
+            else { throw JobPersistenceError.integrityMismatch }
+            try confined.flush(descriptor)
+        }
+        return current
+    }
+
+    func revalidateDirectory(
+        named name: String,
+        identity expectedIdentity: FileIdentity,
+        under parent: Int32
+    ) throws {
+        let reopened = try confined.openDirectory(named: name, under: parent)
+        defer { Darwin.close(reopened) }
+        guard try identity(reopened) == expectedIdentity else {
+            throw JobPersistenceError.integrityMismatch
+        }
+    }
+
+    func openRegularFile(named name: String, under parent: Int32) throws
+        -> OpenedRegularFile
+    {
+        let descriptor = name.withCString {
+            Darwin.openat(parent, $0, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else { throw JobPersistenceError.integrityMismatch }
+        do {
+            var metadata = stat()
+            guard fstat(descriptor, &metadata) == 0,
+                  (metadata.st_mode & S_IFMT) == S_IFREG,
+                  metadata.st_nlink == 1
+            else { throw JobPersistenceError.integrityMismatch }
+            return OpenedRegularFile(
+                descriptor: descriptor,
+                identity: FileIdentity(
+                    device: UInt64(metadata.st_dev),
+                    inode: UInt64(metadata.st_ino)
+                )
+            )
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    func revalidateRegularFile(
+        named name: String,
+        identity expectedIdentity: FileIdentity,
+        under parent: Int32
+    ) throws {
+        let reopened = try openRegularFile(named: name, under: parent)
+        defer { Darwin.close(reopened.descriptor) }
+        guard reopened.identity == expectedIdentity else {
+            throw JobPersistenceError.integrityMismatch
+        }
+    }
+
+    func boundedData(from descriptor: Int32, maximumBytes: Int) throws -> Data {
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              metadata.st_size >= 0,
+              metadata.st_size <= maximumBytes
+        else { throw JobPersistenceError.integrityMismatch }
+        let count = Int(metadata.st_size)
+        var data = Data(count: count)
+        try data.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else {
+                if count == 0 { return }
+                throw JobPersistenceError.io
+            }
+            var offset = 0
+            while offset < count {
+                let readCount = Darwin.pread(
+                    descriptor,
+                    base.advanced(by: offset),
+                    count - offset,
+                    off_t(offset)
+                )
+                if readCount < 0 {
+                    if errno == EINTR { continue }
+                    throw JobPersistenceError.io
+                }
+                guard readCount > 0 else { throw JobPersistenceError.io }
+                offset += readCount
+            }
+        }
+        var finalMetadata = stat()
+        guard fstat(descriptor, &finalMetadata) == 0,
+              finalMetadata.st_size == metadata.st_size
+        else { throw JobPersistenceError.integrityMismatch }
+        return data
     }
 
     func revalidateJob(

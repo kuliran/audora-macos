@@ -515,6 +515,41 @@ public struct SessionProcessingJob: Equatable, Sendable {
     }
 }
 
+/// Process-local capability for one bounded durable-Job inventory. The
+/// Infrastructure owner binds it to an exact active-Library generation and
+/// retained root authority; Application never receives a filesystem path.
+public enum SessionProcessingReconciliationIDError: Error, Equatable, Sendable {
+    case invalidIdentifier
+}
+
+public struct SessionProcessingReconciliationID: Hashable, Sendable {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard (1...128).contains(rawValue.utf8.count), rawValue.utf8.allSatisfy({
+            (48...57).contains($0) || (65...90).contains($0) ||
+                (97...122).contains($0) || $0 == 45 || $0 == 95
+        }) else { throw SessionProcessingReconciliationIDError.invalidIdentifier }
+        self.rawValue = rawValue
+    }
+}
+
+public struct SessionProcessingJobInventory: Equatable, Sendable {
+    public let reconciliationID: SessionProcessingReconciliationID
+    public let scope: LibraryScope
+    public let jobs: [SessionProcessingJob]
+
+    public init(
+        reconciliationID: SessionProcessingReconciliationID,
+        scope: LibraryScope,
+        jobs: [SessionProcessingJob]
+    ) {
+        self.reconciliationID = reconciliationID
+        self.scope = scope
+        self.jobs = jobs
+    }
+}
+
 public struct SessionProcessingReadySnapshot: Equatable, Sendable {
     public let source: SessionTranscriptionSource
     public let profileID: String?
@@ -590,15 +625,21 @@ public struct SessionProcessingRecoverableSnapshot: Equatable, Sendable {
 public struct SessionProcessingCompletedSnapshot: Equatable, Sendable {
     public let sessionID: SessionID
     public let jobID: TranscriptionJobID
-    public let selectedRevisionID: TranscriptRevisionID
+    /// The immutable Revision produced by this completed Job.
+    public let revisionID: TranscriptRevisionID
+    /// The Session's current selection at the source snapshot boundary. It can
+    /// differ from `revisionID` after review, or be nil when nothing is selected.
+    public let selectedRevisionID: TranscriptRevisionID?
 
     public init(
         sessionID: SessionID,
         jobID: TranscriptionJobID,
-        selectedRevisionID: TranscriptRevisionID
+        revisionID: TranscriptRevisionID,
+        selectedRevisionID: TranscriptRevisionID?
     ) {
         self.sessionID = sessionID
         self.jobID = jobID
+        self.revisionID = revisionID
         self.selectedRevisionID = selectedRevisionID
     }
 }
@@ -637,6 +678,9 @@ public enum SessionProcessingFeatureState: Equatable, Sendable {
 }
 
 public enum SessionProcessingCommand: Equatable, Sendable {
+    /// System lifecycle command. It reconciles durable Jobs without selecting
+    /// any Session in the user-facing processing panel.
+    case activateLibrary(LibraryScope)
     case selectSession(SessionProcessingSelection)
     case clearSelection
     case start

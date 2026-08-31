@@ -3,6 +3,7 @@ import AudoraDomain
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private static let maximumIdentityAttempts = 16
+    private static let maximumReconciledJobCount = 10_000
 
     private enum PendingSelectionCommand {
         case select(SessionProcessingSelection)
@@ -39,7 +40,9 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private var commandInFlight = false
     private var cancellationFinalizationInFlight = false
     private var pendingSelectionCommand: PendingSelectionCommand?
+    private var pendingLibraryActivationScope: LibraryScope?
     private var cancelledRunJobID: TranscriptionJobID?
+    private var suppressStateTransitions = false
     private var stateContinuations: [UInt64: AsyncStream<SessionProcessingFeatureState>.Continuation]
         = [:]
     private var nextSubscriberID: UInt64 = 1
@@ -92,14 +95,15 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         while let current = next {
             await perform(current)
             guard !cancellationFinalizationInFlight else { break }
-            next = pendingSelectionCommand?.command
-            pendingSelectionCommand = nil
+            next = takePendingContextCommand()
         }
         commandInFlight = false
     }
 
     private func perform(_ command: SessionProcessingCommand) async {
         switch command {
+        case let .activateLibrary(scope):
+            await reconcileActiveLibrary(scope)
         case let .selectSession(selection):
             await select(selection)
         case .clearSelection:
@@ -131,6 +135,100 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 )
             )
         )
+    }
+
+    /// Bounded launch-time reconciliation is intentionally independent of UI
+    /// Session selection. Infrastructure binds the inventory capability to one
+    /// retained Library generation; every subsequent source/job/publication
+    /// boundary fails closed if that authority is no longer current.
+    private func reconcileActiveLibrary(_ scope: LibraryScope) async {
+        let inventory: SessionProcessingJobInventory
+        switch await jobs.inventory(for: scope) {
+        case let .available(available):
+            inventory = available
+        case .unavailable, .integrityMismatch:
+            return
+        }
+        let reconciliationID = inventory.reconciliationID
+        guard inventory.scope == scope,
+              inventory.jobs.count <= Self.maximumReconciledJobCount,
+              Set(inventory.jobs.map(\.jobID)).count == inventory.jobs.count
+        else {
+            await jobs.finishReconciliation(reconciliationID)
+            return
+        }
+
+        let preservedProfile = selectedProfile
+        suppressStateTransitions = true
+        for job in inventory.jobs.sorted(by: {
+            ($0.createdAt.rawValue, $0.jobID.rawValue) <
+                ($1.createdAt.rawValue, $1.jobID.rawValue)
+        }) {
+            switch job.state {
+            case .queued, .preparing, .running:
+                await reconcileBackgroundControl(job)
+                continue
+            case .completed, .failed, .cancelled, .interrupted:
+                // Durable terminal authority is already deterministic and does
+                // not require launch-time canonical-audio work. An explicitly
+                // selected completed Session still gets exact Revision checks.
+                continue
+            case .validating:
+                break
+            }
+            let selection = SessionProcessingSelection(
+                scope: scope,
+                sessionID: job.sessionID
+            )
+            guard case let .available(source) = await sourcePort.load(
+                selection,
+                reconciliationID: reconciliationID
+            ), source.selection == selection, source.isValid else {
+                continue
+            }
+            await reconcile(job, source: source)
+        }
+        suppressStateTransitions = false
+        selectedProfile = preservedProfile
+        await jobs.finishReconciliation(reconciliationID)
+    }
+
+    private func reconcileBackgroundControl(_ job: SessionProcessingJob) async {
+        switch job.state {
+        case .queued:
+            await persistBackgroundTerminal(job, as: .interrupted)
+        case .preparing, .running:
+            guard job.cancellationAuthorityID != nil else { return }
+            switch await engine.workerPresence(for: job.executionReference) {
+            case .absent:
+                await persistBackgroundAbandonment(job)
+            case .present:
+                let outcome = await engine.cancel(job.executionReference)
+                guard outcome == .reaped || outcome == .alreadyAbsent else { return }
+                await persistBackgroundAbandonment(job)
+            case .unknown:
+                // Preserve the nonterminal Job as recovery-required. Absence
+                // has not been proved, so no durable terminal claim is safe.
+                return
+            }
+        case .validating, .completed, .failed, .cancelled, .interrupted:
+            return
+        }
+    }
+
+    private func persistBackgroundAbandonment(_ job: SessionProcessingJob) async {
+        await persistBackgroundTerminal(
+            job,
+            as: job.cancellationRequestedAt == nil ? .interrupted : .cancelled
+        )
+    }
+
+    private func persistBackgroundTerminal(
+        _ job: SessionProcessingJob,
+        as state: SessionProcessingJobState
+    ) async {
+        let terminal = job.transitioning(to: state)
+        _ = await jobs.transition(terminal, from: job.state)
     }
 
     private func select(_ selection: SessionProcessingSelection) async {
@@ -462,8 +560,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                     SessionProcessingCompletedSnapshot(
                         sessionID: job.sessionID,
                         jobID: job.jobID,
-                        selectedRevisionID:
-                            source.expectedSelectedRevisionID ?? job.revisionID
+                        revisionID: job.revisionID,
+                        selectedRevisionID: source.expectedSelectedRevisionID
                     )
                 )
             )
@@ -504,19 +602,12 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         _ job: SessionProcessingJob,
         source: SessionTranscriptionSource
     ) async {
-        if source.expectedSelectedRevisionID == job.revisionID {
-            guard await selectedRevisionMatches(job, source: source) else {
-                transition(
-                    to: .failed(
-                        SessionProcessingFailedSnapshot(
-                            job: job,
-                            reason: .canonicalRevisionIntegrityFailed,
-                            actions: []
-                        )
-                    )
-                )
-                return
-            }
+        // Publication is manifest-last: the exact immutable Revision may be
+        // installed even when the publisher returned installedNeedsRefresh or
+        // the validating->completed Job CAS failed. Prove this Job's Revision
+        // first, independently of a later review selection, and never republish
+        // it against the stale start-time selection baseline.
+        if await completedRevisionMatches(job, source: source) {
             await completeInstalledValidation(job, source: source)
             return
         }
@@ -600,15 +691,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             let completed = job.transitioning(to: .completed)
             guard case .written = await jobs.transition(completed, from: .validating)
             else {
-                transition(
-                    to: .failed(
-                        SessionProcessingFailedSnapshot(
-                            job: completed,
-                            reason: .installedNeedsRefresh,
-                            actions: [.retry]
-                        )
-                    )
-                )
+                // The canonical selection has already committed. Preserve the
+                // durable validating Job as the sole recovery authority so a
+                // later exact reopen completes this Job instead of rerunning it.
+                transition(to: .recoveryRequired(job))
                 return
             }
             transition(
@@ -616,17 +702,26 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                     SessionProcessingCompletedSnapshot(
                         sessionID: source.selection.sessionID,
                         jobID: job.jobID,
+                        revisionID: job.revisionID,
                         selectedRevisionID: reopened.selectedRevisionID
                     )
                 )
             )
         case let .rejected(failure):
+            if failure == .installedNeedsRefresh {
+                // Repository contract: selection already switched, but its
+                // mandatory reopen could not complete. Never rewrite this
+                // validating Job to retryable failed; relaunch must prove and
+                // reopen the exact installed Revision by Job identity.
+                transition(to: .recoveryRequired(job))
+                return
+            }
             let reason: SessionProcessingFailureReason
             switch failure {
             case .invalidCandidate:
                 reason = .candidateRejected
             case .installedNeedsRefresh:
-                reason = .installedNeedsRefresh
+                preconditionFailure("handled above")
             case .staleSelection:
                 reason = .staleSelection
             default:
@@ -634,27 +729,6 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             }
             await fail(job: job, expected: .validating, reason: reason)
         }
-    }
-
-    private func selectedRevisionMatches(
-        _ job: SessionProcessingJob,
-        source: SessionTranscriptionSource
-    ) async -> Bool {
-        guard source.expectedSelectedRevisionID == job.revisionID,
-              case let .available(reopened) = await publisher.reopenSelected(
-                  sessionID: job.sessionID
-              ),
-              reopened.selectedRevisionID == job.revisionID,
-              reopened.revisionIDs.contains(job.revisionID),
-              reopened.selectedRevision.revisionID == job.revisionID,
-              reopened.selectedRevision.sessionID == job.sessionID,
-              reopened.selectedRevision.jobID == job.jobID,
-              reopened.selectedRevision.audioFingerprint == source.audioFingerprint,
-              reopened.selectedRevision.sourceFingerprints == source.sourceFingerprints,
-              reopened.selectedRevision.candidateArtifactFingerprint.sha256 ==
-                job.candidateArtifactSHA256
-        else { return false }
-        return true
     }
 
     private func completedRevisionMatches(
@@ -682,15 +756,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     ) async {
         let completed = job.transitioning(to: .completed)
         guard case .written = await jobs.transition(completed, from: .validating) else {
-            transition(
-                to: .failed(
-                    SessionProcessingFailedSnapshot(
-                        job: completed,
-                        reason: .installedNeedsRefresh,
-                        actions: [.retry]
-                    )
-                )
-            )
+            transition(to: .recoveryRequired(job))
             return
         }
         transition(
@@ -698,7 +764,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 SessionProcessingCompletedSnapshot(
                     sessionID: source.selection.sessionID,
                     jobID: job.jobID,
-                    selectedRevisionID: job.revisionID
+                    revisionID: job.revisionID,
+                    selectedRevisionID: source.expectedSelectedRevisionID
                 )
             )
         )
@@ -835,7 +902,17 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         let outcome = await engine.cancel(requested.executionReference)
         guard outcome == .reaped || outcome == .alreadyAbsent else {
             transition(to: .recoveryRequired(requested))
-            cancellationFinalizationInFlight = false
+            // The old worker may still be alive, so Session selection remains
+            // fenced. Library activation is different: it is a system lifecycle
+            // obligation for a newly active authority and must not wait forever
+            // for this run. Keep the cancellation fence raised while draining
+            // the coalesced activation(s), then hand ordinary pending context
+            // back to the original run or the idle command loop.
+            while let scope = pendingLibraryActivationScope {
+                pendingLibraryActivationScope = nil
+                await reconcileActiveLibrary(scope)
+            }
+            await finishCancellationFinalization()
             return
         }
         let cancelled = requested.transitioning(to: .cancelled)
@@ -867,6 +944,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
 
     private func retainLatestSelectionCommand(_ command: SessionProcessingCommand) {
         switch command {
+        case let .activateLibrary(scope):
+            pendingLibraryActivationScope = scope
         case let .selectSession(selection):
             pendingSelectionCommand = .select(selection)
         case .clearSelection:
@@ -876,12 +955,22 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         }
     }
 
+    private func takePendingContextCommand() -> SessionProcessingCommand? {
+        if let scope = pendingLibraryActivationScope {
+            pendingLibraryActivationScope = nil
+            return .activateLibrary(scope)
+        }
+        defer { pendingSelectionCommand = nil }
+        return pendingSelectionCommand?.command
+    }
+
     private func finishCancellationFinalization() async {
         cancellationFinalizationInFlight = false
-        guard !commandInFlight, pendingSelectionCommand != nil else { return }
+        guard !commandInFlight,
+              pendingSelectionCommand != nil || pendingLibraryActivationScope != nil
+        else { return }
         commandInFlight = true
-        while let current = pendingSelectionCommand?.command {
-            pendingSelectionCommand = nil
+        while let current = takePendingContextCommand() {
             await perform(current)
             guard !cancellationFinalizationInFlight else { break }
         }
@@ -1055,6 +1144,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     }
 
     private func transition(to next: SessionProcessingFeatureState) {
+        guard !suppressStateTransitions else { return }
         state = next
         for continuation in stateContinuations.values { continuation.yield(next) }
     }

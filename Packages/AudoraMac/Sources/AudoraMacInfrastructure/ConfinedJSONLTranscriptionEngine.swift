@@ -217,6 +217,19 @@ public struct QualificationBlockedTranscriptionWorkerHost:
     ) async throws -> ConfinedTranscriptionWorkerStarted {
         throw TranscriptionEngineFailure.launchFailed
     }
+
+    public func cancelAndReap(
+        _ execution: TranscriptionExecutionReference,
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome {
+        .alreadyAbsent
+    }
+
+    public func workerPresence(
+        for execution: TranscriptionExecutionReference
+    ) async -> TranscriptionWorkerPresence {
+        .absent
+    }
 }
 
 /// Version-one offline JSONL adapter. It does not discover runtimes or models:
@@ -616,6 +629,15 @@ private extension ConfinedJSONLTranscriptionEngine {
         outcome: TranscriptionCancellationOutcome
     ) {
         if completedCancellations[execution] != nil { return }
+        if outcome == .unableToConfirm {
+            guard var active = activeExecutions[execution] else { return }
+            let waiters = active.waiters
+            active.waiters = []
+            active.cancellationStarted = false
+            activeExecutions[execution] = active
+            for waiter in waiters { waiter.resume(returning: outcome) }
+            return
+        }
         let waiters = activeExecutions.removeValue(forKey: execution)?.waiters ?? []
         rememberCancellation(execution, outcome: outcome)
         for waiter in waiters { waiter.resume(returning: outcome) }
@@ -625,6 +647,7 @@ private extension ConfinedJSONLTranscriptionEngine {
         _ execution: TranscriptionExecutionReference,
         outcome: TranscriptionCancellationOutcome
     ) {
+        guard outcome == .reaped || outcome == .alreadyAbsent else { return }
         guard completedCancellations[execution] == nil else { return }
         completedCancellations[execution] = outcome
         completedCancellationOrder.append(execution)
