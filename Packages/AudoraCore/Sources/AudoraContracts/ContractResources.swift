@@ -76,7 +76,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case sessionProcessingQualifiedSuccessScenario
     case sessionProcessingQualificationBlockedScenario
     case sessionProcessingCandidateRejectedScenario
-    case sessionProcessingModelPrepareRetryScenario
+    case sessionProcessingModelPrepareStartScenario
     case sessionProcessingCancellationScenario
     case sessionProcessingRelaunchQueuedInterruptedScenario
     case sessionProcessingRelaunchInterruptedScenario
@@ -295,8 +295,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "qualification-blocked-no-fallback.v1.json"
         case .sessionProcessingCandidateRejectedScenario:
             "candidate-rejected-no-publication.v1.json"
-        case .sessionProcessingModelPrepareRetryScenario:
-            "model-prepare-retry.v1.json"
+        case .sessionProcessingModelPrepareStartScenario:
+            "model-prepare-start.v1.json"
         case .sessionProcessingCancellationScenario:
             "cancel-reaps-retains-session.v1.json"
         case .sessionProcessingRelaunchQueuedInterruptedScenario:
@@ -468,7 +468,7 @@ public enum ContractResource: CaseIterable, Sendable {
         case .sessionProcessingQualifiedSuccessScenario,
              .sessionProcessingQualificationBlockedScenario,
              .sessionProcessingCandidateRejectedScenario,
-             .sessionProcessingModelPrepareRetryScenario,
+             .sessionProcessingModelPrepareStartScenario,
              .sessionProcessingCancellationScenario,
              .sessionProcessingRelaunchQueuedInterruptedScenario,
              .sessionProcessingRelaunchInterruptedScenario,

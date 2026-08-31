@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "scenarioId": "session-processing.model-prepare-retry",
+  "scenarioId": "session-processing.model-prepare-start",
   "initialState": {
     "status": "unavailable",
     "reason": "noSession",
@@ -10,7 +10,7 @@
     { "kind": "selectSession" },
     { "kind": "start" },
     { "kind": "prepare" },
-    { "kind": "retry" }
+    { "kind": "start" }
   ],
   "dependencyTrace": [
     { "port": "source", "effect": "load", "outcome": "available" },

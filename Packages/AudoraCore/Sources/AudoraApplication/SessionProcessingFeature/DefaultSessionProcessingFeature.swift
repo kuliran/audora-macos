@@ -179,7 +179,9 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     /// Retry is truthful even when the previous source read failed: it rereads
     /// the same sealed Session before attempting a new processing run.
     private func retry() async {
-        guard let lastSelection else { return }
+        guard advertisedRecoveryActions.contains(.retry),
+              let lastSelection
+        else { return }
         await select(lastSelection)
         guard selectedSource != nil else { return }
         await start()

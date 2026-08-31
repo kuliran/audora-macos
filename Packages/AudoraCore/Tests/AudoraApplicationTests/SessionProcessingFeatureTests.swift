@@ -287,7 +287,7 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(modelVerificationCount, 0)
     }
 
-    func testMissingModelCanBePreparedThenRetriedWithoutChangingEngine() async throws {
+    func testMissingModelCanBePreparedThenStartedWithoutChangingEngine() async throws {
         let fixture = try ProcessingFixture()
         let runtime = RuntimeProbe(.qualified(fixture.profile))
         let model = ModelProbe(.missing, preparation: .ready)
@@ -324,10 +324,10 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(unavailable.reason, .modelMissing)
 
         await feature.send(.prepare)
-        await feature.send(.retry)
+        await feature.send(.start)
 
         guard case .completed = await feature.currentState else {
-            return XCTFail("expected successful retry after explicit preparation")
+            return XCTFail("expected successful Start after explicit preparation")
         }
         let preparationActions = await model.preparationActions
         let requestProfileIDs = await engine.requests.map(\.profileID)
@@ -836,6 +836,104 @@ final class SessionProcessingFeatureTests: XCTestCase {
             XCTAssertEqual(failure.reason, .canonicalRevisionIntegrityFailed)
             XCTAssertEqual(failure.actions, [])
         }
+    }
+
+    func testRetryIsInertWhenReadyDoesNotAdvertiseRetry() async throws {
+        let fixture = try ProcessingFixture()
+        let source = SourceProbe(.available(fixture.source))
+        let jobs = JobProbe()
+        let revisions = RevisionProbe()
+        let engine = EngineProbe(
+            result: .success(
+                VerifiedTranscriptionCandidate(
+                    candidate: fixture.candidate,
+                    artifactFingerprint: fixture.candidateFingerprint
+                )
+            )
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+        let stateBeforeRetry = await feature.currentState
+        guard case .ready = stateBeforeRetry else {
+            return XCTFail("expected ready before stale Retry")
+        }
+
+        await feature.send(.retry)
+
+        let stateAfterRetry = await feature.currentState
+        let sourceLoadCount = await source.loadCount
+        let persistedStates = await jobs.states
+        let engineRequestCount = await engine.requestCount()
+        let publishCount = await revisions.publishCountValue()
+        let selectedRevisionID = await revisions.selected?.revisionID
+        XCTAssertEqual(stateAfterRetry, stateBeforeRetry)
+        XCTAssertEqual(sourceLoadCount, 1)
+        XCTAssertEqual(persistedStates, [])
+        XCTAssertEqual(engineRequestCount, 0)
+        XCTAssertEqual(publishCount, 0)
+        XCTAssertNil(selectedRevisionID)
+    }
+
+    func testRetryIsInertWhenCompletedDoesNotAdvertiseRetry() async throws {
+        let fixture = try ProcessingFixture(selectedRevisionID: true)
+        let completed = fixture.job(
+            state: .completed,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+        let source = SourceProbe(.available(fixture.source))
+        let jobs = JobProbe(latest: completed)
+        let revisions = RevisionProbe(selected: try fixture.validatedRevision())
+        let engine = EngineProbe(result: .failure(.launchFailed))
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+        let stateBeforeRetry = await feature.currentState
+        guard case .completed = stateBeforeRetry else {
+            return XCTFail("expected completed before stale Retry")
+        }
+        let selectedBeforeRetry = await revisions.selected?.revisionID
+
+        await feature.send(.retry)
+
+        let stateAfterRetry = await feature.currentState
+        let sourceLoadCount = await source.loadCount
+        let persistedStates = await jobs.states
+        let engineRequestCount = await engine.requestCount()
+        let publishCount = await revisions.publishCountValue()
+        let selectedAfterRetry = await revisions.selected?.revisionID
+        XCTAssertEqual(stateAfterRetry, stateBeforeRetry)
+        XCTAssertEqual(sourceLoadCount, 1)
+        XCTAssertEqual(persistedStates, [])
+        XCTAssertEqual(engineRequestCount, 0)
+        XCTAssertEqual(publishCount, 0)
+        XCTAssertEqual(selectedAfterRetry, selectedBeforeRetry)
     }
 
     func testRetryRereadsPreviouslyUnavailableSealedSourceBeforeStarting() async throws {
