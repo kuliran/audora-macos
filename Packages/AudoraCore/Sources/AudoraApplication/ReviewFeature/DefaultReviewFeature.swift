@@ -126,19 +126,27 @@ public actor DefaultReviewFeature: ReviewFeature {
                 notice: nil
             )
         case .unavailable:
-            transition(to: .unavailable(selection: selection, reason: .noTranscript))
-            await playback.clear(previousCapability)
+            await invalidateReview(
+                selection: selection,
+                reason: .noTranscript,
+                clearing: previousCapability
+            )
         case .integrityMismatch:
-            transition(to: .unavailable(selection: selection, reason: .integrityMismatch))
-            await playback.clear(previousCapability)
+            await invalidateReview(
+                selection: selection,
+                reason: .integrityMismatch,
+                clearing: previousCapability
+            )
         }
     }
 
     private func clearSelection() async {
         let capability = readySnapshot?.playback.audioCapabilityID
-        resolver = nil
-        transition(to: .unavailable(selection: nil, reason: .noSession))
-        await playback.clear(capability)
+        await invalidateReview(
+            selection: nil,
+            reason: .noSession,
+            clearing: capability
+        )
     }
 
     private func refresh() async {
@@ -162,10 +170,18 @@ public actor DefaultReviewFeature: ReviewFeature {
                 notice: nil
             )
         case .unavailable:
-            transition(to: .unavailable(selection: selection, reason: .noTranscript))
+            await invalidateReview(
+                selection: selection,
+                reason: .noTranscript,
+                clearing: readySnapshot?.playback.audioCapabilityID ??
+                    previousPlayback?.audioCapabilityID
+            )
         case .integrityMismatch:
-            transition(
-                to: .unavailable(selection: selection, reason: .integrityMismatch)
+            await invalidateReview(
+                selection: selection,
+                reason: .integrityMismatch,
+                clearing: readySnapshot?.playback.audioCapabilityID ??
+                    previousPlayback?.audioCapabilityID
             )
         }
     }
@@ -211,22 +227,33 @@ public actor DefaultReviewFeature: ReviewFeature {
                     notice: .selectionChanged
                 )
             case .unavailable:
-                transition(
-                    to: .unavailable(selection: ready.selection, reason: .noTranscript)
+                await invalidateReview(
+                    selection: ready.selection,
+                    reason: .noTranscript,
+                    clearing: readySnapshot?.playback.audioCapabilityID ??
+                        ready.playback.audioCapabilityID
                 )
             case .integrityMismatch:
-                transition(
-                    to: .unavailable(
-                        selection: ready.selection,
-                        reason: .integrityMismatch
-                    )
+                await invalidateReview(
+                    selection: ready.selection,
+                    reason: .integrityMismatch,
+                    clearing: readySnapshot?.playback.audioCapabilityID ??
+                        ready.playback.audioCapabilityID
                 )
             }
         case .unavailable:
-            transition(to: .unavailable(selection: ready.selection, reason: .noTranscript))
+            await invalidateReview(
+                selection: ready.selection,
+                reason: .noTranscript,
+                clearing: readySnapshot?.playback.audioCapabilityID ??
+                    ready.playback.audioCapabilityID
+            )
         case .integrityMismatch:
-            transition(
-                to: .unavailable(selection: ready.selection, reason: .integrityMismatch)
+            await invalidateReview(
+                selection: ready.selection,
+                reason: .integrityMismatch,
+                clearing: readySnapshot?.playback.audioCapabilityID ??
+                    ready.playback.audioCapabilityID
             )
         case .failed:
             transition(
@@ -253,15 +280,18 @@ public actor DefaultReviewFeature: ReviewFeature {
                     notice: .retranscribed
                 )
             case .unavailable:
-                transition(
-                    to: .unavailable(selection: ready.selection, reason: .noTranscript)
+                await invalidateReview(
+                    selection: ready.selection,
+                    reason: .noTranscript,
+                    clearing: readySnapshot?.playback.audioCapabilityID ??
+                        ready.playback.audioCapabilityID
                 )
             case .integrityMismatch:
-                transition(
-                    to: .unavailable(
-                        selection: ready.selection,
-                        reason: .integrityMismatch
-                    )
+                await invalidateReview(
+                    selection: ready.selection,
+                    reason: .integrityMismatch,
+                    clearing: readySnapshot?.playback.audioCapabilityID ??
+                        ready.playback.audioCapabilityID
                 )
             }
         case .unavailable, .failed:
@@ -296,12 +326,11 @@ public actor DefaultReviewFeature: ReviewFeature {
               playbackSnapshot.durationMilliseconds ==
                 snapshot.canonicalAudioDurationMilliseconds
         else {
-            resolver = nil
-            transition(
-                to: .unavailable(
-                    selection: snapshot.selection,
-                    reason: .playbackUnavailable
-                )
+            await invalidateReview(
+                selection: snapshot.selection,
+                reason: .playbackUnavailable,
+                clearing: previousPlayback?.audioCapabilityID ??
+                    snapshot.audioCapabilityID
             )
             return
         }
@@ -325,6 +354,18 @@ public actor DefaultReviewFeature: ReviewFeature {
                 )
             )
         )
+    }
+
+    /// A Review loses all interaction authority as one operation: stale seek
+    /// indexes and buffered canonical audio are both revoked before returning.
+    private func invalidateReview(
+        selection: ReviewSelection?,
+        reason: ReviewUnavailableReason,
+        clearing audioCapabilityID: ReviewAudioCapabilityID?
+    ) async {
+        resolver = nil
+        transition(to: .unavailable(selection: selection, reason: reason))
+        await playback.clear(audioCapabilityID)
     }
 
     private func applyPlayback(_ playbackSnapshot: ReviewPlaybackSnapshot?) async {

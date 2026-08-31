@@ -274,6 +274,191 @@ final class ReviewFeatureTests: XCTestCase {
         }
         XCTAssertEqual(selection, third)
     }
+
+    func testEveryReadyAuthorityLossClearsPlaybackAndRejectsStaleEvents() async throws {
+        enum Trigger: String {
+            case refresh
+            case staleSelectionReload
+            case directSelectionFailure
+            case retranscriptionReload
+            case playbackReplacementFailure
+        }
+        struct Scenario {
+            let trigger: Trigger
+            let readFailure: ReviewSessionReadResult?
+            let expectedReason: ReviewUnavailableReason
+        }
+
+        let scenarios = [
+            Scenario(
+                trigger: .refresh,
+                readFailure: .unavailable,
+                expectedReason: .noTranscript
+            ),
+            Scenario(
+                trigger: .refresh,
+                readFailure: .integrityMismatch,
+                expectedReason: .integrityMismatch
+            ),
+            Scenario(
+                trigger: .staleSelectionReload,
+                readFailure: .unavailable,
+                expectedReason: .noTranscript
+            ),
+            Scenario(
+                trigger: .staleSelectionReload,
+                readFailure: .integrityMismatch,
+                expectedReason: .integrityMismatch
+            ),
+            Scenario(
+                trigger: .directSelectionFailure,
+                readFailure: .unavailable,
+                expectedReason: .noTranscript
+            ),
+            Scenario(
+                trigger: .directSelectionFailure,
+                readFailure: .integrityMismatch,
+                expectedReason: .integrityMismatch
+            ),
+            Scenario(
+                trigger: .retranscriptionReload,
+                readFailure: .unavailable,
+                expectedReason: .noTranscript
+            ),
+            Scenario(
+                trigger: .retranscriptionReload,
+                readFailure: .integrityMismatch,
+                expectedReason: .integrityMismatch
+            ),
+            Scenario(
+                trigger: .playbackReplacementFailure,
+                readFailure: nil,
+                expectedReason: .playbackUnavailable
+            ),
+        ]
+
+        for scenario in scenarios {
+            let first = try reviewRevision(
+                id: "trv-20260830T121000000Z-4FGH",
+                text: "Hello, world!"
+            )
+            let second = try reviewRevision(
+                id: "trv-20260830T121100000Z-5GHJ",
+                text: "Hello, world!"
+            )
+            let selection = ReviewSelection(
+                scope: LibraryScope(libraryID: revisionFixtureLibraryID),
+                sessionID: first.sessionID
+            )
+            let firstCapability = try ReviewAudioCapabilityID(
+                "review-authority-loss"
+            )
+            let replacementCapability = try ReviewAudioCapabilityID(
+                "review-replacement"
+            )
+            let inventory = [first.revisionID, second.revisionID]
+            let initial = try ReviewSessionSnapshot(
+                selection: selection,
+                revisionIDs: inventory,
+                selectedRevision: first,
+                audioCapabilityID: firstCapability,
+                canonicalAudioDurationMilliseconds: first.durationMilliseconds
+            )
+            let selectedSecond = try ReviewSessionSnapshot(
+                selection: selection,
+                revisionIDs: inventory,
+                selectedRevision: second,
+                audioCapabilityID: firstCapability,
+                canonicalAudioDurationMilliseconds: second.durationMilliseconds
+            )
+            let replacementAudio = try ReviewSessionSnapshot(
+                selection: selection,
+                revisionIDs: inventory,
+                selectedRevision: first,
+                audioCapabilityID: replacementCapability,
+                canonicalAudioDurationMilliseconds: first.durationMilliseconds
+            )
+            var reads: [ReviewSessionReadResult] = [.available(initial)]
+            if scenario.trigger == .playbackReplacementFailure {
+                reads.append(.available(replacementAudio))
+            } else if scenario.trigger != .directSelectionFailure,
+                      let readFailure = scenario.readFailure
+            {
+                reads.append(readFailure)
+            }
+            let selectionResult: ReviewRevisionSelectionResult
+            switch scenario.trigger {
+            case .staleSelectionReload:
+                selectionResult = .stale
+            case .directSelectionFailure:
+                selectionResult = scenario.readFailure == .unavailable
+                    ? .unavailable
+                    : .integrityMismatch
+            case .refresh, .retranscriptionReload,
+                 .playbackReplacementFailure:
+                selectionResult = .selected(selectedSecond)
+            }
+            let sessions = ScriptedAuthorityLossReviewSessions(
+                reads: reads,
+                selectionResult: selectionResult
+            )
+            let playback = AuthorityLossPlaybackStub(
+                failLoadAfter: scenario.trigger == .playbackReplacementFailure ? 1 : nil
+            )
+            let feature = DefaultReviewFeature(
+                sessions: sessions,
+                playback: playback,
+                retranscriber: ReviewRetranscriberStub(result: .completed)
+            )
+            await feature.send(.selectSession(selection))
+            await feature.send(.play)
+            guard case let .ready(playing) = await feature.currentState else {
+                return XCTFail("\(scenario.trigger.rawValue): expected playing Review")
+            }
+            XCTAssertEqual(playing.playback.status, .playing)
+
+            switch scenario.trigger {
+            case .refresh, .playbackReplacementFailure:
+                await feature.send(.refresh)
+            case .staleSelectionReload, .directSelectionFailure:
+                await feature.send(
+                    .selectRevision(
+                        second.revisionID,
+                        expectedSelectedRevisionID: first.revisionID
+                    )
+                )
+            case .retranscriptionReload:
+                await feature.send(.retranscribe)
+            }
+
+            let cleared = await playback.clearedCapabilities()
+            XCTAssertEqual(
+                cleared,
+                [firstCapability],
+                scenario.trigger.rawValue
+            )
+            let hasLoadedAudio = await playback.hasLoadedAudio()
+            XCTAssertFalse(hasLoadedAudio)
+            await playback.emit(
+                ReviewPlaybackSnapshot(
+                    audioCapabilityID: firstCapability,
+                    positionMilliseconds: 800,
+                    durationMilliseconds: first.durationMilliseconds,
+                    status: .playing
+                )
+            )
+            for _ in 0..<8 { await Task.yield() }
+            guard case let .unavailable(finalSelection, reason) =
+                await feature.currentState
+            else {
+                return XCTFail(
+                    "\(scenario.trigger.rawValue): stale playback restored controls"
+                )
+            }
+            XCTAssertEqual(finalSelection, selection, scenario.trigger.rawValue)
+            XCTAssertEqual(reason, scenario.expectedReason, scenario.trigger.rawValue)
+        }
+    }
 }
 
 private actor ReviewSessionStoreStub: ReviewSessionPort {
@@ -422,6 +607,103 @@ private actor SuspendedReviewSessionStub: ReviewSessionPort {
     }
 
     func loadedSelections() -> [ReviewSelection] { selections }
+}
+
+private actor ScriptedAuthorityLossReviewSessions: ReviewSessionPort {
+    private var reads: [ReviewSessionReadResult]
+    private let selectionResult: ReviewRevisionSelectionResult
+
+    init(
+        reads: [ReviewSessionReadResult],
+        selectionResult: ReviewRevisionSelectionResult
+    ) {
+        self.reads = reads
+        self.selectionResult = selectionResult
+    }
+
+    func load(_ selection: ReviewSelection) async -> ReviewSessionReadResult {
+        guard !reads.isEmpty else { return .unavailable }
+        return reads.removeFirst()
+    }
+
+    func selectRevision(
+        _ revisionID: TranscriptRevisionID,
+        for selection: ReviewSelection,
+        expectedSelectedRevisionID: TranscriptRevisionID
+    ) async -> ReviewRevisionSelectionResult {
+        selectionResult
+    }
+}
+
+private actor AuthorityLossPlaybackStub: ReviewPlaybackPort {
+    nonisolated let states: AsyncStream<ReviewPlaybackSnapshot>
+    private let continuation: AsyncStream<ReviewPlaybackSnapshot>.Continuation
+    private let failLoadAfter: Int?
+    private var loadCount = 0
+    private var loaded: ReviewAudioSource?
+    private var clears: [ReviewAudioCapabilityID?] = []
+
+    init(failLoadAfter: Int?) {
+        self.failLoadAfter = failLoadAfter
+        var captured: AsyncStream<ReviewPlaybackSnapshot>.Continuation?
+        states = AsyncStream(bufferingPolicy: .bufferingNewest(1)) {
+            captured = $0
+        }
+        continuation = captured!
+    }
+
+    func load(_ source: ReviewAudioSource) async -> ReviewPlaybackSnapshot? {
+        loadCount += 1
+        if let failLoadAfter, loadCount > failLoadAfter { return nil }
+        loaded = source
+        return snapshot(source: source, status: .paused)
+    }
+
+    func play() async -> ReviewPlaybackSnapshot? {
+        loaded.map { snapshot(source: $0, status: .playing) }
+    }
+
+    func pause() async -> ReviewPlaybackSnapshot? {
+        loaded.map { snapshot(source: $0, status: .paused) }
+    }
+
+    func seek(toMilliseconds milliseconds: UInt64) async -> ReviewPlaybackSnapshot? {
+        loaded.map {
+            ReviewPlaybackSnapshot(
+                audioCapabilityID: $0.audioCapabilityID,
+                positionMilliseconds: milliseconds,
+                durationMilliseconds: $0.durationMilliseconds,
+                status: .paused
+            )
+        }
+    }
+
+    func clear(_ audioCapabilityID: ReviewAudioCapabilityID?) async {
+        clears.append(audioCapabilityID)
+        guard audioCapabilityID == nil || loaded?.audioCapabilityID == audioCapabilityID
+        else { return }
+        loaded = nil
+    }
+
+    func emit(_ snapshot: ReviewPlaybackSnapshot) {
+        continuation.yield(snapshot)
+    }
+
+    func clearedCapabilities() -> [ReviewAudioCapabilityID?] { clears }
+
+    func hasLoadedAudio() -> Bool { loaded != nil }
+
+    private func snapshot(
+        source: ReviewAudioSource,
+        status: ReviewPlaybackStatus
+    ) -> ReviewPlaybackSnapshot {
+        ReviewPlaybackSnapshot(
+            audioCapabilityID: source.audioCapabilityID,
+            positionMilliseconds: 0,
+            durationMilliseconds: source.durationMilliseconds,
+            status: status
+        )
+    }
 }
 
 private actor ReviewRetranscriberStub: ReviewRetranscriptionPort {
