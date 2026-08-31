@@ -127,6 +127,121 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
         }
     }
 
+    func testRecordedSessionNewerSchemaIsUnsupportedAndPreservedByteForByte() async throws {
+        try await withRecordedSession { root, receipt in
+            let sessionURL = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/session.json"
+            )
+            var object = try sessionJSONObject(root: root, sessionID: receipt.sessionID)
+            object["schemaVersion"] = 2
+            object["futureSessionField"] = ["preserve": true]
+            let newerData = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            try newerData.write(to: sessionURL)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+
+            do {
+                _ = try await repository.reopenSelected(sessionID: receipt.sessionID)
+                XCTFail("expected unsupported newer recorded Session")
+            } catch {
+                XCTAssertEqual(
+                    error as? TranscriptRevisionRepositoryFailure,
+                    .unsupportedSchema
+                )
+            }
+            do {
+                _ = try await repository.publishAndSelect(
+                    transcriptRevision(for: receipt),
+                    expectedSelectedRevisionID: nil
+                )
+                XCTFail("expected unsupported newer recorded Session to remain immutable")
+            } catch {
+                XCTAssertEqual(
+                    error as? TranscriptRevisionRepositoryFailure,
+                    .unsupportedSchema
+                )
+            }
+            XCTAssertEqual(try Data(contentsOf: sessionURL), newerData)
+        }
+    }
+
+    func testImportedSessionNewerSchemaIsUnsupportedAndPreservedByteForByte() async throws {
+        try await withImportedSession { root, libraryID, imported in
+            let sessionURL = root.appendingPathComponent(
+                "sessions/\(imported.sessionID.rawValue)/session.json"
+            )
+            var object = try sessionJSONObject(root: root, sessionID: imported.sessionID)
+            object["schemaVersion"] = 2
+            object["futureSessionField"] = ["preserve": true]
+            let newerData = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            try newerData.write(to: sessionURL)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: libraryID
+            )
+
+            do {
+                _ = try await repository.reopenSelected(sessionID: imported.sessionID)
+                XCTFail("expected unsupported newer imported Session")
+            } catch {
+                XCTAssertEqual(
+                    error as? TranscriptRevisionRepositoryFailure,
+                    .unsupportedSchema
+                )
+            }
+            do {
+                _ = try await repository.publishAndSelect(
+                    transcriptRevision(for: imported),
+                    expectedSelectedRevisionID: nil
+                )
+                XCTFail("expected unsupported newer imported Session to remain immutable")
+            } catch {
+                XCTAssertEqual(
+                    error as? TranscriptRevisionRepositoryFailure,
+                    .unsupportedSchema
+                )
+            }
+            XCTAssertEqual(try Data(contentsOf: sessionURL), newerData)
+        }
+    }
+
+    func testMalformedVersionOneSessionRemainsAnIntegrityMismatch() async throws {
+        try await withRecordedSession { root, receipt in
+            let sessionURL = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/session.json"
+            )
+            var object = try sessionJSONObject(root: root, sessionID: receipt.sessionID)
+            object["unexpectedVersionOneField"] = true
+            let malformedData = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            try malformedData.write(to: sessionURL)
+
+            do {
+                _ = try await PortableTranscriptRevisionRepository(
+                    root: root,
+                    libraryID: receipt.libraryID
+                ).reopenSelected(sessionID: receipt.sessionID)
+                XCTFail("expected malformed version-one Session rejection")
+            } catch {
+                XCTAssertEqual(
+                    error as? TranscriptRevisionRepositoryFailure,
+                    .sessionIntegrityMismatch
+                )
+            }
+            XCTAssertEqual(try Data(contentsOf: sessionURL), malformedData)
+        }
+    }
+
     func testPublishesAndReopensExactImmutableRevisionWithStableAnchors() async throws {
         try await withRecordedSession { root, receipt in
             let revision = try transcriptRevision(for: receipt)
