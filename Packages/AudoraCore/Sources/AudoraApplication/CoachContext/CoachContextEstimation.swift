@@ -1,5 +1,7 @@
 import Foundation
 
+// Provider-independent production planning extracted from the qualification gate.
+
 public enum CoachTokenEstimateMode: String, Codable, Equatable, Sendable {
     case exact
     case conservativeUpperBound
@@ -217,6 +219,37 @@ public struct CoachProviderEstimationPolicy: Sendable {
     }
 }
 
+public enum PreparedCoachTranscriptHandleError: Error, Equatable, Sendable {
+    case notCanonicalUUID
+}
+
+/// One bounded Attempt-scoped handle used by both the Coach Request and the
+/// conservatively reserved transcript-read exchange.
+public struct PreparedCoachTranscriptHandle: Equatable, Hashable, Sendable {
+    public static let canonicalUTF8ByteCount = 36
+
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard rawValue.utf8.count == Self.canonicalUTF8ByteCount else {
+            throw PreparedCoachTranscriptHandleError.notCanonicalUUID
+        }
+        let bytes = Array(rawValue.utf8)
+        guard bytes.enumerated().allSatisfy({ index, byte in
+                  switch index {
+                  case 8, 13, 18, 23:
+                      byte == 45
+                  default:
+                      (48 ... 57).contains(byte) || (97 ... 102).contains(byte)
+                  }
+              })
+        else {
+            throw PreparedCoachTranscriptHandleError.notCanonicalUUID
+        }
+        self.rawValue = rawValue
+    }
+}
+
 public enum PreparedCoachAttachment: Equatable, Sendable {
     /// The complete `SessionAttachmentInline` provider value.
     case inline(requestValue: CanonicalJSONValue)
@@ -225,9 +258,25 @@ public enum PreparedCoachAttachment: Equatable, Sendable {
     /// `ReadSessionTranscripts` exchange.
     case onDemand(
         requestValue: CanonicalJSONValue,
-        sessionTranscriptHandle: String,
+        sessionTranscriptHandle: PreparedCoachTranscriptHandle,
         transcriptDisclosure: CanonicalJSONValue
     )
+
+    func authoritativeRequestValue() throws -> CanonicalJSONValue {
+        switch self {
+        case let .inline(requestValue):
+            return requestValue
+        case let .onDemand(requestValue, handle, _):
+            guard case var .object(fields) = requestValue,
+                  fields["sessionTranscriptHandle"] == .string(handle.rawValue)
+            else {
+                throw CoachContextEstimationError.sessionTranscriptHandleMismatch
+            }
+            // Reinstall the typed value so this one authority feeds both payloads.
+            fields["sessionTranscriptHandle"] = .string(handle.rawValue)
+            return .object(fields)
+        }
+    }
 }
 
 public struct PreparedCoachContext: Equatable, Sendable {
@@ -235,6 +284,7 @@ public struct PreparedCoachContext: Equatable, Sendable {
     public let memory: CanonicalJSONValue
     public let history: [CanonicalJSONValue]
     public let trigger: CanonicalJSONValue
+    public let triggerCategory: CoachContextCostCategory
     public let attachments: [PreparedCoachAttachment]
 
     public init(
@@ -242,12 +292,14 @@ public struct PreparedCoachContext: Equatable, Sendable {
         memory: CanonicalJSONValue,
         history: [CanonicalJSONValue],
         trigger: CanonicalJSONValue,
+        triggerCategory: CoachContextCostCategory = .draft,
         attachments: [PreparedCoachAttachment]
     ) {
         self.profile = profile
         self.memory = memory
         self.history = history
         self.trigger = trigger
+        self.triggerCategory = triggerCategory
         self.attachments = attachments
     }
 
@@ -265,14 +317,14 @@ public struct PreparedCoachContext: Equatable, Sendable {
     }
 }
 
-public enum CoachContextComponent: String, CaseIterable, Codable, Hashable, Sendable {
+public enum CoachContextCostCategory: String, CaseIterable, Codable, Hashable, Sendable {
     case profile
     case memory
     case history
-    case trigger
+    case draft
     case framing
-    case inlineTranscripts
-    case onDemandExchange
+    case attachments
+    case transcriptExchange
     case responseReserve
     case safetyMargin
 }
@@ -321,7 +373,7 @@ public struct CoachContextEstimate: Equatable, Sendable {
     public let totalContextTokens: Int
     public let responseCollectorByteCeiling: Int
     public let fits: Bool
-    public let componentCosts: [CoachContextComponent: CoachContextComponentCost]
+    public let componentCosts: [CoachContextCostCategory: CoachContextComponentCost]
     public let exchange: CanonicalCoachExchange
     public let estimatorIdentifier: String
     public let estimatorMode: CoachTokenEstimateMode
@@ -334,7 +386,7 @@ public struct CoachContextEstimate: Equatable, Sendable {
         totalContextTokens: Int,
         responseCollectorByteCeiling: Int,
         fits: Bool,
-        componentCosts: [CoachContextComponent: CoachContextComponentCost],
+        componentCosts: [CoachContextCostCategory: CoachContextComponentCost],
         exchange: CanonicalCoachExchange,
         estimatorIdentifier: String,
         estimatorMode: CoachTokenEstimateMode
@@ -355,6 +407,7 @@ public struct CoachContextEstimate: Equatable, Sendable {
 
 public enum CoachContextEstimationError: Error, Equatable {
     case duplicateSessionTranscriptHandle
+    case sessionTranscriptHandleMismatch
     case invalidDescriptor(CoachProviderDescriptorValidationError)
     case integerOverflow
 }
@@ -408,8 +461,8 @@ public struct CoachContextPlanner: Sendable {
         let inputCeiling = descriptor.contextBudget.contextWindowTokens - reservedAndMargin
         let totalContextTokens = try checkedAdd(completeInputTokens, reservedAndMargin)
 
-        var componentCosts: [CoachContextComponent: CoachContextComponentCost] = [:]
-        for component in CoachContextComponent.allCases {
+        var componentCosts: [CoachContextCostCategory: CoachContextComponentCost] = [:]
+        for component in CoachContextCostCategory.allCases {
             switch component {
             case .responseReserve:
                 componentCosts[component] = CoachContextComponentCost(
@@ -470,30 +523,31 @@ public struct CoachContextPlanner: Sendable {
             LabeledSegment(.framing, Data(",\"memory\":".utf8)),
             LabeledSegment(.memory, memory),
             LabeledSegment(.framing, Data(",\"trigger\":".utf8)),
-            LabeledSegment(.trigger, trigger),
+            LabeledSegment(context.triggerCategory, trigger),
             LabeledSegment(.framing, Data("},\"profile\":".utf8)),
             LabeledSegment(.profile, profile),
             LabeledSegment(.framing, Data(",\"sessionAttachments\":[".utf8)),
         ]
 
-        var handles: [String] = []
+        var handles: [PreparedCoachTranscriptHandle] = []
         var disclosures: [CanonicalJSONValue] = []
         var seenHandles: Set<String> = []
         for (index, attachment) in context.attachments.enumerated() {
             if index > 0 {
                 requestSegments.append(LabeledSegment(.framing, Data(",".utf8)))
             }
+            let requestValue = try attachment.authoritativeRequestValue()
             switch attachment {
-            case let .inline(requestValue):
+            case .inline:
                 requestSegments.append(
-                    LabeledSegment(.inlineTranscripts, CanonicalJSON.serialize(requestValue))
+                    LabeledSegment(.attachments, CanonicalJSON.serialize(requestValue))
                 )
-            case let .onDemand(requestValue, handle, disclosure):
-                guard seenHandles.insert(handle).inserted else {
+            case let .onDemand(_, handle, disclosure):
+                guard seenHandles.insert(handle.rawValue).inserted else {
                     throw CoachContextEstimationError.duplicateSessionTranscriptHandle
                 }
                 requestSegments.append(
-                    LabeledSegment(.onDemandExchange, CanonicalJSON.serialize(requestValue))
+                    LabeledSegment(.attachments, CanonicalJSON.serialize(requestValue))
                 )
                 handles.append(handle)
                 disclosures.append(disclosure)
@@ -503,7 +557,7 @@ public struct CoachContextPlanner: Sendable {
 
         let request = joined(requestSegments)
         let canonicalRequest = CanonicalJSON.serialize(
-            requestValue(context: context)
+            try requestValue(context: context)
         )
         precondition(request == canonicalRequest, "segmented request must remain canonical")
 
@@ -519,7 +573,9 @@ public struct CoachContextPlanner: Sendable {
         var readResponse: Data?
         if !handles.isEmpty {
             let requestValue = CanonicalJSONValue.object([
-                "sessionTranscriptHandles": .array(handles.map(CanonicalJSONValue.string)),
+                "sessionTranscriptHandles": .array(
+                    handles.map { .string($0.rawValue) }
+                ),
             ])
             let responseValue = CanonicalJSONValue.object([
                 "kind": .string("complete"),
@@ -531,12 +587,12 @@ public struct CoachContextPlanner: Sendable {
             readResponse = serializedResponse
             let readRequestSegments = [
                 LabeledSegment(.framing, framing.transcriptReadRequestPrefix),
-                LabeledSegment(.onDemandExchange, serializedRequest),
+                LabeledSegment(.transcriptExchange, serializedRequest),
                 LabeledSegment(.framing, framing.transcriptReadRequestSuffix),
             ]
             let readResponseSegments = [
                 LabeledSegment(.framing, framing.transcriptReadResponsePrefix),
-                LabeledSegment(.onDemandExchange, serializedResponse),
+                LabeledSegment(.transcriptExchange, serializedResponse),
                 LabeledSegment(.framing, framing.transcriptReadResponseSuffix),
             ]
             completeSegments.append(contentsOf: readRequestSegments)
@@ -545,7 +601,7 @@ public struct CoachContextPlanner: Sendable {
             tokenizationUnits.append(joined(readResponseSegments))
         }
 
-        var componentData: [CoachContextComponent: Data] = [:]
+        var componentData: [CoachContextCostCategory: Data] = [:]
         for segment in completeSegments {
             componentData[segment.component, default: Data()].append(segment.data)
         }
@@ -560,14 +616,9 @@ public struct CoachContextPlanner: Sendable {
         )
     }
 
-    private func requestValue(context: PreparedCoachContext) -> CanonicalJSONValue {
-        let attachments = context.attachments.map { attachment in
-            switch attachment {
-            case let .inline(requestValue):
-                requestValue
-            case let .onDemand(requestValue, _, _):
-                requestValue
-            }
+    private func requestValue(context: PreparedCoachContext) throws -> CanonicalJSONValue {
+        let attachments = try context.attachments.map { attachment in
+            try attachment.authoritativeRequestValue()
         }
         return .object([
             "profile": context.profile,
@@ -742,10 +793,10 @@ public struct CoachProviderDescriptorQualifier: Sendable {
 }
 
 private struct LabeledSegment {
-    let component: CoachContextComponent
+    let component: CoachContextCostCategory
     let data: Data
 
-    init(_ component: CoachContextComponent, _ data: Data) {
+    init(_ component: CoachContextCostCategory, _ data: Data) {
         self.component = component
         self.data = data
     }
@@ -757,7 +808,7 @@ private struct PreparedSegments {
     let transcriptReadResponse: Data?
     let completeInput: Data
     let tokenizationUnits: [Data]
-    let componentData: [CoachContextComponent: Data]
+    let componentData: [CoachContextCostCategory: Data]
 }
 
 private func joined(_ segments: [LabeledSegment]) -> Data {
@@ -785,7 +836,7 @@ private func checkedMultiply(_ lhs: Int, _ rhs: Int) throws -> Int {
     return result.partialValue
 }
 
-private func basicValidationError(
+func basicValidationError(
     descriptor: CoachProviderDescriptor,
     policy: CoachProviderEstimationPolicy
 ) -> CoachProviderDescriptorValidationError? {

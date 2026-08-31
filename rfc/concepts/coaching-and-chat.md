@@ -304,6 +304,11 @@ including the current Profile. In Chat, a compact `~X / max` quote updates as th
 Draft, Profile, Memory, history, or provider configuration changes. It explains the
 major categories but never exposes a raw payload editor.
 
+The creation quote uses an explicit app-only creation-context frame. A new Chat has
+no provider trigger yet, so Application neither fabricates user prose nor treats an
+empty placeholder as successful history. Only a later nonempty ordinary Draft is a
+launch-eligible `userMessage` trigger.
+
 The visible estimate is advisory. `tryInvoke` repeats the exact race-safe
 calculation. It never trims a message, Profile, Memory, Session, or history. If the
 context does not fit, no provider work launches and the Pending User Turn shows:
@@ -323,6 +328,25 @@ continuation are backlog work.
 The app-authored user-message maximum is checked before Invocation. A message over
 that independent limit remains editable and shows **Message is too long. Shorten it
 to send.**
+
+Version one sets that Send limit to **16,384 UTF-8 bytes** while the recoverable
+Draft remains persistable up to 32,768 UTF-8 bytes. The quote always reports the
+message limit. Portable context snapshots are bounded to 4,096 history turns,
+128 attachments, 64 MiB per canonical value, and 64 MiB in aggregate; checked
+addition rejects overflow or excess before the planner can allocate an unbounded
+request. The complete framed-message estimate—not the sum of category estimates—
+is authoritative. Exact fit is accepted and one token over is rejected.
+An on-demand transcript handle is one typed 36-byte lowercase canonical UUID. The
+same authority must appear in its attachment descriptor and reserved read request;
+the complete read-request and response wrappers count toward the aggregate bound.
+
+Every resolved snapshot is bound to its Library, Chat, Draft ID and version, and,
+for Send, Pending User Turn and response-position IDs. Separate monotonic
+authorities cover the Profile/Memory/history/attachment projection and the complete
+provider configuration. Application measures exact canonical bytes, then
+revalidates both authorities before returning a quote, local capacity failure, or
+prepared exchange. Identical prose cannot make a stale identity or generation
+current.
 
 ## Transcript delivery
 

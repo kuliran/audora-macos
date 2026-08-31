@@ -70,6 +70,16 @@ public enum ChatNotice: String, Equatable, Sendable {
     case draftSaveFailed
     case draftChanged
     case pendingUserTurnFailed
+    case coachContextUnavailable
+    case messageMustBeShortened
+}
+
+public enum CoachContextAdvisoryState: Equatable, Sendable {
+    case notRequested
+    case quoting
+    case available(CoachContextQuote)
+    case messageTooLong(maximumUTF8Bytes: Int)
+    case unavailable(CoachContextUnavailableReason)
 }
 
 public enum ChatComposerState: Equatable, Sendable {
@@ -102,6 +112,7 @@ public struct ChatFeatureState: Equatable, Sendable {
         case creating
         case renaming(ChatID)
         case lockingDraft(ChatID)
+        case retryingPendingUserTurn(ChatID)
         case discardingPendingUserTurn(ChatID)
     }
 
@@ -109,6 +120,8 @@ public struct ChatFeatureState: Equatable, Sendable {
     public let filterQuery: ChatFilterQuery
     public let selection: Selection
     public let composer: ChatComposerState?
+    public let contextAdvisory: CoachContextAdvisoryState
+    public let createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent?
     public let activity: Activity?
     public let notice: ChatNotice?
 
@@ -117,6 +130,8 @@ public struct ChatFeatureState: Equatable, Sendable {
         filterQuery: ChatFilterQuery = .empty,
         selection: Selection = .none,
         composer: ChatComposerState? = nil,
+        contextAdvisory: CoachContextAdvisoryState = .notRequested,
+        createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
         activity: Activity? = nil,
         notice: ChatNotice? = nil
     ) {
@@ -124,6 +139,8 @@ public struct ChatFeatureState: Equatable, Sendable {
         self.filterQuery = filterQuery
         self.selection = selection
         self.composer = composer
+        self.contextAdvisory = contextAdvisory
+        self.createNewChatRecoveryIntent = createNewChatRecoveryIntent
         self.activity = activity
         self.notice = notice
     }

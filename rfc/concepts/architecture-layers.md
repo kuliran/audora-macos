@@ -108,11 +108,26 @@ admission, Retry/Discard, and token math spread across views, repositories, and 
 provider adapter. Its small conceptual interface is:
 
 ```swift
-quoteNewChat(attachmentPins, creationKind) -> ChatCreationQuote | CoachContextPreparationError
-quoteChat(chatID) -> ContextQuote | CoachContextPreparationError
+quoteNewChat(libraryScope, attachmentIDs, creationKind) -> ChatCreationQuote
+quoteChat(libraryScope, chatID, draftID, draftVersion) -> ContextQuote
+preparePendingUserTurn(libraryScope, chatID, pendingUserTurnID) -> PendingPreparation
 Invocations.tryInvoke(intent) -> InvocationAdmission
 discardInvocationFailure(failureID) -> DiscardResult
 ```
+
+The first two calls are the product-facing advisory boundary. Exact preparation
+is Application-internal because it carries canonical bytes for the later
+Invocation coordinator; Presentation never receives those bytes. Provider launch,
+Invocation admission, rolling limits, and durable Invocation publication remain
+owned by the downstream Invocation module.
+
+`quoteNewChat` measures an explicit non-launch creation-context frame; it does not
+invent Draft text. Resolved quotes and preparations carry a binding to Library,
+Chat, Draft ID/version, Pending ID, and response position as applicable, plus
+independent external-context and provider-configuration generations. The source
+revalidates those authorities after exact serialization. The prepared internal
+artifact retains the authority with the canonical bytes so the later Invocation
+module does not have to reconstruct either.
 
 It hides Profile, Coach Memory, Chat, Session, and Transcript resolution;
 selection of inline versus on-demand transcript delivery; deterministic request

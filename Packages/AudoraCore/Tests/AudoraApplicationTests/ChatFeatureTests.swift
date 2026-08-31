@@ -1212,7 +1212,10 @@ final class ChatFeatureTests: XCTestCase {
             memoryIDGenerator: FixedChatIDs(),
             pendingUserTurnIDGenerator: pendingUserTurnIDGenerator,
             responsePositionIDGenerator: FixedChatIDs(),
-            autosaveScheduler: autosaveScheduler
+            autosaveScheduler: autosaveScheduler,
+            coachContext: DefaultCoachContextFeature(
+                source: AlwaysFitCoachContextSnapshotPort()
+            )
         )
     }
 
@@ -1332,6 +1335,9 @@ private actor SuspendedCatalogChatStore: ChatStorePort {
     func lockPendingUserTurn(
         _ mutation: LockPendingUserTurnMutation
     ) async -> ChatMutationOutcome { .failed }
+    func replacePendingUserTurn(
+        _ mutation: ReplacePendingUserTurnMutation
+    ) async -> ChatMutationOutcome { .failed }
     func discardPendingUserTurn(
         _ mutation: DiscardPendingUserTurnMutation
     ) async -> ChatMutationOutcome { .failed }
@@ -1363,6 +1369,9 @@ private actor SequencedSuspendedCatalogChatStore: ChatStorePort {
     func lockPendingUserTurn(
         _ mutation: LockPendingUserTurnMutation
     ) async -> ChatMutationOutcome { .failed }
+    func replacePendingUserTurn(
+        _ mutation: ReplacePendingUserTurnMutation
+    ) async -> ChatMutationOutcome { .failed }
     func discardPendingUserTurn(
         _ mutation: DiscardPendingUserTurnMutation
     ) async -> ChatMutationOutcome { .failed }
@@ -1371,10 +1380,97 @@ private actor SequencedSuspendedCatalogChatStore: ChatStorePort {
 
 private enum TestError: Error { case unexpectedState }
 
+private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
+    func resolveNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .sourceUnavailable
+    }
+
+    func resolveChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        snapshot(
+            for: request.draft,
+            binding: .chat(
+                library: request.library,
+                chatID: request.chatID,
+                draftID: request.draft.draftID,
+                draftVersion: request.draft.version
+            )
+        )
+    }
+
+    func resolvePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextSnapshotOutcome {
+        snapshot(
+            for: request.draft,
+            binding: .pending(
+                library: request.library,
+                chatID: request.chatID,
+                draftID: request.draft.draftID,
+                draftVersion: request.draft.version,
+                pendingUserTurnID: request.pendingUserTurn.id,
+                responsePositionID: request.pendingUserTurn.responsePositionID
+            )
+        )
+    }
+
+    func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
+        authority.contextGeneration == 1 && authority.configurationGeneration == 1
+    }
+
+    private func snapshot(
+        for draft: ChatDraft,
+        binding: CoachContextSnapshotBinding
+    ) -> CoachContextSnapshotOutcome {
+        do {
+            return .resolved(
+                try CoachContextResolvedSnapshot(
+                    input: CoachContextQuoteInput(
+                        profile: .object(["statements": .array([])]),
+                        memory: .object([
+                            "generalNotes": .string(""),
+                            "sessionSummaries": .array([]),
+                        ]),
+                        history: [],
+                        currentDraft: draft.text
+                    ),
+                    configuration: try CoachContextConfiguration(
+                        descriptor: CoachProviderDescriptor(
+                            displayName: "Synthetic ChatFeature fixture",
+                            contextBudget: CoachContextBudget(
+                                contextWindowTokens: 100_000,
+                                responseReservedTokens: 32,
+                                safetyMarginTokens: 8
+                            ),
+                            coachMemoryMaxTokens: 1
+                        ),
+                        policy: CoachProviderEstimationPolicy(
+                            providerIdentifier: "synthetic-chat-feature-v1",
+                            responseCollectorByteCeiling: 8_192,
+                            framing: CoachProviderFraming(),
+                            tokenEstimator: .utf8ByteUpperBound()
+                        )
+                    ),
+                    authority: CoachContextSnapshotAuthority(
+                        binding: binding,
+                        contextGeneration: 1,
+                        configurationGeneration: 1
+                    )
+                )
+            )
+        } catch {
+            return .sourceUnavailable
+        }
+    }
+}
+
 private actor RecordingChatStore: ChatStorePort {
     enum Call: Equatable {
         case loadCatalog, create, rename, load, saveDraft, lockPendingUserTurn,
-             discardPendingUserTurn
+             replacePendingUserTurn, discardPendingUserTurn
     }
 
     private let catalog: [ChatCatalogEntry]
@@ -1391,6 +1487,7 @@ private actor RecordingChatStore: ChatStorePort {
     private(set) var loadedScopes: [LibraryScope] = []
     private(set) var savedDrafts: [SaveChatDraftMutation] = []
     private(set) var pendingLocks: [LockPendingUserTurnMutation] = []
+    private(set) var pendingReplacements: [ReplacePendingUserTurnMutation] = []
 
     init(
         catalog: [ChatCatalogEntry] = [],
@@ -1503,6 +1600,26 @@ private actor RecordingChatStore: ChatStorePort {
         }
         aggregates[mutation.chatID] = locked
         return .committed(locked)
+    }
+
+    func replacePendingUserTurn(
+        _ mutation: ReplacePendingUserTurnMutation
+    ) -> ChatMutationOutcome {
+        calls.append(.replacePendingUserTurn)
+        pendingReplacements.append(mutation)
+        guard let current = aggregates[mutation.chatID] else { return .failed }
+        if current.pendingUserTurn == mutation.replacement { return .committed(current) }
+        guard current.pendingUserTurn == mutation.base,
+              let replaced = try? ChatAggregate(
+                  chat: current.chat,
+                  memory: current.memory,
+                  pendingUserTurn: mutation.replacement
+              )
+        else {
+            return .stale(current)
+        }
+        aggregates[mutation.chatID] = replaced
+        return .committed(replaced)
     }
 
     func discardPendingUserTurn(

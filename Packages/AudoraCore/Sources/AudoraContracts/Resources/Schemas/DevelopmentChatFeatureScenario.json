@@ -49,6 +49,9 @@
         "providerAvailability": {
             "$ref": "#/$defs/DevelopmentChatScenarioProviderAvailability"
         },
+        "contextCapacityMode": {
+            "$ref": "#/$defs/DevelopmentChatScenarioContextCapacityMode"
+        },
         "suspendedEffect": {
             "$ref": "#/$defs/DevelopmentChatScenarioSuspendedEffect"
         }
@@ -168,7 +171,16 @@
                     "$ref": "#/$defs/EditDevelopmentChatDraftScenarioCommand"
                 },
                 {
+                    "$ref": "#/$defs/RefreshDevelopmentChatContextQuoteScenarioCommand"
+                },
+                {
                     "$ref": "#/$defs/SendDevelopmentChatDraftScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/RetryPendingUserTurnScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/CreateNewChatFromCapacityFailureScenarioCommand"
                 },
                 {
                     "$ref": "#/$defs/DiscardPendingUserTurnScenarioCommand"
@@ -209,6 +221,9 @@
                 },
                 {
                     "$ref": "#/$defs/ChatStorePendingUserTurnLockedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStorePendingUserTurnReplacedEvent"
                 },
                 {
                     "$ref": "#/$defs/ChatStorePendingUserTurnDiscardedEvent"
@@ -284,6 +299,9 @@
                 "responsePositionId": {
                     "$ref": "#/$defs/ChatResponsePositionId"
                 },
+                "pendingFailure": {
+                    "$ref": "#/$defs/PendingUserTurnFailure"
+                },
                 "notice": {
                     "$ref": "#/$defs/DevelopmentChatScenarioNotice"
                 }
@@ -305,6 +323,18 @@
                 {
                     "type": "string",
                     "const": "unavailable"
+                }
+            ]
+        },
+        "DevelopmentChatScenarioContextCapacityMode": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "alwaysFits"
+                },
+                {
+                    "type": "string",
+                    "const": "cannotFitThenFits"
                 }
             ]
         },
@@ -489,6 +519,21 @@
                 "not": {}
             }
         },
+        "RefreshDevelopmentChatContextQuoteScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "refreshContextQuote"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "SendDevelopmentChatDraftScenarioCommand": {
             "type": "object",
             "properties": {
@@ -499,6 +544,44 @@
             },
             "required": [
                 "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "RetryPendingUserTurnScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "retryPendingUserTurn"
+                },
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                }
+            },
+            "required": [
+                "kind",
+                "pendingUserTurnId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CreateNewChatFromCapacityFailureScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "createNewChatFromCapacityFailure"
+                },
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                }
+            },
+            "required": [
+                "kind",
+                "pendingUserTurnId"
             ],
             "unevaluatedProperties": {
                 "not": {}
@@ -817,6 +900,31 @@
                 "not": {}
             }
         },
+        "ChatStorePendingUserTurnReplacedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "replacePendingUserTurn"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "committed"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "ChatStorePendingUserTurnDiscardedEvent": {
             "type": "object",
             "properties": {
@@ -1070,6 +1178,14 @@
             "type": "string",
             "pattern": "^rsp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
         },
+        "PendingUserTurnFailure": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "coachContextCannotFit"
+                }
+            ]
+        },
         "DevelopmentChatScenarioNotice": {
             "anyOf": [
                 {
@@ -1127,6 +1243,14 @@
                 {
                     "type": "string",
                     "const": "pendingUserTurnFailed"
+                },
+                {
+                    "type": "string",
+                    "const": "coachContextUnavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "messageMustBeShortened"
                 }
             ]
         },

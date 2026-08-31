@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "maximumUserMessageUtf8Bytes": 16384,
+  "completeInputTokens": 642,
+  "inputCeilingTokens": 4032,
+  "responseReservedTokens": 48,
+  "safetyMarginTokens": 16,
+  "totalContextTokens": 706,
+  "fits": true,
+  "messageLength": {"status": "eligible"},
+  "categoryCosts": [
+    {"category": "profile", "utf8ByteCount": 80, "estimatedTokenCount": 20},
+    {"category": "memory", "utf8ByteCount": 120, "estimatedTokenCount": 30},
+    {"category": "history", "utf8ByteCount": 400, "estimatedTokenCount": 100},
+    {"category": "draft", "utf8ByteCount": 64, "estimatedTokenCount": 16},
+    {"category": "framing", "utf8ByteCount": 24, "estimatedTokenCount": 6},
+    {"category": "attachments", "utf8ByteCount": 96, "estimatedTokenCount": 24},
+    {"category": "transcriptExchange", "utf8ByteCount": 144, "estimatedTokenCount": 36},
+    {"category": "responseReserve", "utf8ByteCount": 0, "estimatedTokenCount": 48},
+    {"category": "safetyMargin", "utf8ByteCount": 0, "estimatedTokenCount": 16}
+  ],
+  "estimatorIdentifier": "synthetic-fixture-v1",
+  "estimatorMode": "conservativeUpperBound"
+}

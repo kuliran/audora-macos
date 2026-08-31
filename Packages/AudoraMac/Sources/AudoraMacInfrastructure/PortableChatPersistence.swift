@@ -658,6 +658,110 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return .committed(reopened)
     }
 
+    public func replacePendingUserTurn(
+        _ mutation: ReplacePendingUserTurnMutation,
+        at libraryRoot: URL
+    ) throws -> PortableChatMutationResult {
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: mutation.library)
+        defer { Darwin.close(rootDescriptor) }
+        let chatsDescriptor = try openDirectory(named: "chats", under: rootDescriptor)
+        defer { Darwin.close(chatsDescriptor) }
+        let chatName = mutation.chatID.rawValue
+        guard try entryExists(named: chatName, under: chatsDescriptor) else {
+            throw PortableChatPersistenceError.chatMissing
+        }
+        let chatIdentity = try directoryIdentity(named: chatName, under: chatsDescriptor)
+        let chatDescriptor = try openDirectory(named: chatName, under: chatsDescriptor)
+        defer { Darwin.close(chatDescriptor) }
+        guard try directoryIdentity(of: chatDescriptor) == chatIdentity else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        try acquireExclusiveMutationLock(on: chatDescriptor)
+        defer { releaseMutationLock(on: chatDescriptor) }
+        guard try directoryIdentity(named: chatName, under: chatsDescriptor) == chatIdentity,
+              try directoryIdentity(of: chatDescriptor) == chatIdentity
+        else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let loaded = try loadChatForRename(from: chatDescriptor, expectedID: mutation.chatID)
+        guard case let .readWrite(current) = loaded else {
+            if case let .frozen(frozen) = loaded { return .frozen(frozen) }
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        if current.pendingUserTurn == mutation.replacement {
+            return .committed(current)
+        }
+        guard current.pendingUserTurn == mutation.base else {
+            return .stale(current)
+        }
+        let replacement = try ChatAggregate(
+            chat: current.chat,
+            memory: current.memory,
+            pendingUserTurn: mutation.replacement
+        )
+
+        try fault(.beforePendingPartialWrite)
+        let partialName = ".pending-user-turn.json.\(UUID().uuidString.lowercased()).partial"
+        var partialExists = false
+        defer {
+            if partialExists {
+                _ = partialName.withCString { Darwin.unlinkat(chatDescriptor, $0, 0) }
+            }
+        }
+        try writeExclusive(
+            try encodePendingUserTurn(mutation.replacement),
+            named: partialName,
+            under: chatDescriptor
+        )
+        partialExists = true
+        try fault(.afterPendingPartialWrite)
+        let partialDescriptor = try openRegularFile(named: partialName, under: chatDescriptor)
+        defer { Darwin.close(partialDescriptor) }
+        try flushDescriptor(partialDescriptor)
+        try fault(.afterPendingFileFlush)
+        guard try directoryIdentity(named: chatName, under: chatsDescriptor) == chatIdentity,
+              try directoryIdentity(of: chatDescriptor) == chatIdentity
+        else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        switch try loadChatForRename(
+            from: chatDescriptor,
+            expectedID: mutation.chatID,
+            reconcileTransients: false
+        ) {
+        case let .frozen(frozen):
+            return .frozen(frozen)
+        case let .readWrite(commitAuthority):
+            if commitAuthority == replacement { return .committed(commitAuthority) }
+            guard commitAuthority == current else { return .stale(commitAuthority) }
+        }
+        try revalidateLibraryAuthority(
+            libraryID: mutation.library.libraryID,
+            under: rootDescriptor
+        )
+        guard renameat(
+            chatDescriptor,
+            partialName,
+            chatDescriptor,
+            "pending-user-turn.json"
+        ) == 0 else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        partialExists = false
+        try fault(.afterPendingInstall)
+        try flushDescriptor(chatDescriptor)
+        try fault(.afterPendingDirectoryFlush)
+        try fault(.beforePendingFinalRead)
+        guard case let .readWrite(reopened) = try loadChat(
+            from: chatDescriptor,
+            expectedID: mutation.chatID,
+            reconcileTransients: true
+        ), reopened == replacement else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        return .committed(reopened)
+    }
+
     public func discardPendingUserTurn(
         _ mutation: DiscardPendingUserTurnMutation,
         at libraryRoot: URL
@@ -827,6 +931,19 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
+    fileprivate func reconcileCommittedPendingReplacement(
+        _ mutation: ReplacePendingUserTurnMutation,
+        at libraryRoot: URL
+    ) throws -> ChatAggregate? {
+        try reconcileCommittedMutation(
+            in: mutation.library,
+            chatID: mutation.chatID,
+            at: libraryRoot
+        ) { aggregate in
+            aggregate.pendingUserTurn == mutation.replacement
+        }
+    }
+
     fileprivate func reconcileCommittedPendingDiscard(
         _ mutation: DiscardPendingUserTurnMutation,
         at libraryRoot: URL
@@ -947,7 +1064,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 pendingUserTurnId: pending.id.rawValue,
                 draftId: pending.draftID.rawValue,
                 draftVersion: pending.draftVersion,
-                responsePositionId: pending.responsePositionID.rawValue
+                responsePositionId: pending.responsePositionID.rawValue,
+                failure: pending.failure?.rawValue
             )
         )
     }
@@ -1636,14 +1754,28 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     private func decodePendingUserTurn(_ data: Data) throws -> PendingUserTurn {
         let dictionary = try jsonDictionary(data)
-        try requireExactKeys(
-            dictionary,
-            [
-                "schemaVersion", "pendingUserTurnId", "draftId", "draftVersion",
-                "responsePositionId",
-            ]
-        )
+        let requiredKeys: Set<String> = [
+            "schemaVersion", "pendingUserTurnId", "draftId", "draftVersion",
+            "responsePositionId",
+        ]
+        let actualKeys = Set(dictionary.keys)
+        guard actualKeys == requiredKeys || actualKeys == requiredKeys.union(["failure"])
+        else {
+            throw PortableChatPersistenceError.unknownKey
+        }
+        if actualKeys.contains("failure"), dictionary["failure"] is NSNull {
+            throw PortableChatPersistenceError.invalidJSON
+        }
         let dto: PendingUserTurnDTO = try decode(PendingUserTurnDTO.self, data)
+        let failure: PendingUserTurnFailure?
+        if let rawFailure = dto.failure {
+            guard let parsedFailure = PendingUserTurnFailure(rawValue: rawFailure) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            failure = parsedFailure
+        } else {
+            failure = nil
+        }
         guard dto.schemaVersion == PendingUserTurn.schemaVersion else {
             throw PortableChatPersistenceError.invalidSchemaVersion
         }
@@ -1651,7 +1783,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             id: try PendingUserTurnID(dto.pendingUserTurnId),
             draftID: try ChatDraftID(dto.draftId),
             draftVersion: dto.draftVersion,
-            responsePositionID: try ChatResponsePositionID(dto.responsePositionId)
+            responsePositionID: try ChatResponsePositionID(dto.responsePositionId),
+            failure: failure
         )
     }
 
@@ -1957,6 +2090,20 @@ public actor PortableChatStore: ChatStorePort {
         )
     }
 
+    public func replacePendingUserTurn(
+        _ mutation: ReplacePendingUserTurnMutation
+    ) async -> ChatMutationOutcome {
+        await performMutation(
+            in: mutation.library,
+            operation: { root in
+                try persistence.replacePendingUserTurn(mutation, at: root)
+            },
+            reconcile: { root in
+                try persistence.reconcileCommittedPendingReplacement(mutation, at: root)
+            }
+        )
+    }
+
     public func discardPendingUserTurn(
         _ mutation: DiscardPendingUserTurnMutation
     ) async -> ChatMutationOutcome {
@@ -2066,6 +2213,7 @@ private struct PendingUserTurnDTO: Codable {
     let draftId: String
     let draftVersion: UInt64
     let responsePositionId: String
+    let failure: String?
 }
 
 private struct CoachMemoryDTO: Codable {

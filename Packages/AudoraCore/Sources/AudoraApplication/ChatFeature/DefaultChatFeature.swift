@@ -43,6 +43,7 @@ public actor DefaultChatFeature: ChatFeature {
     private let pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator
     private let responsePositionIDGenerator: any ChatResponsePositionIDGenerator
     private let autosaveScheduler: any ChatAutosaveScheduling
+    private let coachContext: any CoachContextCoordinating
 
     private var activeContext: ChatCommandContext?
     private var requestedContext: ChatCommandContext?
@@ -79,6 +80,31 @@ public actor DefaultChatFeature: ChatFeature {
         self.pendingUserTurnIDGenerator = pendingUserTurnIDGenerator
         self.responsePositionIDGenerator = responsePositionIDGenerator
         self.autosaveScheduler = autosaveScheduler
+        coachContext = DefaultCoachContextFeature()
+    }
+
+    init(
+        store: any ChatStorePort,
+        profileReader: any ProfileStatementGenerationReading,
+        clock: any ChatClock,
+        chatIDGenerator: any ChatIDGenerator,
+        draftIDGenerator: any ChatDraftIDGenerator,
+        memoryIDGenerator: any CoachMemoryIDGenerator,
+        pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
+        responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
+        autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
+        coachContext: any CoachContextCoordinating
+    ) {
+        self.store = store
+        self.profileReader = profileReader
+        self.clock = clock
+        self.chatIDGenerator = chatIDGenerator
+        self.draftIDGenerator = draftIDGenerator
+        self.memoryIDGenerator = memoryIDGenerator
+        self.pendingUserTurnIDGenerator = pendingUserTurnIDGenerator
+        self.responsePositionIDGenerator = responsePositionIDGenerator
+        self.autosaveScheduler = autosaveScheduler
+        self.coachContext = coachContext
     }
 
     public var currentState: ChatFeatureState { state }
@@ -221,6 +247,16 @@ public actor DefaultChatFeature: ChatFeature {
             )
         case let .open(context, chatID):
             await open(chatID, context: context)
+        case let .refreshContextQuote(context, chatID, expectedDraft):
+            await refreshContextQuote(
+                chatID: chatID,
+                expectedDraft: expectedDraft,
+                context: context
+            )
+        case let .retryPendingUserTurn(context, pendingUserTurnID):
+            await retryPendingUserTurn(pendingUserTurnID, context: context)
+        case let .createNewChatFromCapacityFailure(context, pendingUserTurnID):
+            createNewChatFromCapacityFailure(pendingUserTurnID, context: context)
         case let .discardPendingUserTurn(context, pendingUserTurnID):
             await discardPendingUserTurn(pendingUserTurnID, context: context)
         case .start, .setFilter, .editDraft, .sendDraft:
@@ -329,6 +365,11 @@ public actor DefaultChatFeature: ChatFeature {
             switch outcome {
             case let .committed(committed):
                 install(committed, selection: .open(committed), notice: nil)
+                await refreshContextAdvisory(
+                    for: committed,
+                    draft: committed.chat.draft,
+                    context: context
+                )
                 return
             case .collision:
                 collisionAttempts += 1
@@ -490,6 +531,8 @@ public actor DefaultChatFeature: ChatFeature {
                 filterQuery: query,
                 selection: state.selection,
                 composer: state.composer,
+                contextAdvisory: state.contextAdvisory,
+                createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
                 activity: state.activity,
                 notice: state.notice
             )
@@ -506,6 +549,8 @@ public actor DefaultChatFeature: ChatFeature {
             filterQuery: query,
             selection: state.selection,
             composer: state.composer,
+            contextAdvisory: state.contextAdvisory,
+            createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
             activity: state.activity,
             notice: nil
         )
@@ -529,6 +574,11 @@ public actor DefaultChatFeature: ChatFeature {
         switch outcome {
         case let .loaded(aggregate):
             install(aggregate, selection: .open(aggregate), notice: nil)
+            await refreshContextAdvisory(
+                for: aggregate,
+                draft: aggregate.chat.draft,
+                context: context
+            )
         case let .frozen(frozen):
             install(frozen, selection: .frozen(frozen), notice: .chatFrozen)
         case .missing:
@@ -575,6 +625,87 @@ public actor DefaultChatFeature: ChatFeature {
         }
     }
 
+    private func refreshContextAdvisory(
+        for aggregate: ChatAggregate,
+        draft: ChatDraft,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context),
+              case let .open(selected) = state.selection,
+              selected.chat.id == aggregate.chat.id,
+              state.composer?.draft == draft
+        else {
+            return
+        }
+        guard draft.text.utf8.count <=
+            CoachContextInputLimits.maximumUserMessageUTF8Bytes
+        else {
+            state = replacing(
+                contextAdvisory: .messageTooLong(
+                    maximumUTF8Bytes: CoachContextInputLimits.maximumUserMessageUTF8Bytes
+                ),
+                clearsRecoveryIntent: true,
+                activity: state.activity,
+                notice: state.notice
+            )
+            publish()
+            return
+        }
+        state = replacing(
+            contextAdvisory: .quoting,
+            clearsRecoveryIntent: true,
+            activity: state.activity,
+            notice: state.notice
+        )
+        publish()
+        let outcome = await coachContext.quoteChat(
+            CoachContextChatQuoteRequest(
+                library: context.libraryScope,
+                chatID: aggregate.chat.id,
+                draft: draft
+            )
+        )
+        guard isActive(context),
+              case let .open(current) = state.selection,
+              current.chat.id == aggregate.chat.id,
+              state.composer?.draft == draft
+        else {
+            return
+        }
+        let advisory: CoachContextAdvisoryState
+        switch outcome {
+        case let .available(quote):
+            advisory = .available(quote)
+        case let .unavailable(reason):
+            advisory = .unavailable(reason)
+        }
+        state = replacing(
+            contextAdvisory: advisory,
+            activity: state.activity,
+            notice: state.notice
+        )
+        publish()
+    }
+
+    private func refreshContextQuote(
+        chatID: ChatID,
+        expectedDraft: ChatDraft,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context),
+              case let .open(aggregate) = state.selection,
+              aggregate.chat.id == chatID,
+              state.composer?.draft == expectedDraft
+        else {
+            return
+        }
+        await refreshContextAdvisory(
+            for: aggregate,
+            draft: expectedDraft,
+            context: context
+        )
+    }
+
     private func finishOperation() {
         operationInFlight = false
         let waiters = operationIdleWaiters
@@ -611,6 +742,11 @@ public actor DefaultChatFeature: ChatFeature {
             )
             publish()
             scheduleAutosave(for: context, chatID: aggregate.chat.id)
+            await refreshContextAdvisory(
+                for: aggregate,
+                draft: edited,
+                context: context
+            )
         } catch {
             state = replacing(activity: nil, notice: .invalidDraft)
             publish()
@@ -666,18 +802,82 @@ public actor DefaultChatFeature: ChatFeature {
             draftVersion: flushedDraft.version,
             responsePositionID: responsePositionID
         )
+        let request: CoachContextPendingTurnRequest
+        do {
+            request = try CoachContextPendingTurnRequest(
+                library: context.libraryScope,
+                chatID: flushed.chat.id,
+                draft: flushedDraft,
+                pendingUserTurn: pending
+            )
+        } catch {
+            state = replacing(activity: nil, notice: .coachContextUnavailable)
+            publish()
+            return
+        }
+        let preparation = await coachContext.preparePendingUserTurn(request)
+        guard isActive(context),
+              case let .open(current) = state.selection,
+              current.chat.id == flushed.chat.id,
+              current.pendingUserTurn == nil,
+              case let .editable(currentDraft, false) = state.composer,
+              currentDraft == flushedDraft
+        else {
+            return
+        }
+
+        let pendingToInstall: PendingUserTurn
+        switch preparation {
+        case let .prepared(prepared):
+            pendingToInstall = pending
+            state = replacing(
+                contextAdvisory: .available(prepared.quote),
+                clearsRecoveryIntent: true,
+                activity: .lockingDraft(flushed.chat.id),
+                notice: nil
+            )
+        case let .cannotFit(failure):
+            pendingToInstall = pending.replacingFailure(.coachContextCannotFit)
+            state = replacing(
+                contextAdvisory: .available(failure.quote),
+                clearsRecoveryIntent: true,
+                activity: .lockingDraft(flushed.chat.id),
+                notice: nil
+            )
+        case let .messageTooLong(maximumUTF8Bytes):
+            state = replacing(
+                contextAdvisory: .messageTooLong(
+                    maximumUTF8Bytes: maximumUTF8Bytes
+                ),
+                clearsRecoveryIntent: true,
+                activity: nil,
+                notice: .messageMustBeShortened
+            )
+            publish()
+            return
+        case let .unavailable(reason):
+            state = replacing(
+                contextAdvisory: .unavailable(reason),
+                clearsRecoveryIntent: true,
+                activity: nil,
+                notice: .coachContextUnavailable
+            )
+            publish()
+            return
+        }
+        publish()
         let outcome = await store.lockPendingUserTurn(
             LockPendingUserTurnMutation(
                 library: context.libraryScope,
                 chatID: flushed.chat.id,
-                pendingUserTurn: pending
+                pendingUserTurn: pendingToInstall
             )
         )
         guard isActive(context) else { return }
         applyPendingMutationOutcome(
             outcome,
             expectedChatID: flushed.chat.id,
-            expectedPending: pending,
+            expectedPending: pendingToInstall,
             operationFailure: .pendingUserTurnFailed
         )
     }
@@ -697,6 +897,7 @@ public actor DefaultChatFeature: ChatFeature {
             return
         }
         state = replacing(
+            clearsRecoveryIntent: true,
             activity: .discardingPendingUserTurn(aggregate.chat.id),
             notice: nil
         )
@@ -715,6 +916,136 @@ public actor DefaultChatFeature: ChatFeature {
             expectedPending: nil,
             operationFailure: .pendingUserTurnFailed
         )
+    }
+
+    private func retryPendingUserTurn(
+        _ pendingUserTurnID: PendingUserTurnID,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context),
+              case let .open(aggregate) = state.selection,
+              let pending = aggregate.pendingUserTurn,
+              pending.id == pendingUserTurnID,
+              pending.failure == .coachContextCannotFit,
+              case let .locked(draft, locked) = state.composer,
+              locked == pending,
+              draft == aggregate.chat.draft
+        else {
+            return
+        }
+        state = replacing(
+            clearsRecoveryIntent: true,
+            activity: .retryingPendingUserTurn(aggregate.chat.id),
+            notice: nil
+        )
+        publish()
+        let request: CoachContextPendingTurnRequest
+        do {
+            request = try CoachContextPendingTurnRequest(
+                library: context.libraryScope,
+                chatID: aggregate.chat.id,
+                draft: draft,
+                pendingUserTurn: pending
+            )
+        } catch {
+            state = replacing(activity: nil, notice: .coachContextUnavailable)
+            publish()
+            return
+        }
+        let preparation = await coachContext.preparePendingUserTurn(request)
+        guard isActive(context),
+              case let .open(current) = state.selection,
+              current.chat.id == aggregate.chat.id,
+              current.pendingUserTurn == pending,
+              case let .locked(currentDraft, currentPending) = state.composer,
+              currentDraft == draft,
+              currentPending == pending
+        else {
+            return
+        }
+        switch preparation {
+        case let .prepared(prepared):
+            let replacement = pending.replacingFailure(nil)
+            state = replacing(
+                contextAdvisory: .available(prepared.quote),
+                activity: .retryingPendingUserTurn(aggregate.chat.id),
+                notice: nil
+            )
+            publish()
+            let mutation: ReplacePendingUserTurnMutation
+            do {
+                mutation = try ReplacePendingUserTurnMutation(
+                    library: context.libraryScope,
+                    chatID: aggregate.chat.id,
+                    base: pending,
+                    replacement: replacement
+                )
+            } catch {
+                state = replacing(activity: nil, notice: .pendingUserTurnFailed)
+                publish()
+                return
+            }
+            let outcome = await store.replacePendingUserTurn(
+                mutation
+            )
+            guard isActive(context) else { return }
+            applyPendingMutationOutcome(
+                outcome,
+                expectedChatID: aggregate.chat.id,
+                expectedPending: replacement,
+                operationFailure: .pendingUserTurnFailed
+            )
+        case let .cannotFit(failure):
+            state = replacing(
+                contextAdvisory: .available(failure.quote),
+                activity: nil,
+                notice: nil
+            )
+            publish()
+        case let .messageTooLong(maximumUTF8Bytes):
+            state = replacing(
+                contextAdvisory: .messageTooLong(
+                    maximumUTF8Bytes: maximumUTF8Bytes
+                ),
+                activity: nil,
+                notice: .messageMustBeShortened
+            )
+            publish()
+        case let .unavailable(reason):
+            state = replacing(
+                contextAdvisory: .unavailable(reason),
+                activity: nil,
+                notice: .coachContextUnavailable
+            )
+            publish()
+        }
+    }
+
+    private func createNewChatFromCapacityFailure(
+        _ pendingUserTurnID: PendingUserTurnID,
+        context: ChatCommandContext
+    ) {
+        guard isActive(context),
+              case let .open(aggregate) = state.selection,
+              let pending = aggregate.pendingUserTurn,
+              pending.id == pendingUserTurnID,
+              pending.failure == .coachContextCannotFit,
+              case let .locked(draft, locked) = state.composer,
+              locked == pending,
+              draft == aggregate.chat.draft,
+              let intent = try? CoachContextCreateNewChatRecoveryIntent(
+                  chat: aggregate.chat,
+                  pendingUserTurn: pending
+              )
+        else {
+            return
+        }
+        state = replacing(
+            recoveryIntent: intent,
+            activity: nil,
+            notice: nil
+        )
+        publish()
     }
 
     private func scheduleAutosave(for context: ChatCommandContext, chatID: ChatID) {
@@ -1065,6 +1396,14 @@ public actor DefaultChatFeature: ChatFeature {
         notice: ChatNotice?
     ) {
         let sorted = sortedRows(rows)
+        let preservesSelectedChat: Bool = {
+            guard case let .open(previous) = state.selection,
+                  case let .open(next) = selection
+            else {
+                return false
+            }
+            return previous.chat.id == next.chat.id
+        }()
         state = ChatFeatureState(
             catalog: .ready(
                 ChatCatalogSnapshot(
@@ -1075,6 +1414,12 @@ public actor DefaultChatFeature: ChatFeature {
             filterQuery: state.filterQuery,
             selection: selection,
             composer: composer,
+            contextAdvisory: preservesSelectedChat
+                ? state.contextAdvisory
+                : .notRequested,
+            createNewChatRecoveryIntent: preservesSelectedChat
+                ? state.createNewChatRecoveryIntent
+                : nil,
             activity: activity,
             notice: notice
         )
@@ -1158,6 +1503,9 @@ public actor DefaultChatFeature: ChatFeature {
         selection: ChatFeatureState.Selection? = nil,
         composer: ChatComposerState? = nil,
         replacesComposer: Bool = false,
+        contextAdvisory: CoachContextAdvisoryState? = nil,
+        recoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
+        clearsRecoveryIntent: Bool = false,
         activity: ChatFeatureState.Activity?,
         notice: ChatNotice?
     ) -> ChatFeatureState {
@@ -1166,6 +1514,10 @@ public actor DefaultChatFeature: ChatFeature {
             filterQuery: state.filterQuery,
             selection: selection ?? state.selection,
             composer: replacesComposer ? composer : state.composer,
+            contextAdvisory: contextAdvisory ?? state.contextAdvisory,
+            createNewChatRecoveryIntent: clearsRecoveryIntent
+                ? nil
+                : recoveryIntent ?? state.createNewChatRecoveryIntent,
             activity: activity,
             notice: notice
         )
@@ -1201,7 +1553,11 @@ private extension ChatCommand {
             context
         case let .rename(context, _, _, _), let .setFilter(context, _),
              let .open(context, _), let .editDraft(context, _, _, _),
-             let .sendDraft(context, _, _), let .discardPendingUserTurn(context, _):
+             let .refreshContextQuote(context, _, _),
+             let .sendDraft(context, _, _),
+             let .retryPendingUserTurn(context, _),
+             let .createNewChatFromCapacityFailure(context, _),
+             let .discardPendingUserTurn(context, _):
             context
         }
     }

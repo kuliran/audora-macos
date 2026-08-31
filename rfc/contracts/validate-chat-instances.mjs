@@ -17,12 +17,17 @@ const examplesDirectory = path.join(
   resourcesDirectory,
   "Examples/DevelopmentChat/v1",
 );
+const coachContextExamplesDirectory = path.join(
+  resourcesDirectory,
+  "Examples/CoachContext/v1",
+);
 const rejectedDirectory = path.join(examplesDirectory, "rejected");
 const scenariosDirectory = path.join(resourcesDirectory, "Scenarios/Chat");
 
 const positiveInventory = [
   "chat.json",
   "memory.json",
+  "pending-user-turn-capacity-failure.json",
   "pending-user-turn.json",
   "rejected",
   "renamed-chat.json",
@@ -30,6 +35,7 @@ const positiveInventory = [
 ];
 const scenarioInventory = [
   "corrupt-chat-freezes.v1.json",
+  "context-capacity-recovery.v1.json",
   "create-collision-limit.v1.json",
   "create-empty-development-chat.v1.json",
   "draft-send-discard.v1.json",
@@ -93,6 +99,19 @@ const chatManifest = await validator("ChatManifest.json");
 const coachMemory = await validator("CoachMemoryEnvelope.json");
 const pendingUserTurn = await validator("PendingUserTurn.json");
 const scenario = await validator("DevelopmentChatFeatureScenario.json");
+const coachContextQuote = await validator("CoachContextQuote.json");
+
+await assertExactInventory(
+  coachContextExamplesDirectory,
+  ["quote.json"],
+  "Coach context fixture",
+);
+assertValidation(
+  coachContextQuote,
+  await loadJSON(path.join(coachContextExamplesDirectory, "quote.json")),
+  true,
+  "coach-context/quote.json",
+);
 
 for (const name of ["chat.json", "renamed-chat.json", "session-analysis-chat.json"]) {
   assertValidation(
@@ -113,6 +132,14 @@ assertValidation(
   await loadJSON(path.join(examplesDirectory, "pending-user-turn.json")),
   true,
   "pending-user-turn.json",
+);
+assertValidation(
+  pendingUserTurn,
+  await loadJSON(
+    path.join(examplesDirectory, "pending-user-turn-capacity-failure.json"),
+  ),
+  true,
+  "pending-user-turn-capacity-failure.json",
 );
 
 for (const name of scenarioInventory) {

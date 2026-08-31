@@ -7,6 +7,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case chatManifestSchema
     case pendingUserTurnSchema
     case coachMemoryEnvelopeSchema
+    case coachContextQuoteSchema
     case coachProviderDescriptorSchema
     case coachRequestSchema
     case coachResponseSchema
@@ -32,6 +33,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case audioImportCollisionRegenerationScenario
     case createDevelopmentChatScenario
     case draftSendDiscardDevelopmentChatScenario
+    case contextCapacityRecoveryDevelopmentChatScenario
     case renameDevelopmentChatScenario
     case filterDevelopmentChatsScenario
     case relaunchDevelopmentChatScenario
@@ -85,6 +87,8 @@ public enum ContractResource: CaseIterable, Sendable {
     case developmentChatExample
     case developmentChatMemoryExample
     case pendingUserTurnExample
+    case pendingUserTurnCapacityFailureExample
+    case coachContextQuoteExample
     case renamedDevelopmentChatExample
     case sessionAnalysisChatExample
     case rejectedChatExplicitNullOrigin
@@ -143,6 +147,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "PendingUserTurn.json"
         case .coachMemoryEnvelopeSchema:
             "CoachMemoryEnvelope.json"
+        case .coachContextQuoteSchema:
+            "CoachContextQuote.json"
         case .coachProviderDescriptorSchema:
             "CoachProviderDescriptor.json"
         case .coachRequestSchema:
@@ -191,6 +197,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "create-empty-development-chat.v1.json"
         case .draftSendDiscardDevelopmentChatScenario:
             "draft-send-discard.v1.json"
+        case .contextCapacityRecoveryDevelopmentChatScenario:
+            "context-capacity-recovery.v1.json"
         case .renameDevelopmentChatScenario:
             "rename-preserves-identity.v1.json"
         case .filterDevelopmentChatsScenario:
@@ -293,6 +301,10 @@ public enum ContractResource: CaseIterable, Sendable {
             "memory.json"
         case .pendingUserTurnExample:
             "pending-user-turn.json"
+        case .pendingUserTurnCapacityFailureExample:
+            "pending-user-turn-capacity-failure.json"
+        case .coachContextQuoteExample:
+            "quote.json"
         case .renamedDevelopmentChatExample:
             "renamed-chat.json"
         case .sessionAnalysisChatExample:
@@ -375,7 +387,8 @@ public enum ContractResource: CaseIterable, Sendable {
         case .audioImportFeatureScenarioSchema, .audioManifestSchema,
              .audioNormalizationVectorsSchema, .chatManifestSchema,
              .pendingUserTurnSchema,
-             .coachMemoryEnvelopeSchema, .coachProviderDescriptorSchema,
+             .coachMemoryEnvelopeSchema, .coachContextQuoteSchema,
+             .coachProviderDescriptorSchema,
              .coachRequestSchema, .coachResponseSchema,
              .developmentChatFeatureScenarioSchema, .libraryFeatureScenarioSchema,
              .libraryManifestSchema, .libraryPreferencesSchema, .profileHeadSchema,
@@ -390,6 +403,7 @@ public enum ContractResource: CaseIterable, Sendable {
              .audioImportCollisionRegenerationScenario:
             "Scenarios/AudioImport"
         case .createDevelopmentChatScenario, .draftSendDiscardDevelopmentChatScenario,
+             .contextCapacityRecoveryDevelopmentChatScenario,
              .renameDevelopmentChatScenario,
              .filterDevelopmentChatsScenario, .relaunchDevelopmentChatScenario,
              .staleRenameDevelopmentChatScenario, .wrongLibraryDevelopmentChatScenario,
@@ -424,9 +438,11 @@ public enum ContractResource: CaseIterable, Sendable {
              .rejectedNegativeProfileGeneration, .newerPreferencesExample:
             "Examples/PortableLibrary/v1/rejected"
         case .developmentChatExample, .developmentChatMemoryExample,
-             .pendingUserTurnExample,
+             .pendingUserTurnExample, .pendingUserTurnCapacityFailureExample,
              .renamedDevelopmentChatExample, .sessionAnalysisChatExample:
             "Examples/DevelopmentChat/v1"
+        case .coachContextQuoteExample:
+            "Examples/CoachContext/v1"
         case .rejectedChatExplicitNullOrigin, .rejectedChatMissingAttachments,
              .rejectedNewChatWithOrigin, .rejectedNewerChatSchema,
              .rejectedChatUnknownKey, .rejectedDanglingMemorySummary:

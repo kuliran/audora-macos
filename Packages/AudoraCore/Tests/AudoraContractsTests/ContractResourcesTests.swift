@@ -18,6 +18,32 @@ final class ContractResourcesTests: XCTestCase {
         }
     }
 
+    func testCoachContextQuoteLocksMessageLimitAndAllExplanatoryCategories() throws {
+        let quote = try jsonObject(.coachContextQuoteExample)
+        XCTAssertEqual(quote["maximumUserMessageUtf8Bytes"] as? Int, 16_384)
+        XCTAssertEqual(quote["completeInputTokens"] as? Int, 642)
+        XCTAssertEqual(quote["inputCeilingTokens"] as? Int, 4_032)
+        let costs = try XCTUnwrap(quote["categoryCosts"] as? [[String: Any]])
+        XCTAssertEqual(
+            Set(costs.compactMap { $0["category"] as? String }),
+            Set([
+                "profile", "memory", "history", "draft", "framing", "attachments",
+                "transcriptExchange", "responseReserve", "safetyMargin",
+            ])
+        )
+        XCTAssertEqual(costs.count, 9)
+
+        let schema = try jsonObject(.coachContextQuoteSchema)
+        let serialized = try JSONSerialization.data(
+            withJSONObject: schema,
+            options: [.sortedKeys]
+        )
+        let text = try XCTUnwrap(String(data: serialized, encoding: .utf8))
+        XCTAssertTrue(text.contains("16384"))
+        XCTAssertFalse(text.contains("CanonicalCoachExchange"))
+        XCTAssertFalse(text.contains("modelInputFrames"))
+    }
+
     func testSameBasenameImportAndRecordingResourcesStayDistinct() throws {
         XCTAssertEqual(
             ContractResource.importedAudioManifestExample.rawValue,
@@ -506,6 +532,17 @@ final class ContractResourcesTests: XCTestCase {
             pending["responsePositionId"] as? String,
             "rsp-20260830T120001000Z-6PQR"
         )
+        XCTAssertNil(pending["failure"])
+
+        let failed = try jsonObject(.pendingUserTurnCapacityFailureExample)
+        XCTAssertEqual(failed["pendingUserTurnId"] as? String,
+                       pending["pendingUserTurnId"] as? String)
+        XCTAssertEqual(failed["draftId"] as? String, pending["draftId"] as? String)
+        XCTAssertEqual((failed["draftVersion"] as? NSNumber)?.uint64Value,
+                       (pending["draftVersion"] as? NSNumber)?.uint64Value)
+        XCTAssertEqual(failed["responsePositionId"] as? String,
+                       pending["responsePositionId"] as? String)
+        XCTAssertEqual(failed["failure"] as? String, "coachContextCannotFit")
 
         let schema = try XCTUnwrap(
             String(
@@ -515,6 +552,7 @@ final class ContractResourcesTests: XCTestCase {
         )
         XCTAssertTrue(schema.contains("PendingUserTurnId"))
         XCTAssertTrue(schema.contains("ChatResponsePositionId"))
+        XCTAssertTrue(schema.contains("coachContextCannotFit"))
         XCTAssertTrue(schema.contains("unevaluatedProperties"))
     }
 
@@ -522,6 +560,7 @@ final class ContractResourcesTests: XCTestCase {
         let resources: [ContractResource] = [
             .createDevelopmentChatScenario,
             .draftSendDiscardDevelopmentChatScenario,
+            .contextCapacityRecoveryDevelopmentChatScenario,
             .renameDevelopmentChatScenario,
             .filterDevelopmentChatsScenario,
             .relaunchDevelopmentChatScenario,
@@ -579,6 +618,7 @@ final class ContractResourcesTests: XCTestCase {
                 "renameFailed", "staleRename", "chatMissing", "chatOpenFailed",
                 "chatFrozen", "catalogFailed", "readOnlyLibrary", "invalidDraft",
                 "draftSaveFailed", "draftChanged", "pendingUserTurnFailed",
+                "coachContextUnavailable", "messageMustBeShortened",
             ]
         )
     }

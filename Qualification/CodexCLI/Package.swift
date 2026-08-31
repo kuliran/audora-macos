@@ -17,6 +17,9 @@ let package = Package(
             targets: ["CodexCLIQualificationCommand"]
         ),
     ],
+    dependencies: [
+        .package(path: "../../Packages/AudoraCore"),
+    ],
     targets: [
         .target(
             name: "AudoraCodexCLIQualification",
@@ -28,7 +31,10 @@ let package = Package(
         ),
         .testTarget(
             name: "AudoraCodexCLIQualificationTests",
-            dependencies: ["AudoraCodexCLIQualification"]
+            dependencies: [
+                "AudoraCodexCLIQualification",
+                .product(name: "AudoraApplication", package: "AudoraCore"),
+            ]
         ),
     ]
 )

@@ -1,4 +1,4 @@
-import AudoraApplication
+@testable import AudoraApplication
 import AudoraContracts
 import AudoraDomain
 import Foundation
@@ -10,6 +10,7 @@ final class DevelopmentChatScenarioTests: XCTestCase {
         let resources: [ContractResource] = [
             .createDevelopmentChatScenario,
             .draftSendDiscardDevelopmentChatScenario,
+            .contextCapacityRecoveryDevelopmentChatScenario,
             .renameDevelopmentChatScenario,
             .filterDevelopmentChatsScenario,
             .relaunchDevelopmentChatScenario,
@@ -49,7 +50,12 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 draftIDGenerator: scripted,
                 memoryIDGenerator: scripted,
                 pendingUserTurnIDGenerator: scripted,
-                responsePositionIDGenerator: scripted
+                responsePositionIDGenerator: scripted,
+                coachContext: DefaultCoachContextFeature(
+                    source: ScenarioCoachContextSnapshotPort(
+                        mode: dto.contextCapacityMode ?? "alwaysFits"
+                    )
+                )
             )
             let scope = LibraryScope(libraryID: try LibraryID(dto.libraryId))
             var commandGeneration: UInt64 = 1
@@ -143,6 +149,13 @@ final class DevelopmentChatScenarioTests: XCTestCase {
             if let expected = dto.expectedState.responsePositionId {
                 XCTAssertEqual(
                     selectedChat(state)?.pendingUserTurn?.responsePositionID.rawValue,
+                    expected,
+                    dto.scenarioId
+                )
+            }
+            if let expected = dto.expectedState.pendingFailure {
+                XCTAssertEqual(
+                    selectedChat(state)?.pendingUserTurn?.failure?.rawValue,
                     expected,
                     dto.scenarioId
                 )
@@ -280,6 +293,7 @@ private struct DevelopmentChatScenarioDTO: Decodable {
     let expectedInvocationCalls: Int
     let expectedAdmissionCalls: Int
     let providerAvailability: String?
+    let contextCapacityMode: String?
     let suspendedEffect: String?
 }
 
@@ -374,6 +388,14 @@ private struct DevelopmentChatCommandDTO: Decodable {
                     throw ScenarioFailure.command
                 }
                 return .sendDraft(context, activeChatID, activeDraft)
+            case "refreshContextQuote":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, query == nil, text == nil,
+                      pendingUserTurnId == nil, let activeChatID, let activeDraft
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .refreshContextQuote(context, activeChatID, activeDraft)
             case "discardPendingUserTurn":
                 guard libraryId == nil, chatId == nil, title == nil,
                       expectedRevision == nil, query == nil, text == nil,
@@ -382,6 +404,28 @@ private struct DevelopmentChatCommandDTO: Decodable {
                     throw ScenarioFailure.command
                 }
                 return .discardPendingUserTurn(
+                    context,
+                    try PendingUserTurnID(pendingUserTurnId)
+                )
+            case "retryPendingUserTurn":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, query == nil, text == nil,
+                      let pendingUserTurnId
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .retryPendingUserTurn(
+                    context,
+                    try PendingUserTurnID(pendingUserTurnId)
+                )
+            case "createNewChatFromCapacityFailure":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, query == nil, text == nil,
+                      let pendingUserTurnId
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .createNewChatFromCapacityFailure(
                     context,
                     try PendingUserTurnID(pendingUserTurnId)
                 )
@@ -482,6 +526,7 @@ private struct DevelopmentChatStateDTO: Decodable {
     let composerStatus: String?
     let pendingUserTurnId: String?
     let responsePositionId: String?
+    let pendingFailure: String?
     let notice: String?
 }
 
@@ -649,6 +694,31 @@ private actor ChatScenarioStore: ChatStorePort {
         return .committed(locked)
     }
 
+    func replacePendingUserTurn(
+        _ mutation: ReplacePendingUserTurnMutation
+    ) async -> ChatMutationOutcome {
+        guard let event = consume(effect: "replacePendingUserTurn"),
+              let current = chats[mutation.chatID]
+        else {
+            XCTFail("missing scripted Pending User Turn replacement event or Chat")
+            return .failed
+        }
+        await record(event)
+        guard event.outcome.rendered == "committed" else { return .failed }
+        if current.pendingUserTurn == mutation.replacement { return .committed(current) }
+        guard current.pendingUserTurn == mutation.base,
+              let replaced = try? ChatAggregate(
+                  chat: current.chat,
+                  memory: current.memory,
+                  pendingUserTurn: mutation.replacement
+              )
+        else {
+            return .stale(current)
+        }
+        chats[mutation.chatID] = replaced
+        return .committed(replaced)
+    }
+
     func discardPendingUserTurn(
         _ mutation: DiscardPendingUserTurnMutation
     ) async -> ChatMutationOutcome {
@@ -781,5 +851,107 @@ private actor ChatScenarioScript:
             effect: event.effect,
             outcome: event.outcome.rendered
         )
+    }
+}
+
+private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
+    private let mode: String
+    private var pendingResolutionCount = 0
+
+    init(mode: String) {
+        self.mode = mode
+    }
+
+    func resolveNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .sourceUnavailable
+    }
+
+    func resolveChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        snapshot(
+            for: request.draft,
+            binding: .chat(
+                library: request.library,
+                chatID: request.chatID,
+                draftID: request.draft.draftID,
+                draftVersion: request.draft.version
+            ),
+            contextWindow: 100_000
+        )
+    }
+
+    func resolvePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextSnapshotOutcome {
+        pendingResolutionCount += 1
+        let contextWindow = mode == "cannotFitThenFits" && pendingResolutionCount == 1
+            ? 64
+            : 100_000
+        return snapshot(
+            for: request.draft,
+            binding: .pending(
+                library: request.library,
+                chatID: request.chatID,
+                draftID: request.draft.draftID,
+                draftVersion: request.draft.version,
+                pendingUserTurnID: request.pendingUserTurn.id,
+                responsePositionID: request.pendingUserTurn.responsePositionID
+            ),
+            contextWindow: contextWindow
+        )
+    }
+
+    func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
+        authority.contextGeneration == UInt64(pendingResolutionCount + 1) &&
+            authority.configurationGeneration == UInt64(pendingResolutionCount + 1)
+    }
+
+    private func snapshot(
+        for draft: ChatDraft,
+        binding: CoachContextSnapshotBinding,
+        contextWindow: Int
+    ) -> CoachContextSnapshotOutcome {
+        do {
+            return .resolved(
+                try CoachContextResolvedSnapshot(
+                    input: CoachContextQuoteInput(
+                        profile: .object(["statements": .array([])]),
+                        memory: .object([
+                            "generalNotes": .string(""),
+                            "sessionSummaries": .array([]),
+                        ]),
+                        history: [],
+                        currentDraft: draft.text
+                    ),
+                    configuration: try CoachContextConfiguration(
+                        descriptor: CoachProviderDescriptor(
+                            displayName: "Synthetic scenario fixture",
+                            contextBudget: CoachContextBudget(
+                                contextWindowTokens: contextWindow,
+                                responseReservedTokens: 16,
+                                safetyMarginTokens: 8
+                            ),
+                            coachMemoryMaxTokens: 1
+                        ),
+                        policy: CoachProviderEstimationPolicy(
+                            providerIdentifier: "synthetic-scenario-v1",
+                            responseCollectorByteCeiling: 8_192,
+                            framing: CoachProviderFraming(),
+                            tokenEstimator: .utf8ByteUpperBound()
+                        )
+                    ),
+                    authority: CoachContextSnapshotAuthority(
+                        binding: binding,
+                        contextGeneration: UInt64(pendingResolutionCount + 1),
+                        configurationGeneration: UInt64(pendingResolutionCount + 1)
+                    )
+                )
+            )
+        } catch {
+            return .sourceUnavailable
+        }
     }
 }

@@ -24,11 +24,43 @@ enum ChatNoticePresentation {
         case .draftSaveFailed: "The Draft could not be saved. Try again before leaving."
         case .draftChanged: "The Draft changed elsewhere. Its current text is shown."
         case .pendingUserTurnFailed: "The pending Chat turn could not be changed."
+        case .coachContextUnavailable: "Context capacity is unavailable for this Coach configuration."
+        case .messageMustBeShortened: "Message is too long. Shorten it to send."
         }
     }
 
     static func accessibilityLabel(for notice: ChatNotice) -> String {
         "Chat notice: \(recoveryText(for: notice))"
+    }
+}
+
+enum CoachContextQuotePresentation {
+    static func summary(_ quote: CoachContextQuote) -> String {
+        summary(
+            completeInputTokens: quote.completeInputTokens,
+            inputCeilingTokens: quote.inputCeilingTokens
+        )
+    }
+
+    static func summary(
+        completeInputTokens: Int,
+        inputCeilingTokens: Int
+    ) -> String {
+        "~\(completeInputTokens) / \(inputCeilingTokens) input tokens"
+    }
+
+    static func categoryLabel(_ category: CoachContextCostCategory) -> String {
+        switch category {
+        case .profile: "Profile"
+        case .memory: "Coach Memory"
+        case .history: "Prior chat history"
+        case .draft: "Current Draft"
+        case .framing: "Provider framing"
+        case .attachments: "Attachments"
+        case .transcriptExchange: "Transcript exchange reserve"
+        case .responseReserve: "Response reserve"
+        case .safetyMargin: "Safety margin"
+        }
     }
 }
 
@@ -233,15 +265,24 @@ public struct ChatRootView: View {
                                 isDirty ? "Chat Draft has unsaved changes" : "Chat Draft is saved"
                             )
                         Spacer()
+                        contextSummary
                         Button("Send") { model.sendDraft() }
                             .keyboardShortcut(.return, modifiers: [.command])
                             .accessibilityLabel("Send Chat Draft")
                             .disabled(
                                 !allowsNavigationAndMutation ||
+                                    !sendIsContextEligible ||
                                     !draft.text.unicodeScalars.contains {
                                         !$0.properties.isWhitespace
                                     }
                             )
+                    }
+                    contextDetails
+                    if messageNeedsShortening {
+                        Text("Message is too long. Shorten it to send.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Message is too long. Shorten it to send.")
                     }
                 }
             }
@@ -258,13 +299,41 @@ public struct ChatRootView: View {
                     Text("This exact Draft is locked outside successful history.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    HStack {
-                        Spacer()
-                        Button("Discard") {
-                            model.discardPendingUserTurn(pending.id)
+                    if pending.failure == .coachContextCannotFit {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Chat size exceeded. Please create a new one.")
+                                .font(.callout.weight(.semibold))
+                                .accessibilityLabel(
+                                    "Chat size exceeded. Please create a new one."
+                                )
+                            contextDetails
+                            HStack {
+                                Button("Retry") {
+                                    model.retryPendingUserTurn(pending.id)
+                                }
+                                .accessibilityLabel("Retry Pending User Turn")
+                                Button("Discard") {
+                                    model.discardPendingUserTurn(pending.id)
+                                }
+                                .accessibilityLabel("Discard Pending User Turn")
+                                Button("Create New Chat") {
+                                    model.createNewChatFromCapacityFailure(pending.id)
+                                }
+                                .accessibilityLabel(
+                                    "Create New Chat from capacity failure"
+                                )
+                            }
+                            .disabled(!allowsNavigationAndMutation)
                         }
-                        .accessibilityLabel("Discard Pending User Turn")
-                        .disabled(!allowsNavigationAndMutation)
+                    } else {
+                        HStack {
+                            Spacer()
+                            Button("Discard") {
+                                model.discardPendingUserTurn(pending.id)
+                            }
+                            .accessibilityLabel("Discard Pending User Turn")
+                            .disabled(!allowsNavigationAndMutation)
+                        }
                     }
                 }
             }
@@ -282,6 +351,8 @@ public struct ChatRootView: View {
             ProgressView("Renaming Chat…")
         case .lockingDraft:
             ProgressView("Preparing Draft…")
+        case .retryingPendingUserTurn:
+            ProgressView("Rechecking Chat capacity…")
         case .discardingPendingUserTurn:
             ProgressView("Unlocking Draft…")
         case nil:
@@ -294,6 +365,87 @@ public struct ChatRootView: View {
             !dispatcher.isChatBoundaryPending &&
             !dispatcher.isOrderlyTerminationPending &&
             ChatInteractionPolicy.allowsNavigationAndMutation(in: model.snapshot)
+    }
+
+    @ViewBuilder
+    private var contextSummary: some View {
+        switch model.snapshot.contextAdvisory {
+        case let .available(quote):
+            Text(CoachContextQuotePresentation.summary(quote))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(
+                    "Estimated context, \(quote.completeInputTokens) of \(quote.inputCeilingTokens) input tokens"
+                )
+        case .quoting:
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel("Estimating context capacity")
+        case .unavailable:
+            HStack(spacing: 4) {
+                Text("Capacity unavailable")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Refresh") { model.refreshContextQuote() }
+                    .buttonStyle(.link)
+                    .accessibilityLabel("Refresh context capacity")
+            }
+        case .messageTooLong:
+            Text("Message too long")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Message exceeds the per-message Send limit")
+        case .notRequested:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var contextDetails: some View {
+        if case let .available(quote) = model.snapshot.contextAdvisory {
+            DisclosureGroup("Context details") {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(CoachContextCostCategory.allCases, id: \.self) { category in
+                        if let cost = quote.categoryCosts[category] {
+                            HStack {
+                                Text(CoachContextQuotePresentation.categoryLabel(category))
+                                Spacer()
+                                Text("~\(cost.estimatedTokenCount) tokens")
+                                    .monospacedDigit()
+                            }
+                        }
+                    }
+                    Text(
+                        "Category estimates explain usage. The complete request total is authoritative and may differ from their sum."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.top, 4)
+            }
+            .accessibilityLabel("Context cost categories")
+        }
+    }
+
+    private var sendIsContextEligible: Bool {
+        switch model.snapshot.contextAdvisory {
+        case let .available(quote):
+            if case .mustShorten = quote.messageLength { return false }
+            return true
+        case .notRequested, .quoting, .messageTooLong, .unavailable:
+            return false
+        }
+    }
+
+    private var messageNeedsShortening: Bool {
+        switch model.snapshot.contextAdvisory {
+        case .messageTooLong:
+            true
+        case let .available(quote):
+            if case .mustShorten = quote.messageLength { true } else { false }
+        case .notRequested, .quoting, .unavailable:
+            false
+        }
     }
 
 }

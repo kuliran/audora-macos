@@ -1,4 +1,5 @@
 import AudoraCodexCLIQualification
+import AudoraApplication
 import CryptoKit
 import Foundation
 

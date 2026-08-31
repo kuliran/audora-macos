@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 
+import AudoraApplication
 @testable import AudoraCodexCLIQualification
 
 final class CoachContextEstimationTests: XCTestCase {
@@ -42,12 +43,12 @@ final class CoachContextEstimationTests: XCTestCase {
         XCTAssertEqual((decoded["sessionAttachments"] as? [[String: Any]])?.count, 1)
 
         for component in [
-            CoachContextComponent.profile,
+            CoachContextCostCategory.profile,
             .memory,
             .history,
-            .trigger,
+            .draft,
             .framing,
-            .inlineTranscripts,
+            .attachments,
             .responseReserve,
             .safetyMargin,
         ] {
@@ -57,7 +58,7 @@ final class CoachContextEstimationTests: XCTestCase {
                 "missing cost for \(component)"
             )
         }
-        XCTAssertEqual(result.componentCosts[.onDemandExchange]?.estimatedTokenCount, 0)
+        XCTAssertEqual(result.componentCosts[.transcriptExchange]?.estimatedTokenCount, 0)
         XCTAssertEqual(result.responseCollectorByteCeiling, 8_192)
     }
 
@@ -125,8 +126,8 @@ final class CoachContextEstimationTests: XCTestCase {
     }
 
     func testMultipleLargeSessionsReserveOneCompleteAtomicOnDemandExchange() throws {
-        let first = onDemandAttachment(index: 1, transcriptText: String(repeating: "alpha ", count: 200))
-        let second = onDemandAttachment(index: 2, transcriptText: String(repeating: "beta ", count: 300))
+        let first = try onDemandAttachment(index: 1, transcriptText: String(repeating: "alpha ", count: 200))
+        let second = try onDemandAttachment(index: 2, transcriptText: String(repeating: "beta ", count: 300))
         let one = try planner.estimate(
             fixtureContext(attachments: [first]),
             descriptor: descriptor(contextWindow: 100_000),
@@ -140,8 +141,8 @@ final class CoachContextEstimationTests: XCTestCase {
 
         XCTAssertGreaterThan(both.completeInputTokens, one.completeInputTokens)
         XCTAssertGreaterThan(
-            try XCTUnwrap(both.componentCosts[.onDemandExchange]).estimatedTokenCount,
-            try XCTUnwrap(one.componentCosts[.onDemandExchange]).estimatedTokenCount
+            try XCTUnwrap(both.componentCosts[.transcriptExchange]).estimatedTokenCount,
+            try XCTUnwrap(one.componentCosts[.transcriptExchange]).estimatedTokenCount
         )
 
         let readRequest = try XCTUnwrap(both.exchange.transcriptReadRequest)
@@ -166,7 +167,7 @@ final class CoachContextEstimationTests: XCTestCase {
         )
         let result = try planner.estimate(
             fixtureContext(attachments: [
-                onDemandAttachment(index: 1, transcriptText: "large transcript"),
+                try onDemandAttachment(index: 1, transcriptText: "large transcript"),
             ]),
             descriptor: descriptor(contextWindow: 1_000),
             policy: policy(tokenEstimator: oneTokenPerMessage)
@@ -179,7 +180,7 @@ final class CoachContextEstimationTests: XCTestCase {
     }
 
     func testDuplicateOnDemandHandleIsRejectedBeforeEstimation() throws {
-        let attachment = onDemandAttachment(index: 1, transcriptText: "one")
+        let attachment = try onDemandAttachment(index: 1, transcriptText: "one")
         XCTAssertThrowsError(
             try planner.estimate(
                 fixtureContext(attachments: [attachment, attachment]),
@@ -519,7 +520,7 @@ final class CoachContextEstimationTests: XCTestCase {
     private func onDemandAttachment(
         index: Int,
         transcriptText: String
-    ) -> PreparedCoachAttachment {
+    ) throws -> PreparedCoachAttachment {
         let handle = String(format: "00000000-0000-0000-0000-%012d", index)
         let attachmentID = "attachment-\(index)"
         return .onDemand(
@@ -529,7 +530,7 @@ final class CoachContextEstimationTests: XCTestCase {
                 "sessionAttachmentId": .string(attachmentID),
                 "sessionTranscriptHandle": .string(handle),
             ]),
-            sessionTranscriptHandle: handle,
+            sessionTranscriptHandle: try PreparedCoachTranscriptHandle(handle),
             transcriptDisclosure: .object([
                 "sessionAttachmentId": .string(attachmentID),
                 "transcript": transcript(text: transcriptText),

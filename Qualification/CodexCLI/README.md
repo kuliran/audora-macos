@@ -117,8 +117,9 @@ or quota failures.
 
 ## Exact context-estimation gate
 
-The package also contains the provider-independent context planner needed before a
-Coach process may launch. It serializes the contract JSON itself instead of
+The package imports the provider-independent context planner and canonical JSON
+implementation from `AudoraApplication/CoachContext`, so qualification vectors and
+the shipping Application seam exercise identical bytes. It serializes the contract JSON itself instead of
 estimating from Swift strings or object counts. Canonical serialization is compact
 UTF-8, preserves string contents without normalization, orders object keys by UTF-8
 bytes, and escapes JSON control characters before measurement.
@@ -169,7 +170,7 @@ be converted into optimistic zero-cost fields.
 Environment: Apple Silicon macOS, Codex CLI 0.143.0, ChatGPT login reported as
 available by `codex login status`.
 
-- The deterministic Swift suite passed 27 tests.
+- The deterministic Swift suite passed 28 tests.
 - The real synthetic cancellation case passed and reaped the CLI in 128 ms.
 - The real synthetic timeout case passed and reaped the CLI in 137 ms.
 - Both real cases left the initially empty scoped workspace empty.

@@ -217,6 +217,9 @@ The native application has a reduced set of states:
   the complete eligible prose-history projection, current Draft, fixed overhead,
   and the conservative complete-exchange reserve for every on-demand immutable
   attachment.
+  The category disclosure also lists the response reserve and safety margin.
+  Category token costs are explanatory and are not summed: only the complete
+  framed model-message sequence decides fit because tokenizer boundaries differ.
   The creation picker shows Session duration and estimated transcript cost and
   rejects an attachment set whose complete evidence can never fit with **These
   Sessions cannot fit together in this coach's context. Remove a Session.**

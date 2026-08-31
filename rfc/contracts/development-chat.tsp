@@ -57,6 +57,11 @@ namespace Audora.Contracts {
     draftId: ChatDraftId;
     draftVersion: NonnegativeWholeNumber;
     responsePositionId: ChatResponsePositionId;
+    failure?: PendingUserTurnFailure;
+  }
+
+  union PendingUserTurnFailure {
+    coachContextCannotFit: "coachContextCannotFit",
   }
 
   @pattern("^cht-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
@@ -124,6 +129,7 @@ namespace Audora.Contracts {
     expectedInvocationCalls: 0;
     expectedAdmissionCalls: 0;
     providerAvailability?: DevelopmentChatScenarioProviderAvailability;
+    contextCapacityMode?: DevelopmentChatScenarioContextCapacityMode;
     suspendedEffect?: DevelopmentChatScenarioSuspendedEffect;
   }
 
@@ -151,7 +157,10 @@ namespace Audora.Contracts {
     setFilter: SetDevelopmentChatFilterScenarioCommand,
     open: OpenDevelopmentChatScenarioCommand,
     editDraft: EditDevelopmentChatDraftScenarioCommand,
+    refreshContextQuote: RefreshDevelopmentChatContextQuoteScenarioCommand,
     sendDraft: SendDevelopmentChatDraftScenarioCommand,
+    retryPendingUserTurn: RetryPendingUserTurnScenarioCommand,
+    createNewChatFromCapacityFailure: CreateNewChatFromCapacityFailureScenarioCommand,
     discardPendingUserTurn: DiscardPendingUserTurnScenarioCommand,
     start: StartDevelopmentChatScenarioCommand,
   }
@@ -168,6 +177,7 @@ namespace Audora.Contracts {
     renameStale: ChatStoreRenameStaleEvent,
     draftSaved: ChatStoreDraftSavedEvent,
     pendingUserTurnLocked: ChatStorePendingUserTurnLockedEvent,
+    pendingUserTurnReplaced: ChatStorePendingUserTurnReplacedEvent,
     pendingUserTurnDiscarded: ChatStorePendingUserTurnDiscardedEvent,
     profileStatementGenerationRead: ProfileStatementGenerationReadEvent,
     currentInstantRead: CurrentInstantReadEvent,
@@ -192,6 +202,7 @@ namespace Audora.Contracts {
     composerStatus?: DevelopmentChatScenarioComposerStatus;
     pendingUserTurnId?: PendingUserTurnId;
     responsePositionId?: ChatResponsePositionId;
+    pendingFailure?: PendingUserTurnFailure;
     notice?: DevelopmentChatScenarioNotice;
   }
 
@@ -225,8 +236,22 @@ namespace Audora.Contracts {
     kind: "sendDraft";
   }
 
+  model RefreshDevelopmentChatContextQuoteScenarioCommand {
+    kind: "refreshContextQuote";
+  }
+
   model DiscardPendingUserTurnScenarioCommand {
     kind: "discardPendingUserTurn";
+    pendingUserTurnId: PendingUserTurnId;
+  }
+
+  model RetryPendingUserTurnScenarioCommand {
+    kind: "retryPendingUserTurn";
+    pendingUserTurnId: PendingUserTurnId;
+  }
+
+  model CreateNewChatFromCapacityFailureScenarioCommand {
+    kind: "createNewChatFromCapacityFailure";
     pendingUserTurnId: PendingUserTurnId;
   }
 
@@ -307,6 +332,12 @@ namespace Audora.Contracts {
     outcome: "committed";
   }
 
+  model ChatStorePendingUserTurnReplacedEvent {
+    port: "chatStore";
+    effect: "replacePendingUserTurn";
+    outcome: "committed";
+  }
+
   model ProfileStatementGenerationReadEvent {
     port: "profileHead";
     effect: "readStatementGeneration";
@@ -354,6 +385,11 @@ namespace Audora.Contracts {
     unavailable: "unavailable",
   }
 
+  union DevelopmentChatScenarioContextCapacityMode {
+    alwaysFits: "alwaysFits",
+    cannotFitThenFits: "cannotFitThenFits",
+  }
+
   union DevelopmentChatScenarioSuspendedEffect {
     firstCatalogLoad: "firstCatalogLoad",
   }
@@ -394,5 +430,7 @@ namespace Audora.Contracts {
     draftSaveFailed: "draftSaveFailed",
     draftChanged: "draftChanged",
     pendingUserTurnFailed: "pendingUserTurnFailed",
+    coachContextUnavailable: "coachContextUnavailable",
+    messageMustBeShortened: "messageMustBeShortened",
   }
 }

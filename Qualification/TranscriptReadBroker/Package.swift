@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "AudoraTranscriptReadBrokerQualification",
     platforms: [
-        .macOS(.v13),
+        .macOS(.v14),
     ],
     products: [
         .library(
@@ -19,6 +19,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../CodexCLI"),
+        .package(path: "../../Packages/AudoraCore"),
     ],
     targets: [
         .target(
@@ -28,6 +29,7 @@ let package = Package(
                     name: "AudoraCodexCLIQualification",
                     package: "CodexCLI"
                 ),
+                .product(name: "AudoraApplication", package: "AudoraCore"),
             ]
         ),
         .executableTarget(

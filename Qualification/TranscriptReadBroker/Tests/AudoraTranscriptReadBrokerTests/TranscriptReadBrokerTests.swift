@@ -1,4 +1,5 @@
 import AudoraCodexCLIQualification
+import AudoraApplication
 @testable import AudoraTranscriptReadBroker
 import Darwin
 import Foundation

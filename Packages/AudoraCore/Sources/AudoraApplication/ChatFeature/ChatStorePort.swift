@@ -8,6 +8,9 @@ public protocol ChatStorePort: Sendable {
     func lockPendingUserTurn(
         _ mutation: LockPendingUserTurnMutation
     ) async -> ChatMutationOutcome
+    func replacePendingUserTurn(
+        _ mutation: ReplacePendingUserTurnMutation
+    ) async -> ChatMutationOutcome
     func discardPendingUserTurn(
         _ mutation: DiscardPendingUserTurnMutation
     ) async -> ChatMutationOutcome
@@ -130,6 +133,41 @@ public struct LockPendingUserTurnMutation: Equatable, Sendable {
         self.library = library
         self.chatID = chatID
         self.pendingUserTurn = pendingUserTurn
+    }
+}
+
+public enum ReplacePendingUserTurnMutationError: Error, Equatable, Sendable {
+    case identityChanged
+}
+
+/// A compare-and-swap update for the retryable failure on one Pending User Turn.
+///
+/// The base value is the durable comparison authority. The replacement is
+/// constrained to the same Pending User Turn, Draft version, and reserved
+/// response position so a retry cannot silently become another send.
+public struct ReplacePendingUserTurnMutation: Equatable, Sendable {
+    public let library: LibraryScope
+    public let chatID: ChatID
+    public let base: PendingUserTurn
+    public let replacement: PendingUserTurn
+
+    public init(
+        library: LibraryScope,
+        chatID: ChatID,
+        base: PendingUserTurn,
+        replacement: PendingUserTurn
+    ) throws {
+        guard base.id == replacement.id,
+              base.draftID == replacement.draftID,
+              base.draftVersion == replacement.draftVersion,
+              base.responsePositionID == replacement.responsePositionID
+        else {
+            throw ReplacePendingUserTurnMutationError.identityChanged
+        }
+        self.library = library
+        self.chatID = chatID
+        self.base = base
+        self.replacement = replacement
     }
 }
 
