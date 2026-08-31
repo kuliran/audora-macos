@@ -142,6 +142,58 @@ final class DevelopmentChatTests: XCTestCase {
         XCTAssertEqual(renamed.chat.title.rawValue, "Speaking goals")
     }
 
+    func testDraftEditsAdvanceMonotonicallyAndPendingTurnLocksTheExactVersion() throws {
+        let original = try makeAggregate()
+        let firstInstant = try UTCInstant("2026-08-30T12:00:01.000Z")
+        let secondInstant = try UTCInstant("2026-08-30T12:00:02.000Z")
+
+        let first = try original.chat.draft.edited(
+            text: "Help me make this opening clearer.",
+            at: firstInstant
+        )
+        let second = try first.edited(
+            text: "Help me make this opening clearer and shorter.",
+            at: secondInstant
+        )
+        let chat = try original.chat.replacingDraft(with: second)
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120002000Z-5KMN"),
+            draftID: second.draftID,
+            draftVersion: second.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120002000Z-6PQR"
+            )
+        )
+        let locked = try ChatAggregate(
+            chat: chat,
+            memory: original.memory,
+            pendingUserTurn: pending
+        )
+
+        XCTAssertEqual(first.version, 1)
+        XCTAssertEqual(second.version, 2)
+        XCTAssertEqual(locked.pendingUserTurn?.draftVersion, 2)
+        XCTAssertEqual(locked.chat.draft.text,
+                       "Help me make this opening clearer and shorter.")
+        XCTAssertEqual(locked.chat.messageIDs, [])
+
+        let wrongVersion = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120002000Z-7STV"),
+            draftID: second.draftID,
+            draftVersion: 1,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120002000Z-8WXY"
+            )
+        )
+        XCTAssertThrowsError(
+            try ChatAggregate(
+                chat: chat,
+                memory: original.memory,
+                pendingUserTurn: wrongVersion
+            )
+        )
+    }
+
     private func makeAggregate() throws -> ChatAggregate {
         try ChatAggregate.emptyDevelopmentChat(
             chatID: ChatID("cht-20260830T120000000Z-2ABC"),

@@ -10,6 +10,7 @@ Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/DevelopmentChatFea
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/PendingUserTurn.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json

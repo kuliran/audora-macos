@@ -1,9 +1,37 @@
 public enum ChatIdentityError: Error, Equatable, Sendable {
     case invalidChatID
     case invalidDraftID
+    case invalidPendingUserTurnID
+    case invalidResponsePositionID
     case invalidMemoryID
     case invalidMessageID
     case invalidAttachmentID
+}
+
+public struct PendingUserTurnID: Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard TypedIdentifierValidator.isValid(rawValue, prefix: "ptu-") else {
+            throw ChatIdentityError.invalidPendingUserTurnID
+        }
+        self.rawValue = rawValue
+    }
+
+    public var description: String { rawValue }
+}
+
+public struct ChatResponsePositionID: Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard TypedIdentifierValidator.isValid(rawValue, prefix: "rsp-") else {
+            throw ChatIdentityError.invalidResponsePositionID
+        }
+        self.rawValue = rawValue
+    }
+
+    public var description: String { rawValue }
 }
 
 public struct ChatID: Hashable, Sendable, CustomStringConvertible {
@@ -229,6 +257,7 @@ public struct ChatCreation: Equatable, Sendable {
 public enum ChatDraftError: Error, Equatable, Sendable {
     case textTooLong
     case invalidText
+    case versionOverflow
 }
 
 public struct ChatDraft: Equatable, Sendable {
@@ -255,6 +284,38 @@ public struct ChatDraft: Equatable, Sendable {
         self.version = version
         self.text = text
         self.updatedAt = updatedAt
+    }
+
+    public func edited(text: String, at instant: UTCInstant) throws -> ChatDraft {
+        let (nextVersion, overflow) = version.addingReportingOverflow(1)
+        guard !overflow else { throw ChatDraftError.versionOverflow }
+        return try ChatDraft(
+            draftID: draftID,
+            version: nextVersion,
+            text: text,
+            updatedAt: instant
+        )
+    }
+}
+
+public struct PendingUserTurn: Equatable, Sendable {
+    public static let schemaVersion: UInt32 = 1
+
+    public let id: PendingUserTurnID
+    public let draftID: ChatDraftID
+    public let draftVersion: UInt64
+    public let responsePositionID: ChatResponsePositionID
+
+    public init(
+        id: PendingUserTurnID,
+        draftID: ChatDraftID,
+        draftVersion: UInt64,
+        responsePositionID: ChatResponsePositionID
+    ) {
+        self.id = id
+        self.draftID = draftID
+        self.draftVersion = draftVersion
+        self.responsePositionID = responsePositionID
     }
 }
 
@@ -317,6 +378,9 @@ public struct CoachMemory: Equatable, Sendable {
 
 public enum ChatAggregateError: Error, Equatable, Sendable {
     case duplicateMessageID
+    case draftIdentityChanged
+    case draftVersionDidNotAdvance
+    case pendingDraftMismatch
     case memoryPointerMismatch
     case memoryOwnerMismatch
     case manifestRevisionOverflow
@@ -389,21 +453,58 @@ public struct Chat: Equatable, Sendable {
             currentMemoryID: currentMemoryID
         )
     }
+
+    public func replacingDraft(with replacement: ChatDraft) throws -> Chat {
+        guard replacement.draftID == draft.draftID else {
+            throw ChatAggregateError.draftIdentityChanged
+        }
+        guard replacement.version > draft.version else {
+            throw ChatAggregateError.draftVersionDidNotAdvance
+        }
+        let (revision, overflow) = manifestRevision.addingReportingOverflow(1)
+        guard !overflow else { throw ChatAggregateError.manifestRevisionOverflow }
+        return try Chat(
+            id: id,
+            manifestRevision: revision,
+            title: title,
+            createdAt: createdAt,
+            updatedAt: replacement.updatedAt,
+            creation: creation,
+            profileStatementGenerationAtCreation: profileStatementGenerationAtCreation,
+            attachments: attachments,
+            draft: replacement,
+            messageIDs: messageIDs,
+            currentMemoryID: currentMemoryID
+        )
+    }
 }
 
 public struct ChatAggregate: Equatable, Sendable {
     public let chat: Chat
     public let memory: CoachMemory
+    public let pendingUserTurn: PendingUserTurn?
 
-    public init(chat: Chat, memory: CoachMemory) throws {
+    public init(
+        chat: Chat,
+        memory: CoachMemory,
+        pendingUserTurn: PendingUserTurn? = nil
+    ) throws {
         guard chat.currentMemoryID == memory.memoryID else {
             throw ChatAggregateError.memoryPointerMismatch
         }
         guard chat.id == memory.chatID else {
             throw ChatAggregateError.memoryOwnerMismatch
         }
+        if let pendingUserTurn {
+            guard pendingUserTurn.draftID == chat.draft.draftID,
+                  pendingUserTurn.draftVersion == chat.draft.version
+            else {
+                throw ChatAggregateError.pendingDraftMismatch
+            }
+        }
         self.chat = chat
         self.memory = memory
+        self.pendingUserTurn = pendingUserTurn
     }
 
     public static func emptyDevelopmentChat(

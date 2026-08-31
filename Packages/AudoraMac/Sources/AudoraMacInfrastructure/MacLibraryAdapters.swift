@@ -318,7 +318,9 @@ public struct SystemLibraryClock: LibraryClock, ChatClock {
 public struct RandomChatIdentityGenerator:
     ChatIDGenerator,
     ChatDraftIDGenerator,
-    CoachMemoryIDGenerator
+    CoachMemoryIDGenerator,
+    PendingUserTurnIDGenerator,
+    ChatResponsePositionIDGenerator
 {
     private static let crockford = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 
@@ -334,6 +336,16 @@ public struct RandomChatIdentityGenerator:
 
     public func generateCoachMemoryID(at instant: UTCInstant) async -> CoachMemoryID {
         try! CoachMemoryID(Self.identifier(prefix: "mem-", instant: instant))
+    }
+
+    public func generatePendingUserTurnID(at instant: UTCInstant) async -> PendingUserTurnID {
+        try! PendingUserTurnID(Self.identifier(prefix: "ptu-", instant: instant))
+    }
+
+    public func generateChatResponsePositionID(
+        at instant: UTCInstant
+    ) async -> ChatResponsePositionID {
+        try! ChatResponsePositionID(Self.identifier(prefix: "rsp-", instant: instant))
     }
 
     private static func identifier(prefix: String, instant: UTCInstant) -> String {

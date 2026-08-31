@@ -491,9 +491,37 @@ final class ContractResourcesTests: XCTestCase {
         }
     }
 
+    func testPendingUserTurnContractLocksExactDraftVersionAndResponsePosition() throws {
+        let pending = try jsonObject(.pendingUserTurnExample)
+        XCTAssertEqual(
+            pending["pendingUserTurnId"] as? String,
+            "ptu-20260830T120001000Z-5KMN"
+        )
+        XCTAssertEqual(
+            pending["draftId"] as? String,
+            "drf-20260830T120000000Z-3DEF"
+        )
+        XCTAssertEqual((pending["draftVersion"] as? NSNumber)?.uint64Value, 1)
+        XCTAssertEqual(
+            pending["responsePositionId"] as? String,
+            "rsp-20260830T120001000Z-6PQR"
+        )
+
+        let schema = try XCTUnwrap(
+            String(
+                data: ContractResources.data(for: .pendingUserTurnSchema),
+                encoding: .utf8
+            )
+        )
+        XCTAssertTrue(schema.contains("PendingUserTurnId"))
+        XCTAssertTrue(schema.contains("ChatResponsePositionId"))
+        XCTAssertTrue(schema.contains("unevaluatedProperties"))
+    }
+
     func testEveryDevelopmentChatScenarioForbidsProviderAndAdmissionEffects() throws {
         let resources: [ContractResource] = [
             .createDevelopmentChatScenario,
+            .draftSendDiscardDevelopmentChatScenario,
             .renameDevelopmentChatScenario,
             .filterDevelopmentChatsScenario,
             .relaunchDevelopmentChatScenario,
@@ -549,7 +577,8 @@ final class ContractResourcesTests: XCTestCase {
             [
                 "invalidTitle", "createFailed", "createCollisionLimitReached",
                 "renameFailed", "staleRename", "chatMissing", "chatOpenFailed",
-                "chatFrozen", "catalogFailed", "readOnlyLibrary",
+                "chatFrozen", "catalogFailed", "readOnlyLibrary", "invalidDraft",
+                "draftSaveFailed", "draftChanged", "pendingUserTurnFailed",
             ]
         )
     }

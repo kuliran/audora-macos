@@ -271,6 +271,282 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testDelayedOlderDraftSaveCannotOverwriteNewerFlushedVersion() throws {
+        try withCreatedChat { root, scope, original in
+            let persistence = PortableChatPersistence()
+            let first = try original.chat.draft.edited(
+                text: "older autosave",
+                at: UTCInstant("2026-08-30T12:00:01.000Z")
+            )
+            let second = try first.edited(
+                text: "newer synchronous flush",
+                at: UTCInstant("2026-08-30T12:00:02.000Z")
+            )
+
+            let flushed = try persistence.saveDraft(
+                SaveChatDraftMutation(
+                    library: scope,
+                    chatID: original.chat.id,
+                    replacement: second
+                ),
+                at: root
+            )
+            guard case let .committed(current) = flushed else {
+                return XCTFail("newer Draft did not commit")
+            }
+
+            let delayed = try persistence.saveDraft(
+                SaveChatDraftMutation(
+                    library: scope,
+                    chatID: original.chat.id,
+                    replacement: first
+                ),
+                at: root
+            )
+
+            XCTAssertEqual(delayed, .stale(current))
+            XCTAssertEqual(
+                try persistence.load(original.chat.id, at: root, in: scope),
+                .readWrite(current)
+            )
+            XCTAssertEqual(current.chat.draft, second)
+        }
+    }
+
+    func testPendingUserTurnReopensAndDiscardUnlocksSameDraftWithoutMessages() throws {
+        try withCreatedChat { root, scope, original in
+            let persistence = PortableChatPersistence()
+            let draft = try original.chat.draft.edited(
+                text: "Keep this exact populated Draft.",
+                at: UTCInstant("2026-08-30T12:00:01.000Z")
+            )
+            guard case let .committed(saved) = try persistence.saveDraft(
+                SaveChatDraftMutation(
+                    library: scope,
+                    chatID: original.chat.id,
+                    replacement: draft
+                ),
+                at: root
+            ) else {
+                return XCTFail("Draft did not save")
+            }
+            let pending = PendingUserTurn(
+                id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+                draftID: draft.draftID,
+                draftVersion: draft.version,
+                responsePositionID: try ChatResponsePositionID(
+                    "rsp-20260830T120001000Z-6PQR"
+                )
+            )
+
+            guard case let .committed(locked) = try persistence.lockPendingUserTurn(
+                LockPendingUserTurnMutation(
+                    library: scope,
+                    chatID: saved.chat.id,
+                    pendingUserTurn: pending
+                ),
+                at: root
+            ) else {
+                return XCTFail("Pending User Turn did not lock")
+            }
+            XCTAssertEqual(locked.pendingUserTurn, pending)
+            XCTAssertEqual(locked.chat.messageIDs, [])
+            XCTAssertEqual(
+                try persistence.load(saved.chat.id, at: root, in: scope),
+                .readWrite(locked)
+            )
+
+            let discard = DiscardPendingUserTurnMutation(
+                library: scope,
+                chatID: saved.chat.id,
+                pendingUserTurn: pending
+            )
+            guard case let .committed(unlocked) = try persistence.discardPendingUserTurn(
+                discard,
+                at: root
+            ) else {
+                return XCTFail("Pending User Turn did not discard")
+            }
+            XCTAssertNil(unlocked.pendingUserTurn)
+            XCTAssertEqual(unlocked.chat.draft, draft)
+            XCTAssertEqual(unlocked.chat.messageIDs, [])
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: chatRoot(root, saved.chat.id)
+                        .appendingPathComponent("pending-user-turn.json").path
+                )
+            )
+            XCTAssertEqual(
+                try persistence.load(saved.chat.id, at: root, in: scope),
+                .readWrite(unlocked)
+            )
+            XCTAssertEqual(
+                try persistence.discardPendingUserTurn(discard, at: root),
+                .committed(unlocked)
+            )
+        }
+    }
+
+    func testReopenReconcilesExactDraftAndPendingPartialsLeftByACrashedProcess() throws {
+        try withCreatedChat { root, scope, aggregate in
+            let chat = chatRoot(root, aggregate.chat.id)
+            let draftPartial = chat.appendingPathComponent(
+                ".chat.json.11111111-1111-1111-1111-111111111111.partial"
+            )
+            let pendingPartial = chat.appendingPathComponent(
+                ".pending-user-turn.json.22222222-2222-2222-2222-222222222222.partial"
+            )
+            try Data("crashed Draft write".utf8).write(to: draftPartial)
+            try Data("crashed Pending User Turn write".utf8).write(to: pendingPartial)
+
+            let reopened = try PortableChatPersistence().load(
+                aggregate.chat.id,
+                at: root,
+                in: scope
+            )
+
+            XCTAssertEqual(reopened, .readWrite(aggregate))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: draftPartial.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: pendingPartial.path))
+        }
+    }
+
+    func testOrdinaryReadWaitsForActiveWriterBeforeReconcilingItsPartial() async throws {
+        try await withCreatedLibraryAsync { root, scope in
+            let original = try PortableChatPersistence().create(
+                makeChatSeed(scope: scope),
+                at: root
+            )
+            let replacement = try original.chat.draft.edited(
+                text: "Writer-owned synthetic Draft",
+                at: UTCInstant("2026-08-30T12:00:01.000Z")
+            )
+            let gate = BlockingPersistenceFaultGate()
+            let writerPersistence = PortableChatPersistence { point in
+                guard point == .afterDraftPartialWrite else { return }
+                gate.reachAndWait()
+            }
+            let writer = Task.detached {
+                try writerPersistence.saveDraft(
+                    SaveChatDraftMutation(
+                        library: scope,
+                        chatID: original.chat.id,
+                        replacement: replacement
+                    ),
+                    at: root
+                )
+            }
+            await gate.waitUntilReached()
+
+            let readerProgress = PersistenceReaderProgress()
+            let reader = Task.detached {
+                await readerProgress.markStarted()
+                let loaded = try PortableChatPersistence().load(
+                    original.chat.id,
+                    at: root,
+                    in: scope
+                )
+                await readerProgress.markFinished()
+                return loaded
+            }
+            await readerProgress.waitUntilStarted()
+            try await Task.sleep(nanoseconds: 50_000_000)
+            let finishedWhileWriterHeldLock = await readerProgress.isFinished
+            XCTAssertFalse(
+                finishedWhileWriterHeldLock,
+                "Read reconciled a live writer partial instead of waiting for its Chat lock"
+            )
+
+            gate.release()
+            let written = try await writer.value
+            let loaded = try await reader.value
+            guard case let .committed(committed) = written else {
+                return XCTFail("active writer lost its partial")
+            }
+            XCTAssertEqual(committed.chat.draft, replacement)
+            XCTAssertEqual(loaded, .readWrite(committed))
+        }
+    }
+
+    func testDirectLoadWaitsForCreateCandidatePublication() async throws {
+        try await withCreatedLibraryAsync { root, scope in
+            let seed = try makeChatSeed(scope: scope)
+            let gate = BlockingPersistenceFaultGate()
+            let creator = PortableChatPersistence { point in
+                guard point == .afterCandidateFlush else { return }
+                gate.reachAndWait()
+            }
+            let create = Task.detached { try creator.create(seed, at: root) }
+            await gate.waitUntilReached()
+
+            let progress = PersistenceReaderProgress()
+            let read = Task.detached {
+                await progress.markStarted()
+                do {
+                    let loaded = try PortableChatPersistence().load(
+                        seed.aggregate.chat.id,
+                        at: root,
+                        in: scope
+                    )
+                    await progress.markFinished()
+                    return loaded
+                } catch {
+                    await progress.markFinished()
+                    throw error
+                }
+            }
+            await progress.waitUntilStarted()
+            try await Task.sleep(nanoseconds: 50_000_000)
+            let loadFinishedDuringCreate = await progress.isFinished
+            XCTAssertFalse(loadFinishedDuringCreate, "load crossed live create staging")
+
+            gate.release()
+            let installed = try await create.value
+            let loaded = try await read.value
+            XCTAssertEqual(installed, seed.aggregate)
+            XCTAssertEqual(loaded, .readWrite(installed))
+        }
+    }
+
+    func testCatalogLoadWaitsForNewlyCreatedCandidate() async throws {
+        try await withCreatedLibraryAsync { root, scope in
+            let seed = try makeChatSeed(scope: scope)
+            let gate = BlockingPersistenceFaultGate()
+            let creator = PortableChatPersistence { point in
+                guard point == .candidateCreated else { return }
+                gate.reachAndWait()
+            }
+            let create = Task.detached { try creator.create(seed, at: root) }
+            await gate.waitUntilReached()
+
+            let progress = PersistenceReaderProgress()
+            let read = Task.detached {
+                await progress.markStarted()
+                do {
+                    let loaded = try PortableChatPersistence().loadCatalog(
+                        at: root,
+                        in: scope
+                    )
+                    await progress.markFinished()
+                    return loaded
+                } catch {
+                    await progress.markFinished()
+                    throw error
+                }
+            }
+            await progress.waitUntilStarted()
+            try await Task.sleep(nanoseconds: 50_000_000)
+            let catalogFinishedDuringCreate = await progress.isFinished
+            XCTAssertFalse(catalogFinishedDuringCreate, "catalog crossed live create staging")
+
+            gate.release()
+            let installed = try await create.value
+            let catalog = try await read.value
+            XCTAssertEqual(installed, seed.aggregate)
+            XCTAssertEqual(catalog, [.readWrite(installed)])
+        }
+    }
+
     func testLibraryIdentityChangingBeforeRenameInstallLeavesOriginalChatUnchanged() throws {
         try withCreatedChat { root, scope, original in
             let manifestURL = chatRoot(root, original.chat.id).appendingPathComponent("chat.json")
@@ -831,6 +1107,35 @@ final class PortableChatPersistenceTests: XCTestCase {
         try body(root, LibraryScope(libraryID: libraryID))
     }
 
+    private func withCreatedLibraryAsync(
+        _ body: (URL, LibraryScope) async throws -> Void
+    ) async throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "audora-chat-tests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = parent.appendingPathComponent("Synthetic.audoralibrary")
+        let instant = try UTCInstant("2026-08-30T11:59:00.000Z")
+        let libraryID = try LibraryID("lib-20260830T115900000Z-2ABC")
+        _ = try PortableLibraryPersistence().create(
+            at: root,
+            seed: NewLibrarySeed(
+                libraryID: libraryID,
+                createdAt: instant,
+                preferences: .defaults,
+                profileHead: ProfileHead(
+                    generation: 0,
+                    statementGeneration: 7,
+                    selection: .null,
+                    updatedAt: instant
+                )
+            )
+        )
+        try await body(root, LibraryScope(libraryID: libraryID))
+    }
+
     private func makeChatSeed(scope: LibraryScope) throws -> NewDevelopmentChatSeed {
         try NewDevelopmentChatSeed(
             library: scope,
@@ -913,5 +1218,55 @@ final class PortableChatPersistenceTests: XCTestCase {
             values.append(relative + (directory ? "/" : ""))
         }
         return values.sorted()
+    }
+}
+
+private final class BlockingPersistenceFaultGate: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var reached = false
+    private var released = false
+
+    func reachAndWait() {
+        condition.lock()
+        reached = true
+        condition.broadcast()
+        while !released {
+            condition.wait()
+        }
+        condition.unlock()
+    }
+
+    func waitUntilReached() async {
+        while !hasReached() { await Task.yield() }
+    }
+
+    private func hasReached() -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return reached
+    }
+
+    func release() {
+        condition.lock()
+        released = true
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
+private actor PersistenceReaderProgress {
+    private var started = false
+    private(set) var isFinished = false
+
+    func markStarted() {
+        started = true
+    }
+
+    func markFinished() {
+        isFinished = true
+    }
+
+    func waitUntilStarted() async {
+        while !started { await Task.yield() }
     }
 }

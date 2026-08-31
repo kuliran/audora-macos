@@ -91,6 +91,7 @@ final class LibraryPresentationModelTests: XCTestCase {
         XCTAssertTrue(duringImport.canUseAudioImportControls)
         XCTAssertFalse(duringImport.canUseRecordingControls)
     }
+
 }
 
 private actor ScriptedLibraryFeature: LibraryFeature {

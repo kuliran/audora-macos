@@ -66,6 +66,21 @@ public enum ChatNotice: String, Equatable, Sendable {
     case chatFrozen
     case catalogFailed
     case readOnlyLibrary
+    case invalidDraft
+    case draftSaveFailed
+    case draftChanged
+    case pendingUserTurnFailed
+}
+
+public enum ChatComposerState: Equatable, Sendable {
+    case editable(ChatDraft, isDirty: Bool)
+    case locked(ChatDraft, PendingUserTurn)
+
+    public var draft: ChatDraft {
+        switch self {
+        case let .editable(draft, _), let .locked(draft, _): draft
+        }
+    }
 }
 
 public struct ChatFeatureState: Equatable, Sendable {
@@ -86,11 +101,14 @@ public struct ChatFeatureState: Equatable, Sendable {
     public enum Activity: Equatable, Sendable {
         case creating
         case renaming(ChatID)
+        case lockingDraft(ChatID)
+        case discardingPendingUserTurn(ChatID)
     }
 
     public let catalog: Catalog
     public let filterQuery: ChatFilterQuery
     public let selection: Selection
+    public let composer: ChatComposerState?
     public let activity: Activity?
     public let notice: ChatNotice?
 
@@ -98,12 +116,14 @@ public struct ChatFeatureState: Equatable, Sendable {
         catalog: Catalog = .notLoaded,
         filterQuery: ChatFilterQuery = .empty,
         selection: Selection = .none,
+        composer: ChatComposerState? = nil,
         activity: Activity? = nil,
         notice: ChatNotice? = nil
     ) {
         self.catalog = catalog
         self.filterQuery = filterQuery
         self.selection = selection
+        self.composer = composer
         self.activity = activity
         self.notice = notice
     }

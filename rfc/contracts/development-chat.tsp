@@ -49,11 +49,27 @@ namespace Audora.Contracts {
     updatedAt: UTCInstant;
   }
 
+  @jsonSchema
+  @id("PendingUserTurn.json")
+  model PendingUserTurn {
+    schemaVersion: 1;
+    pendingUserTurnId: PendingUserTurnId;
+    draftId: ChatDraftId;
+    draftVersion: NonnegativeWholeNumber;
+    responsePositionId: ChatResponsePositionId;
+  }
+
   @pattern("^cht-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
   scalar ChatId extends string;
 
   @pattern("^drf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
   scalar ChatDraftId extends string;
+
+  @pattern("^ptu-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar PendingUserTurnId extends string;
+
+  @pattern("^rsp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar ChatResponsePositionId extends string;
 
   @pattern("^mem-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
   scalar CoachMemoryId extends string;
@@ -134,6 +150,9 @@ namespace Audora.Contracts {
     rename: RenameDevelopmentChatScenarioCommand,
     setFilter: SetDevelopmentChatFilterScenarioCommand,
     open: OpenDevelopmentChatScenarioCommand,
+    editDraft: EditDevelopmentChatDraftScenarioCommand,
+    sendDraft: SendDevelopmentChatDraftScenarioCommand,
+    discardPendingUserTurn: DiscardPendingUserTurnScenarioCommand,
     start: StartDevelopmentChatScenarioCommand,
   }
 
@@ -147,11 +166,16 @@ namespace Audora.Contracts {
     createCollision: ChatStoreCreateCollisionEvent,
     chatRenamed: ChatStoreChatRenamedEvent,
     renameStale: ChatStoreRenameStaleEvent,
+    draftSaved: ChatStoreDraftSavedEvent,
+    pendingUserTurnLocked: ChatStorePendingUserTurnLockedEvent,
+    pendingUserTurnDiscarded: ChatStorePendingUserTurnDiscardedEvent,
     profileStatementGenerationRead: ProfileStatementGenerationReadEvent,
     currentInstantRead: CurrentInstantReadEvent,
     chatIdGenerated: ChatIdGeneratedEvent,
     chatDraftIdGenerated: ChatDraftIdGeneratedEvent,
     coachMemoryIdGenerated: CoachMemoryIdGeneratedEvent,
+    pendingUserTurnIdGenerated: PendingUserTurnIdGeneratedEvent,
+    chatResponsePositionIdGenerated: ChatResponsePositionIdGeneratedEvent,
   }
 
   model DevelopmentChatScenarioState {
@@ -163,6 +187,11 @@ namespace Audora.Contracts {
     selectedRevision?: NonnegativeWholeNumber;
     selectedAvailability?: DevelopmentChatScenarioSelectionAvailability;
     selectedFrozenReason?: DevelopmentChatScenarioFrozenReason;
+    selectedDraftText?: ChatDraftText;
+    selectedDraftVersion?: NonnegativeWholeNumber;
+    composerStatus?: DevelopmentChatScenarioComposerStatus;
+    pendingUserTurnId?: PendingUserTurnId;
+    responsePositionId?: ChatResponsePositionId;
     notice?: DevelopmentChatScenarioNotice;
   }
 
@@ -185,6 +214,20 @@ namespace Audora.Contracts {
   model OpenDevelopmentChatScenarioCommand {
     kind: "open";
     chatId: ChatId;
+  }
+
+  model EditDevelopmentChatDraftScenarioCommand {
+    kind: "editDraft";
+    text: ChatDraftText;
+  }
+
+  model SendDevelopmentChatDraftScenarioCommand {
+    kind: "sendDraft";
+  }
+
+  model DiscardPendingUserTurnScenarioCommand {
+    kind: "discardPendingUserTurn";
+    pendingUserTurnId: PendingUserTurnId;
   }
 
   model StartDevelopmentChatScenarioCommand {
@@ -246,6 +289,24 @@ namespace Audora.Contracts {
     outcome: "stale";
   }
 
+  model ChatStoreDraftSavedEvent {
+    port: "chatStore";
+    effect: "saveDraft";
+    outcome: "committed";
+  }
+
+  model ChatStorePendingUserTurnLockedEvent {
+    port: "chatStore";
+    effect: "lockPendingUserTurn";
+    outcome: "committed";
+  }
+
+  model ChatStorePendingUserTurnDiscardedEvent {
+    port: "chatStore";
+    effect: "discardPendingUserTurn";
+    outcome: "committed";
+  }
+
   model ProfileStatementGenerationReadEvent {
     port: "profileHead";
     effect: "readStatementGeneration";
@@ -276,6 +337,18 @@ namespace Audora.Contracts {
     outcome: CoachMemoryId;
   }
 
+  model PendingUserTurnIdGeneratedEvent {
+    port: "pendingUserTurnIdGenerator";
+    effect: "next";
+    outcome: PendingUserTurnId;
+  }
+
+  model ChatResponsePositionIdGeneratedEvent {
+    port: "chatResponsePositionIdGenerator";
+    effect: "next";
+    outcome: ChatResponsePositionId;
+  }
+
   union DevelopmentChatScenarioProviderAvailability {
     available: "available",
     unavailable: "unavailable",
@@ -295,6 +368,11 @@ namespace Audora.Contracts {
     frozen: "frozen",
   }
 
+  union DevelopmentChatScenarioComposerStatus {
+    editable: "editable",
+    locked: "locked",
+  }
+
   union DevelopmentChatScenarioFrozenReason {
     newerSchema: "newerSchema",
     unsupportedSchema: "unsupportedSchema",
@@ -312,5 +390,9 @@ namespace Audora.Contracts {
     chatFrozen: "chatFrozen",
     catalogFailed: "catalogFailed",
     readOnlyLibrary: "readOnlyLibrary",
+    invalidDraft: "invalidDraft",
+    draftSaveFailed: "draftSaveFailed",
+    draftChanged: "draftChanged",
+    pendingUserTurnFailed: "pendingUserTurnFailed",
   }
 }

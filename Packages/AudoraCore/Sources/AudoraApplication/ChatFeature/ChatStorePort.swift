@@ -4,6 +4,13 @@ public protocol ChatStorePort: Sendable {
     func loadCatalog(in library: LibraryScope) async -> ChatCatalogOutcome
     func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome
     func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome
+    func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome
+    func lockPendingUserTurn(
+        _ mutation: LockPendingUserTurnMutation
+    ) async -> ChatMutationOutcome
+    func discardPendingUserTurn(
+        _ mutation: DiscardPendingUserTurnMutation
+    ) async -> ChatMutationOutcome
     func load(_ chatID: ChatID, in library: LibraryScope) async -> ChatLoadOutcome
 }
 
@@ -21,6 +28,26 @@ public protocol ChatDraftIDGenerator: Sendable {
 
 public protocol CoachMemoryIDGenerator: Sendable {
     func generateCoachMemoryID(at instant: UTCInstant) async -> CoachMemoryID
+}
+
+public protocol PendingUserTurnIDGenerator: Sendable {
+    func generatePendingUserTurnID(at instant: UTCInstant) async -> PendingUserTurnID
+}
+
+public protocol ChatResponsePositionIDGenerator: Sendable {
+    func generateChatResponsePositionID(at instant: UTCInstant) async -> ChatResponsePositionID
+}
+
+public protocol ChatAutosaveScheduling: Sendable {
+    func sleep(forNanoseconds nanoseconds: UInt64) async throws
+}
+
+public struct SystemChatAutosaveScheduler: ChatAutosaveScheduling {
+    public init() {}
+
+    public func sleep(forNanoseconds nanoseconds: UInt64) async throws {
+        try await Task.sleep(nanoseconds: nanoseconds)
+    }
 }
 
 public protocol ProfileStatementGenerationReading: Sendable {
@@ -65,12 +92,61 @@ public struct RenameChatMutation: Equatable, Sendable {
         self.base = base
         replacement = try ChatAggregate(
             chat: base.chat.renamed(to: title, at: updatedAt),
-            memory: base.memory
+            memory: base.memory,
+            pendingUserTurn: base.pendingUserTurn
         )
     }
 
     public var chatID: ChatID { base.chat.id }
     public var expectedRevision: UInt64 { base.chat.manifestRevision }
+}
+
+public struct SaveChatDraftMutation: Equatable, Sendable {
+    public let library: LibraryScope
+    public let chatID: ChatID
+    public let replacement: ChatDraft
+
+    public init(
+        library: LibraryScope,
+        chatID: ChatID,
+        replacement: ChatDraft
+    ) {
+        self.library = library
+        self.chatID = chatID
+        self.replacement = replacement
+    }
+}
+
+public struct LockPendingUserTurnMutation: Equatable, Sendable {
+    public let library: LibraryScope
+    public let chatID: ChatID
+    public let pendingUserTurn: PendingUserTurn
+
+    public init(
+        library: LibraryScope,
+        chatID: ChatID,
+        pendingUserTurn: PendingUserTurn
+    ) {
+        self.library = library
+        self.chatID = chatID
+        self.pendingUserTurn = pendingUserTurn
+    }
+}
+
+public struct DiscardPendingUserTurnMutation: Equatable, Sendable {
+    public let library: LibraryScope
+    public let chatID: ChatID
+    public let pendingUserTurn: PendingUserTurn
+
+    public init(
+        library: LibraryScope,
+        chatID: ChatID,
+        pendingUserTurn: PendingUserTurn
+    ) {
+        self.library = library
+        self.chatID = chatID
+        self.pendingUserTurn = pendingUserTurn
+    }
 }
 
 public enum ChatCatalogEntry: Equatable, Sendable {

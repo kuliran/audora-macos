@@ -9,7 +9,7 @@ final class ChatPresentationModelTests: XCTestCase {
     func testStartScopesTheFeatureAndPublishesItsInitialSnapshot() async throws {
         let state = ChatFeatureState(catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])))
         let feature = RecordingPresentationChatFeature(initial: state)
-        let model = ChatPresentationModel(feature: feature)
+        let model = makeChatPresentationModel(feature: feature)
         let scope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
         )
@@ -28,7 +28,7 @@ final class ChatPresentationModelTests: XCTestCase {
             catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
         )
         let feature = RecordingPresentationChatFeature(initial: state)
-        let model = ChatPresentationModel(feature: feature)
+        let model = makeChatPresentationModel(feature: feature)
         let scope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
         )
@@ -51,15 +51,25 @@ final class ChatPresentationModelTests: XCTestCase {
     }
 
     func testUserActionsCaptureTheCurrentLibraryCommandContext() async throws {
-        let state = ChatFeatureState(
-            catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
-        )
-        let feature = RecordingPresentationChatFeature(initial: state)
-        let model = ChatPresentationModel(feature: feature)
         let scope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
         )
         let chatID = try ChatID("cht-20260830T120000000Z-2ABC")
+        let aggregate = try aggregate(
+            in: scope,
+            chatID: chatID.rawValue,
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "New Chat"
+        )
+        let row = ChatRowSnapshot(aggregate: aggregate)
+        let state = ChatFeatureState(
+            catalog: .ready(ChatCatalogSnapshot(allRows: [row], visibleRows: [row])),
+            selection: .open(aggregate),
+            composer: .editable(aggregate.chat.draft, isDirty: false)
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let model = makeChatPresentationModel(feature: feature)
         await model.start(in: scope)
         let startCommands = await feature.commands
         let context = try XCTUnwrap(startContexts(in: startCommands).first)
@@ -70,6 +80,13 @@ final class ChatPresentationModelTests: XCTestCase {
         await waitForCommandCount(3, in: feature)
         model.rename(chatID, title: "Focused Practice", expectedRevision: 4)
         await waitForCommandCount(4, in: feature)
+        model.updateDraft("A synthetic coaching Draft")
+        await waitForCommandCount(5, in: feature)
+        model.sendDraft()
+        await waitForCommandCount(6, in: feature)
+        let pendingID = try PendingUserTurnID("ptu-20260830T120000000Z-5KMN")
+        model.discardPendingUserTurn(pendingID)
+        await waitForCommandCount(7, in: feature)
 
         let commands = await feature.commands
         XCTAssertEqual(
@@ -79,6 +96,14 @@ final class ChatPresentationModelTests: XCTestCase {
                 .createDevelopmentChat(context),
                 .open(context, chatID),
                 .rename(context, chatID, title: "Focused Practice", expectedRevision: 4),
+                .editDraft(
+                    context,
+                    aggregate.chat.id,
+                    aggregate.chat.draft.draftID,
+                    text: "A synthetic coaching Draft"
+                ),
+                .sendDraft(context, aggregate.chat.id, aggregate.chat.draft),
+                .discardPendingUserTurn(context, pendingID),
             ]
         )
     }
@@ -129,7 +154,7 @@ final class ChatPresentationModelTests: XCTestCase {
         )
         let latestState = ChatFeatureState(notice: .catalogFailed)
         let feature = SuspendedInitialPresentationChatFeature(latestState: latestState)
-        let model = ChatPresentationModel(feature: feature)
+        let model = makeChatPresentationModel(feature: feature)
 
         let firstStart = Task { await model.start(in: firstScope) }
         await feature.waitForSubscriptionCount(1)
@@ -154,14 +179,14 @@ final class ChatPresentationModelTests: XCTestCase {
             libraryID: try LibraryID("lib-20260830T121000000Z-3DEF")
         )
         let feature = SuspendedOldActionPresentationChatFeature()
-        let firstVisit = ChatPresentationModel(feature: feature)
+        let firstVisit = makeChatPresentationModel(feature: feature)
         await firstVisit.start(in: firstScope)
         firstVisit.updateFilter("stale first visit")
         await feature.waitForFilterSuspension()
 
-        let secondVisit = ChatPresentationModel(feature: feature)
+        let secondVisit = makeChatPresentationModel(feature: feature)
         await secondVisit.start(in: secondScope)
-        let returnedVisit = ChatPresentationModel(feature: feature)
+        let returnedVisit = makeChatPresentationModel(feature: feature)
         await returnedVisit.start(in: firstScope)
 
         await feature.resumeFilter()
@@ -213,7 +238,7 @@ final class ChatPresentationModelTests: XCTestCase {
             firstState: firstState,
             secondState: secondState
         )
-        let model = ChatPresentationModel(feature: feature)
+        let model = makeChatPresentationModel(feature: feature)
 
         await model.start(in: firstScope)
         model.filterText = "First"
@@ -252,7 +277,7 @@ final class ChatPresentationModelTests: XCTestCase {
         )
         let ready = readyState(for: aggregate)
         let feature = LateSubscriptionPresentationChatFeature(finalState: ready)
-        let model = ChatPresentationModel(feature: feature)
+        let model = makeChatPresentationModel(feature: feature)
 
         let start = Task { await model.start(in: scope) }
         await feature.waitForStart()
@@ -272,7 +297,7 @@ final class ChatPresentationModelTests: XCTestCase {
         )
         let failed = ChatFeatureState(catalog: .failed, notice: .catalogFailed)
         let feature = LateSubscriptionPresentationChatFeature(finalState: failed)
-        let model = ChatPresentationModel(feature: feature)
+        let model = makeChatPresentationModel(feature: feature)
 
         let start = Task { await model.start(in: scope) }
         await feature.waitForStart()
@@ -338,6 +363,31 @@ final class ChatPresentationModelTests: XCTestCase {
     }
 }
 
+@MainActor
+private func makeChatPresentationModel(
+    feature: any ChatFeature
+) -> ChatPresentationModel {
+    let application = DefaultApplicationCommandFeature(
+        library: PassivePresentationLibraryFeature(),
+        chat: feature
+    )
+    return ChatPresentationModel(
+        dispatcher: ChatCommandDispatcher(feature: application)
+    )
+}
+
+private actor PassivePresentationLibraryFeature: LibraryFeature {
+    nonisolated let states = AsyncStream<LibraryFeatureState> { continuation in
+        continuation.finish()
+    }
+
+    var currentState: LibraryFeatureState {
+        LibraryFeatureState(selection: .awaitingBootstrap)
+    }
+
+    func send(_ command: LibraryCommand) async {}
+}
+
 private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
     nonisolated var states: AsyncStream<ChatFeatureState> {
         AsyncStream { continuation in continuation.finish() }
@@ -358,6 +408,8 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
         activeContext?.libraryScope == scope ? state : nil
     }
 
+    func flushForOrderlyTermination() async -> Bool { true }
+
     func send(_ command: ChatCommand) async {
         commands.append(command)
         switch command {
@@ -377,7 +429,8 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
                 )
             }
             filterIsComplete = true
-        case .createDevelopmentChat, .rename, .open:
+        case .createDevelopmentChat, .rename, .open, .editDraft, .sendDraft,
+             .discardPendingUserTurn:
             break
         }
     }
@@ -414,6 +467,8 @@ private actor RecordingPresentationChatFeature: ChatFeature {
     func currentState(in scope: LibraryScope) -> ChatFeatureState? {
         activeScope == scope ? state : nil
     }
+
+    func flushForOrderlyTermination() async -> Bool { true }
 
     func send(_ command: ChatCommand) {
         commands.append(command)
@@ -469,6 +524,8 @@ private actor SuspendedInitialPresentationChatFeature: ChatFeature {
     func currentState(in scope: LibraryScope) -> ChatFeatureState? {
         activeScope == scope ? latestState : nil
     }
+
+    func flushForOrderlyTermination() async -> Bool { true }
 
     func send(_ command: ChatCommand) {
         commands.append(command)
@@ -562,6 +619,8 @@ private actor SuspendedLibrarySwitchPresentationChatFeature: ChatFeature {
         activeScope == scope ? state : nil
     }
 
+    func flushForOrderlyTermination() async -> Bool { true }
+
     func send(_ command: ChatCommand) async {
         commands.append(command)
         guard case let .start(context) = command else { return }
@@ -647,6 +706,8 @@ private actor LateSubscriptionPresentationChatFeature: ChatFeature {
     func currentState(in scope: LibraryScope) -> ChatFeatureState? {
         activeScope == scope ? finalState : nil
     }
+
+    func flushForOrderlyTermination() async -> Bool { true }
 
     func send(_ command: ChatCommand) {
         commands.append(command)

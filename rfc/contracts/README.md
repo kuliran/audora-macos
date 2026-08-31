@@ -41,6 +41,7 @@ at runtime.
 - [`LibraryFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json)
 - [`LibraryManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json)
 - [`LibraryPreferences.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json)
+- [`PendingUserTurn.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/PendingUserTurn.json)
 - [`ProfileHead.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json)
 - [`ReadSessionTranscriptsRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json)
 - [`ReadSessionTranscriptsResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json)
@@ -63,6 +64,7 @@ at runtime.
 | `LibraryFeatureScenario` | Portable cross-implementation behavior | No |
 | `LibraryManifest` | Portable Library storage | No |
 | `LibraryPreferences` | Portable Library storage | No |
+| `PendingUserTurn` | Portable Library operational storage | No |
 | `ProfileHead` | Portable Library storage | No |
 | `ReadSessionTranscriptsRequest` | Coach tool call -> Application | Yes |
 | `ReadSessionTranscriptsResponse` | Application -> coach tool result | Yes |
@@ -184,7 +186,9 @@ files are absent. Rename changes only the title, manifest revision, and update
 instant; filter is a pure in-memory projection; reopen restores the same IDs and
 local Draft without invoking a provider.
 
-Checked-in fixtures cover create, rename, filter, relaunch, and stale rename.
+Checked-in fixtures cover create, rename, filter, relaunch, stale rename, and the
+Draft lock-and-discard lifecycle in
+[`draft-send-discard.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/Chat/draft-send-discard.v1.json).
 Each scenario declares zero provider, Invocation, and admission calls. Rejected
 examples cover ambiguous creation shapes, unknown keys, missing attachments,
 dangling Memory summaries, and newer schemas that must remain byte-identical

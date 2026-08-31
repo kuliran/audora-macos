@@ -23,6 +23,7 @@ const scenariosDirectory = path.join(resourcesDirectory, "Scenarios/Chat");
 const positiveInventory = [
   "chat.json",
   "memory.json",
+  "pending-user-turn.json",
   "rejected",
   "renamed-chat.json",
   "session-analysis-chat.json",
@@ -31,6 +32,7 @@ const scenarioInventory = [
   "corrupt-chat-freezes.v1.json",
   "create-collision-limit.v1.json",
   "create-empty-development-chat.v1.json",
+  "draft-send-discard.v1.json",
   "filter-is-pure.v1.json",
   "library-switch-during-suspended-load.v1.json",
   "newer-chat-freezes.v1.json",
@@ -89,6 +91,7 @@ await assertExactInventory(rejectedDirectory, rejectedInventory, "rejected Chat 
 
 const chatManifest = await validator("ChatManifest.json");
 const coachMemory = await validator("CoachMemoryEnvelope.json");
+const pendingUserTurn = await validator("PendingUserTurn.json");
 const scenario = await validator("DevelopmentChatFeatureScenario.json");
 
 for (const name of ["chat.json", "renamed-chat.json", "session-analysis-chat.json"]) {
@@ -104,6 +107,12 @@ assertValidation(
   await loadJSON(path.join(examplesDirectory, "memory.json")),
   true,
   "memory.json",
+);
+assertValidation(
+  pendingUserTurn,
+  await loadJSON(path.join(examplesDirectory, "pending-user-turn.json")),
+  true,
+  "pending-user-turn.json",
 );
 
 for (const name of scenarioInventory) {

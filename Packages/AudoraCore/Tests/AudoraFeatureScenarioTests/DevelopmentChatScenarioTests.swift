@@ -9,6 +9,7 @@ final class DevelopmentChatScenarioTests: XCTestCase {
     func testEveryDevelopmentChatScenarioMatchesTheSwiftFeature() async throws {
         let resources: [ContractResource] = [
             .createDevelopmentChatScenario,
+            .draftSendDiscardDevelopmentChatScenario,
             .renameDevelopmentChatScenario,
             .filterDevelopmentChatsScenario,
             .relaunchDevelopmentChatScenario,
@@ -46,7 +47,9 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 clock: scripted,
                 chatIDGenerator: scripted,
                 draftIDGenerator: scripted,
-                memoryIDGenerator: scripted
+                memoryIDGenerator: scripted,
+                pendingUserTurnIDGenerator: scripted,
+                responsePositionIDGenerator: scripted
             )
             let scope = LibraryScope(libraryID: try LibraryID(dto.libraryId))
             var commandGeneration: UInt64 = 1
@@ -62,34 +65,37 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 guard let switchCommand = dto.commands.first else {
                     throw ScenarioFailure.script
                 }
-                await feature.send(
-                    try contextualizedCommand(
-                        switchCommand,
-                        activeContext: &commandContext,
-                        generation: &commandGeneration
-                    )
+                let switchState = await feature.currentState
+                let applicationSwitch = try contextualizedCommand(
+                    switchCommand,
+                    activeState: switchState,
+                    activeContext: &commandContext,
+                    generation: &commandGeneration
                 )
+                await feature.send(applicationSwitch)
                 await store.resumeFirstCatalogLoad()
                 await firstStart.value
                 for command in dto.commands.dropFirst() {
-                    await feature.send(
-                        try contextualizedCommand(
-                            command,
-                            activeContext: &commandContext,
-                            generation: &commandGeneration
-                        )
+                    let activeState = await feature.currentState
+                    let applicationCommand = try contextualizedCommand(
+                        command,
+                        activeState: activeState,
+                        activeContext: &commandContext,
+                        generation: &commandGeneration
                     )
+                    await feature.send(applicationCommand)
                 }
             } else {
                 await feature.send(.start(commandContext))
                 for command in dto.commands {
-                    await feature.send(
-                        try contextualizedCommand(
-                            command,
-                            activeContext: &commandContext,
-                            generation: &commandGeneration
-                        )
+                    let activeState = await feature.currentState
+                    let applicationCommand = try contextualizedCommand(
+                        command,
+                        activeState: activeState,
+                        activeContext: &commandContext,
+                        generation: &commandGeneration
                     )
+                    await feature.send(applicationCommand)
                 }
             }
 
@@ -118,6 +124,29 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 dto.expectedState.selectedFrozenReason,
                 dto.scenarioId
             )
+            if let expected = dto.expectedState.selectedDraftText {
+                XCTAssertEqual(selectedChat(state)?.chat.draft.text, expected, dto.scenarioId)
+            }
+            if let expected = dto.expectedState.selectedDraftVersion {
+                XCTAssertEqual(selectedChat(state)?.chat.draft.version, expected, dto.scenarioId)
+            }
+            if let expected = dto.expectedState.composerStatus {
+                XCTAssertEqual(composerStatus(state), expected, dto.scenarioId)
+            }
+            if let expected = dto.expectedState.pendingUserTurnId {
+                XCTAssertEqual(
+                    selectedChat(state)?.pendingUserTurn?.id.rawValue,
+                    expected,
+                    dto.scenarioId
+                )
+            }
+            if let expected = dto.expectedState.responsePositionId {
+                XCTAssertEqual(
+                    selectedChat(state)?.pendingUserTurn?.responsePositionID.rawValue,
+                    expected,
+                    dto.scenarioId
+                )
+            }
             XCTAssertEqual(state.notice?.rawValue, dto.expectedState.notice, dto.scenarioId)
             let recordedEvents = await recorder.events
             XCTAssertEqual(recordedEvents, dto.dependencyTrace.map(\.signature), dto.scenarioId)
@@ -229,6 +258,14 @@ final class DevelopmentChatScenarioTests: XCTestCase {
         guard case let .frozen(frozen) = state.selection else { return nil }
         return frozen.reason.rawValue
     }
+
+    private func composerStatus(_ state: ChatFeatureState) -> String? {
+        switch state.composer {
+        case .editable: "editable"
+        case .locked: "locked"
+        case nil: nil
+        }
+    }
 }
 
 private struct DevelopmentChatScenarioDTO: Decodable {
@@ -281,19 +318,26 @@ private struct DevelopmentChatCommandDTO: Decodable {
     let title: String?
     let expectedRevision: UInt64?
     let query: String?
+    let text: String?
+    let pendingUserTurnId: String?
 
-    func applicationCommand(context: ChatCommandContext) throws -> ChatCommand {
+    func applicationCommand(
+        context: ChatCommandContext,
+        activeChatID: ChatID?,
+        activeDraft: ChatDraft?
+    ) throws -> ChatCommand {
         switch kind {
             case "createDevelopmentChat":
                 guard libraryId == nil, chatId == nil, title == nil,
-                      expectedRevision == nil, query == nil
+                      expectedRevision == nil, query == nil, text == nil,
+                      pendingUserTurnId == nil
                 else {
                     throw ScenarioFailure.command
                 }
                 return .createDevelopmentChat(context)
             case "rename":
                 guard libraryId == nil, let chatId, let title, let expectedRevision,
-                      query == nil
+                      query == nil, text == nil, pendingUserTurnId == nil
                 else {
                     throw ScenarioFailure.command
                 }
@@ -301,21 +345,50 @@ private struct DevelopmentChatCommandDTO: Decodable {
                                expectedRevision: expectedRevision)
             case "setFilter":
                 guard libraryId == nil, let query, chatId == nil, title == nil,
-                      expectedRevision == nil
+                      expectedRevision == nil, text == nil, pendingUserTurnId == nil
                 else {
                     throw ScenarioFailure.command
                 }
                 return .setFilter(context, try ChatFilterQuery(query))
             case "open":
                 guard libraryId == nil, let chatId, title == nil,
-                      expectedRevision == nil, query == nil
+                      expectedRevision == nil, query == nil, text == nil,
+                      pendingUserTurnId == nil
                 else {
                     throw ScenarioFailure.command
                 }
                 return .open(context, try ChatID(chatId))
+            case "editDraft":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, query == nil, let text,
+                      pendingUserTurnId == nil, let activeChatID, let activeDraft
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .editDraft(context, activeChatID, activeDraft.draftID, text: text)
+            case "sendDraft":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, query == nil, text == nil,
+                      pendingUserTurnId == nil, let activeChatID, let activeDraft
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .sendDraft(context, activeChatID, activeDraft)
+            case "discardPendingUserTurn":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, query == nil, text == nil,
+                      let pendingUserTurnId
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .discardPendingUserTurn(
+                    context,
+                    try PendingUserTurnID(pendingUserTurnId)
+                )
             case "start":
                 guard let libraryId, chatId == nil, title == nil,
-                      expectedRevision == nil, query == nil
+                      expectedRevision == nil, query == nil, text == nil,
+                      pendingUserTurnId == nil
                 else {
                     throw ScenarioFailure.command
                 }
@@ -332,6 +405,7 @@ private struct DevelopmentChatCommandDTO: Decodable {
 
 private func contextualizedCommand(
     _ command: DevelopmentChatCommandDTO,
+    activeState: ChatFeatureState,
     activeContext: inout ChatCommandContext,
     generation: inout UInt64
 ) throws -> ChatCommand {
@@ -345,7 +419,20 @@ private func contextualizedCommand(
             generation: generation
         )
     }
-    return try command.applicationCommand(context: activeContext)
+    let identity: (ChatID, ChatDraft)? = {
+        guard case let .open(aggregate) = activeState.selection,
+              case let .editable(draft, _) = activeState.composer,
+              aggregate.chat.draft.draftID == draft.draftID
+        else {
+            return nil
+        }
+        return (aggregate.chat.id, draft)
+    }()
+    return try command.applicationCommand(
+        context: activeContext,
+        activeChatID: identity?.0,
+        activeDraft: identity?.1
+    )
 }
 
 private struct DevelopmentChatEventDTO: Decodable {
@@ -390,6 +477,11 @@ private struct DevelopmentChatStateDTO: Decodable {
     let selectedRevision: UInt64?
     let selectedAvailability: String?
     let selectedFrozenReason: String?
+    let selectedDraftText: String?
+    let selectedDraftVersion: UInt64?
+    let composerStatus: String?
+    let pendingUserTurnId: String?
+    let responsePositionId: String?
     let notice: String?
 }
 
@@ -506,6 +598,77 @@ private actor ChatScenarioStore: ChatStorePort {
         return .committed(updated)
     }
 
+    func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome {
+        guard let event = consume(effect: "saveDraft"),
+              let current = chats[mutation.chatID]
+        else {
+            XCTFail("missing scripted Draft save event or Chat")
+            return .failed
+        }
+        await record(event)
+        guard event.outcome.rendered == "committed",
+              current.pendingUserTurn == nil,
+              current.chat.draft.draftID == mutation.replacement.draftID,
+              mutation.replacement.version >= current.chat.draft.version
+        else {
+            return .stale(current)
+        }
+        if mutation.replacement == current.chat.draft { return .committed(current) }
+        guard let updatedChat = try? current.chat.replacingDraft(with: mutation.replacement),
+              let updated = try? ChatAggregate(chat: updatedChat, memory: current.memory)
+        else {
+            return .failed
+        }
+        chats[mutation.chatID] = updated
+        return .committed(updated)
+    }
+
+    func lockPendingUserTurn(
+        _ mutation: LockPendingUserTurnMutation
+    ) async -> ChatMutationOutcome {
+        guard let event = consume(effect: "lockPendingUserTurn"),
+              let current = chats[mutation.chatID]
+        else {
+            XCTFail("missing scripted Pending User Turn lock event or Chat")
+            return .failed
+        }
+        await record(event)
+        guard event.outcome.rendered == "committed",
+              current.pendingUserTurn == nil,
+              current.chat.draft.draftID == mutation.pendingUserTurn.draftID,
+              current.chat.draft.version == mutation.pendingUserTurn.draftVersion,
+              let locked = try? ChatAggregate(
+                  chat: current.chat,
+                  memory: current.memory,
+                  pendingUserTurn: mutation.pendingUserTurn
+              )
+        else {
+            return .stale(current)
+        }
+        chats[mutation.chatID] = locked
+        return .committed(locked)
+    }
+
+    func discardPendingUserTurn(
+        _ mutation: DiscardPendingUserTurnMutation
+    ) async -> ChatMutationOutcome {
+        guard let event = consume(effect: "discardPendingUserTurn"),
+              let current = chats[mutation.chatID]
+        else {
+            XCTFail("missing scripted Pending User Turn discard event or Chat")
+            return .failed
+        }
+        await record(event)
+        guard event.outcome.rendered == "committed",
+              current.pendingUserTurn == mutation.pendingUserTurn,
+              let unlocked = try? ChatAggregate(chat: current.chat, memory: current.memory)
+        else {
+            return .stale(current)
+        }
+        chats[mutation.chatID] = unlocked
+        return .committed(unlocked)
+    }
+
     func load(_ chatID: ChatID, in library: LibraryScope) async -> ChatLoadOutcome {
         guard let event = consume(effect: "load") else {
             XCTFail("missing scripted load event")
@@ -548,6 +711,7 @@ private actor ChatScenarioStore: ChatStorePort {
 
 private actor ChatScenarioScript:
     ChatClock, ChatIDGenerator, ChatDraftIDGenerator, CoachMemoryIDGenerator,
+    PendingUserTurnIDGenerator, ChatResponsePositionIDGenerator,
     ProfileStatementGenerationReading
 {
     private var events: [DevelopmentChatEventDTO]
@@ -588,6 +752,20 @@ private actor ChatScenarioScript:
         let event = consume(port: "coachMemoryIdGenerator", effect: "next")!
         await record(event)
         return try! CoachMemoryID(event.outcome.rendered)
+    }
+
+    func generatePendingUserTurnID(at instant: UTCInstant) async -> PendingUserTurnID {
+        let event = consume(port: "pendingUserTurnIdGenerator", effect: "next")!
+        await record(event)
+        return try! PendingUserTurnID(event.outcome.rendered)
+    }
+
+    func generateChatResponsePositionID(
+        at instant: UTCInstant
+    ) async -> ChatResponsePositionID {
+        let event = consume(port: "chatResponsePositionIdGenerator", effect: "next")!
+        await record(event)
+        return try! ChatResponsePositionID(event.outcome.rendered)
     }
 
     private func consume(port: String, effect: String) -> DevelopmentChatEventDTO? {

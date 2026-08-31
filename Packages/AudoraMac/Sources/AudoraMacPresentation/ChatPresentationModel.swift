@@ -9,14 +9,16 @@ public final class ChatPresentationModel: ObservableObject {
     @Published public private(set) var snapshot = ChatFeatureState()
     @Published public var filterText = ""
 
-    private let feature: any ChatFeature
+    private let feature: any ApplicationCommandFeature
+    private let dispatcher: ChatCommandDispatcher
     private var startedLibrary: LibraryID?
     private var commandContext: ChatCommandContext?
     private var projectedStateContext: ChatCommandContext?
     private var stateConsumer: Task<Void, Never>?
 
-    public init(feature: any ChatFeature) {
-        self.feature = feature
+    public init(dispatcher: ChatCommandDispatcher) {
+        feature = dispatcher.feature
+        self.dispatcher = dispatcher
     }
 
     public func start(in scope: LibraryScope) async {
@@ -34,14 +36,14 @@ public final class ChatPresentationModel: ObservableObject {
         )
         filterText = ""
 
-        let stream = feature.states
+        let stream = feature.chatStates
         let consumer = Task { @MainActor [weak self] in
             guard let self else { return }
             var states = stream.makeAsyncIterator()
             while !Task.isCancelled, let next = await states.next() {
                 guard context == commandContext else { return }
                 if projectedStateContext != context {
-                    guard await feature.currentState(in: scope) == next else { continue }
+                    guard await feature.currentChatState(in: scope) == next else { continue }
                     guard context == commandContext, !Task.isCancelled else { return }
                     projectedStateContext = context
                 }
@@ -51,12 +53,12 @@ public final class ChatPresentationModel: ObservableObject {
         stateConsumer = consumer
 
         await withTaskCancellationHandler {
-            await feature.send(.start(context))
+            await dispatcher.sendAndWait(.start(context))
             guard !Task.isCancelled else {
                 consumer.cancel()
                 return
             }
-            if let current = await feature.currentState(in: scope) {
+            if let current = await feature.currentChatState(in: scope) {
                 guard context == commandContext, !Task.isCancelled else {
                     consumer.cancel()
                     return
@@ -109,8 +111,35 @@ public final class ChatPresentationModel: ObservableObject {
         )
     }
 
+    public func updateDraft(_ text: String) {
+        guard let context = commandContext,
+              case let .open(aggregate) = snapshot.selection,
+              case let .editable(draft, _) = snapshot.composer,
+              aggregate.chat.draft.draftID == draft.draftID
+        else {
+            return
+        }
+        send(.editDraft(context, aggregate.chat.id, draft.draftID, text: text))
+    }
+
+    public func sendDraft() {
+        guard let context = commandContext,
+              case let .open(aggregate) = snapshot.selection,
+              case let .editable(draft, _) = snapshot.composer,
+              aggregate.chat.draft.draftID == draft.draftID
+        else {
+            return
+        }
+        send(.sendDraft(context, aggregate.chat.id, draft))
+    }
+
+    public func discardPendingUserTurn(_ pendingUserTurnID: PendingUserTurnID) {
+        guard let context = commandContext else { return }
+        send(.discardPendingUserTurn(context, pendingUserTurnID))
+    }
+
     private func send(_ command: ChatCommand) {
-        Task { await feature.send(command) }
+        dispatcher.enqueue(command)
     }
 
     public func updateFilter(_ value: String) {
