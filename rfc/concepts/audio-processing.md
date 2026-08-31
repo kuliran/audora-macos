@@ -26,6 +26,21 @@ as `audora-avfoundation` version 1: stereo is mixed as `(left + right) / 2` in
 normal/max-quality/normal-prime settings, and quantization multiplies by 32,768,
 rounds ties away from zero, then saturates to the signed-16 range.
 
+At a declared unavailable microphone discontinuity, version one may reset that
+same converter instance without changing its format, settings, or pipeline
+version. Before reset it completes the current 4,096-frame input batch and one
+batch-rounded converter-prime window; version one qualifies both prime counts at
+no more than 4,096 frames, so this bridge is at most 8,191 source frames. It then
+materializes only unavailable canonical frames through
+`floor(inputEnd * 16000 / inputRate)`, retaining the zero-or-one-frame difference
+to the ceiling projection as ordered unavailable ownership. After reset it
+pre-rolls `inputEnd mod (inputRate / gcd(inputRate, 16000))` zero source frames,
+discards the floor-projected pre-roll output, and routes any surplus output
+through that retained ownership before exposing later observed audio. This
+bounded bridge plus absolute-phase pre-roll must be byte-equivalent after the
+unavailable interval to uninterrupted conversion with zeros, while work remains
+independent of the unavailable interval's duration.
+
 The decoded canonical frame count is authoritative. Version one accepts at most
 43,200,000 frames, including that exact boundary, and calculates duration as
 `ceil(frameCount * 1000 / 16000)` with integer arithmetic. It does not use a
@@ -56,8 +71,12 @@ priming/edit-list offsets causing the transcript to appear ahead of playback.
 
 For microphone recording:
 
-1. Allocate and freeze the Session ID and start time before the first accepted
-   frame, while keeping the acquisition non-authoritative until it seals.
+1. Allocate and freeze the Session ID and wall-clock start metadata while keeping
+   the acquisition non-authoritative until it seals. After microphone authorization
+   and input preparation, the source samples one monotonic capture origin
+   immediately before starting. Source callback/gap projection, displayed elapsed
+   time, mute and Stop boundaries, warning deadlines, and the 45-minute ceiling
+   all share that zero point; authorization and preparation wait do not count.
 2. Write capture frames away from the real-time callback as lossless partial data.
 3. Preserve callback/sample discontinuities by inserting timeline silence and
    recording a capture-gap diagnostic.

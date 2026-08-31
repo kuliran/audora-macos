@@ -94,14 +94,40 @@ final class StreamingCanonicalAudioNormalizer {
 /// capture share this exact converter configuration and batching policy.
 final class StreamingCanonicalSampleRateConverter {
     static let inputFrameCount = 4_096
+    static let maximumQualifiedPrimeFrames: AVAudioFrameCount = 4_096
+    static let maximumUnavailableBridgeInputFrames = UInt64(inputFrameCount * 2 - 1)
+    /// Covers the largest qualified live-source phase period. Both callers of
+    /// the silence primitive (the discontinuity bridge and phase preroll) must
+    /// stay within this fixed work bound.
+    static let maximumSyntheticSilenceInputFrames: UInt64 = 384_000
 
     private let sourceSampleRateHz: UInt32
     private let converter: AVAudioConverter?
     private let sourceFormat: AVAudioFormat?
     private let destinationFormat: AVAudioFormat?
+    private let qualifiedPrimeBridgeFrames: UInt64
     private var pending: [Double] = []
     private var pendingOffset = 0
+    private var outputFramesToDiscard: UInt64 = 0
     private var finished = false
+
+    /// The maximum source-time bridge needed before an unavailable
+    /// discontinuity can be compacted. First complete the converter's current
+    /// 4,096-frame input batch, then advance through a whole, batch-rounded
+    /// prime window. The bound is derived from this converter instance rather
+    /// than assuming a particular AVFoundation latency.
+    var unavailableDiscontinuityBridgeInputFrames: UInt64 {
+        guard converter != nil else { return 0 }
+        let batch = UInt64(Self.inputFrameCount)
+        let retainedInputFrames = UInt64(pending.count - pendingOffset)
+        let retainedRemainder = retainedInputFrames % batch
+        let alignment = retainedRemainder == 0 ? 0 : batch - retainedRemainder
+        return alignment + qualifiedPrimeBridgeFrames
+    }
+
+    var hasPendingPhasePreroll: Bool {
+        outputFramesToDiscard != 0
+    }
 
     init(sourceSampleRateHz: UInt32) throws {
         guard sourceSampleRateHz > 0 else { throw AudioImportFailure.unsupportedMedia }
@@ -110,6 +136,7 @@ final class StreamingCanonicalSampleRateConverter {
             converter = nil
             sourceFormat = nil
             destinationFormat = nil
+            qualifiedPrimeBridgeFrames = 0
             return
         }
         guard let source = AVAudioFormat(
@@ -129,6 +156,18 @@ final class StreamingCanonicalSampleRateConverter {
         converter.sampleRateConverterQuality = Int(kAudioConverterQuality_Max)
         converter.primeMethod = .normal
         converter.dither = false
+        guard converter.primeInfo.leadingFrames <= Self.maximumQualifiedPrimeFrames,
+              converter.primeInfo.trailingFrames <= Self.maximumQualifiedPrimeFrames
+        else {
+            throw AudioImportFailure.unsupportedMedia
+        }
+        let batch = UInt64(Self.inputFrameCount)
+        let qualifiedPrime = max(
+            batch,
+            UInt64(converter.primeInfo.leadingFrames),
+            UInt64(converter.primeInfo.trailingFrames)
+        )
+        qualifiedPrimeBridgeFrames = ((qualifiedPrime + batch - 1) / batch) * batch
         self.converter = converter
         sourceFormat = source
         destinationFormat = destination
@@ -155,7 +194,7 @@ final class StreamingCanonicalSampleRateConverter {
             pending.removeFirst(pendingOffset)
             pendingOffset = 0
         }
-        return output
+        return discardPhasePreroll(from: output)
     }
 
     /// Advances the same converter through unavailable source time without
@@ -164,7 +203,10 @@ final class StreamingCanonicalSampleRateConverter {
         frameCount: UInt64,
         onOutput: ([Double]) throws -> Void
     ) throws {
-        guard !finished, frameCount > 0 else { throw AudioImportFailure.decodeFailed }
+        guard !finished,
+              frameCount > 0,
+              frameCount <= Self.maximumSyntheticSilenceInputFrames
+        else { throw AudioImportFailure.decodeFailed }
         let boundedSilence = [Double](repeating: 0, count: Self.inputFrameCount)
         var remaining = frameCount
         while remaining > 0 {
@@ -209,7 +251,11 @@ final class StreamingCanonicalSampleRateConverter {
             case .haveData:
                 guard buffer.frameLength > 0 else { throw AudioImportFailure.decodeFailed }
             case .endOfStream:
-                return output
+                let exposed = discardPhasePreroll(from: output)
+                guard outputFramesToDiscard == 0 else {
+                    throw AudioImportFailure.decodeFailed
+                }
+                return exposed
             case .inputRanDry:
                 continue
             case .error:
@@ -219,6 +265,48 @@ final class StreamingCanonicalSampleRateConverter {
             }
         }
         throw AudioImportFailure.decodeFailed
+    }
+
+    /// Starts a new observed segment after a declared unavailable interval.
+    /// AVAudioConverter keeps the identical instance and configuration, while
+    /// reset plus a rational source-phase preroll makes post-gap samples align
+    /// with the absolute canonical timeline. The preroll is always smaller
+    /// than one source/canonical phase period and is never exposed as audio.
+    func resetAfterUnavailable(atAbsoluteSourceFrame sourceFrame: UInt64) throws -> [Double] {
+        guard !finished, outputFramesToDiscard == 0 else {
+            throw AudioImportFailure.decodeFailed
+        }
+        pending.removeAll(keepingCapacity: true)
+        pendingOffset = 0
+        converter?.reset()
+
+        let divisor = Self.greatestCommonDivisor(
+            UInt64(sourceSampleRateHz),
+            CanonicalRecordingLimits.sampleRate
+        )
+        let period = UInt64(sourceSampleRateHz) / divisor
+        let phase = sourceFrame % period
+        guard phase > 0 else {
+            guard pending.isEmpty, pendingOffset == 0 else {
+                throw AudioImportFailure.decodeFailed
+            }
+            return []
+        }
+        let expectedDiscard = try Self.canonicalFloor(
+            inputFrame: phase,
+            inputRate: sourceSampleRateHz
+        )
+        outputFramesToDiscard = expectedDiscard
+        var exposed: [Double] = []
+        try consumeSilence(frameCount: phase) { output in
+            exposed.append(contentsOf: output)
+        }
+        guard pending.count - pendingOffset < Self.inputFrameCount,
+              outputFramesToDiscard <= expectedDiscard
+        else {
+            throw AudioImportFailure.decodeFailed
+        }
+        return exposed
     }
 
     private func convert(
@@ -275,6 +363,33 @@ final class StreamingCanonicalSampleRateConverter {
             throw AudioImportFailure.decodeFailed
         }
         return Array(UnsafeBufferPointer(start: channel, count: count))
+    }
+
+    private func discardPhasePreroll(from samples: [Double]) -> [Double] {
+        guard outputFramesToDiscard > 0, !samples.isEmpty else { return samples }
+        let discarded = min(outputFramesToDiscard, UInt64(samples.count))
+        outputFramesToDiscard -= discarded
+        return Array(samples.dropFirst(Int(discarded)))
+    }
+
+    private static func greatestCommonDivisor(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        var a = lhs
+        var b = rhs
+        while b != 0 {
+            (a, b) = (b, a % b)
+        }
+        return a
+    }
+
+    private static func canonicalFloor(
+        inputFrame: UInt64,
+        inputRate: UInt32
+    ) throws -> UInt64 {
+        let (scaled, overflow) = inputFrame.multipliedReportingOverflow(
+            by: CanonicalRecordingLimits.sampleRate
+        )
+        guard !overflow else { throw AudioImportFailure.decodeFailed }
+        return scaled / UInt64(inputRate)
     }
 
     private static func float64Channel(in buffer: AVAudioPCMBuffer) -> UnsafeMutablePointer<Double>? {

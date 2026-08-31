@@ -419,6 +419,20 @@ For imported media, version one retains the original file as evidence and also
 creates a canonical mono WAV for playback, analysis, and timestamps. This uses
 more disk space but avoids making a destructive format conversion part of import.
 
+Microphone capture declares its physical format before the first event and uses a
+bounded, loss-aware relay: muted callbacks retain timing only, and any unavailable
+source interval remains explicit on the canonical timeline. After microphone
+authorization and preparation, the source declares one monotonic capture origin
+immediately before starting. Callback projection, displayed elapsed time, mute
+and Stop boundaries, warnings, and the 45-minute ceiling all use that origin;
+permission wait is never recorded time. Capture and import share the same
+qualified streaming converter. Long unavailable intervals advance it through a
+bounded bridge and an absolute-phase reset, so later observed audio stays
+deterministic while work remains independent of the interval's duration; the
+45-minute ceiling is applied before that work begins. The exact version-one
+normalization and discontinuity rules live in
+[`concepts/audio-processing.md`](concepts/audio-processing.md).
+
 Credentials, Codex login state, model weights, the Python runtime, caches, macOS
 permission grants, and the machine-specific locator needed to reopen the Library
 remain outside it. A copied library heals unresolved Chat and Development Profile
