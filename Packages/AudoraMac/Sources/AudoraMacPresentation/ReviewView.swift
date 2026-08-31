@@ -3,6 +3,40 @@ import AudoraApplication
 import AudoraDomain
 import SwiftUI
 
+struct ReviewAnnotationStyleToken {
+    let underlineStyle: NSUnderlineStyle
+    let underlineColor: NSColor
+}
+
+/// Semantic presentation tokens kept separate from annotation classification.
+/// Each category also has a distinct underline pattern, so color is never the
+/// only signal.
+enum ReviewAnnotationStyleTokens {
+    static let minimumContrastRatio = 3.0
+
+    static func style(
+        for category: TextualEventCategory
+    ) -> ReviewAnnotationStyleToken {
+        switch category {
+        case .filledPause:
+            ReviewAnnotationStyleToken(
+                underlineStyle: .single,
+                underlineColor: .systemBrown
+            )
+        case .partialWord:
+            ReviewAnnotationStyleToken(
+                underlineStyle: .double,
+                underlineColor: .systemRed
+            )
+        case .repetitionCandidate:
+            ReviewAnnotationStyleToken(
+                underlineStyle: .single.union(.patternDot),
+                underlineColor: .systemPurple
+            )
+        }
+    }
+}
+
 public struct ReviewView: View {
     @ObservedObject private var model: ReviewPresentationModel
 
@@ -393,29 +427,22 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
             if annotations.isVisible {
                 for overlay in annotations.projection.textualOverlays {
                     guard let range = wordRanges[overlay.wordID] else { continue }
-                    let (style, color) = annotationStyle(overlay.category)
+                    let token = ReviewAnnotationStyleTokens.style(
+                        for: overlay.category
+                    )
                     storage.addAttribute(
                         .underlineStyle,
-                        value: style.rawValue,
+                        value: token.underlineStyle.rawValue,
                         range: range
                     )
-                    storage.addAttribute(.underlineColor, value: color, range: range)
+                    storage.addAttribute(
+                        .underlineColor,
+                        value: token.underlineColor,
+                        range: range
+                    )
                 }
             }
             installedAnnotations = annotations
-        }
-
-        private func annotationStyle(
-            _ category: TextualEventCategory
-        ) -> (NSUnderlineStyle, NSColor) {
-            switch category {
-            case .filledPause:
-                (.single, .systemOrange)
-            case .partialWord:
-                (.double, .systemRed)
-            case .repetitionCandidate:
-                (.single.union(.patternDot), .systemPurple)
-            }
         }
 
         private func placement(containing characterIndex: Int) -> LinePlacement? {

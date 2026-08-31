@@ -11,6 +11,14 @@
             "type": "string",
             "const": "audora-speech-annotations-v1"
         },
+        "normalizationCases": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SpeechAnnotationFixtureNormalizationCase"
+            },
+            "minItems": 4,
+            "maxItems": 32
+        },
         "durationMs": {
             "$ref": "#/$defs/CanonicalDurationMilliseconds"
         },
@@ -44,6 +52,7 @@
     "required": [
         "schemaVersion",
         "ruleVersion",
+        "normalizationCases",
         "durationMs",
         "lineText",
         "words",
@@ -56,6 +65,27 @@
     },
     "description": "Versioned, platform-neutral golden input and expected output for the pure\ndeterministic local speech annotator. This fixture is never provider data.",
     "$defs": {
+        "SpeechAnnotationFixtureNormalizationCase": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                },
+                "expected": {
+                    "type": "string",
+                    "maxLength": 1024
+                }
+            },
+            "required": [
+                "input",
+                "expected"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "CanonicalDurationMilliseconds": {
             "type": "integer",
             "minimum": 1,

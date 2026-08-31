@@ -12,6 +12,11 @@ namespace Audora.Contracts {
   model SpeechAnnotationFixture {
     schemaVersion: 1;
     ruleVersion: "audora-speech-annotations-v1";
+
+    @minItems(4)
+    @maxItems(32)
+    normalizationCases: SpeechAnnotationFixtureNormalizationCase[];
+
     durationMs: CanonicalDurationMilliseconds;
 
     @minLength(1)
@@ -27,6 +32,15 @@ namespace Audora.Contracts {
 
     evidence: SpeechAnnotationFixtureEvidence;
     expected: SpeechAnnotationFixtureExpected;
+  }
+
+  model SpeechAnnotationFixtureNormalizationCase {
+    @minLength(1)
+    @maxLength(1024)
+    input: string;
+
+    @maxLength(1024)
+    expected: string;
   }
 
   model SpeechAnnotationFixtureWord {

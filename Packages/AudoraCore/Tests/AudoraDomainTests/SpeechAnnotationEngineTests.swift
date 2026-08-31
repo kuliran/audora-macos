@@ -2,6 +2,39 @@ import AudoraDomain
 import XCTest
 
 final class SpeechAnnotationEngineTests: XCTestCase {
+    func testV1RepetitionNormalizationTrimsOnlySurroundingPunctuation() {
+        XCTAssertEqual(
+            DeterministicSpeechAnnotator.normalizeRepetitionToken("U.S."),
+            "u.s"
+        )
+        XCTAssertEqual(
+            DeterministicSpeechAnnotator.normalizeRepetitionToken("us"),
+            "us"
+        )
+        XCTAssertEqual(
+            DeterministicSpeechAnnotator.normalizeRepetitionToken("-go"),
+            "go"
+        )
+        XCTAssertEqual(
+            DeterministicSpeechAnnotator.normalizeRepetitionToken("go"),
+            "go"
+        )
+        XCTAssertEqual(
+            DeterministicSpeechAnnotator.normalizeRepetitionToken("“DON’T,”"),
+            "don’t"
+        )
+        XCTAssertEqual(
+            DeterministicSpeechAnnotator.normalizeRepetitionToken(
+                "(state-of-the-art)!"
+            ),
+            "state-of-the-art"
+        )
+        XCTAssertEqual(
+            DeterministicSpeechAnnotator.normalizeRepetitionToken("go-."),
+            "go-"
+        )
+    }
+
     func testClassifiesOnlyExplicitTextualEvidenceAndExactBoundedRepetition() throws {
         let revision = try annotationRevision(
             text: "Um state-of-the-art p- we should we should well actually no",

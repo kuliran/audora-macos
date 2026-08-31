@@ -17,6 +17,12 @@ final class SpeechAnnotationContractFixtureTests: XCTestCase {
             DeterministicSpeechAnnotator.ruleVersion
         )
         XCTAssertEqual(
+            fixture.normalizationCases.map {
+                DeterministicSpeechAnnotator.normalizeRepetitionToken($0.input)
+            },
+            fixture.normalizationCases.map(\.expected)
+        )
+        XCTAssertEqual(
             fixture.words.map(\.wordKind),
             [
                 "filledPause", "lexical", "partialWord", "lexical", "lexical",
@@ -66,6 +72,11 @@ final class SpeechAnnotationContractFixtureTests: XCTestCase {
 }
 
 private struct SpeechAnnotationGoldenFixture: Decodable {
+    struct NormalizationCase: Decodable {
+        let input: String
+        let expected: String
+    }
+
     struct Word: Decodable {
         let text: String
         let wordKind: String
@@ -117,6 +128,7 @@ private struct SpeechAnnotationGoldenFixture: Decodable {
 
     let schemaVersion: Int
     let ruleVersion: String
+    let normalizationCases: [NormalizationCase]
     let durationMs: UInt64
     let lineText: String
     let words: [Word]

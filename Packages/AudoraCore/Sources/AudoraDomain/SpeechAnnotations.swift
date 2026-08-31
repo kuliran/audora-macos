@@ -524,7 +524,7 @@ public struct DeterministicSpeechAnnotator: Sendable {
     private func repetitionDrafts(in words: [TranscriptWord]) -> [TextualDraft] {
         let lexical = words.compactMap { word -> LexicalWord? in
             guard word.wordKind == .lexical else { return nil }
-            let normalized = normalize(word.text)
+            let normalized = Self.normalizeRepetitionToken(word.text)
             guard !normalized.isEmpty else { return nil }
             return LexicalWord(word: word, normalized: normalized)
         }
@@ -617,14 +617,34 @@ public struct DeterministicSpeechAnnotator: Sendable {
             Self.maximumRepetitionGapMilliseconds
     }
 
-    private func normalize(_ text: String) -> String {
+    /// Version-one, locale-independent repetition normalization.
+    ///
+    /// Canonical Words have already passed `TranscriptWordTextValidator`, but
+    /// keeping this rule explicit and versioned prevents future ingestion seams
+    /// from collapsing internal punctuation such as `U.S.` into `us`. Only
+    /// punctuation outside the first/last lexical character is trimmed. One
+    /// ASCII hyphen immediately after the last lexical character is retained as
+    /// an ASR cutoff marker.
+    public static func normalizeRepetitionToken(_ text: String) -> String {
         let compatible = (text as NSString)
             .precomposedStringWithCompatibilityMapping
             .lowercased()
-        return String(compatible.unicodeScalars.filter { scalar in
-            scalar.properties.isAlphabetic || (48...57).contains(scalar.value) ||
-                scalar.value == 39 || scalar.value == 0x2019 || scalar.value == 45
-        })
+        let characters = Array(compatible)
+        guard let first = characters.firstIndex(where: containsLexicalBase),
+              let lastLexical = characters.lastIndex(where: containsLexicalBase)
+        else { return "" }
+        var last = lastLexical
+        let afterLexical = characters.index(after: lastLexical)
+        if afterLexical < characters.endIndex, characters[afterLexical] == "-" {
+            last = afterLexical
+        }
+        return String(characters[first...last])
+    }
+
+    private static func containsLexicalBase(_ character: Character) -> Bool {
+        character.unicodeScalars.contains {
+            $0.properties.isAlphabetic || (48...57).contains($0.value)
+        }
     }
 
     private func categoryPriority(_ category: TextualEventCategory) -> Int {

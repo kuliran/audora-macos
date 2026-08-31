@@ -173,9 +173,11 @@ Library-switch serialization.
 Domain annotator. Its v1 example combines explicit filler and partial-word kinds,
 a legitimate hyphenated Word, deliberate emphasis, a bounded multiword
 repetition, missing timing, canonical non-speech evidence, observed silence and
-voice, and authoritative Muted Interval and Capture Gap ranges. Swift contract
-tests decode the package resource and run it through the production classifier;
-the fixture is neither portable Session state nor coach-visible content.
+voice, authoritative Muted Interval and Capture Gap ranges, and boundary-only
+normalization cases that distinguish internal punctuation from surrounding
+punctuation. Swift contract tests decode the package resource and run it through
+the production classifier and normalizer; the fixture is neither portable Session
+state nor coach-visible content.
 
 ## Session processing contracts
 

@@ -1,6 +1,15 @@
 {
   "schemaVersion": 1,
   "ruleVersion": "audora-speech-annotations-v1",
+  "normalizationCases": [
+    { "input": "U.S.", "expected": "u.s" },
+    { "input": "us", "expected": "us" },
+    { "input": "-go", "expected": "go" },
+    { "input": "go", "expected": "go" },
+    { "input": "“DON’T,”", "expected": "don’t" },
+    { "input": "(state-of-the-art)!", "expected": "state-of-the-art" },
+    { "input": "go-.", "expected": "go-" }
+  ],
   "durationMs": 2400,
   "lineText": "Um state-of-the-art p- very very we should we should later later",
   "words": [
