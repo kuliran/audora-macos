@@ -34,6 +34,14 @@ const transcriptRevisionExamplesDirectory = path.join(
   resourcesDirectory,
   "Examples/TranscriptRevision/v1",
 );
+const qualifiedTranscriptRevisionExamplesDirectory = path.join(
+  resourcesDirectory,
+  "Examples/TranscriptRevision/v2",
+);
+const sessionProcessingScenariosDirectory = path.join(
+  resourcesDirectory,
+  "Scenarios/SessionProcessing",
+);
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 
@@ -118,6 +126,9 @@ await registerSchema("RecordingStagingIdentityManifest.json");
 const recordingStagingManifest = await validator("RecordingStagingManifest.json");
 const recordingScenario = await validator("RecordingFeatureScenario.json");
 const transcriptRevision = await validator("TranscriptRevision.json");
+const sessionProcessingScenario = await validator(
+  "SessionProcessingFeatureScenario.json",
+);
 
 const importedAudio = await loadFixture(
   path.join(audioImportExamplesDirectory, "audio.json"),
@@ -233,14 +244,23 @@ for (const name of expectedRecordingScenarios) {
   );
 }
 
-const canonicalTranscriptRevision = await loadJSON(
+const legacyTranscriptRevision = await loadJSON(
   path.join(transcriptRevisionExamplesDirectory, "revision.json"),
 );
 assertValidation(
   transcriptRevision,
-  canonicalTranscriptRevision,
+  legacyTranscriptRevision,
   true,
-  "transcript-revision/revision.json",
+  "transcript-revision/v1/revision.json",
+);
+const qualifiedTranscriptRevision = await loadJSON(
+  path.join(qualifiedTranscriptRevisionExamplesDirectory, "revision.json"),
+);
+assertValidation(
+  transcriptRevision,
+  qualifiedTranscriptRevision,
+  true,
+  "transcript-revision/v2/revision.json",
 );
 const transcriptRevisionRejectedDirectory = path.join(
   transcriptRevisionExamplesDirectory,
@@ -263,6 +283,40 @@ for (const name of runtimeRejectedTranscriptRevisionFixtures) {
     `transcript-revision/runtime-rejected/${name}`,
   );
 }
+
+const expectedSessionProcessingScenarios = [
+  "candidate-rejected-no-publication.v1.json",
+  "model-prepare-retry.v1.json",
+  "qualification-blocked-no-fallback.v1.json",
+  "qualified-offline-success.v1.json",
+];
+await assertInventory(
+  sessionProcessingScenariosDirectory,
+  expectedSessionProcessingScenarios,
+  "session-processing scenario",
+);
+for (const name of expectedSessionProcessingScenarios) {
+  assertValidation(
+    sessionProcessingScenario,
+    await loadJSON(path.join(sessionProcessingScenariosDirectory, name)),
+    true,
+    `session-processing/scenario/${name}`,
+  );
+}
+const fallbackProbe = await loadJSON(
+  path.join(
+    sessionProcessingScenariosDirectory,
+    "qualification-blocked-no-fallback.v1.json",
+  ),
+);
+const invalidFallback = structuredClone(fallbackProbe);
+invalidFallback.expectedEffects.push({ kind: "fallbackEngine" });
+assertValidation(
+  sessionProcessingScenario,
+  invalidFallback,
+  false,
+  "session-processing/scenario/invalid-fallback-effect",
+);
 const punctuationWordRevision = await loadJSON(
   path.join(transcriptRevisionRejectedDirectory, "punctuation-as-word.json"),
 );

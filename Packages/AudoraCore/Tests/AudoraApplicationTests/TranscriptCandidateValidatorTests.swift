@@ -684,6 +684,13 @@ struct TranscriptCandidateFixture {
             licenseReference: "pinned-license-reference",
             licenseSHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         )
+        let qualification = try TranscriptEngineQualification(
+            qualificationProfileID: "synthetic-qualified-v1",
+            engineLockSHA256: String(repeating: "f", count: 64),
+            runtimeIdentity: "synthetic-runtime-v1",
+            runtimeLockSHA256: String(repeating: "d", count: 64),
+            compatibilityPatchID: "synthetic-progress-patch-v1"
+        )
         let engine = try TranscriptEngineProvenance(
             provider: "crisperwhisper",
             model: "small",
@@ -691,6 +698,7 @@ struct TranscriptCandidateFixture {
             language: "en",
             mode: "verbatim",
             decodingOptionsSHA256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            qualification: qualification,
             usePolicy: usePolicy
         )
         context = TranscriptPublicationContext(
@@ -741,7 +749,15 @@ struct TranscriptCandidateFixture {
                 revision: engine.revision,
                 language: engine.language,
                 mode: engine.mode,
-                decodingOptionsSHA256: engine.decodingOptionsSHA256
+                decodingOptionsSHA256: engine.decodingOptionsSHA256,
+                qualification: CandidateTranscriptEngineQualification(
+                    schemaVersion: TranscriptEngineQualification.schemaVersion,
+                    qualificationProfileID: qualification.qualificationProfileID,
+                    engineLockSHA256: qualification.engineLockSHA256,
+                    runtimeIdentity: qualification.runtimeIdentity,
+                    runtimeLockSHA256: qualification.runtimeLockSHA256,
+                    compatibilityPatchID: qualification.compatibilityPatchID
+                )
             ),
             lines: [
                 CandidateTranscriptLine(
@@ -900,7 +916,8 @@ extension TranscriptionCandidate {
                 revision: engine.revision,
                 language: engine.language,
                 mode: engine.mode,
-                decodingOptionsSHA256: engine.decodingOptionsSHA256
+                decodingOptionsSHA256: engine.decodingOptionsSHA256,
+                qualification: engine.qualification
             ),
             lines: lines,
             audioEvents: audioEvents

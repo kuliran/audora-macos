@@ -412,7 +412,43 @@ public enum TranscriptEngineProvenanceError: Error, Equatable, Sendable {
     case unsupportedLanguage
     case unsupportedMode
     case invalidDecodingOptionsHash
+    case invalidQualification
     case invalidUsePolicy
+}
+
+/// Immutable derivation identity for the exact runtime admitted by engine
+/// qualification. Keeping it generic lets a future engine retain the same
+/// provenance contract without weakening the no-substitution guarantee.
+public struct TranscriptEngineQualification: Equatable, Sendable {
+    public static let schemaVersion: UInt32 = 1
+
+    public let qualificationProfileID: String
+    public let engineLockSHA256: String
+    public let runtimeIdentity: String
+    public let runtimeLockSHA256: String
+    public let compatibilityPatchID: String
+
+    public init(
+        qualificationProfileID: String,
+        engineLockSHA256: String,
+        runtimeIdentity: String,
+        runtimeLockSHA256: String,
+        compatibilityPatchID: String
+    ) throws {
+        guard TranscriptEngineProvenance.isBoundedIdentifier(qualificationProfileID),
+              AudioArtifactFingerprint.isSHA256(engineLockSHA256),
+              TranscriptEngineProvenance.isBoundedIdentifier(runtimeIdentity),
+              AudioArtifactFingerprint.isSHA256(runtimeLockSHA256),
+              TranscriptEngineProvenance.isBoundedIdentifier(compatibilityPatchID)
+        else {
+            throw TranscriptEngineProvenanceError.invalidQualification
+        }
+        self.qualificationProfileID = qualificationProfileID
+        self.engineLockSHA256 = engineLockSHA256
+        self.runtimeIdentity = runtimeIdentity
+        self.runtimeLockSHA256 = runtimeLockSHA256
+        self.compatibilityPatchID = compatibilityPatchID
+    }
 }
 
 public enum EngineCoveredArtifact: String, Hashable, Sendable {
@@ -468,6 +504,10 @@ public struct TranscriptEngineProvenance: Equatable, Sendable {
     public let language: String
     public let mode: String
     public let decodingOptionsSHA256: String
+    /// Nil is reserved exclusively for reopening immutable schema-v1
+    /// Revisions created before qualification provenance existed. New
+    /// derivations must use the public initializer that requires qualification.
+    public let qualification: TranscriptEngineQualification?
     public let usePolicy: EngineUsePolicy
 
     public init(
@@ -477,6 +517,7 @@ public struct TranscriptEngineProvenance: Equatable, Sendable {
         language: String,
         mode: String,
         decodingOptionsSHA256: String,
+        qualification: TranscriptEngineQualification,
         usePolicy: EngineUsePolicy
     ) throws {
         guard provider == "crisperwhisper" else {
@@ -501,6 +542,73 @@ public struct TranscriptEngineProvenance: Equatable, Sendable {
         self.language = language
         self.mode = mode
         self.decodingOptionsSHA256 = decodingOptionsSHA256
+        self.qualification = qualification
+        self.usePolicy = usePolicy
+    }
+
+    /// Compatibility boundary for byte-preserved schema-v1 Revisions. This
+    /// factory must never be used to admit an engine or publish a new Revision.
+    public static func reopeningLegacyV1(
+        provider: String,
+        model: String,
+        revision: String,
+        language: String,
+        mode: String,
+        decodingOptionsSHA256: String,
+        usePolicy: EngineUsePolicy
+    ) throws -> TranscriptEngineProvenance {
+        try TranscriptEngineProvenance(
+            provider: provider,
+            model: model,
+            revision: revision,
+            language: language,
+            mode: mode,
+            decodingOptionsSHA256: decodingOptionsSHA256,
+            qualification: nil,
+            usePolicy: usePolicy,
+            reopeningLegacyV1: true
+        )
+    }
+
+    private init(
+        provider: String,
+        model: String,
+        revision: String,
+        language: String,
+        mode: String,
+        decodingOptionsSHA256: String,
+        qualification: TranscriptEngineQualification?,
+        usePolicy: EngineUsePolicy,
+        reopeningLegacyV1: Bool
+    ) throws {
+        guard reopeningLegacyV1, qualification == nil else {
+            throw TranscriptEngineProvenanceError.invalidQualification
+        }
+        guard provider == "crisperwhisper" else {
+            throw TranscriptEngineProvenanceError.invalidProvider
+        }
+        guard model == "small" else {
+            throw TranscriptEngineProvenanceError.invalidModel
+        }
+        guard Self.isBoundedIdentifier(revision) else {
+            throw TranscriptEngineProvenanceError.invalidRevision
+        }
+        guard language == "en" else {
+            throw TranscriptEngineProvenanceError.unsupportedLanguage
+        }
+        guard mode == "verbatim" else {
+            throw TranscriptEngineProvenanceError.unsupportedMode
+        }
+        guard AudioArtifactFingerprint.isSHA256(decodingOptionsSHA256) else {
+            throw TranscriptEngineProvenanceError.invalidDecodingOptionsHash
+        }
+        self.provider = provider
+        self.model = model
+        self.revision = revision
+        self.language = language
+        self.mode = mode
+        self.decodingOptionsSHA256 = decodingOptionsSHA256
+        self.qualification = nil
         self.usePolicy = usePolicy
     }
 

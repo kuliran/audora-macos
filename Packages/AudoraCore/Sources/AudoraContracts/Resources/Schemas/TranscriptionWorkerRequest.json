@@ -1,0 +1,220 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/TranscriptionWorkerRequest.json",
+    "type": "object",
+    "properties": {
+        "v": {
+            "type": "number",
+            "const": 1
+        },
+        "type": {
+            "type": "string",
+            "const": "transcribe"
+        },
+        "jobId": {
+            "$ref": "#/$defs/TranscriptionJobId"
+        },
+        "sessionId": {
+            "$ref": "#/$defs/SessionId"
+        },
+        "revisionId": {
+            "$ref": "#/$defs/TranscriptRevisionId"
+        },
+        "durationMs": {
+            "$ref": "#/$defs/CanonicalDurationMilliseconds"
+        },
+        "qualificationProfileId": {
+            "$ref": "#/$defs/TranscriptionProfileId"
+        },
+        "engine": {
+            "$ref": "#/$defs/TranscriptionWorkerEngine"
+        },
+        "qualification": {
+            "$ref": "#/$defs/TranscriptionWorkerQualification"
+        },
+        "sources": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/TranscriptionWorkerSource"
+            },
+            "minItems": 1,
+            "maxItems": 1
+        },
+        "options": {
+            "$ref": "#/$defs/TranscriptionWorkerOptions"
+        },
+        "networkAccess": {
+            "type": "string",
+            "const": "disabled"
+        }
+    },
+    "required": [
+        "v",
+        "type",
+        "jobId",
+        "sessionId",
+        "revisionId",
+        "durationMs",
+        "qualificationProfileId",
+        "engine",
+        "qualification",
+        "sources",
+        "options",
+        "networkAccess"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "One offline invocation written to the worker's anonymous stdin.",
+    "$defs": {
+        "TranscriptionJobId": {
+            "type": "string",
+            "pattern": "^job-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "SessionId": {
+            "type": "string",
+            "pattern": "^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "TranscriptRevisionId": {
+            "type": "string",
+            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "CanonicalDurationMilliseconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2700000
+        },
+        "TranscriptionProfileId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[0-9A-Za-z._-]+$"
+        },
+        "TranscriptionWorkerEngine": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "const": "crisperwhisper"
+                },
+                "model": {
+                    "type": "string",
+                    "const": "small"
+                },
+                "revision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[0-9A-Za-z._-]+$"
+                }
+            },
+            "required": [
+                "provider",
+                "model",
+                "revision"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptionWorkerQualification": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "engineLockSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                },
+                "runtimeIdentity": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[0-9A-Za-z._-]+$"
+                },
+                "runtimeLockSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                },
+                "compatibilityPatchId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[0-9A-Za-z._-]+$"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "engineLockSha256",
+                "runtimeIdentity",
+                "runtimeLockSha256",
+                "compatibilityPatchId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptionWorkerSource": {
+            "type": "object",
+            "properties": {
+                "audioSourceId": {
+                    "$ref": "#/$defs/TranscriptAudioSourceId"
+                },
+                "role": {
+                    "type": "string",
+                    "const": "microphone"
+                },
+                "path": {
+                    "type": "string",
+                    "const": "input/audio.wav"
+                },
+                "timelineOffsetMs": {
+                    "type": "number",
+                    "const": 0
+                }
+            },
+            "required": [
+                "audioSourceId",
+                "role",
+                "path",
+                "timelineOffsetMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptionWorkerOptions": {
+            "type": "object",
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "const": "en"
+                },
+                "mode": {
+                    "type": "string",
+                    "const": "verbatim"
+                },
+                "wordTimestamps": {
+                    "type": "boolean",
+                    "const": true
+                }
+            },
+            "required": [
+                "language",
+                "mode",
+                "wordTimestamps"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "Sha256Hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+        },
+        "TranscriptAudioSourceId": {
+            "type": "string",
+            "pattern": "^src-[0-9]{4}$"
+        }
+    }
+}

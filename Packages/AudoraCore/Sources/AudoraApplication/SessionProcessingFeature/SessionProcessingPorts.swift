@@ -1,0 +1,120 @@
+import AudoraDomain
+
+public enum SessionTranscriptionSourceResult: Equatable, Sendable {
+    case available(SessionTranscriptionSource)
+    case unavailable
+    case integrityMismatch
+}
+
+public protocol SessionTranscriptionSourcePort: Sendable {
+    func load(_ selection: SessionProcessingSelection) async
+        -> SessionTranscriptionSourceResult
+}
+
+public enum SessionAcousticEvidenceResolution: Equatable, Sendable {
+    case qualified(SessionVoicedRangeEvidence)
+    case unavailable
+}
+
+public protocol SessionAcousticEvidencePort: Sendable {
+    func resolve(
+        for source: SessionTranscriptionSource,
+        profile: QualifiedTranscriptionProfile
+    ) async -> SessionAcousticEvidenceResolution
+}
+
+public enum TranscriptionRuntimeResolution: Equatable, Sendable {
+    case qualified(QualifiedTranscriptionProfile)
+    case unavailable(SessionProcessingUnavailableReason)
+}
+
+public protocol TranscriptionRuntimePort: Sendable {
+    /// Returns a qualified profile only after exact runtime/model-lock and
+    /// qualification evidence verification. It never substitutes an engine.
+    func resolve() async -> TranscriptionRuntimeResolution
+
+    func prepare(_ action: SessionProcessingRecoveryAction) async
+        -> TranscriptionRuntimeResolution
+
+    /// Returns a process-local capability only for the exact profile retained
+    /// by the successful qualification result.
+    func executionCapability(
+        for profile: QualifiedTranscriptionProfile
+    ) async -> VerifiedTranscriptionRuntime?
+}
+
+public enum TranscriptionModelResolution: Equatable, Sendable {
+    case ready
+    case missing
+    case corrupt
+    case lockMismatch
+}
+
+public protocol TranscriptionModelPort: Sendable {
+    func verify(_ profile: QualifiedTranscriptionProfile) async
+        -> TranscriptionModelResolution
+
+    func prepare(
+        _ action: SessionProcessingRecoveryAction,
+        profile: QualifiedTranscriptionProfile
+    ) async -> TranscriptionModelResolution
+
+    /// Returns the descriptor-retained model snapshot created by the most
+    /// recent successful verification. No path crosses this boundary.
+    func executionCapability(
+        for profile: QualifiedTranscriptionProfile
+    ) async -> VerifiedTranscriptionModel?
+}
+
+public enum SessionProcessingJobWriteResult: Equatable, Sendable {
+    case written(SessionProcessingJob)
+    case collision
+    case stale
+    case failed
+}
+
+public enum SessionProcessingJobLoadResult: Equatable, Sendable {
+    case none
+    case loaded(SessionProcessingJob)
+    case unavailable
+    case integrityMismatch
+}
+
+public protocol SessionProcessingJobPort: Sendable {
+    func latest(for selection: SessionProcessingSelection) async
+        -> SessionProcessingJobLoadResult
+
+    func create(_ job: SessionProcessingJob) async -> SessionProcessingJobWriteResult
+
+    /// Durable compare-and-swap. Infrastructure must reject a different current
+    /// state rather than replacing it unconditionally.
+    func transition(
+        _ job: SessionProcessingJob,
+        from expected: SessionProcessingJobState
+    ) async -> SessionProcessingJobWriteResult
+}
+
+public protocol TranscriptionEngine: Sendable {
+    /// Returns exactly one complete, bounded, hash-verified but semantically
+    /// untrusted Candidate, or throws one bounded failure.
+    func transcribe(
+        _ request: TranscriptionRequest,
+        events: @escaping @Sendable (TranscriptionEvent) async -> Void
+    ) async throws -> VerifiedTranscriptionCandidate
+}
+
+public protocol SessionProcessingClock: Sendable {
+    func now() async -> UTCInstant
+}
+
+public protocol SessionProcessingIDGenerator: Sendable {
+    func generateJobID(at instant: UTCInstant) async -> TranscriptionJobID
+    func generateRevisionID(at instant: UTCInstant) async -> TranscriptRevisionID
+}
+
+@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+public protocol SessionProcessingFeature: Sendable {
+    var currentState: SessionProcessingFeatureState { get async }
+    var states: AsyncStream<SessionProcessingFeatureState> { get }
+    func send(_ command: SessionProcessingCommand) async
+}

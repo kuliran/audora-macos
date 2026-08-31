@@ -13,6 +13,7 @@ struct AudoraApp: App {
     private let feature: DefaultLibraryFeature
     private let audioImportFeature: DefaultAudioImportFeature
     private let recordingFeature: DefaultRecordingFeature
+    private let sessionProcessingFeature: DefaultSessionProcessingFeature
     private let chatFeature: DefaultChatFeature
     private let windowCoordinator: MainWindowCoordinator
 
@@ -43,6 +44,27 @@ struct AudoraApp: App {
             idGenerator: RandomRecordingIDGenerator(),
             activity: activityCoordinator
         )
+        let processingWorkspace = PortableSessionProcessingWorkspace(scopes: workspace)
+        let transcriptionRuntime = CrisperPinnedQualificationRuntime()
+        let transcriptionModel = PinnedLocalTranscriptionModelRepository(
+            root: PinnedLocalTranscriptionModelRepository.defaultInstalledRoot()
+        )
+        let sessionProcessingFeature = DefaultSessionProcessingFeature(
+            source: processingWorkspace,
+            runtime: transcriptionRuntime,
+            model: transcriptionModel,
+            acoustics: QualificationBlockedSessionAcousticEvidence(),
+            jobs: processingWorkspace,
+            engine: ConfinedJSONLTranscriptionEngine(
+                host: QualificationBlockedTranscriptionWorkerHost(),
+                audio: processingWorkspace,
+                runtime: transcriptionRuntime,
+                model: transcriptionModel
+            ),
+            publisher: TranscriptRevisionPublisher(repository: processingWorkspace),
+            clock: SystemLibraryClock(),
+            identifiers: RandomSessionProcessingIDGenerator()
+        )
         let audioImportWorkspace = PortableAudioImportWorkspace(
             workspace: workspace,
             chooser: AppKitAudioFileChooser(),
@@ -72,6 +94,7 @@ struct AudoraApp: App {
         self.feature = feature
         self.audioImportFeature = audioImportFeature
         self.recordingFeature = recordingFeature
+        self.sessionProcessingFeature = sessionProcessingFeature
         self.chatFeature = chatFeature
         self.windowCoordinator = windowCoordinator
         appDelegate.configure(
@@ -87,6 +110,7 @@ struct AudoraApp: App {
                 feature: feature,
                 audioImportFeature: audioImportFeature,
                 recordingFeature: recordingFeature,
+                sessionProcessingFeature: sessionProcessingFeature,
                 chatFeature: chatFeature,
                 windowCoordinator: windowCoordinator
             )

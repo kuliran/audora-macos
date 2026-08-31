@@ -320,6 +320,57 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         return activeScope.root
     }
 
+    public func acquireSessionProcessingScope(
+        for scope: LibraryScope
+    ) -> ActiveLibraryProcessingScope? {
+        guard let activeScope,
+              case let .readWrite(authority) = activeScope.loaded,
+              authority.manifest.libraryID == scope.libraryID,
+              let processingLease = try? access.acquireAccess(to: activeScope.root)
+        else { return nil }
+        guard let rootIdentity = SessionProcessingRootIdentity.capture(
+            processingLease.url
+        ) else {
+            processingLease.release()
+            return nil
+        }
+        return ActiveLibraryProcessingScope(
+            identity: SessionProcessingScopeIdentity(
+                libraryID: scope.libraryID,
+                workspaceGeneration: workspaceGeneration,
+                rootIdentity: rootIdentity
+            ),
+            root: processingLease.url,
+            lease: processingLease
+        )
+    }
+
+    public func isCurrentSessionProcessingScope(
+        _ identity: SessionProcessingScopeIdentity
+    ) -> Bool {
+        guard identity.workspaceGeneration == workspaceGeneration,
+              let activeScope,
+              case let .readWrite(authority) = activeScope.loaded,
+              authority.manifest.libraryID == identity.libraryID,
+              SessionProcessingRootIdentity.capture(activeScope.root) ==
+                identity.rootIdentity
+        else { return false }
+        return true
+    }
+
+    public func withCurrentSessionProcessingScope<Result: Sendable>(
+        _ identity: SessionProcessingScopeIdentity,
+        perform operation: @Sendable () throws -> Result
+    ) throws -> Result {
+        guard isCurrentSessionProcessingScope(identity) else {
+            throw SessionProcessingScopeError.changed
+        }
+        // The synchronous descriptor-confined mutation runs while this actor
+        // is isolated, so an app-driven close/switch cannot interleave between
+        // generation verification and commit.
+        return try operation()
+    }
+
     private func openLocator(
         _ locator: MachineLibraryLocator,
         restoreOnLaunch: Bool

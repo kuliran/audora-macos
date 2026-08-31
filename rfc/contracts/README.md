@@ -14,7 +14,9 @@ variants. Imported-audio normalization and feature behavior live in
 [`audio-import-scenario.tsp`](audio-import-scenario.tsp); Recording staging and
 feature behavior live in [`recording.tsp`](recording.tsp). The complete immutable
 transcription root and its stable evidence anchors live in
-[`transcript-revision.tsp`](transcript-revision.tsp).
+[`transcript-revision.tsp`](transcript-revision.tsp). Durable offline processing,
+the confined JSONL boundary, untrusted Candidate artifacts, and portable feature
+scenarios live in [`session-processing.tsp`](session-processing.tsp).
 
 The provider source is separated by audience:
 
@@ -48,7 +50,12 @@ at runtime.
 - [`RecordingStagingIdentityManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingIdentityManifest.json)
 - [`RecordingStagingManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingManifest.json)
 - [`SessionManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionManifest.json)
+- [`SessionProcessingFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionProcessingFeatureScenario.json)
 - [`TranscriptRevision.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptRevision.json)
+- [`TranscriptionCandidateArtifact.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptionCandidateArtifact.json)
+- [`TranscriptionJobManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptionJobManifest.json)
+- [`TranscriptionWorkerMessage.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptionWorkerMessage.json)
+- [`TranscriptionWorkerRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptionWorkerRequest.json)
 
 | Root schema | Direction | Coach-visible instance? |
 | --- | --- | --- |
@@ -70,7 +77,12 @@ at runtime.
 | `RecordingStagingIdentityManifest` | Recording staging storage | No |
 | `RecordingStagingManifest` | Recording staging storage | No |
 | `SessionManifest` | Imported or recorded Session storage | No |
+| `SessionProcessingFeatureScenario` | Portable cross-implementation behavior | No |
 | `TranscriptRevision` | Immutable canonical Session transcription storage | No |
+| `TranscriptionCandidateArtifact` | Confined worker -> Application staging | No |
+| `TranscriptionJobManifest` | Portable Library job storage | No |
+| `TranscriptionWorkerMessage` | Confined worker -> adapter JSONL | No |
+| `TranscriptionWorkerRequest` | Adapter -> confined worker JSON | No |
 
 Invocation and Attempt identities, provider idempotency, admission state, token
 estimator identity, Profile integrity hashes, and persisted-record schema versions
@@ -148,6 +160,30 @@ Recording scenarios cover live state, mute gaps, duration warnings and limits,
 stop races, cancellation, recovery, repeated takes, late-event fencing, and
 Library-switch serialization.
 
+## Session processing contracts
+
+`TranscriptionJobManifest` persists the minimal single-run state before worker
+launch and binds one Job, Session, intended Revision, and qualification profile.
+State transitions remain compare-and-swap operations in Infrastructure; a worker
+cannot write this manifest or canonical Session selection.
+
+`TranscriptionWorkerRequest` fixes version-one English verbatim input, the single
+confined relative audio path, exact engine and qualification identity, and
+`networkAccess: disabled`. `TranscriptionWorkerMessage` seals the startup hello,
+bounded phase/progress events, one `candidate_ready`, and redacted failure shape.
+The adapter rejects a mismatched hello, unknown message, a second terminal value,
+or a Candidate reference other than `result.json`. The hello contains only the
+pinned qualification identity; Job metadata and private input capabilities are
+granted only in the subsequent request after the hello is accepted.
+
+`TranscriptionCandidateArtifact` is deliberately not canonical. Infrastructure
+bounds and confines its bytes, checks its detached SHA-256, and parses its closed
+shape. Application still requires exact source, Job, engine-lock, runtime-lock,
+patch, timing, coverage, and textual evidence validation before publication.
+Checked-in scenarios cover a synthetic qualified offline success, the current
+production qualification block with no fallback, Candidate rejection with no
+selection, and explicit model Prepare/Retry.
+
 ## Transcript Revision contract
 
 `TranscriptRevision` is the complete immutable result of accepting one
@@ -155,6 +191,13 @@ semantically untrusted transcription Candidate. It binds the Session, Job,
 canonical audio and source fingerprints, Candidate artifact, pinned engine and
 use policy, ordered Lines and Words, and Audio Events. Stable `lineId`, `wordId`,
 and `audioEventId` values occupy distinct anchor namespaces.
+
+Schema version 2 adds the exact qualification profile, engine-lock digest,
+runtime identity and lock digest, and compatibility-patch identity to derivation
+provenance. New publications require and write version 2. The reader continues
+to reopen immutable version-1 Revisions through an explicit legacy path, without
+retroactively treating them as qualified for a new worker launch or rewriting
+their bytes.
 
 Line text is display syntax and retains punctuation. Words are lexical evidence
 tokens mapped by exact UTF-8 byte ranges; punctuation and surrounding whitespace
