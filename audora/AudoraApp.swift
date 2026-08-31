@@ -13,6 +13,7 @@ struct AudoraApp: App {
     private let feature: DefaultLibraryFeature
     private let audioImportFeature: DefaultAudioImportFeature
     private let recordingFeature: DefaultRecordingFeature
+    private let applicationCommands: DefaultApplicationCommandFeature
     private let chatDispatcher: ChatCommandDispatcher
     private let librarySelectionDispatcher: LibrarySelectionCommandDispatcher
     private let windowCoordinator: MainWindowCoordinator
@@ -68,14 +69,13 @@ struct AudoraApp: App {
             pendingUserTurnIDGenerator: chatIdentityGenerator,
             responsePositionIDGenerator: chatIdentityGenerator
         )
-        let librarySelectionFeature = DefaultLibrarySelectionFeature(
+        let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,
             chat: chatFeature
         )
-        let chatDispatcher = ChatCommandDispatcher(feature: librarySelectionFeature)
+        let chatDispatcher = ChatCommandDispatcher(feature: applicationCommands)
         let librarySelectionDispatcher = LibrarySelectionCommandDispatcher(
-            feature: librarySelectionFeature,
-            chatDispatcher: chatDispatcher
+            commandDispatcher: chatDispatcher
         )
         let windowCoordinator = MainWindowCoordinator(
             access: AppKitMainWindowAccess()
@@ -84,12 +84,13 @@ struct AudoraApp: App {
         self.feature = feature
         self.audioImportFeature = audioImportFeature
         self.recordingFeature = recordingFeature
+        self.applicationCommands = applicationCommands
         self.chatDispatcher = chatDispatcher
         self.librarySelectionDispatcher = librarySelectionDispatcher
         self.windowCoordinator = windowCoordinator
         appDelegate.configure(
             feature: feature,
-            chatDispatcher: chatDispatcher,
+            applicationCommands: applicationCommands,
             librarySelectionDispatcher: librarySelectionDispatcher,
             workspace: workspace,
             windowCoordinator: windowCoordinator
@@ -117,7 +118,7 @@ struct AudoraApp: App {
 @MainActor
 final class AudoraAppDelegate: NSObject, NSApplicationDelegate {
     private var feature: DefaultLibraryFeature?
-    private var chatDispatcher: ChatCommandDispatcher?
+    private var applicationCommands: (any ApplicationCommandFeature)?
     private var librarySelectionDispatcher: LibrarySelectionCommandDispatcher?
     private var workspace: PortableLibraryWorkspace?
     private var windowCoordinator: MainWindowCoordinator?
@@ -125,13 +126,13 @@ final class AudoraAppDelegate: NSObject, NSApplicationDelegate {
 
     func configure(
         feature: DefaultLibraryFeature,
-        chatDispatcher: ChatCommandDispatcher,
+        applicationCommands: any ApplicationCommandFeature,
         librarySelectionDispatcher: LibrarySelectionCommandDispatcher,
         workspace: PortableLibraryWorkspace,
         windowCoordinator: MainWindowCoordinator
     ) {
         self.feature = feature
-        self.chatDispatcher = chatDispatcher
+        self.applicationCommands = applicationCommands
         self.librarySelectionDispatcher = librarySelectionDispatcher
         self.workspace = workspace
         self.windowCoordinator = windowCoordinator
@@ -170,10 +171,11 @@ final class AudoraAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
-        guard let chatDispatcher else { return .terminateNow }
+        guard let applicationCommands else { return .terminateNow }
         guard terminationTask == nil else { return .terminateLater }
         terminationTask = Task { @MainActor [weak self] in
-            let draftIsDurable = await chatDispatcher.flushForOrderlyTermination()
+            let termination = applicationCommands.flushForOrderlyTermination()
+            let draftIsDurable = await termination.value
             self?.terminationTask = nil
             sender.reply(toApplicationShouldTerminate: draftIsDurable)
         }

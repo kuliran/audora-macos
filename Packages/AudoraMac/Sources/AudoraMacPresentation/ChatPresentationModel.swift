@@ -9,18 +9,12 @@ public final class ChatPresentationModel: ObservableObject {
     @Published public private(set) var snapshot = ChatFeatureState()
     @Published public var filterText = ""
 
-    private let feature: any ChatFeature
+    private let feature: any ApplicationCommandFeature
     private let dispatcher: ChatCommandDispatcher
     private var startedLibrary: LibraryID?
     private var commandContext: ChatCommandContext?
     private var projectedStateContext: ChatCommandContext?
     private var stateConsumer: Task<Void, Never>?
-
-    public init(feature: any ChatFeature) {
-        let dispatcher = ChatCommandDispatcher(feature: feature)
-        self.feature = feature
-        self.dispatcher = dispatcher
-    }
 
     public init(dispatcher: ChatCommandDispatcher) {
         feature = dispatcher.feature
@@ -42,14 +36,14 @@ public final class ChatPresentationModel: ObservableObject {
         )
         filterText = ""
 
-        let stream = feature.states
+        let stream = feature.chatStates
         let consumer = Task { @MainActor [weak self] in
             guard let self else { return }
             var states = stream.makeAsyncIterator()
             while !Task.isCancelled, let next = await states.next() {
                 guard context == commandContext else { return }
                 if projectedStateContext != context {
-                    guard await feature.currentState(in: scope) == next else { continue }
+                    guard await feature.currentChatState(in: scope) == next else { continue }
                     guard context == commandContext, !Task.isCancelled else { return }
                     projectedStateContext = context
                 }
@@ -64,7 +58,7 @@ public final class ChatPresentationModel: ObservableObject {
                 consumer.cancel()
                 return
             }
-            if let current = await feature.currentState(in: scope) {
+            if let current = await feature.currentChatState(in: scope) {
                 guard context == commandContext, !Task.isCancelled else {
                     consumer.cancel()
                     return
