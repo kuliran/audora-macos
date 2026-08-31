@@ -7,6 +7,7 @@ public enum CoachTokenEstimateMode: String, Codable, Equatable, Sendable {
     case conservativeUpperBound
 }
 
+@_spi(CoachContextQualification)
 public enum CoachTokenEstimatorError: Error, Equatable {
     case emptyIdentifier
     case invalidMaximumUTF8BytesPerToken
@@ -19,6 +20,7 @@ public enum CoachTokenEstimatorError: Error, Equatable {
 /// time. The planner never sums independently tokenized JSON fields (which can
 /// undercount at tokenizer boundaries), and it preserves provider message
 /// boundaries for transcript tool calls and results.
+@_spi(CoachContextQualification)
 public struct CoachTokenEstimator: Sendable {
     public let identifier: String
     public let mode: CoachTokenEstimateMode
@@ -66,6 +68,7 @@ public struct CoachTokenEstimator: Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public enum CompleteToolResponseBudgetError: Error, Equatable, Sendable {
     case negativeRemainingInputTokens
     case negativeHiddenTokens
@@ -78,6 +81,7 @@ public enum CompleteToolResponseBudgetError: Error, Equatable, Sendable {
 /// The response is framed and tokenized as one model-visible provider message.
 /// Callers supply canonical response bytes; they never estimate transcript text,
 /// fields, or fragments independently.
+@_spi(CoachContextQualification)
 public struct CompleteToolResponseBudget: Sendable {
     public let remainingInputTokens: Int
 
@@ -121,6 +125,7 @@ public struct CompleteToolResponseBudget: Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public struct CoachContextBudget: Equatable, Sendable {
     public let contextWindowTokens: Int
     public let responseReservedTokens: Int
@@ -138,6 +143,7 @@ public struct CoachContextBudget: Equatable, Sendable {
 }
 
 /// The app-only fields from `CoachProviderDescriptor.json`.
+@_spi(CoachContextQualification)
 public struct CoachProviderDescriptor: Equatable, Sendable {
     public let displayName: String
     public let contextBudget: CoachContextBudget
@@ -159,6 +165,7 @@ public struct CoachProviderDescriptor: Equatable, Sendable {
 /// Prefixes and suffixes include pinned instructions, tool definitions, role
 /// wrappers, and adapter syntax that is actually visible to the provider model.
 /// Hidden token counts cover provider special tokens that have no UTF-8 spelling.
+@_spi(CoachContextQualification)
 public struct CoachProviderFraming: Equatable, Sendable {
     public let initialRequestPrefix: Data
     public let initialRequestSuffix: Data
@@ -200,6 +207,7 @@ public struct CoachProviderFraming: Equatable, Sendable {
 }
 
 /// Qualified implementation details that intentionally remain outside provider DTOs.
+@_spi(CoachContextQualification)
 public struct CoachProviderEstimationPolicy: Sendable {
     public let providerIdentifier: String
     public let responseCollectorByteCeiling: Int
@@ -219,12 +227,14 @@ public struct CoachProviderEstimationPolicy: Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public enum PreparedCoachTranscriptHandleError: Error, Equatable, Sendable {
     case notCanonicalUUID
 }
 
 /// One bounded Attempt-scoped handle used by both the Coach Request and the
 /// conservatively reserved transcript-read exchange.
+@_spi(CoachContextQualification)
 public struct PreparedCoachTranscriptHandle: Equatable, Hashable, Sendable {
     public static let canonicalUTF8ByteCount = 36
 
@@ -250,6 +260,7 @@ public struct PreparedCoachTranscriptHandle: Equatable, Hashable, Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public enum PreparedCoachAttachment: Equatable, Sendable {
     /// The complete `SessionAttachmentInline` provider value.
     case inline(requestValue: CanonicalJSONValue)
@@ -279,6 +290,7 @@ public enum PreparedCoachAttachment: Equatable, Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public struct PreparedCoachContext: Equatable, Sendable {
     public let profile: CanonicalJSONValue
     public let memory: CanonicalJSONValue
@@ -339,6 +351,7 @@ public struct CoachContextComponentCost: Equatable, Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public struct CanonicalCoachExchange: Equatable, Sendable {
     public let request: Data
     public let transcriptReadRequest: Data?
@@ -364,6 +377,7 @@ public struct CanonicalCoachExchange: Equatable, Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public struct CoachContextEstimate: Equatable, Sendable {
     /// The authoritative whole-envelope estimate used for admission.
     public let completeInputTokens: Int
@@ -405,6 +419,7 @@ public struct CoachContextEstimate: Equatable, Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public enum CoachContextEstimationError: Error, Equatable {
     case duplicateSessionTranscriptHandle
     case sessionTranscriptHandleMismatch
@@ -412,6 +427,7 @@ public enum CoachContextEstimationError: Error, Equatable {
     case integerOverflow
 }
 
+@_spi(CoachContextQualification)
 public struct CoachContextPlanner: Sendable {
     public init() {}
 
@@ -632,6 +648,7 @@ public struct CoachContextPlanner: Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public enum CoachProviderDescriptorValidationError: Error, Equatable, Sendable {
     case emptyDisplayName
     case emptyProviderIdentifier
@@ -650,6 +667,7 @@ public enum CoachProviderDescriptorValidationError: Error, Equatable, Sendable {
     case integerOverflow
 }
 
+@_spi(CoachContextQualification)
 public struct QualifiedCoachProviderDescriptor: Equatable, Sendable {
     public let descriptor: CoachProviderDescriptor
     public let providerIdentifier: String
@@ -687,6 +705,7 @@ public struct QualifiedCoachProviderDescriptor: Equatable, Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public struct CoachProviderDescriptorQualifier: Sendable {
     private let planner: CoachContextPlanner
 

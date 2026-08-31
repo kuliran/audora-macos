@@ -7,6 +7,7 @@ import Foundation
 /// Numbers in the current contracts are integers. Keeping the value model this
 /// small avoids platform-dependent floating-point spelling and makes the exact
 /// bytes sent to a provider reproducible on macOS and Linux.
+@_spi(CoachContextQualification)
 public indirect enum CanonicalJSONValue: Equatable, Sendable {
     case object([String: CanonicalJSONValue])
     case array([CanonicalJSONValue])
@@ -16,6 +17,7 @@ public indirect enum CanonicalJSONValue: Equatable, Sendable {
     case null
 }
 
+@_spi(CoachContextQualification)
 public enum CanonicalJSONMeasurementError: Error, Equatable, Sendable {
     case invalidMaximumByteCount
     case byteLimitExceeded
@@ -23,6 +25,7 @@ public enum CanonicalJSONMeasurementError: Error, Equatable, Sendable {
     case integerOverflow
 }
 
+@_spi(CoachContextQualification)
 public enum CanonicalJSON {
     public static let maximumMeasuredNestingDepth = 256
 

@@ -39,6 +39,9 @@ portable_gate_stage='feature scenario tests'
 swift test --package-path Packages/AudoraCore \
   --filter AudoraFeatureScenarioTests
 
+portable_gate_stage='coach context interface guard'
+sh scripts/check-coach-context-interface.sh
+
 forbidden_imports='^import (SwiftUI|AppKit|AVFoundation|Combine|Observation|CoreAudio|Metal|MetalPerformanceShaders|Network|FoundationNetworking|Darwin|Glibc)$'
 portable_gate_stage='platform import guard'
 

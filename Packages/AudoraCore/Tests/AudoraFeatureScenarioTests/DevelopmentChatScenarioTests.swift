@@ -1,4 +1,4 @@
-@testable import AudoraApplication
+@testable @_spi(CoachContextQualification) import AudoraApplication
 import AudoraContracts
 import AudoraDomain
 import Foundation

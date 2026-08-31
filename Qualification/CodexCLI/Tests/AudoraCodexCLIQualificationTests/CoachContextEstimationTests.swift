@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 
-import AudoraApplication
+@_spi(CoachContextQualification) import AudoraApplication
 @testable import AudoraCodexCLIQualification
 
 final class CoachContextEstimationTests: XCTestCase {
