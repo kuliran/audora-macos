@@ -1431,6 +1431,11 @@ final class PortableChatPersistenceTests: XCTestCase {
 
     func testPublicationFaultsExposeNeitherSideBeforeManifestCommitAndBothAfterIt() throws {
         let beforeCommit: [PortableChatFaultPoint] = [
+            .beforePublicationProofPartialWrite,
+            .afterPublicationProofPartialWrite,
+            .afterPublicationProofFileFlush,
+            .afterPublicationProofInstall,
+            .afterPublicationProofDirectoryFlush,
             .afterUserMessageInstall,
             .afterCoachMessageInstall,
             .afterPublicationManifestFileFlush,
@@ -1659,6 +1664,49 @@ final class PortableChatPersistenceTests: XCTestCase {
             XCTAssertEqual(unlocked.chat.draft, fixture.locked.chat.draft)
             XCTAssertEqual(unlocked.chat.messageIDs, [])
             XCTAssertFalse(try persistence.hasActiveInvocation(at: root, in: scope))
+        }
+    }
+
+    func testRepeatedPublicationRejectsDifferentMessageBytesForPublishedManifest() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            guard case .committed = try persistence.publishInvocation(
+                fixture.publication,
+                at: root,
+                in: scope
+            ) else { return XCTFail("Invocation did not publish") }
+
+            let alteredCoachMessage = try ChatMessage(
+                id: fixture.publication.coachMessage.id,
+                responsePositionID: fixture.publication.coachMessage.responsePositionID,
+                content: .coach(markdown: "A different but valid Coach response."),
+                coachProfile: fixture.publication.coachMessage.coachProfile,
+                createdAt: fixture.publication.coachMessage.createdAt
+            )
+            try writeMessage(
+                alteredCoachMessage,
+                using: persistence,
+                under: root,
+                chatID: fixture.locked.chat.id
+            )
+
+            XCTAssertEqual(
+                try persistence.publishInvocation(
+                    fixture.publication,
+                    at: root,
+                    in: scope
+                ),
+                .stale(fixture.publication.replacement)
+            )
         }
     }
 

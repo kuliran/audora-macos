@@ -1297,6 +1297,44 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testLivePublicationProofPartialDoesNotFreezeOrMutatePendingRead() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let owner = PortableInvocationStore(workspace: fixture.workspace)
+            guard case .acquired = await owner.acquirePendingInvocation(
+                fixture.install.authority.request
+            ) else { return XCTFail("Pending authority was not acquired") }
+            guard case .installed = await owner.installInvocation(fixture.install) else {
+                return XCTFail("Invocation was not installed")
+            }
+            let partial = fixture.root
+                .appendingPathComponent("invocations", isDirectory: true)
+                .appendingPathComponent(
+                    fixture.install.invocation.id.rawValue,
+                    isDirectory: true
+                )
+                .appendingPathComponent(
+                    ".publication-proof.json.11111111-1111-1111-1111-111111111111.partial"
+                )
+            try Data("in-progress".utf8).write(to: partial)
+
+            let readingWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await readingWorkspace.chooseLibrary()
+            let reader = PortableChatStore(workspace: readingWorkspace)
+            let load = await reader.load(fixture.locked.chat.id, in: fixture.scope)
+
+            XCTAssertEqual(load, .loaded(fixture.locked))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: partial.path))
+            _ = await owner.abortInstalledNewSend(fixture.install.invocation)
+        }
+    }
+
     func testCommittedPublicationSurvivesFailedImmediateReconciliationAndRecoveryReread() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)
@@ -1332,6 +1370,72 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 recovery,
                 .ineligible(fixture.publication.replacement)
             )
+        }
+    }
+
+    func testTypedRecoveryRejectsBoundButDifferentDurablePublicationProof() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let publicationFault = OneShot()
+            let reconciliationFault = OneShot()
+            let owner = PortableInvocationStore(
+                persistence: PortableChatPersistence { point in
+                    if point == .afterPublicationManifestInstall,
+                       publicationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                    if point == .beforePublicationReconciliationRead,
+                       reconciliationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                },
+                workspace: fixture.workspace
+            )
+            guard case .acquired = await owner.acquirePendingInvocation(
+                fixture.install.authority.request
+            ) else { return XCTFail("Pending authority was not acquired") }
+            guard case .installed = await owner.installInvocation(fixture.install) else {
+                return XCTFail("Invocation was not installed")
+            }
+            let publication = await owner.publish(fixture.publication)
+            XCTAssertEqual(publication, .failed)
+
+            let invocationRoot = fixture.root
+                .appendingPathComponent("invocations", isDirectory: true)
+                .appendingPathComponent(
+                    fixture.install.invocation.id.rawValue,
+                    isDirectory: true
+                )
+            let proofURL = invocationRoot.appendingPathComponent("publication-proof.json")
+            var proof = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: Data(contentsOf: proofURL)
+                ) as? [String: Any]
+            )
+            proof["coachMessageSha256"] = String(repeating: "0", count: 64)
+            try JSONSerialization.data(
+                withJSONObject: proof,
+                options: [.sortedKeys]
+            ).write(to: proofURL)
+
+            let recovery = await owner.recoverPublishedInvocation(fixture.publication)
+
+            XCTAssertEqual(recovery, .unavailable)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: proofURL.path))
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: fixture.root
+                        .appendingPathComponent("chats", isDirectory: true)
+                        .appendingPathComponent(
+                            fixture.locked.chat.id.rawValue,
+                            isDirectory: true
+                        )
+                        .appendingPathComponent("pending-user-turn.json").path
+                )
+            )
+            XCTAssertTrue(FileManager.default.fileExists(atPath: invocationRoot.path))
         }
     }
 
@@ -1471,6 +1575,438 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testRelaunchPreservesPendingAndInvocationForAlteredPublishedMessage() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let publicationFault = OneShot()
+            let reconciliationFault = OneShot()
+            weak var releasedStore: PortableInvocationStore?
+            do {
+                let crashed = PortableInvocationStore(
+                    persistence: PortableChatPersistence { point in
+                        if point == .afterPublicationManifestInstall,
+                           publicationFault.take()
+                        {
+                            throw PortableChatPersistenceError.injectedFault(point)
+                        }
+                        if point == .beforePublicationReconciliationRead,
+                           reconciliationFault.take()
+                        {
+                            throw PortableChatPersistenceError.injectedFault(point)
+                        }
+                    },
+                    workspace: fixture.workspace
+                )
+                releasedStore = crashed
+                guard case .acquired = await crashed.acquirePendingInvocation(
+                    fixture.install.authority.request
+                ) else { return XCTFail("Pending authority was not acquired") }
+                guard case .installed = await crashed.installInvocation(fixture.install) else {
+                    return XCTFail("Invocation was not installed")
+                }
+                let publication = await crashed.publish(fixture.publication)
+                XCTAssertEqual(publication, .failed)
+            }
+            for _ in 0 ..< 20 where releasedStore != nil {
+                await Task.yield()
+            }
+            XCTAssertNil(releasedStore)
+
+            let expected = fixture.publication.coachMessage
+            let impostor = try ChatMessage(
+                id: expected.id,
+                responsePositionID: expected.responsePositionID,
+                content: .coach(markdown: "Altered immutable response."),
+                coachProfile: expected.coachProfile,
+                createdAt: expected.createdAt
+            )
+            let chatRoot = fixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(fixture.locked.chat.id.rawValue, isDirectory: true)
+            try PortableChatPersistence().encodeMessage(impostor).write(
+                to: chatRoot
+                    .appendingPathComponent("messages", isDirectory: true)
+                    .appendingPathComponent("\(expected.id.rawValue).json")
+            )
+
+            let relaunchedWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await relaunchedWorkspace.chooseLibrary()
+            let relaunched = PortableChatStore(workspace: relaunchedWorkspace)
+
+            let load = await relaunched.load(fixture.locked.chat.id, in: fixture.scope)
+            XCTAssertEqual(load, .failed)
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: chatRoot.appendingPathComponent("pending-user-turn.json").path
+                )
+            )
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: fixture.root
+                        .appendingPathComponent("invocations", isDirectory: true)
+                        .appendingPathComponent(
+                            fixture.install.invocation.id.rawValue,
+                            isDirectory: true
+                        ).path
+                )
+            )
+        }
+    }
+
+    func testRelaunchPreservesPendingAndInvocationForAlteredCoachProvenance() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let crash = await leaveCommittedPublicationForRelaunch(fixture)
+            XCTAssertEqual(crash.outcome, .failed)
+            XCTAssertTrue(crash.storeReleased)
+
+            let expected = fixture.publication.coachMessage
+            let impostor = try ChatMessage(
+                id: expected.id,
+                responsePositionID: expected.responsePositionID,
+                content: expected.content,
+                coachProfile: CoachProfileProvenance(
+                    revisionID: expected.coachProfile?.revisionID,
+                    statementGeneration: 10
+                ),
+                createdAt: expected.createdAt
+            )
+            let chatRoot = fixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(fixture.locked.chat.id.rawValue, isDirectory: true)
+            try PortableChatPersistence().encodeMessage(impostor).write(
+                to: chatRoot
+                    .appendingPathComponent("messages", isDirectory: true)
+                    .appendingPathComponent("\(expected.id.rawValue).json")
+            )
+
+            let relaunchedWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await relaunchedWorkspace.chooseLibrary()
+            let relaunched = PortableChatStore(workspace: relaunchedWorkspace)
+            let load = await relaunched.load(fixture.locked.chat.id, in: fixture.scope)
+
+            XCTAssertEqual(load, .failed)
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: chatRoot.appendingPathComponent("pending-user-turn.json").path
+                )
+            )
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: fixture.root
+                        .appendingPathComponent("invocations", isDirectory: true)
+                        .appendingPathComponent(
+                            fixture.install.invocation.id.rawValue,
+                            isDirectory: true
+                        ).path
+                )
+            )
+        }
+    }
+
+    func testRelaunchRecognizesExactCommittedPublicationAndFinishesCleanup() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let crash = await leaveCommittedPublicationForRelaunch(fixture)
+            XCTAssertEqual(crash.outcome, .failed)
+            XCTAssertTrue(crash.storeReleased)
+
+            let relaunchedWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await relaunchedWorkspace.chooseLibrary()
+            let relaunched = PortableChatStore(workspace: relaunchedWorkspace)
+
+            let load = await relaunched.load(fixture.locked.chat.id, in: fixture.scope)
+            XCTAssertEqual(load, .loaded(fixture.publication.replacement))
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: fixture.root
+                        .appendingPathComponent("chats", isDirectory: true)
+                        .appendingPathComponent(
+                            fixture.locked.chat.id.rawValue,
+                            isDirectory: true
+                        )
+                        .appendingPathComponent("pending-user-turn.json").path
+                )
+            )
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: fixture.root
+                        .appendingPathComponent("invocations", isDirectory: true)
+                        .appendingPathComponent(
+                            fixture.install.invocation.id.rawValue,
+                            isDirectory: true
+                        ).path
+                )
+            )
+        }
+    }
+
+    func testRelaunchPreservesPostSwitchInvocationWithoutPublicationProof() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let crash = await leaveCommittedPublicationForRelaunch(fixture)
+            XCTAssertEqual(crash.outcome, .failed)
+            XCTAssertTrue(crash.storeReleased)
+
+            let invocationRoot = fixture.root
+                .appendingPathComponent("invocations", isDirectory: true)
+                .appendingPathComponent(
+                    fixture.install.invocation.id.rawValue,
+                    isDirectory: true
+                )
+            try FileManager.default.removeItem(
+                at: invocationRoot.appendingPathComponent("publication-proof.json")
+            )
+            let relaunchedWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await relaunchedWorkspace.chooseLibrary()
+            let relaunched = PortableChatStore(workspace: relaunchedWorkspace)
+
+            let load = await relaunched.load(fixture.locked.chat.id, in: fixture.scope)
+            XCTAssertEqual(load, .failed)
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: fixture.root
+                        .appendingPathComponent("chats", isDirectory: true)
+                        .appendingPathComponent(
+                            fixture.locked.chat.id.rawValue,
+                            isDirectory: true
+                        )
+                        .appendingPathComponent("pending-user-turn.json").path
+                )
+            )
+            XCTAssertTrue(FileManager.default.fileExists(atPath: invocationRoot.path))
+        }
+    }
+
+    func testCorruptPublicationProofFreezesOnlyItsTargetChatInCatalog() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let crash = await leaveCommittedPublicationForRelaunch(fixture)
+            XCTAssertEqual(crash.outcome, .failed)
+            XCTAssertTrue(crash.storeReleased)
+
+            let invocationRoot = fixture.root
+                .appendingPathComponent("invocations", isDirectory: true)
+                .appendingPathComponent(
+                    fixture.install.invocation.id.rawValue,
+                    isDirectory: true
+                )
+            let proofURL = invocationRoot.appendingPathComponent("publication-proof.json")
+            var proof = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: Data(contentsOf: proofURL)
+                ) as? [String: Any]
+            )
+            proof["schemaVersion"] = 2
+            try JSONSerialization.data(
+                withJSONObject: proof,
+                options: [.sortedKeys]
+            ).write(to: proofURL)
+
+            let entries = try PortableChatPersistence().loadCatalog(
+                at: fixture.root,
+                in: fixture.scope
+            )
+
+            XCTAssertEqual(entries.count, 2)
+            XCTAssertTrue(entries.contains(.frozen(
+                FrozenChatSnapshot(chatID: fixture.locked.chat.id, reason: .corrupt)
+            )))
+            XCTAssertTrue(entries.contains { entry in
+                guard case let .readWrite(aggregate) = entry else { return false }
+                return aggregate.chat.id == fixture.competingAuthority.request.chatID
+            })
+            XCTAssertTrue(FileManager.default.fileExists(atPath: proofURL.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: invocationRoot.path))
+        }
+    }
+
+    func testRelaunchPreservesPendingAndInvocationForDifferentPublishedMessageIDs() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let crash = await leaveCommittedPublicationForRelaunch(fixture)
+            XCTAssertEqual(crash.outcome, .failed)
+            XCTAssertTrue(crash.storeReleased)
+
+            let published = fixture.publication.replacement.chat
+            let userID = try ChatMessageID("msg-20260830T120004000Z-3DEF")
+            let coachID = try ChatMessageID("msg-20260830T120004000Z-4GHJ")
+            let user = try ChatMessage(
+                id: userID,
+                responsePositionID: fixture.install.invocation.responsePositionID,
+                content: fixture.publication.userMessage.content,
+                createdAt: fixture.publication.userMessage.createdAt
+            )
+            let coach = try ChatMessage(
+                id: coachID,
+                responsePositionID: fixture.install.invocation.responsePositionID,
+                content: fixture.publication.coachMessage.content,
+                coachProfile: fixture.publication.coachMessage.coachProfile,
+                createdAt: fixture.publication.coachMessage.createdAt
+            )
+            let impostor = try Chat(
+                id: published.id,
+                manifestRevision: published.manifestRevision,
+                title: published.title,
+                createdAt: published.createdAt,
+                updatedAt: published.updatedAt,
+                creation: published.creation,
+                profileStatementGenerationAtCreation:
+                    published.profileStatementGenerationAtCreation,
+                attachments: published.attachments,
+                draft: published.draft,
+                messageIDs: Array(published.messageIDs.dropLast(2)) + [userID, coachID],
+                currentMemoryID: published.currentMemoryID
+            )
+            let chatRoot = fixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(published.id.rawValue, isDirectory: true)
+            let messages = chatRoot.appendingPathComponent("messages", isDirectory: true)
+            try PortableChatPersistence().encodeMessage(user).write(
+                to: messages.appendingPathComponent("\(userID.rawValue).json")
+            )
+            try PortableChatPersistence().encodeMessage(coach).write(
+                to: messages.appendingPathComponent("\(coachID.rawValue).json")
+            )
+            try PortableChatPersistence().encodeChat(impostor).write(
+                to: chatRoot.appendingPathComponent("chat.json")
+            )
+
+            let relaunchedWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await relaunchedWorkspace.chooseLibrary()
+            let relaunched = PortableChatStore(workspace: relaunchedWorkspace)
+            let load = await relaunched.load(published.id, in: fixture.scope)
+
+            XCTAssertEqual(load, .failed)
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: chatRoot.appendingPathComponent("pending-user-turn.json").path
+                )
+            )
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: fixture.root
+                        .appendingPathComponent("invocations", isDirectory: true)
+                        .appendingPathComponent(
+                            fixture.install.invocation.id.rawValue,
+                            isDirectory: true
+                        ).path
+                )
+            )
+        }
+    }
+
+    func testRelaunchPreservesPendingAndInvocationForUnrelatedTwoMessageTail() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let crash = await leaveCommittedPublicationForRelaunch(fixture)
+            XCTAssertEqual(crash.outcome, .failed)
+            XCTAssertTrue(crash.storeReleased)
+
+            let published = fixture.publication.replacement.chat
+            let userID = try ChatMessageID("msg-20260830T120005000Z-5KMN")
+            let coachID = try ChatMessageID("msg-20260830T120005000Z-6PQR")
+            let user = try ChatMessage(
+                id: userID,
+                responsePositionID: fixture.install.invocation.responsePositionID,
+                content: .user(text: "Unrelated later user message."),
+                createdAt: try UTCInstant("2026-08-30T12:00:05.000Z")
+            )
+            let coach = try ChatMessage(
+                id: coachID,
+                responsePositionID: fixture.install.invocation.responsePositionID,
+                content: .coach(markdown: "Unrelated later coach message."),
+                coachProfile: fixture.install.invocation.preparedProfile,
+                createdAt: try UTCInstant("2026-08-30T12:00:05.000Z")
+            )
+            let impostor = try Chat(
+                id: published.id,
+                manifestRevision: published.manifestRevision + 1,
+                title: published.title,
+                createdAt: published.createdAt,
+                updatedAt: try UTCInstant("2026-08-30T12:00:05.000Z"),
+                creation: published.creation,
+                profileStatementGenerationAtCreation:
+                    published.profileStatementGenerationAtCreation,
+                attachments: published.attachments,
+                draft: published.draft,
+                messageIDs: published.messageIDs + [userID, coachID],
+                currentMemoryID: published.currentMemoryID
+            )
+            let chatRoot = fixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(published.id.rawValue, isDirectory: true)
+            let messages = chatRoot.appendingPathComponent("messages", isDirectory: true)
+            try PortableChatPersistence().encodeMessage(user).write(
+                to: messages.appendingPathComponent("\(userID.rawValue).json")
+            )
+            try PortableChatPersistence().encodeMessage(coach).write(
+                to: messages.appendingPathComponent("\(coachID.rawValue).json")
+            )
+            try PortableChatPersistence().encodeChat(impostor).write(
+                to: chatRoot.appendingPathComponent("chat.json")
+            )
+
+            let relaunchedWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await relaunchedWorkspace.chooseLibrary()
+            let relaunched = PortableChatStore(workspace: relaunchedWorkspace)
+            let load = await relaunched.load(published.id, in: fixture.scope)
+
+            XCTAssertEqual(load, .failed)
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: chatRoot.appendingPathComponent("pending-user-turn.json").path
+                )
+            )
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: fixture.root
+                        .appendingPathComponent("invocations", isDirectory: true)
+                        .appendingPathComponent(
+                            fixture.install.invocation.id.rawValue,
+                            isDirectory: true
+                        ).path
+                )
+            )
+        }
+    }
+
     func testExactPublishedRecoveryRejectsFreshDraftChangeWithoutManifestRevision() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)
@@ -1528,7 +2064,7 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
             let recovery = await owner.recoverPublishedInvocation(
                 fixture.publication
             )
-            XCTAssertEqual(recovery, .notPublished)
+            XCTAssertEqual(recovery, .unavailable)
             _ = await owner.abortInstalledNewSend(fixture.install.invocation)
         }
     }
@@ -2615,6 +3151,42 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         let install: InstallCoachInvocationMutation
         let publication: PublishCoachInvocationMutation
         let competingAuthority: InvocationPendingAuthority
+    }
+
+    private func leaveCommittedPublicationForRelaunch(
+        _ fixture: InvocationStoreFixture
+    ) async -> (outcome: InvocationPublicationOutcome, storeReleased: Bool) {
+        let publicationFault = OneShot()
+        let reconciliationFault = OneShot()
+        weak var releasedStore: PortableInvocationStore?
+        var outcome = InvocationPublicationOutcome.failed
+        do {
+            let crashed = PortableInvocationStore(
+                persistence: PortableChatPersistence { point in
+                    if point == .afterPublicationManifestInstall,
+                       publicationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                    if point == .beforePublicationReconciliationRead,
+                       reconciliationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                },
+                workspace: fixture.workspace
+            )
+            releasedStore = crashed
+            guard case .acquired = await crashed.acquirePendingInvocation(
+                fixture.install.authority.request
+            ), case .installed = await crashed.installInvocation(fixture.install)
+            else { return (.failed, false) }
+            outcome = await crashed.publish(fixture.publication)
+        }
+        for _ in 0 ..< 20 where releasedStore != nil {
+            await Task.yield()
+        }
+        return (outcome, releasedStore == nil)
     }
 
     private func makeInvocationStoreFixture(
