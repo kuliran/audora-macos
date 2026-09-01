@@ -285,7 +285,7 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
             }
 
             do {
-                try await traversal.value
+                _ = try await traversal.value
                 XCTFail("cancellation must stop exact evidence traversal")
             } catch is CancellationError {
                 // Expected after the first full Revision has been projected.

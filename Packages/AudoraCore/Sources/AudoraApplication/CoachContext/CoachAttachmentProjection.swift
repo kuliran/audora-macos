@@ -226,7 +226,8 @@ public struct CoachAttachmentProjection: Equatable, Sendable {
 enum ChatAttachmentCapacityPreparationOutcome: Sendable {
     case prepared(
         [PreparedCoachAttachment],
-        configuration: CoachContextConfigurationStamp
+        configuration: CoachContextConfigurationStamp,
+        evidenceAuthority: ChatCreationEvidenceAuthority
     )
     case configurationChanged
     case qualifiedConfigurationUnavailable
@@ -249,6 +250,32 @@ struct UnavailableChatAttachmentCapacityPreparer:
         in library: LibraryScope
     ) async -> ChatAttachmentCapacityPreparationOutcome {
         .failed
+    }
+}
+
+/// Internal snapshot-fixture adapter used when context tests intentionally omit
+/// portable attachment persistence. Product composition always installs the
+/// projected persistence adapter below.
+struct ConfigurationBoundEmptyChatAttachmentCapacityPreparer:
+    ChatAttachmentCapacityPreparing
+{
+    let configurationAuthorityID: UUID
+    private let evidenceAuthority = ChatCreationEvidenceAuthority(
+        testingValue: UUID()
+    )
+
+    func prepareCapacityAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentCapacityPreparationOutcome {
+        return .prepared(
+            [],
+            configuration: CoachContextConfigurationStamp(
+                authorityID: configurationAuthorityID,
+                generation: 0
+            ),
+            evidenceAuthority: evidenceAuthority
+        )
     }
 }
 
@@ -287,7 +314,7 @@ actor ProjectedChatSessionAttachmentSource:
             in: library,
             accumulator.visit
         ) {
-        case .completed:
+        case .completed, .completedWithAuthority:
             guard !Task.isCancelled else { return .failed }
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
                 return .configurationChanged
@@ -321,7 +348,7 @@ actor ProjectedChatSessionAttachmentSource:
             in: library,
             accumulator.visit
         ) {
-        case .completed:
+        case .completed, .completedWithAuthority:
             guard !Task.isCancelled else { return .failed }
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
                 return .configurationChanged
@@ -356,7 +383,7 @@ actor ProjectedChatSessionAttachmentSource:
             in: library,
             accumulator.visit
         ) {
-        case .completed:
+        case let .completedWithAuthority(evidenceAuthority):
             guard !Task.isCancelled else { return .failed }
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
                 return .configurationChanged
@@ -364,7 +391,15 @@ actor ProjectedChatSessionAttachmentSource:
             guard let prepared = accumulator.prepared else {
                 return .attachmentUnavailable
             }
-            return .prepared(prepared, configuration: configuration.stamp)
+            return .prepared(
+                prepared,
+                configuration: configuration.stamp,
+                evidenceAuthority: evidenceAuthority
+            )
+        case .completed:
+            // A persistence adapter that cannot bind the exact active root and
+            // evidence bytes is not creation authority.
+            return .failed
         case .readOnlyLibrary, .failed:
             return .failed
         }

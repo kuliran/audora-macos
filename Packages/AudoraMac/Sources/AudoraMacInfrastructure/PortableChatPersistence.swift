@@ -51,6 +51,7 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
 
 public enum PortableChatPersistenceError: Error, Equatable, Sendable {
     case collision
+    case creationAuthorityChanged
     case attachmentUnavailable
     case readOnlyLibrary
     case libraryScopeMismatch
@@ -94,7 +95,8 @@ private func frozenChatSnapshot(
     case .expectedPathIsSymlink, .invalidLayout, .rootTooLarge, .invalidJSON,
          .invalidSchemaVersion, .unknownKey:
         FrozenChatSnapshot(chatID: chatID, reason: .corrupt)
-    case .collision, .attachmentUnavailable, .readOnlyLibrary, .libraryScopeMismatch,
+    case .collision, .creationAuthorityChanged, .attachmentUnavailable,
+         .readOnlyLibrary, .libraryScopeMismatch,
          .profileStatementGenerationChanged, .chatMissing, .ioFailure,
          .injectedFault:
         nil
@@ -212,6 +214,21 @@ public struct PortableChatPersistence: @unchecked Sendable {
         _ seed: NewChatSeed,
         at libraryRoot: URL
     ) throws -> ChatAggregate {
+        try create(
+            seed,
+            at: libraryRoot,
+            expectedAttachmentFingerprints: nil,
+            expectedRootIdentity: nil
+        )
+    }
+
+    func create(
+        _ seed: NewChatSeed,
+        at libraryRoot: URL,
+        expectedAttachmentFingerprints:
+            [PortableChatAttachmentFingerprint]?,
+        expectedRootIdentity: SessionProcessingRootIdentity? = nil
+    ) throws -> ChatAggregate {
         let rootAuthority = try openLibraryRootAuthority(
             at: libraryRoot,
             in: seed.library,
@@ -221,6 +238,10 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let rootDescriptor = rootAuthority.rootDescriptor
         defer { Darwin.close(rootDescriptor) }
         defer { Darwin.close(rootAuthority.parentDescriptor) }
+        try revalidateExpectedChatCreationRootIdentity(
+            expectedRootIdentity,
+            under: rootDescriptor
+        )
         let stagingDescriptor = try openDirectory(named: "staging", under: rootDescriptor)
         defer { Darwin.close(stagingDescriptor) }
         try acquireExclusiveMutationLock(on: stagingDescriptor)
@@ -328,10 +349,15 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 libraryID: seed.library.libraryID
             ).withAvailableChatAttachmentsSynchronously(
                 seed.aggregate.chat.attachments,
+                expectedFingerprints: expectedAttachmentFingerprints,
                 underRootDescriptor: rootDescriptor
             ) {
                 try fault(.afterAttachmentValidation)
                 try revalidateConfiguredRootAuthority(rootAuthority)
+                try revalidateExpectedChatCreationRootIdentity(
+                    expectedRootIdentity,
+                    under: rootDescriptor
+                )
                 try revalidateLibraryAuthority(
                     libraryID: seed.library.libraryID,
                     profileStatementGeneration:
@@ -355,10 +381,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
         } catch let error as PortableChatPersistenceError {
             throw error
         } catch {
-            throw PortableChatPersistenceError.attachmentUnavailable
+            throw expectedAttachmentFingerprints == nil
+                ? PortableChatPersistenceError.attachmentUnavailable
+                : PortableChatPersistenceError.creationAuthorityChanged
         }
         guard attachmentInstall == true else {
-            throw PortableChatPersistenceError.attachmentUnavailable
+            throw expectedAttachmentFingerprints == nil
+                ? PortableChatPersistenceError.attachmentUnavailable
+                : PortableChatPersistenceError.creationAuthorityChanged
         }
         let finalDescriptor = try openDirectory(named: finalName, under: chatsDescriptor)
         defer { Darwin.close(finalDescriptor) }
@@ -1247,6 +1277,19 @@ public struct PortableChatPersistence: @unchecked Sendable {
               ) == authority.identity
         else {
             throw PortableChatPersistenceError.invalidLayout
+        }
+    }
+
+    private func revalidateExpectedChatCreationRootIdentity(
+        _ expected: SessionProcessingRootIdentity?,
+        under rootDescriptor: Int32
+    ) throws {
+        guard let expected else { return }
+        let identity = try directoryIdentity(of: rootDescriptor)
+        guard UInt64(truncatingIfNeeded: identity.device) == expected.device,
+              UInt64(truncatingIfNeeded: identity.inode) == expected.inode
+        else {
+            throw PortableChatPersistenceError.creationAuthorityChanged
         }
     }
 
@@ -2140,7 +2183,68 @@ public actor PortableChatStore: ChatStorePort {
         }
     }
 
-    public func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
+    public func create(_ commit: NewChatCommit) async -> ChatMutationOutcome {
+        await createAuthorized(commit)
+    }
+
+    /// Test-support setup path. Product creation crosses the authorized commit
+    /// interface above; infrastructure tests use this only to seed later mutation
+    /// scenarios that do not exercise new-Chat confirmation.
+    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
+        await createUnbound(seed)
+    }
+
+    private func createAuthorized(
+        _ commit: NewChatCommit
+    ) async -> ChatMutationOutcome {
+        let seed = commit.seed
+        let outcome = await workspace.withCurrentChatCreationEvidenceAuthority(
+            commit.portableEvidenceAuthority,
+            in: seed.library
+        ) { root, rootIdentity, fingerprints in
+            let outcome: ChatMutationOutcome
+            do {
+                outcome = ChatMutationOutcome.committed(
+                    try persistence.create(
+                        seed,
+                        at: root,
+                        expectedAttachmentFingerprints: fingerprints,
+                        expectedRootIdentity: rootIdentity
+                    )
+                )
+            } catch PortableChatPersistenceError.collision {
+                outcome = ChatMutationOutcome.collision
+            } catch PortableChatPersistenceError.creationAuthorityChanged {
+                outcome = ChatMutationOutcome.creationAuthorityChanged
+            } catch PortableChatPersistenceError.attachmentUnavailable {
+                outcome = ChatMutationOutcome.attachmentUnavailable
+            } catch let PortableChatPersistenceError
+                .profileStatementGenerationChanged(current)
+            {
+                outcome = ChatMutationOutcome.profileStatementGenerationChanged(current)
+            } catch PortableChatPersistenceError.readOnlyLibrary {
+                outcome = ChatMutationOutcome.readOnlyLibrary
+            } catch {
+                if let committed = try? persistence.reconcileCommittedCreate(
+                    seed,
+                    at: root
+                ) {
+                    outcome = ChatMutationOutcome.committed(committed)
+                } else {
+                    outcome = ChatMutationOutcome.failed
+                }
+            }
+            if case .collision = outcome,
+               commit.portableRetainsEvidenceAuthorityOnCollision
+            {
+                return .retain(outcome)
+            }
+            return .consume(outcome)
+        }
+        return outcome ?? .creationAuthorityChanged
+    }
+
+    private func createUnbound(_ seed: NewChatSeed) async -> ChatMutationOutcome {
         let result: ActiveLibraryOperationResult<ChatMutationOutcome> =
             await workspace.performActiveReadWriteOperation(in: seed.library) { root in
             do {

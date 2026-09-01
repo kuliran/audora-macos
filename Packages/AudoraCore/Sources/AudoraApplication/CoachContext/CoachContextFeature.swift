@@ -388,13 +388,16 @@ enum ConfigurationBoundChatCreationQuoteOutcome: Equatable, Sendable {
 struct ChatCreationQuoteAuthority: Equatable, Sendable {
     let context: CoachContextSnapshotAuthority?
     let configuration: CoachContextConfigurationStamp
+    let evidence: ChatCreationEvidenceAuthority
 
     init(
         context: CoachContextSnapshotAuthority? = nil,
-        configuration: CoachContextConfigurationStamp
+        configuration: CoachContextConfigurationStamp,
+        evidence: ChatCreationEvidenceAuthority
     ) {
         self.context = context
         self.configuration = configuration
+        self.evidence = evidence
     }
 }
 
@@ -511,7 +514,10 @@ public struct DefaultCoachContextFeature:
             authorityID: configurationAuthorityID
         )
         attachmentSource = UnavailableChatSessionAttachmentSource()
-        attachmentCapacityPreparer = UnavailableChatAttachmentCapacityPreparer()
+        attachmentCapacityPreparer =
+            ConfigurationBoundEmptyChatAttachmentCapacityPreparer(
+                configurationAuthorityID: configurationAuthority.authorityID
+            )
     }
 
     init(
@@ -551,10 +557,40 @@ public struct DefaultCoachContextFeature:
     func quoteNewChatBoundToConfiguration(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> ConfigurationBoundChatCreationQuoteOutcome {
+        let preparedAttachments: [PreparedCoachAttachment]
+        let preparedConfiguration: CoachContextConfigurationStamp
+        let evidenceAuthority: ChatCreationEvidenceAuthority
+        switch await attachmentCapacityPreparer.prepareCapacityAttachments(
+            request.attachments,
+            in: request.library
+        ) {
+        case let .prepared(prepared, configuration, authority):
+            preparedAttachments = prepared
+            preparedConfiguration = configuration
+            evidenceAuthority = authority
+        case .configurationChanged:
+            return .unavailable(.staleState)
+        case .qualifiedConfigurationUnavailable:
+            return .unavailable(.sourceUnavailable)
+        case .attachmentUnavailable:
+            return .unavailable(.invalidContext)
+        case .failed:
+            return .unavailable(.sourceUnavailable)
+        }
         switch await source.resolveNewChat(request) {
         case let .resolved(snapshot):
             guard snapshot.authority.binding == request.snapshotBinding,
-                  snapshot.input.trigger == .chatCreation(request.creation)
+                  snapshot.input.trigger == .chatCreation(request.creation),
+                  (!evidenceAuthority.requiresExactPreparedEvidence ||
+                    snapshot.input.attachments == preparedAttachments)
+            else {
+                return .unavailable(.staleState)
+            }
+            let configuration = configurationAuthority.stamp(
+                for: snapshot.authority.configurationGeneration
+            )
+            guard !evidenceAuthority.requiresExactPreparedEvidence ||
+                    configuration == preparedConfiguration
             else {
                 return .unavailable(.staleState)
             }
@@ -570,9 +606,8 @@ public struct DefaultCoachContextFeature:
                     quote,
                     authority: ChatCreationQuoteAuthority(
                         context: snapshot.authority,
-                        configuration: configurationAuthority.stamp(
-                            for: snapshot.authority.configurationGeneration
-                        )
+                        configuration: configuration,
+                        evidence: evidenceAuthority
                     )
                 )
             } catch {
@@ -588,28 +623,10 @@ public struct DefaultCoachContextFeature:
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
                 return .unavailable(.staleState)
             }
-            let preparedAttachments: [PreparedCoachAttachment]
-            if request.attachments.values.isEmpty {
-                preparedAttachments = []
-            } else {
-                switch await attachmentCapacityPreparer.prepareCapacityAttachments(
-                    request.attachments,
-                    in: request.library
-                ) {
-                case let .prepared(prepared, preparedConfiguration):
-                    guard preparedConfiguration == configuration.stamp else {
-                        return .unavailable(.staleState)
-                    }
-                    preparedAttachments = prepared
-                case .configurationChanged:
-                    return .unavailable(.staleState)
-                case .qualifiedConfigurationUnavailable:
-                    return .unavailable(.sourceUnavailable)
-                case .attachmentUnavailable:
-                    return .unavailable(.invalidContext)
-                case .failed:
-                    return .unavailable(.sourceUnavailable)
-                }
+            guard !evidenceAuthority.requiresExactPreparedEvidence ||
+                    preparedConfiguration == configuration.stamp
+            else {
+                return .unavailable(.staleState)
             }
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
                 return .unavailable(.staleState)
@@ -623,7 +640,8 @@ public struct DefaultCoachContextFeature:
                     ),
                     authority: ChatCreationQuoteAuthority(
                         context: nil,
-                        configuration: configuration.stamp
+                        configuration: configuration.stamp,
+                        evidence: evidenceAuthority
                     )
                 )
             } catch {

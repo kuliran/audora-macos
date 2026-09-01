@@ -1,4 +1,4 @@
-@testable @_spi(CoachContextQualification) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(ChatCreationAuthorityTesting) import AudoraApplication
 import AudoraDomain
 import Foundation
 import XCTest
@@ -942,7 +942,13 @@ private struct AttachmentEvidenceSourceFixture: ChatSessionAttachmentEvidenceSou
                 try Task.checkCancellation()
                 try visit(resolution)
             }
-            return .completed
+            return .completedWithAuthority(
+                ChatCreationEvidenceAuthority(
+                    testingValue: UUID(
+                        uuidString: "00000000-0000-0000-0000-000000000525"
+                    )!
+                )
+            )
         } catch {
             return .failed
         }

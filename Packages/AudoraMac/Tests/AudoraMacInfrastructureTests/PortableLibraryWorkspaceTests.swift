@@ -1,11 +1,179 @@
-import AudoraApplication
+@_spi(CoachContextQualification) @_spi(ChatCreationAuthorityTesting) import AudoraApplication
 import AudoraDomain
-@testable import AudoraMacInfrastructure
+@testable @_spi(CoachContextQualification) import AudoraMacInfrastructure
+import CryptoKit
 import Darwin
 import Foundation
 import XCTest
 
 final class PortableLibraryWorkspaceTests: XCTestCase {
+    func testNewChatAuthorityRejectsSameLibraryIDRootReplacementBeforeCreate()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Root.audoralibrary")
+            let moved = parent.appendingPathComponent("Original.audoralibrary")
+            let librarySeed = try makeSeed()
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: librarySeed
+            )
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let source = PortableChatSessionAttachmentSource(workspace: workspace)
+            let traversal = await source.forEachResolvedEvidence(.empty, in: scope) {
+                _ in XCTFail("An empty selection cannot visit evidence")
+            }
+            guard case let .completedWithAuthority(quotedAuthority) = traversal else {
+                return XCTFail("Expected an opaque workspace-bound authority")
+            }
+            let seed = try makeChatSeed(scope: scope)
+
+            try FileManager.default.moveItem(at: root, to: moved)
+            _ = try PortableLibraryPersistence().create(at: root, seed: librarySeed)
+
+            let outcome = await PortableChatStore(workspace: workspace).create(
+                NewChatCommit(
+                    seed: seed,
+                    evidenceAuthority: quotedAuthority
+                )
+            )
+
+            XCTAssertEqual(outcome, .creationAuthorityChanged)
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: root.appendingPathComponent(
+                        "chats/\(seed.aggregate.chat.id.rawValue)"
+                    ).path
+                )
+            )
+        }
+    }
+
+    func testNewChatAuthorityRejectsDifferentValidEvidenceBytesWithSameIDs()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Evidence.audoralibrary")
+            let libraryAuthority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: makeSeed()
+            )
+            let scope = LibraryScope(
+                libraryID: libraryAuthority.manifest.libraryID
+            )
+            let attachment = try await installRecordedAttachment(
+                at: root,
+                in: scope
+            )
+            let attachments = try ChatAttachments(validating: [attachment])
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let source = PortableChatSessionAttachmentSource(workspace: workspace)
+            let traversal = await source.forEachResolvedEvidence(
+                attachments,
+                in: scope
+            ) { item in
+                guard case .available = item.resolution else {
+                    return XCTFail("Expected quoted evidence")
+                }
+            }
+            guard case let .completedWithAuthority(quotedAuthority) = traversal else {
+                return XCTFail("Expected an exact evidence authority")
+            }
+            let seed = try makeChatSeed(
+                scope: scope,
+                attachments: attachments
+            )
+
+            try replaceInstalledRevisionWithDifferentValidBytes(
+                at: root,
+                attachment: attachment
+            )
+
+            let outcome = await PortableChatStore(workspace: workspace).create(
+                NewChatCommit(
+                    seed: seed,
+                    evidenceAuthority: quotedAuthority
+                )
+            )
+
+            XCTAssertEqual(outcome, .creationAuthorityChanged)
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: root.appendingPathComponent(
+                        "chats/\(seed.aggregate.chat.id.rawValue)"
+                    ).path
+                )
+            )
+        }
+    }
+
+    func testAuthorizedNewChatCrashAfterInstallReconcilesTheExactCASCommit()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("AuthorizedCrash.audoralibrary")
+            let libraryAuthority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: makeSeed()
+            )
+            let scope = LibraryScope(
+                libraryID: libraryAuthority.manifest.libraryID
+            )
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let traversal = await PortableChatSessionAttachmentSource(
+                workspace: workspace
+            ).forEachResolvedEvidence(.empty, in: scope) { _ in
+                XCTFail("Empty authority cannot visit evidence")
+            }
+            guard case let .completedWithAuthority(quotedAuthority) = traversal else {
+                return XCTFail("Expected a workspace authority")
+            }
+            let seed = try makeChatSeed(scope: scope)
+            let store = PortableChatStore(
+                persistence: PortableChatPersistence { point in
+                    if point == .afterFinalInstall {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                },
+                workspace: workspace
+            )
+
+            let commit = NewChatCommit(
+                seed: seed,
+                evidenceAuthority: quotedAuthority
+            )
+            let outcome = await store.create(commit)
+            let reopened = await store.load(seed.aggregate.chat.id, in: scope)
+            let replay = await store.create(commit)
+
+            XCTAssertEqual(outcome, .committed(seed.aggregate))
+            XCTAssertEqual(reopened, .loaded(seed.aggregate))
+            XCTAssertEqual(replay, .creationAuthorityChanged)
+        }
+    }
+
     func testProcessingScopeDoesNotReviveAfterSwitchingAwayAndBack() async throws {
         try await withTwoLibraries { first, second, firstAuthority, _ in
             let workspace = PortableLibraryWorkspace(
@@ -916,15 +1084,199 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         )
     }
 
-    private func makeChatSeed(scope: LibraryScope) throws -> NewChatSeed {
+    private func makeChatSeed(
+        scope: LibraryScope,
+        attachments: ChatAttachments = .empty
+    ) throws -> NewChatSeed {
         try NewChatSeed(
             library: scope,
             chatID: ChatID("cht-20260830T120000000Z-2ABC"),
             draftID: ChatDraftID("drf-20260830T120000000Z-3DEF"),
             memoryID: CoachMemoryID("mem-20260830T120000000Z-4GHJ"),
             instant: UTCInstant("2026-08-30T12:00:00.000Z"),
-            profileStatementGeneration: 0
+            profileStatementGeneration: 0,
+            attachments: attachments
         )
+    }
+
+    private func installRecordedAttachment(
+        at root: URL,
+        in scope: LibraryScope
+    ) async throws -> ChatSessionAttachment {
+        let instant = try UTCInstant("2026-08-30T12:00:00.000Z")
+        let request = MicrophoneRecordingRequest(
+            libraryScope: scope,
+            recordingID: try RecordingID("rec-20260830T120000000Z-2ABC"),
+            sessionID: try SessionID("ses-20260830T120000000Z-3DEF"),
+            startedAt: instant
+        )
+        let recordings = RecordingPersistence()
+        let handle = try recordings.prepare(request, under: root)
+        try recordings.append(
+            CanonicalPCMSpan(
+                frameCount: 4,
+                pcmLittleEndian: Data(repeating: 1, count: 8),
+                reasons: [],
+                level: 0.2
+            ),
+            to: handle
+        )
+        let candidate = try recordings.stageSeal(handle, reason: .userStop)
+        let publication = try RecordingSealCandidateValidator.validate(
+            candidate,
+            expected: request
+        )
+        let receipt = try recordings.install(publication, using: handle)
+        let revision = try makeTranscriptRevision(for: receipt)
+        _ = try await PortableTranscriptRevisionRepository(
+            root: root,
+            libraryID: scope.libraryID
+        ).publishAndSelect(
+            revision,
+            expectedSelectedRevisionID: nil
+        )
+        return ChatSessionAttachment(
+            attachmentID: try ChatSessionAttachmentID("attachment-000001"),
+            sessionID: receipt.sessionID,
+            transcriptRevisionID: revision.revisionID
+        )
+    }
+
+    private func makeTranscriptRevision(
+        for receipt: SessionSealedReceipt
+    ) throws -> TranscriptRevision {
+        let range = try SessionTimeRange(
+            startMilliseconds: 0,
+            endMilliseconds: 1,
+            sessionDurationMilliseconds: 1
+        )
+        let policy = try EngineUsePolicy(
+            policyID: "chat-authority-fixture-v1",
+            coveredArtifacts: [.transcriptRevision],
+            privateLocalUseAllowed: true,
+            privateExportAllowed: true,
+            externalProcessingAllowed: false,
+            publicDistributionAllowed: false,
+            commercialUseAllowed: false,
+            licenseReference: "fixture-license",
+            licenseSHA256: String(repeating: "e", count: 64)
+        )
+        return try TranscriptRevision(
+            revisionID: TranscriptRevisionID(
+                "trv-20260830T121000000Z-4FGH"
+            ),
+            sessionID: receipt.sessionID,
+            jobID: TranscriptionJobID("job-20260830T120500000Z-5GHJ"),
+            createdAt: UTCInstant("2026-08-30T12:10:00.000Z"),
+            durationMilliseconds: 1,
+            audioFingerprint: receipt.fingerprint,
+            sourceFingerprints: [
+                TranscriptSourceFingerprint(
+                    audioSourceID: .microphone,
+                    fingerprint: receipt.fingerprint
+                ),
+            ],
+            candidateArtifactFingerprint: AudioFingerprint(
+                sha256: String(repeating: "b", count: 64)
+            ),
+            engine: TranscriptEngineProvenance(
+                provider: "crisperwhisper",
+                model: "small",
+                revision: "fixture-revision",
+                language: "en",
+                mode: "verbatim",
+                decodingOptionsSHA256: String(repeating: "c", count: 64),
+                qualification: TranscriptEngineQualification(
+                    qualificationProfileID: "chat-authority-fixture-v1",
+                    engineLockSHA256: String(repeating: "f", count: 64),
+                    runtimeIdentity: "fixture-runtime-v1",
+                    runtimeLockSHA256: String(repeating: "d", count: 64),
+                    compatibilityPatchID: "fixture-patch-v1"
+                ),
+                usePolicy: policy
+            ),
+            lines: [
+                TranscriptLine(
+                    lineID: TranscriptLineID("l000000"),
+                    order: 0,
+                    audioSourceID: .microphone,
+                    timeRange: range,
+                    text: "Hi.",
+                    words: [
+                        TranscriptWord(
+                            wordID: TranscriptWordID("w000000"),
+                            ordinal: 0,
+                            text: "Hi",
+                            displayRange: LineTextRange(
+                                startUTF8Byte: 0,
+                                endUTF8Byte: 2
+                            ),
+                            timeRange: range,
+                            confidence: 0.95,
+                            wordKind: .lexical
+                        ),
+                    ]
+                ),
+            ],
+            audioEvents: []
+        )
+    }
+
+    private func replaceInstalledRevisionWithDifferentValidBytes(
+        at root: URL,
+        attachment: ChatSessionAttachment
+    ) throws {
+        let revisionRoot = root.appendingPathComponent(
+            "sessions/\(attachment.sessionID.rawValue)/transcripts/" +
+                attachment.transcriptRevisionID.rawValue,
+            isDirectory: true
+        )
+        let revisionURL = revisionRoot.appendingPathComponent("revision.json")
+        var revision = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: revisionURL)
+            ) as? [String: Any]
+        )
+        var lines = try XCTUnwrap(revision["lines"] as? [[String: Any]])
+        var firstLine = try XCTUnwrap(lines.first)
+        firstLine["text"] = "Yo."
+        var words = try XCTUnwrap(firstLine["words"] as? [[String: Any]])
+        var firstWord = try XCTUnwrap(words.first)
+        firstWord["text"] = "Yo"
+        words[0] = firstWord
+        firstLine["words"] = words
+        lines[0] = firstLine
+        revision["lines"] = lines
+        let replacement = try JSONSerialization.data(
+            withJSONObject: revision,
+            options: [.sortedKeys]
+        )
+        let replacementSHA256 = SHA256.hash(data: replacement)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        try replacement.write(to: revisionURL, options: .atomic)
+        try Data(replacementSHA256.utf8).write(
+            to: revisionRoot.appendingPathComponent("revision.sha256"),
+            options: .atomic
+        )
+
+        let sessionURL = root.appendingPathComponent(
+            "sessions/\(attachment.sessionID.rawValue)/session.json"
+        )
+        var session = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: sessionURL)
+            ) as? [String: Any]
+        )
+        var selected = try XCTUnwrap(
+            session["selectedTranscriptRevision"] as? [String: Any]
+        )
+        selected["revisionSha256"] = replacementSHA256
+        session["selectedTranscriptRevision"] = selected
+        try JSONSerialization.data(
+            withJSONObject: session,
+            options: [.sortedKeys]
+        ).write(to: sessionURL, options: .atomic)
     }
 
     private func makeRecognizedAbandonedAudioImportTree(in root: URL) throws -> URL {

@@ -159,6 +159,39 @@ public struct NewChatConfirmationToken: Equatable, Sendable {
     }
 }
 
+/// Opaque Infrastructure-issued authority binding one quoted new-Chat proposal
+/// to the exact active Library workspace and verified transcript bytes. The
+/// Application may compare and carry this value, but cannot derive filesystem
+/// location or evidence fingerprints from it.
+public struct ChatCreationEvidenceAuthority: Equatable, Sendable {
+    private enum Provenance: Equatable, Sendable {
+        case portablePersistence
+        case testFixture
+    }
+
+    private let opaqueIdentifier: UUID
+    private let provenance: Provenance
+
+    @_spi(CoachContextQualification)
+    public init(portableOpaqueIdentifier: UUID) {
+        opaqueIdentifier = portableOpaqueIdentifier
+        provenance = .portablePersistence
+    }
+
+    @_spi(CoachContextQualification)
+    public var portableOpaqueIdentifier: UUID { opaqueIdentifier }
+
+    @_spi(ChatCreationAuthorityTesting)
+    public init(testingValue: UUID) {
+        opaqueIdentifier = testingValue
+        provenance = .testFixture
+    }
+
+    var requiresExactPreparedEvidence: Bool {
+        provenance == .portablePersistence
+    }
+}
+
 public struct ChatAttachmentPickerSnapshot: Equatable, Sendable {
     public let allRows: [ChatAttachmentPickerRow]
     public let visibleRows: [ChatAttachmentPickerRow]
@@ -322,6 +355,7 @@ public struct ResolvedChatAttachmentEvidence: Equatable, Sendable {
 @_spi(CoachContextQualification)
 public enum ChatAttachmentEvidenceTraversalOutcome: Equatable, Sendable {
     case completed
+    case completedWithAuthority(ChatCreationEvidenceAuthority)
     case readOnlyLibrary
     case failed
 }

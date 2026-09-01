@@ -1,4 +1,4 @@
-@testable @_spi(CoachContextQualification) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(ChatCreationAuthorityTesting) import AudoraApplication
 import AudoraContracts
 import AudoraDomain
 import Foundation
@@ -900,7 +900,8 @@ private actor ChatScenarioStore: ChatStorePort {
         }
     }
 
-    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome {
+        let seed = commit.seed
         guard let event = consume(effect: "create") else {
             XCTFail("missing scripted create event")
             return .failed
@@ -1157,6 +1158,9 @@ private let developmentScenarioConfigurationStamp = CoachContextConfigurationSta
     authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000225")!,
     generation: 1
 )
+private let developmentScenarioEvidenceAuthority = ChatCreationEvidenceAuthority(
+    testingValue: UUID(uuidString: "00000000-0000-0000-0000-000000000226")!
+)
 
 private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
     let attachmentSource: any ChatSessionAttachmentSource
@@ -1190,14 +1194,16 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
             return .available(
                 quote,
                 authority: ChatCreationQuoteAuthority(
-                    configuration: developmentScenarioConfigurationStamp
+                    configuration: developmentScenarioConfigurationStamp,
+                    evidence: developmentScenarioEvidenceAuthority
                 )
             )
         case .unavailable(.providerUnavailable):
             return .providerUnavailable(
                 scenarioProviderUnavailableCapacityLowerBound(),
                 authority: ChatCreationQuoteAuthority(
-                    configuration: developmentScenarioConfigurationStamp
+                    configuration: developmentScenarioConfigurationStamp,
+                    evidence: developmentScenarioEvidenceAuthority
                 )
             )
         case let .unavailable(reason):

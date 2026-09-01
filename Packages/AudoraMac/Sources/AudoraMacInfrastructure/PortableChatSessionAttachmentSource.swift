@@ -41,23 +41,24 @@ public actor PortableChatSessionAttachmentSource: ChatSessionAttachmentEvidenceS
         in library: LibraryScope,
         _ visit: @escaping @Sendable (ResolvedChatAttachmentEvidence) throws -> Void
     ) async -> ChatAttachmentEvidenceTraversalOutcome {
-        let result: ActiveLibraryOperationResult<ChatAttachmentEvidenceTraversalOutcome> =
-            await workspace.performActiveReadWriteOperation(in: library) { root in
+        let result: ActiveLibraryOperationResult<ChatCreationEvidenceAuthority> =
+            await workspace.issueChatCreationEvidenceAuthority(in: library) {
+                root in
                 do {
-                    try PortableTranscriptRevisionRepository(
+                    return try PortableTranscriptRevisionRepository(
                         root: root,
                         libraryID: library.libraryID
                     ).forEachResolvedChatAttachmentEvidenceSynchronously(
                         attachments,
                         visit
                     )
-                    return .completed
                 } catch {
-                    return .failed
+                    return nil
                 }
             }
         switch result {
-        case let .performed(outcome): return outcome
+        case let .performed(authority):
+            return .completedWithAuthority(authority)
         case .readOnly: return .readOnlyLibrary
         case .unavailable: return .failed
         }

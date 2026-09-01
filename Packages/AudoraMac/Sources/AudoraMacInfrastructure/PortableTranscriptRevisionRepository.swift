@@ -45,8 +45,13 @@ struct PortableVerifiedReviewSession: Sendable {
 }
 
 enum PortableChatAttachmentRead: Sendable {
-    case available(ChatAttachmentEvidence)
+    case available(ChatAttachmentEvidence, revisionSHA256: String)
     case unavailable(ChatAttachmentUnavailableReason)
+}
+
+struct PortableChatAttachmentFingerprint: Equatable, Sendable {
+    let attachment: ChatSessionAttachment
+    let revisionSHA256: String
 }
 
 /// The one persistence boundary that turns a validated Transcript Revision into
@@ -482,7 +487,7 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                 sessionID: sessionID,
                 transcriptRevisionID: nil
             ) {
-            case let .available(candidate):
+            case let .available(candidate, _):
                 try visit(candidate)
             // One unreadable independent entity must not hide healthy Sessions
             // from a creation catalog. Every selected pin is re-resolved before
@@ -495,10 +500,12 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
 
     /// Reopens the exact historical revision pinned by a Chat, even if the
     /// Session later selects a different revision.
+    @discardableResult
     func forEachResolvedChatAttachmentEvidenceSynchronously(
         _ attachments: ChatAttachments,
         _ visit: @Sendable (ResolvedChatAttachmentEvidence) throws -> Void
-    ) throws {
+    ) throws -> [PortableChatAttachmentFingerprint] {
+        var fingerprints: [PortableChatAttachmentFingerprint] = []
         for attachment in attachments.values {
             try Task.checkCancellation()
             let read = loadChatAttachmentSynchronously(
@@ -507,7 +514,14 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             )
             let resolution: ChatAttachmentEvidenceResolution
             switch read {
-            case let .available(evidence): resolution = .available(evidence)
+            case let .available(evidence, revisionSHA256):
+                resolution = .available(evidence)
+                fingerprints.append(
+                    PortableChatAttachmentFingerprint(
+                        attachment: attachment,
+                        revisionSHA256: revisionSHA256
+                    )
+                )
             case let .unavailable(reason): resolution = .unavailable(reason)
             }
             try visit(
@@ -517,6 +531,7 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                 )
             )
         }
+        return fingerprints
     }
 
     /// Binds final Chat attachment validation and its install linearization point
@@ -524,6 +539,7 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
     /// stable identifier order and remain held until `install` returns.
     func withAvailableChatAttachmentsSynchronously<Result>(
         _ attachments: ChatAttachments,
+        expectedFingerprints: [PortableChatAttachmentFingerprint]? = nil,
         underRootDescriptor rootDescriptor: Int32,
         install: () throws -> Result
     ) throws -> Result? {
@@ -612,7 +628,12 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             }
         }
 
-        for attachment in attachments.values {
+        if let expectedFingerprints,
+           expectedFingerprints.map(\.attachment) != attachments.values
+        {
+            return nil
+        }
+        for (index, attachment) in attachments.values.enumerated() {
             guard let authority = authoritiesBySession[attachment.sessionID] else {
                 return nil
             }
@@ -626,9 +647,12 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             } catch {
                 return nil
             }
-            guard case let .available(evidence) = read,
+            guard case let .available(evidence, revisionSHA256) = read,
                   evidence.revision.sessionID == attachment.sessionID,
-                  evidence.revision.revisionID == attachment.transcriptRevisionID
+                  evidence.revision.revisionID == attachment.transcriptRevisionID,
+                  expectedFingerprints.map({
+                      $0[index].revisionSHA256 == revisionSHA256
+                  }) ?? true
             else {
                 return nil
             }
@@ -831,7 +855,8 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             ChatAttachmentEvidence(
                 displayLabel: loaded.manifest.chatDisplayLabel,
                 revision: installed.revision
-            )
+            ),
+            revisionSHA256: installed.sha256
         )
     }
 

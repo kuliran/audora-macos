@@ -1,4 +1,4 @@
-@testable @_spi(CoachContextQualification) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(ChatCreationAuthorityTesting) import AudoraApplication
 import AudoraDomain
 import Foundation
 import XCTest
@@ -720,6 +720,45 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         XCTAssertEqual(rejected.selectionCount, 1)
     }
 
+    func testStaleEvidenceAuthorityAtPersistenceReopensPickerAndRequiresFreshConfirmation()
+        async throws
+    {
+        let candidate = try candidate(
+            session: "ses-20260830T110000000Z-5KMN",
+            revision: "trv-20260830T111000000Z-6PQR",
+            label: "Root-bound rehearsal"
+        )
+        let source = AttachmentSourceFixture(candidates: [candidate])
+        let store = AttachmentChatStoreFixture(
+            createOutcomes: [.creationAuthorityChanged]
+        )
+        let feature = makeFeature(source: source, store: store)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initial) = await feature.currentState.newChatPicker,
+              let row = initial.allRows.first
+        else { return XCTFail("Expected the root-bound candidate") }
+        await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+        guard case let .ready(quoted) = await feature.currentState.newChatPicker,
+              let quotedToken = quoted.confirmationToken
+        else { return XCTFail("Expected an exact quoted authority") }
+
+        await feature.send(.confirmNewChat(Self.context, quotedToken))
+
+        guard case let .ready(requoted) = await feature.currentState.newChatPicker,
+              let freshToken = requoted.confirmationToken
+        else { return XCTFail("A stale root authority must reopen the picker") }
+        XCTAssertNotEqual(freshToken, quotedToken)
+        XCTAssertEqual(requoted.selectionCount, 1)
+        let rejectedSeed = await store.createdSeed
+        XCTAssertNil(rejectedSeed)
+
+        await feature.send(.confirmNewChat(Self.context, freshToken))
+
+        let committedSeed = await store.createdSeed
+        XCTAssertNotNil(committedSeed)
+    }
+
     private func makeFeature(
         source: any ChatSessionAttachmentSource,
         store: AttachmentChatStoreFixture = AttachmentChatStoreFixture(),
@@ -879,6 +918,9 @@ private let attachmentFeatureConfigurationStamp = CoachContextConfigurationStamp
     authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000025")!,
     generation: 1
 )
+private let attachmentFeatureEvidenceAuthority = ChatCreationEvidenceAuthority(
+    testingValue: UUID(uuidString: "00000000-0000-0000-0000-000000000125")!
+)
 
 private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating {
     let attachmentSource: any ChatSessionAttachmentSource
@@ -908,14 +950,16 @@ private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating 
             return .available(
                 quote,
                 authority: ChatCreationQuoteAuthority(
-                    configuration: attachmentFeatureConfigurationStamp
+                    configuration: attachmentFeatureConfigurationStamp,
+                    evidence: attachmentFeatureEvidenceAuthority
                 )
             )
         case .unavailable(.providerUnavailable):
             return .providerUnavailable(
                 previouslyQualifiedProviderUnavailableCapacityLowerBound(),
                 authority: ChatCreationQuoteAuthority(
-                    configuration: attachmentFeatureConfigurationStamp
+                    configuration: attachmentFeatureConfigurationStamp,
+                    evidence: attachmentFeatureEvidenceAuthority
                 )
             )
         case let .unavailable(reason):
@@ -988,7 +1032,7 @@ private struct AttachmentEvidenceSourceForFeature:
                     )
                 )
             }
-            return .completed
+            return .completedWithAuthority(attachmentFeatureEvidenceAuthority)
         } catch {
             return .failed
         }
@@ -1297,12 +1341,18 @@ private actor MismatchedAttachmentAuthorityFixture:
         case let .available(quote):
             return .available(
                 quote,
-                authority: ChatCreationQuoteAuthority(configuration: stamp)
+                authority: ChatCreationQuoteAuthority(
+                    configuration: stamp,
+                    evidence: attachmentFeatureEvidenceAuthority
+                )
             )
         case .unavailable(.providerUnavailable):
             return .providerUnavailable(
                 previouslyQualifiedProviderUnavailableCapacityLowerBound(),
-                authority: ChatCreationQuoteAuthority(configuration: stamp)
+                authority: ChatCreationQuoteAuthority(
+                    configuration: stamp,
+                    evidence: attachmentFeatureEvidenceAuthority
+                )
             )
         case let .unavailable(reason):
             return .unavailable(reason)
@@ -1431,16 +1481,25 @@ private actor AttachmentChatStoreFixture: ChatStorePort {
     private(set) var createdSeed: NewChatSeed?
     private var existing: ChatAggregate?
     private(set) var mutationCount = 0
+    private var createOutcomes: [ChatMutationOutcome]
 
-    init(existing: ChatAggregate? = nil) {
+    init(
+        existing: ChatAggregate? = nil,
+        createOutcomes: [ChatMutationOutcome] = []
+    ) {
         self.existing = existing
+        self.createOutcomes = createOutcomes
     }
 
     func loadCatalog(in library: LibraryScope) async -> ChatCatalogOutcome {
         .loaded(existing.map { [.available($0)] } ?? [])
     }
-    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome {
+        let seed = commit.seed
         mutationCount += 1
+        if !createOutcomes.isEmpty {
+            return createOutcomes.removeFirst()
+        }
         createdSeed = seed
         existing = seed.aggregate
         return .committed(seed.aggregate)

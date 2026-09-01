@@ -303,7 +303,7 @@ private actor CapacityChatStore: ChatStorePort {
         .loaded([.available(aggregate)])
     }
 
-    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome { .failed }
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome { .failed }
     func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome { .failed }
 
     func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome {

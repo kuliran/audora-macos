@@ -1,6 +1,17 @@
-import AudoraApplication
+@_spi(CoachContextQualification) import AudoraApplication
 import AudoraDomain
 import Foundation
+
+enum ChatCreationAuthorityUse<Value: Sendable>: Sendable {
+    case retain(Value)
+    case consume(Value)
+
+    var value: Value {
+        switch self {
+        case let .retain(value), let .consume(value): value
+        }
+    }
+}
 
 public protocol LibraryLocationChoosing: Sendable {
     func chooseCreateDestination() async -> URL?
@@ -59,6 +70,14 @@ public protocol LibraryRevealing: Sendable {
 }
 
 public actor PortableLibraryWorkspace: LibraryWorkspacePort {
+    private struct ChatCreationAuthorityRecord: Sendable {
+        let libraryID: LibraryID
+        let workspaceGeneration: UInt64
+        let rootIdentity: SessionProcessingRootIdentity
+        let fingerprints: [PortableChatAttachmentFingerprint]
+    }
+
+    private static let maximumChatCreationAuthorities = 64
     private struct ActiveScope: Sendable {
         let lease: any LibraryAccessLease
         let loaded: LoadedPortableLibrary
@@ -84,6 +103,9 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     private var nextExternalRequest = 0
     private var operationInFlight = false
     private var workspaceGeneration: UInt64 = 0
+    private var chatCreationAuthorities:
+        [UUID: ChatCreationAuthorityRecord] = [:]
+    private var chatCreationAuthorityOrder: [UUID] = []
 
     public init(
         persistence: PortableLibraryPersistence = PortableLibraryPersistence(),
@@ -172,6 +194,90 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         case .readWrite:
             return .performed(operation(activeScope.root))
         }
+    }
+
+    /// Performs one exact evidence traversal and records only an opaque token in
+    /// Application. Root location, workspace generation, and verified revision
+    /// fingerprints remain confined to this Infrastructure actor.
+    func issueChatCreationEvidenceAuthority(
+        in scope: LibraryScope,
+        _ operation: @Sendable (URL) -> [PortableChatAttachmentFingerprint]?
+    ) -> ActiveLibraryOperationResult<ChatCreationEvidenceAuthority> {
+        guard reserveOperation() else { return .unavailable }
+        defer { operationInFlight = false }
+        guard let activeScope, activeScope.libraryID == scope.libraryID else {
+            return .unavailable
+        }
+        guard case .readWrite = activeScope.loaded else { return .readOnly }
+        guard let initialRootIdentity = SessionProcessingRootIdentity.capture(
+            activeScope.root
+        ), let fingerprints = operation(activeScope.root),
+              SessionProcessingRootIdentity.capture(activeScope.root) ==
+                initialRootIdentity
+        else {
+            return .unavailable
+        }
+        let identifier = UUID()
+        chatCreationAuthorities[identifier] = ChatCreationAuthorityRecord(
+            libraryID: scope.libraryID,
+            workspaceGeneration: workspaceGeneration,
+            rootIdentity: initialRootIdentity,
+            fingerprints: fingerprints
+        )
+        chatCreationAuthorityOrder.append(identifier)
+        while chatCreationAuthorityOrder.count >
+            Self.maximumChatCreationAuthorities
+        {
+            let expired = chatCreationAuthorityOrder.removeFirst()
+            chatCreationAuthorities.removeValue(forKey: expired)
+        }
+        return .performed(
+            ChatCreationEvidenceAuthority(
+                portableOpaqueIdentifier: identifier
+            )
+        )
+    }
+
+    /// Keeps final authority validation and the descriptor-confined commit in
+    /// one actor-isolated synchronous operation, so an app-driven Library switch
+    /// cannot interleave between validation and no-replace installation.
+    func withCurrentChatCreationEvidenceAuthority<Value: Sendable>(
+        _ authority: ChatCreationEvidenceAuthority,
+        in scope: LibraryScope,
+        _ operation: @Sendable (
+            URL,
+            SessionProcessingRootIdentity,
+            [PortableChatAttachmentFingerprint]
+        ) -> ChatCreationAuthorityUse<Value>
+    ) -> Value? {
+        guard reserveOperation() else { return nil }
+        defer { operationInFlight = false }
+        let identifier = authority.portableOpaqueIdentifier
+        guard let record = chatCreationAuthorities[identifier] else {
+            return nil
+        }
+        guard record.libraryID == scope.libraryID,
+              record.workspaceGeneration == workspaceGeneration,
+              let activeScope,
+              case .readWrite = activeScope.loaded,
+              activeScope.libraryID == scope.libraryID,
+              SessionProcessingRootIdentity.capture(activeScope.root) ==
+                record.rootIdentity
+        else {
+            chatCreationAuthorities.removeValue(forKey: identifier)
+            chatCreationAuthorityOrder.removeAll { $0 == identifier }
+            return nil
+        }
+        let use = operation(
+            activeScope.root,
+            record.rootIdentity,
+            record.fingerprints
+        )
+        if case .consume = use {
+            chatCreationAuthorities.removeValue(forKey: identifier)
+            chatCreationAuthorityOrder.removeAll { $0 == identifier }
+        }
+        return use.value
     }
 
     public func activeProfileStatementGeneration(in scope: LibraryScope) -> UInt64? {

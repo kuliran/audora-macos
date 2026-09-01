@@ -71,6 +71,40 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testAuthorizedCreateRejectsAReplacementRootDescriptor() throws {
+        try withCreatedLibrary { root, scope in
+            let quotedRootIdentity = try XCTUnwrap(
+                SessionProcessingRootIdentity.capture(root)
+            )
+            let displaced = root.deletingLastPathComponent().appendingPathComponent(
+                "quoted-root.audoralibrary",
+                isDirectory: true
+            )
+            try FileManager.default.moveItem(at: root, to: displaced)
+            try FileManager.default.copyItem(at: displaced, to: root)
+            let seed = try makeChatSeed(scope: scope)
+
+            XCTAssertThrowsError(
+                try PortableChatPersistence().create(
+                    seed,
+                    at: root,
+                    expectedAttachmentFingerprints: [],
+                    expectedRootIdentity: quotedRootIdentity
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .creationAuthorityChanged
+                )
+            }
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: chatRoot(root, seed.aggregate.chat.id).path
+                )
+            )
+        }
+    }
+
     func testChatValidationNeverReconcilesActiveAudioImportStaging() throws {
         try withCreatedLibrary { root, scope in
             let activeImport = try makeRecognizedAbandonedAudioImportTree(in: root)

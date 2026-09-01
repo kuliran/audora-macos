@@ -1,4 +1,4 @@
-@testable @_spi(CoachContextQualification) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(ChatCreationAuthorityTesting) import AudoraApplication
 import AudoraDomain
 import Foundation
 import XCTest
@@ -71,8 +71,11 @@ final class ChatFeatureTests: XCTestCase {
         await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seedCount = await store.createSeeds.count
+        let collisionAuthorityRetentions =
+            await store.createCollisionAuthorityRetentions
         let state = await feature.currentState
         XCTAssertEqual(seedCount, 3)
+        XCTAssertEqual(collisionAuthorityRetentions, [true, true, false])
         XCTAssertEqual(state.notice, .createCollisionLimitReached)
     }
 
@@ -2380,6 +2383,9 @@ private let chatFeatureConfigurationStamp = CoachContextConfigurationStamp(
     authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000125")!,
     generation: 1
 )
+private let chatFeatureEvidenceAuthority = ChatCreationEvidenceAuthority(
+    testingValue: UUID(uuidString: "00000000-0000-0000-0000-000000000225")!
+)
 
 private struct ChatFeatureBoundCoachContextFixture: ChatCoachContextCoordinating {
     let attachmentSource: any ChatSessionAttachmentSource
@@ -2527,7 +2533,8 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
         return .providerUnavailable(
             previouslyQualifiedProviderUnavailableCapacityLowerBound(),
             authority: ChatCreationQuoteAuthority(
-                configuration: chatFeatureConfigurationStamp
+                configuration: chatFeatureConfigurationStamp,
+                evidence: chatFeatureEvidenceAuthority
             )
         )
     }
@@ -2683,12 +2690,18 @@ private actor AdvancingConfigurationChatContextFixture:
         case let .available(quote):
             return .available(
                 quote,
-                authority: ChatCreationQuoteAuthority(configuration: stamp)
+                authority: ChatCreationQuoteAuthority(
+                    configuration: stamp,
+                    evidence: chatFeatureEvidenceAuthority
+                )
             )
         case .unavailable(.providerUnavailable):
             return .providerUnavailable(
                 previouslyQualifiedProviderUnavailableCapacityLowerBound(),
-                authority: ChatCreationQuoteAuthority(configuration: stamp)
+                authority: ChatCreationQuoteAuthority(
+                    configuration: stamp,
+                    evidence: chatFeatureEvidenceAuthority
+                )
             )
         case let .unavailable(reason):
             return .unavailable(reason)
@@ -2780,7 +2793,8 @@ private actor SuspendedCreateStore: ChatStorePort {
         .loaded([])
     }
 
-    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome {
+        let seed = commit.seed
         createSeeds.append(seed)
         createStarted = true
         await withCheckedContinuation { createContinuation = $0 }
@@ -2848,7 +2862,7 @@ private actor SuspendedCatalogChatStore: ChatStorePort {
         return .loaded(catalog)
     }
 
-    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome { .failed }
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome { .failed }
     func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome { .failed }
     func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome { .failed }
     func lockPendingUserTurn(
@@ -2882,7 +2896,7 @@ private actor SequencedSuspendedCatalogChatStore: ChatStorePort {
         }
     }
 
-    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome { .failed }
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome { .failed }
     func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome { .failed }
     func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome { .failed }
     func lockPendingUserTurn(
@@ -3181,7 +3195,8 @@ private actor ProfileChangingCreateStore: ChatStorePort {
         .loaded([])
     }
 
-    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome {
+        let seed = commit.seed
         createSeeds.append(seed)
         guard createSeeds.count == 1 else { return .committed(seed.aggregate) }
         await source.installOversizedProfile()
@@ -3220,6 +3235,7 @@ private actor RecordingChatStore: ChatStorePort {
     private var draftSaveStarted = false
     private var draftSaveContinuation: CheckedContinuation<Void, Never>?
     private(set) var createSeeds: [NewChatSeed] = []
+    private(set) var createCollisionAuthorityRetentions: [Bool] = []
     private(set) var calls: [Call] = []
     private(set) var loadedScopes: [LibraryScope] = []
     private(set) var savedDrafts: [SaveChatDraftMutation] = []
@@ -3259,9 +3275,13 @@ private actor RecordingChatStore: ChatStorePort {
         })
     }
 
-    func create(_ seed: NewChatSeed) -> ChatMutationOutcome {
+    func create(_ commit: NewChatCommit) -> ChatMutationOutcome {
+        let seed = commit.seed
         calls.append(.create)
         createSeeds.append(seed)
+        createCollisionAuthorityRetentions.append(
+            commit.retainsEvidenceAuthorityOnCollision
+        )
         if !createOutcomes.isEmpty { return createOutcomes.removeFirst() }
         aggregates[seed.aggregate.chat.id] = seed.aggregate
         return .committed(seed.aggregate)
