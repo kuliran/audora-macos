@@ -1136,6 +1136,111 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(requestCount, 0)
     }
 
+    func testLibraryActivationStaleTransitionRetainsTheExactDurableWinner()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let queued = fixture.job(state: .queued)
+        let winner = fixture.job(state: .failed, failure: .engineFailed)
+        let reconciliationID = try SessionProcessingReconciliationID(
+            "reconcile-stale-transition-winner"
+        )
+        let jobs = ActivationTransitionProbe(
+            scope: fixture.selection.scope,
+            reconciliationID: reconciliationID,
+            inventoried: queued,
+            transitionResult: .stale,
+            exactLoadResult: .loaded(winner)
+        )
+        let source = SourceProbe(.available(fixture.source))
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: EngineProbe(result: .failure(.launchFailed)),
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.activateLibrary(fixture.selection.scope))
+        await feature.send(.selectSession(fixture.selection))
+
+        guard case let .failed(failure) = await feature.currentState else {
+            return XCTFail("the exact first durable winner must remain observable")
+        }
+        XCTAssertEqual(failure.job, winner)
+        XCTAssertEqual(failure.reason, .engineFailed)
+        XCTAssertEqual(failure.actions, [.retry])
+        let exactLoads = await jobs.exactLoadCount
+        let latestLoads = await jobs.latestLoadCount
+        let finished = await jobs.finishedReconciliationIDs
+        XCTAssertEqual(exactLoads, 1)
+        XCTAssertEqual(latestLoads, 0)
+        XCTAssertEqual(finished, [reconciliationID])
+    }
+
+    func testLibraryActivationUnconfirmedTransitionRequiresObservableRecovery()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let queued = fixture.job(state: .queued)
+
+        for (index, result) in [
+            SessionProcessingJobWriteResult.collision,
+            .failed,
+        ].enumerated() {
+            let reconciliationID = try SessionProcessingReconciliationID(
+                "reconcile-unconfirmed-transition-\(index)"
+            )
+            let jobs = ActivationTransitionProbe(
+                scope: fixture.selection.scope,
+                reconciliationID: reconciliationID,
+                inventoried: queued,
+                transitionResult: result,
+                exactLoadResult: .none
+            )
+            let source = SourceProbe(.available(fixture.source))
+            let feature = DefaultSessionProcessingFeature(
+                source: source,
+                runtime: RuntimeProbe(.qualified(fixture.profile)),
+                model: ModelProbe(.ready),
+                acoustics: AcousticProbe(fixture.evidence),
+                jobs: jobs,
+                engine: EngineProbe(result: .failure(.launchFailed)),
+                publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+                clock: FixedProcessingClock(fixture.createdAt),
+                identifiers: FixedProcessingIdentifiers(
+                    jobID: fixture.jobID,
+                    revisionID: fixture.revisionID
+                )
+            )
+
+            await feature.send(.activateLibrary(fixture.selection.scope))
+            await feature.send(.selectSession(fixture.selection))
+
+            guard case let .recoveryRequired(authority) = await feature.currentState
+            else {
+                XCTFail("unconfirmed launch persistence must require recovery")
+                continue
+            }
+            XCTAssertEqual(authority, queued)
+            let sourceLoads = await source.loadCount
+            let exactLoads = await jobs.exactLoadCount
+            let latestLoads = await jobs.latestLoadCount
+            let finished = await jobs.finishedReconciliationIDs
+            XCTAssertEqual(sourceLoads, 0, "case \(index)")
+            XCTAssertEqual(exactLoads, 0, "case \(index)")
+            XCTAssertEqual(latestLoads, 0, "case \(index)")
+            XCTAssertEqual(finished, [reconciliationID], "case \(index)")
+        }
+    }
+
     func testLibraryActivationReapsRunningWorkerWhenSessionAudioIsUnavailable()
         async throws
     {
@@ -3139,6 +3244,81 @@ private actor AcousticProbe: SessionAcousticEvidencePort {
         profile: QualifiedTranscriptionProfile
     ) async -> SessionAcousticEvidenceResolution {
         .qualified(evidence)
+    }
+}
+
+private actor ActivationTransitionProbe: SessionProcessingJobPort {
+    private let scope: LibraryScope
+    private let reconciliationID: SessionProcessingReconciliationID
+    private let inventoried: SessionProcessingJob
+    private let transitionResult: SessionProcessingJobWriteResult
+    private let exactLoadResult: SessionProcessingJobLoadResult
+    private(set) var exactLoadCount = 0
+    private(set) var latestLoadCount = 0
+    private(set) var finishedReconciliationIDs: [SessionProcessingReconciliationID]
+        = []
+
+    init(
+        scope: LibraryScope,
+        reconciliationID: SessionProcessingReconciliationID,
+        inventoried: SessionProcessingJob,
+        transitionResult: SessionProcessingJobWriteResult,
+        exactLoadResult: SessionProcessingJobLoadResult
+    ) {
+        self.scope = scope
+        self.reconciliationID = reconciliationID
+        self.inventoried = inventoried
+        self.transitionResult = transitionResult
+        self.exactLoadResult = exactLoadResult
+    }
+
+    func inventory(
+        for scope: LibraryScope
+    ) async -> SessionProcessingJobInventoryResult {
+        guard scope == self.scope else { return .unavailable }
+        return .available(
+            SessionProcessingJobInventory(
+                reconciliationID: reconciliationID,
+                scope: scope,
+                jobs: [inventoried]
+            )
+        )
+    }
+
+    func finishReconciliation(
+        _ reconciliationID: SessionProcessingReconciliationID
+    ) async {
+        finishedReconciliationIDs.append(reconciliationID)
+    }
+
+    func latest(for selection: SessionProcessingSelection) async
+        -> SessionProcessingJobLoadResult
+    {
+        latestLoadCount += 1
+        return .loaded(inventoried)
+    }
+
+    func load(
+        jobID: TranscriptionJobID,
+        for selection: SessionProcessingSelection
+    ) async -> SessionProcessingJobLoadResult {
+        exactLoadCount += 1
+        guard jobID == inventoried.jobID,
+              selection.scope == scope,
+              selection.sessionID == inventoried.sessionID
+        else { return .none }
+        return exactLoadResult
+    }
+
+    func create(_ job: SessionProcessingJob) async -> SessionProcessingJobWriteResult {
+        .failed
+    }
+
+    func transition(
+        _ job: SessionProcessingJob,
+        from expected: SessionProcessingJobState
+    ) async -> SessionProcessingJobWriteResult {
+        transitionResult
     }
 }
 

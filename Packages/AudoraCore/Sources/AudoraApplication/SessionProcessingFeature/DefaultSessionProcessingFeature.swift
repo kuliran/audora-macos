@@ -15,6 +15,15 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         }
     }
 
+    private enum ActivationRecovery {
+        /// A stale compare-and-swap proved that another writer committed first;
+        /// this is the exact immutable-identity load of that durable winner.
+        case exactWinner(SessionProcessingJob)
+        /// Persistence did not establish a new durable truth. The inventoried
+        /// Job remains fenced until a later Library activation can reconcile it.
+        case unconfirmed(SessionProcessingJob)
+    }
+
     private enum PendingSelectionCommand {
         case select(SessionProcessingSelection)
         case clear
@@ -54,6 +63,9 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private var cancelledRunJobID: TranscriptionJobID?
     private var invalidCompletedJobs: [CompletedRecoveryKey: SessionProcessingJob]
         = [:]
+    private var activationRecovery: [CompletedRecoveryKey: ActivationRecovery]
+        = [:]
+    private var activeReconciliationScope: LibraryScope?
     private var suppressStateTransitions = false
     private var stateContinuations: [UInt64: AsyncStream<SessionProcessingFeatureState>.Continuation]
         = [:]
@@ -172,13 +184,23 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         // One writable Library is active at a time. Its bounded inventory is
         // the authority for launch-time completed-Job recovery errors.
         invalidCompletedJobs.removeAll(keepingCapacity: true)
+        activationRecovery.removeAll(keepingCapacity: true)
 
         let preservedProfile = selectedProfile
+        activeReconciliationScope = scope
         suppressStateTransitions = true
         for job in inventory.jobs.sorted(by: {
             ($0.createdAt.rawValue, $0.jobID.rawValue) <
                 ($1.createdAt.rawValue, $1.jobID.rawValue)
         }) {
+            // A newer inventoried Job for the same Session supersedes an older
+            // launch-recovery observation. Only the newest processed authority
+            // may fence a later Session selection.
+            activationRecovery.removeValue(
+                forKey: CompletedRecoveryKey(
+                    SessionProcessingSelection(scope: scope, sessionID: job.sessionID)
+                )
+            )
             switch job.state {
             case .queued, .preparing, .running:
                 await reconcileBackgroundControl(job)
@@ -223,6 +245,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             await reconcile(job, source: source)
         }
         suppressStateTransitions = false
+        activeReconciliationScope = nil
         selectedProfile = preservedProfile
         await jobs.finishReconciliation(reconciliationID)
     }
@@ -262,7 +285,29 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         as state: SessionProcessingJobState
     ) async {
         let terminal = job.transitioning(to: state)
-        _ = await jobs.transition(terminal, from: job.state)
+        switch await jobs.transition(terminal, from: job.state) {
+        case .written:
+            return
+        case .stale:
+            guard let scope = activeReconciliationScope else {
+                retainActivationRecovery(.unconfirmed(job), for: job)
+                return
+            }
+            let selection = SessionProcessingSelection(
+                scope: scope,
+                sessionID: job.sessionID
+            )
+            let winnerResult = await jobs.load(jobID: job.jobID, for: selection)
+            guard case let .loaded(winner) = winnerResult,
+                  winner.hasSameReconciliationIdentity(as: job)
+            else {
+                retainActivationRecovery(.unconfirmed(job), for: job)
+                return
+            }
+            retainActivationRecovery(.exactWinner(winner), for: winner)
+        case .collision, .failed:
+            retainActivationRecovery(.unconfirmed(job), for: job)
+        }
     }
 
     private func select(_ selection: SessionProcessingSelection) async {
@@ -281,6 +326,12 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             )
             return
         }
+        if case let .unconfirmed(job) = activationRecovery[
+            CompletedRecoveryKey(selection)
+        ] {
+            transition(to: .recoveryRequired(job))
+            return
+        }
         switch await sourcePort.load(selection) {
         case let .available(source):
             guard source.selection == selection, source.isValid else {
@@ -295,6 +346,12 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 return
             }
             selectedSource = source
+            if case let .exactWinner(winner) = activationRecovery.removeValue(
+                forKey: CompletedRecoveryKey(selection)
+            ) {
+                await reconcile(winner, source: source)
+                return
+            }
             switch await jobs.latest(for: selection) {
             case let .loaded(latest):
                 await reconcile(latest, source: source)
@@ -1304,8 +1361,56 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     }
 
     private func transition(to next: SessionProcessingFeatureState) {
-        guard !suppressStateTransitions else { return }
+        guard !suppressStateTransitions else {
+            retainSuppressedActivationRecovery(next)
+            return
+        }
         state = next
         for continuation in stateContinuations.values { continuation.yield(next) }
+    }
+
+    private func retainActivationRecovery(
+        _ recovery: ActivationRecovery,
+        for job: SessionProcessingJob
+    ) {
+        guard let scope = activeReconciliationScope else { return }
+        activationRecovery[
+            CompletedRecoveryKey(
+                SessionProcessingSelection(scope: scope, sessionID: job.sessionID)
+            )
+        ] = recovery
+    }
+
+    private func retainSuppressedActivationRecovery(
+        _ next: SessionProcessingFeatureState
+    ) {
+        switch next {
+        case let .recoveryRequired(job):
+            retainActivationRecovery(.unconfirmed(job), for: job)
+        case let .failed(snapshot):
+            guard let job = snapshot.job else { return }
+            retainActivationRecovery(
+                snapshot.reason == .jobPersistenceFailed
+                    ? .unconfirmed(job)
+                    : .exactWinner(job),
+                for: job
+            )
+        case .unavailable, .ready, .preparing, .queued, .running, .cancelling,
+             .validating, .completed, .cancelled, .interrupted:
+            return
+        }
+    }
+}
+
+private extension SessionProcessingJob {
+    func hasSameReconciliationIdentity(as other: SessionProcessingJob) -> Bool {
+        jobID == other.jobID &&
+            sessionID == other.sessionID &&
+            revisionID == other.revisionID &&
+            profileID == other.profileID &&
+            createdAt == other.createdAt &&
+            expectedSelectedRevisionID == other.expectedSelectedRevisionID &&
+            hasCapturedSelectionBaseline == other.hasCapturedSelectionBaseline &&
+            cancellationAuthorityID == other.cancellationAuthorityID
     }
 }
