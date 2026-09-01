@@ -259,6 +259,15 @@ public enum SessionProcessingUnavailableReason: Equatable, Sendable {
     /// The authoritative durable Job index was written by a newer Audora.
     /// Existing bytes remain frozen until a compatible app version opens it.
     case jobIndexSchemaNewer(version: UInt32)
+    /// The Library's durable Job index could not be read during activation.
+    /// No exact Session recovery authority may be inferred from that failure.
+    case jobIndexUnavailable
+    /// The Library's durable Job index failed integrity verification. Its
+    /// contents remain untouched and cannot identify a trustworthy Session.
+    case jobIndexIntegrityMismatch
+    /// Activation received only a bounded or structurally ambiguous inventory.
+    /// Known Jobs may be reconciled, but the Library-wide set is not provable.
+    case jobIndexIncomplete
     case sourceUnavailable
     case sourceIntegrityMismatch
     case acousticEvidenceUnavailable

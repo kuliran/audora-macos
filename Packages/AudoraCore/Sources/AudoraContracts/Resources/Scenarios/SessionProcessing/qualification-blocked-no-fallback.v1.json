@@ -11,8 +11,8 @@
     { "kind": "start" }
   ],
   "dependencyTrace": [
-    { "port": "source", "effect": "load", "outcome": "available" },
     { "port": "jobs", "effect": "latest", "outcome": "none" },
+    { "port": "source", "effect": "load", "outcome": "available" },
     { "port": "runtime", "effect": "resolve", "outcome": "qualificationBlocked" }
   ],
   "expectedState": {

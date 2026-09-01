@@ -98,6 +98,11 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         case next(SessionProcessingJob, exactWinner: Bool)
     }
 
+    private enum StagedCandidateProof {
+        case verified(VerifiedTranscriptionCandidate)
+        case invalid
+    }
+
     private enum PendingSelectionCommand {
         case select(SessionProcessingSelection)
         case clear
@@ -356,12 +361,25 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         case let .available(available):
             inventory = available
         case let .unsupportedSchema(version):
+            guard latestLibraryActivation == activation,
+                  libraryReconciliationFence == activation
+            else { return }
             presentUnsupportedJobIndex(
                 version: version,
                 selection: lastSelection?.scope == scope ? lastSelection : nil
             )
             return
-        case .unavailable, .integrityMismatch:
+        case .unavailable:
+            guard latestLibraryActivation == activation,
+                  libraryReconciliationFence == activation
+            else { return }
+            presentLibraryRecoveryUnavailable(.jobIndexUnavailable)
+            return
+        case .integrityMismatch:
+            guard latestLibraryActivation == activation,
+                  libraryReconciliationFence == activation
+            else { return }
+            presentLibraryRecoveryUnavailable(.jobIndexIntegrityMismatch)
             return
         }
         let reconciliationID = inventory.reconciliationID
@@ -413,8 +431,13 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         selectedProfile = preservedProfile
         await jobs.finishReconciliation(reconciliationID)
         guard !superseded,
-              latestLibraryActivation == activation
+              latestLibraryActivation == activation,
+              libraryReconciliationFence == activation
         else { return }
+        guard classified.isComplete else {
+            presentLibraryRecoveryUnavailable(.jobIndexIncomplete)
+            return
+        }
 
         let libraryID = scope.libraryID.rawValue
         let hasInvalidCompletedAuthority = invalidCompletedJobs.keys.contains {
@@ -431,19 +454,25 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             successfullyReconciledLibraryActivation = activation
         }
 
-        // Activation may have changed durable authority. Refresh the Session
-        // already on screen first. With no transient selection, expose one
-        // deterministic recovered route only after the complete bounded pass;
-        // every sibling has still been reconciled above.
-        guard pendingSelectionCommand == nil else { return }
+        // Activation may have discovered durable recovery outside the prior
+        // on-screen Session. Expose one deterministic recovered route before
+        // refreshing that stale selection; every sibling has still been
+        // reconciled by the complete bounded pass above.
+        // An unconfirmed cancellation owns the current observable recovery
+        // fence while its worker may still be alive. Its queued activation has
+        // completed the full inventory pass above, but must not replace that
+        // stronger live authority with a sibling's terminal Retry route.
+        guard pendingSelectionCommand == nil,
+              !cancellationFinalizationInFlight
+        else { return }
+        if let recovered = deterministicRecoveredSelection(for: scope) {
+            await projectDeterministicActivationRecovery(recovered)
+            return
+        }
         if let selected = lastSelection {
             if selected.scope == scope { await select(selected) }
             return
         }
-        guard successfullyReconciledLibraryActivation == activation,
-              let recovered = deterministicRecoveredSelection(for: scope)
-        else { return }
-        await select(recovered)
     }
 
     /// Preserve the repository's causal order while bounding hostile or corrupt
@@ -496,7 +525,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
 
     private func recoverDurableJob(
         _ initial: SessionProcessingJob,
-        context: DurableRecoveryContext
+        context: DurableRecoveryContext,
+        initialCandidateProof: StagedCandidateProof? = nil
     ) async {
         let selection: SessionProcessingSelection
         switch context {
@@ -580,17 +610,57 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                     isExactWinner: isExactWinner
                 )
                 return
-            case .validating, .completed:
+            case .completed:
                 guard let source = await recoverySource(
                     for: selection,
                     context: context
                 ) else {
-                    // Validating work may safely become retryable interruption.
                     // Completed authority is immutable: missing/corrupt sealed
                     // source leaves it fail-closed instead of retranscribing.
-                    if job.state == .completed {
-                        projectInvalidCompleted(job, context: context)
-                        return
+                    projectInvalidCompleted(job, context: context)
+                    return
+                }
+                guard await completedRevisionMatches(job, source: source) else {
+                    projectInvalidCompleted(job, context: context)
+                    return
+                }
+                projectRecoveredCompleted(
+                    job,
+                    source: source,
+                    context: context,
+                    isExactWinner: isExactWinner
+                )
+                return
+            case .validating:
+                let proof: StagedCandidateProof
+                if job == initial, let initialCandidateProof {
+                    proof = initialCandidateProof
+                } else {
+                    proof = await proveStagedCandidate(for: job)
+                }
+                guard case let .verified(verified) = proof else {
+                    if let source = await recoverySource(
+                        for: selection,
+                        context: context
+                    ), await completedRevisionMatches(job, source: source)
+                    {
+                        let outcome = await completeInstalledValidation(
+                            job,
+                            source: source
+                        )
+                        switch await recoveryContinuation(
+                            after: outcome,
+                            job: job,
+                            selection: selection,
+                            context: context
+                        ) {
+                        case .stop:
+                            return
+                        case let .next(winner, exactWinner):
+                            job = winner
+                            isExactWinner = isExactWinner || exactWinner
+                        }
+                        continue
                     }
                     let outcome = await persistInterruptedRecovery(
                         job,
@@ -611,20 +681,18 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                     }
                     continue
                 }
-                if job.state == .completed {
-                    guard await completedRevisionMatches(job, source: source) else {
-                        projectInvalidCompleted(job, context: context)
-                        return
-                    }
-                    projectRecoveredCompleted(
-                        job,
-                        source: source,
-                        context: context,
-                        isExactWinner: isExactWinner
-                    )
+                guard let source = await recoverySource(
+                    for: selection,
+                    context: context
+                ) else {
+                    projectDeferredValidation(job, context: context)
                     return
                 }
-                guard let outcome = await resumeValidation(job, source: source) else {
+                guard let outcome = await resumeValidation(
+                    job,
+                    source: source,
+                    verified: verified
+                ) else {
                     projectDeferredValidation(job, context: context)
                     return
                 }
@@ -941,6 +1009,20 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         )
     }
 
+    private func presentLibraryRecoveryUnavailable(
+        _ reason: SessionProcessingUnavailableReason
+    ) {
+        transition(
+            to: .unavailable(
+                SessionProcessingUnavailableSnapshot(
+                    selection: nil,
+                    reason: reason,
+                    actions: []
+                )
+            )
+        )
+    }
+
     private func select(_ selection: SessionProcessingSelection) async {
         lastSelection = selection
         selectedSource = nil
@@ -962,12 +1044,40 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             transition(to: .recoveryRequired(job))
             return
         }
+        let jobResult: SessionProcessingJobLoadResult
+        if let winner = takeExactActivationWinner(for: recoveryKey) {
+            jobResult = .loaded(winner)
+        } else {
+            jobResult = await jobs.latest(for: selection)
+        }
+        switch jobResult {
+        case let .loaded(job) where job.state == .validating:
+            let proof = await proveStagedCandidate(for: job)
+            await selectValidatingJob(
+                job,
+                proof: proof,
+                selection: selection
+            )
+        case let .loaded(job):
+            await selectSource(for: selection, job: job)
+        case .none:
+            await selectSource(for: selection, job: nil)
+        case let .unsupportedSchema(version):
+            await retainReadableSourceIfAvailable(for: selection)
+            presentUnsupportedJobIndex(version: version, selection: selection)
+        case .integrityMismatch, .unavailable:
+            await retainReadableSourceIfAvailable(for: selection)
+            presentPersistenceFailure(for: nil)
+        }
+    }
+
+    private func selectSource(
+        for selection: SessionProcessingSelection,
+        job: SessionProcessingJob?
+    ) async {
         switch await sourcePort.load(selection) {
         case let .available(source):
             guard source.selection == selection, source.isValid else {
-                guard await interruptValidatingJobWithoutSource(for: selection) else {
-                    return
-                }
                 transition(
                     to: .unavailable(
                         unavailable(selection, .sourceIntegrityMismatch)
@@ -976,101 +1086,113 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 return
             }
             selectedSource = source
-            if let winner = takeExactActivationWinner(for: recoveryKey) {
-                await reconcile(winner, source: source)
-                return
+            if let job {
+                await recoverDurableJob(job, context: .selectedSession(source))
+            } else {
+                transition(to: .ready(SessionProcessingReadySnapshot(source: source)))
             }
-            switch await jobs.latest(for: selection) {
-            case let .loaded(latest):
-                await reconcile(latest, source: source)
-                return
-            case let .unsupportedSchema(version):
-                presentUnsupportedJobIndex(version: version, selection: selection)
-                return
-            case .integrityMismatch, .unavailable:
-                transition(
-                    to: .failed(
-                        SessionProcessingFailedSnapshot(
-                            job: nil,
-                            reason: .jobPersistenceFailed,
-                            actions: [.retry]
-                        )
-                    )
-                )
-                return
-            case .none:
-                break
-            }
-            transition(to: .ready(SessionProcessingReadySnapshot(source: source)))
         case .unavailable:
-            guard await interruptValidatingJobWithoutSource(for: selection) else {
-                return
-            }
             transition(to: .unavailable(unavailable(selection, .sourceUnavailable)))
         case .integrityMismatch:
-            guard await interruptValidatingJobWithoutSource(for: selection) else {
-                return
-            }
             transition(
                 to: .unavailable(unavailable(selection, .sourceIntegrityMismatch))
             )
         }
     }
 
-    private func interruptValidatingJobWithoutSource(
-        for selection: SessionProcessingSelection
+    private func selectValidatingJob(
+        _ job: SessionProcessingJob,
+        proof: StagedCandidateProof,
+        selection: SessionProcessingSelection
+    ) async {
+        let sourceResult = await sourcePort.load(selection)
+        if case let .available(source) = sourceResult,
+           source.selection == selection, source.isValid
+        {
+            selectedSource = source
+            await recoverDurableJob(
+                job,
+                context: .selectedSession(source),
+                initialCandidateProof: proof
+            )
+            return
+        }
+        guard await preserveOrInterruptValidatingJobWithoutSource(
+            job,
+            proof: proof,
+            selection: selection
+        ) else { return }
+        let reason: SessionProcessingUnavailableReason = switch sourceResult {
+        case .unavailable:
+            .sourceUnavailable
+        case .available, .integrityMismatch:
+            .sourceIntegrityMismatch
+        }
+        transition(to: .unavailable(unavailable(selection, reason)))
+    }
+
+    private func preserveOrInterruptValidatingJobWithoutSource(
+        _ initial: SessionProcessingJob,
+        proof initialProof: StagedCandidateProof,
+        selection: SessionProcessingSelection
     ) async -> Bool {
-        switch await jobs.latest(for: selection) {
-        case let .loaded(initial) where initial.state == .validating:
-            var job = initial
-            var observedJobs: [SessionProcessingJob] = []
-            for _ in 0..<Self.maximumExactWinnerReconciliationPassCount {
-                guard !observedJobs.contains(job) else {
+        var job = initial
+        var proof: StagedCandidateProof? = initialProof
+        var observedJobs: [SessionProcessingJob] = []
+        for _ in 0..<Self.maximumExactWinnerReconciliationPassCount {
+            guard !observedJobs.contains(job) else {
+                transition(to: .recoveryRequired(job))
+                return false
+            }
+            observedJobs.append(job)
+            guard job.state == .validating else { return true }
+
+            let currentProof: StagedCandidateProof
+            if let proof {
+                currentProof = proof
+            } else {
+                currentProof = await proveStagedCandidate(for: job)
+            }
+            proof = nil
+            switch currentProof {
+            case .verified:
+                transition(to: .recoveryRequired(job))
+                return false
+            case .invalid:
+                break
+            }
+
+            let interrupted = job.transitioning(to: .interrupted)
+            switch DurableMutationOutcome(
+                await jobs.transition(interrupted, from: .validating)
+            ) {
+            case .settled:
+                return true
+            case .stale:
+                guard let winner = await loadExactWinner(
+                    afterStaleWriteFor: job,
+                    selection: selection
+                ) else {
                     transition(to: .recoveryRequired(job))
                     return false
                 }
-                observedJobs.append(job)
-                guard job.state == .validating else { return true }
-
-                let interrupted = job.transitioning(to: .interrupted)
-                switch DurableMutationOutcome(
-                    await jobs.transition(interrupted, from: .validating)
-                ) {
-                case .settled:
-                    return true
-                case .stale:
-                    guard let winner = await loadExactWinner(
-                        afterStaleWriteFor: job,
-                        selection: selection
-                    ) else {
-                        transition(to: .recoveryRequired(job))
-                        return false
-                    }
-                    job = winner
-                case .unconfirmed:
-                    presentPersistenceFailure(for: job)
-                    return false
-                }
+                job = winner
+            case .unconfirmed:
+                presentPersistenceFailure(for: job)
+                return false
             }
-            transition(to: .recoveryRequired(job))
-            return false
-        case .loaded, .none:
-            return true
-        case let .unsupportedSchema(version):
-            presentUnsupportedJobIndex(version: version, selection: selection)
-            return false
-        case .unavailable, .integrityMismatch:
-            transition(
-                to: .failed(
-                    SessionProcessingFailedSnapshot(
-                        job: nil,
-                        reason: .jobPersistenceFailed,
-                        actions: [.retry]
-                    )
-                )
-            )
-            return false
         }
+        transition(to: .recoveryRequired(job))
+        return false
+    }
+
+    private func retainReadableSourceIfAvailable(
+        for selection: SessionProcessingSelection
+    ) async {
+        guard case let .available(source) = await sourcePort.load(selection),
+              source.selection == selection, source.isValid
+        else { return }
+        selectedSource = source
     }
 
     /// Retry is truthful even when the previous source read failed: it rereads
@@ -1408,7 +1530,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     @discardableResult
     private func resumeValidation(
         _ job: SessionProcessingJob,
-        source: SessionTranscriptionSource
+        source: SessionTranscriptionSource,
+        verified: VerifiedTranscriptionCandidate
     ) async -> DurableMutationOutcome? {
         // Publication is manifest-last: the exact immutable Revision may be
         // installed even when the publisher returned installedNeedsRefresh or
@@ -1417,24 +1540,6 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         // it against the stale start-time selection baseline.
         if await completedRevisionMatches(job, source: source) {
             return await completeInstalledValidation(job, source: source)
-        }
-        guard job.hasCapturedSelectionBaseline else {
-            return await interrupt(job, source: source)
-        }
-        guard let expectedHash = job.candidateArtifactSHA256 else {
-            return await interrupt(job, source: source)
-        }
-        let verified: VerifiedTranscriptionCandidate
-        switch await engine.recoverCandidate(for: job) {
-        case let .available(candidate):
-            guard candidate.artifactFingerprint.sha256 == expectedHash,
-                  candidate.candidate.candidateArtifactSHA256 == expectedHash
-            else {
-                return await interrupt(job, source: source)
-            }
-            verified = candidate
-        case .unavailable, .integrityMismatch:
-            return await interrupt(job, source: source)
         }
         guard case let .qualified(profile) = await runtime.resolve(),
               profile.profileID == job.profileID,
@@ -1459,6 +1564,23 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             evidence: evidence,
             job: job
         )
+    }
+
+    private func proveStagedCandidate(
+        for job: SessionProcessingJob
+    ) async -> StagedCandidateProof {
+        guard job.hasCapturedSelectionBaseline,
+              let expectedHash = job.candidateArtifactSHA256
+        else { return .invalid }
+        switch await engine.recoverCandidate(for: job) {
+        case let .available(candidate):
+            guard candidate.artifactFingerprint.sha256 == expectedHash,
+                  candidate.candidate.candidateArtifactSHA256 == expectedHash
+            else { return .invalid }
+            return .verified(candidate)
+        case .unavailable, .integrityMismatch:
+            return .invalid
+        }
     }
 
     @discardableResult
@@ -1990,7 +2112,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     ) -> SessionProcessingUnavailableSnapshot {
         let actions: [SessionProcessingRecoveryAction]
         switch reason {
-        case .noSession, .jobIndexSchemaNewer:
+        case .noSession, .jobIndexSchemaNewer, .jobIndexUnavailable,
+             .jobIndexIntegrityMismatch, .jobIndexIncomplete:
             actions = []
         case .sourceUnavailable, .sourceIntegrityMismatch,
              .acousticEvidenceUnavailable:
@@ -2109,22 +2232,55 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         for scope: LibraryScope
     ) -> SessionProcessingSelection? {
         let libraryID = scope.libraryID.rawValue
-        return activationRecovery.compactMap { key, ledger in
-            guard key.libraryID == libraryID, let job = ledger.exactWinner else {
+        let invalidCompletedSelections: [SessionProcessingSelection] =
+            invalidCompletedJobs.compactMap { key, job in
+            guard key.libraryID == libraryID else { return nil }
+            return SessionProcessingSelection(
+                scope: scope,
+                sessionID: job.sessionID
+            )
+        }
+        let retainedRecoverySelections: [SessionProcessingSelection] =
+            activationRecovery.compactMap { key, ledger in
+            guard key.libraryID == libraryID else {
                 return nil
             }
-            switch job.state {
-            case .failed, .cancelled, .interrupted:
+            if let job = ledger.recoveryRequiredJob {
                 return SessionProcessingSelection(
                     scope: scope,
                     sessionID: job.sessionID
                 )
-            case .queued, .preparing, .running, .validating, .completed:
+            }
+            guard let job = ledger.exactWinner else { return nil }
+            switch job.state {
+            case .validating, .failed, .cancelled, .interrupted:
+                return SessionProcessingSelection(
+                    scope: scope,
+                    sessionID: job.sessionID
+                )
+            case .queued, .preparing, .running, .completed:
                 return nil
             }
-        }.min {
+        }
+        return (invalidCompletedSelections + retainedRecoverySelections).min {
             $0.sessionID.rawValue < $1.sessionID.rawValue
         }
+    }
+
+    private func projectDeterministicActivationRecovery(
+        _ selection: SessionProcessingSelection
+    ) async {
+        let key = CompletedRecoveryKey(selection)
+        if let deferred = activationRecovery[key]?.exactWinner,
+           deferred.state == .validating
+        {
+            lastSelection = selection
+            selectedSource = nil
+            selectedProfile = nil
+            transition(to: .recoveryRequired(deferred))
+            return
+        }
+        await select(selection)
     }
 
     private func retainSuppressedActivationRecovery(

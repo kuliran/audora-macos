@@ -561,9 +561,9 @@ public actor PortableSessionProcessingWorkspace:
     public func latest(
         for selection: SessionProcessingSelection
     ) async -> SessionProcessingJobLoadResult {
-        guard let jobBinding, jobBinding.selection == selection,
-              await scopes.isCurrentSessionProcessingScope(jobBinding.scope.identity)
-        else { return .unavailable }
+        guard let jobBinding = await jobBinding(for: selection) else {
+            return .unavailable
+        }
         do {
             let result = try await scopes.withCurrentSessionProcessingScope(
                 jobBinding.scope.identity
@@ -608,9 +608,9 @@ public actor PortableSessionProcessingWorkspace:
                 return .unavailable
             }
         }
-        guard let jobBinding, jobBinding.selection == selection,
-              await scopes.isCurrentSessionProcessingScope(jobBinding.scope.identity)
-        else { return .unavailable }
+        guard let jobBinding = await jobBinding(for: selection) else {
+            return .unavailable
+        }
         do {
             let result = try await scopes.withCurrentSessionProcessingScope(
                 jobBinding.scope.identity
@@ -624,6 +624,37 @@ public actor PortableSessionProcessingWorkspace:
         } catch {
             return .unavailable
         }
+    }
+
+    /// Durable Job identity is readable without first reconstructing sealed
+    /// Session audio. Validation recovery must prove its staged artifact before
+    /// consulting that mutable source capability.
+    private func jobBinding(
+        for selection: SessionProcessingSelection
+    ) async -> JobBinding? {
+        if let jobBinding,
+           jobBinding.selection == selection,
+           await scopes.isCurrentSessionProcessingScope(jobBinding.scope.identity)
+        {
+            return jobBinding
+        }
+        guard let active = await scopes.acquireSessionProcessingScope(
+            for: selection.scope
+        ) else {
+            jobBinding = nil
+            return nil
+        }
+        let next = JobBinding(
+            selection: selection,
+            scope: active,
+            jobs: PortableSessionProcessingJobRepository(
+                root: active.root,
+                libraryID: selection.scope.libraryID,
+                expectedRootIdentity: active.identity.rootIdentity
+            )
+        )
+        jobBinding = next
+        return next
     }
 
     public func create(

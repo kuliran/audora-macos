@@ -424,6 +424,9 @@ namespace Audora.Contracts {
     reason:
       | "noSession"
       | "jobIndexSchemaNewer"
+      | "jobIndexUnavailable"
+      | "jobIndexIntegrityMismatch"
+      | "jobIndexIncomplete"
       | "qualificationBlocked"
       | "runtimeMissing"
       | "runtimeLockMismatch"

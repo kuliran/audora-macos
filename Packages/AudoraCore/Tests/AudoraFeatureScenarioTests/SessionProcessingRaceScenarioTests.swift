@@ -382,6 +382,9 @@ private struct FeatureScenarioState: Equatable, Sendable {
         switch reason {
         case .noSession: "noSession"
         case .jobIndexSchemaNewer: "jobIndexSchemaNewer"
+        case .jobIndexUnavailable: "jobIndexUnavailable"
+        case .jobIndexIntegrityMismatch: "jobIndexIntegrityMismatch"
+        case .jobIndexIncomplete: "jobIndexIncomplete"
         case .sourceUnavailable: "sourceUnavailable"
         case .sourceIntegrityMismatch: "sourceIntegrityMismatch"
         case .acousticEvidenceUnavailable: "acousticEvidenceUnavailable"

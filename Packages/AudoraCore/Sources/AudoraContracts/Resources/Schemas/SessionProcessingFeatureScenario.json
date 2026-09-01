@@ -575,6 +575,18 @@
                         },
                         {
                             "type": "string",
+                            "const": "jobIndexUnavailable"
+                        },
+                        {
+                            "type": "string",
+                            "const": "jobIndexIntegrityMismatch"
+                        },
+                        {
+                            "type": "string",
+                            "const": "jobIndexIncomplete"
+                        },
+                        {
+                            "type": "string",
                             "const": "qualificationBlocked"
                         },
                         {

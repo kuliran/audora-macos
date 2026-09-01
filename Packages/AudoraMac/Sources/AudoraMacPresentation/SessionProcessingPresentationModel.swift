@@ -219,6 +219,21 @@ public enum SessionProcessingPresentationMapper {
                 "Processing needs a newer Audora",
                 "This Library’s processing job index uses schema version \(version). Install a compatible update to resume processing; Audora left the existing processing data unchanged."
             )
+        case .jobIndexUnavailable:
+            (
+                "Processing recovery is unavailable",
+                "Audora could not read this Library’s processing job index. Reopen the Library after its storage is available; the existing processing data was left unchanged."
+            )
+        case .jobIndexIntegrityMismatch:
+            (
+                "Processing recovery could not be verified",
+                "This Library’s processing job index failed integrity checks. Audora left it unchanged; restore the Library from a trusted copy or use a compatible Audora update."
+            )
+        case .jobIndexIncomplete:
+            (
+                "Processing recovery is incomplete",
+                "Audora could verify only part of this Library’s processing job inventory. Known jobs were reconciled, but processing remains blocked and no Session was chosen."
+            )
         case .sourceUnavailable:
             ("Session audio is unavailable", "Retry after the sealed audio is available.")
         case .sourceIntegrityMismatch:
@@ -375,6 +390,7 @@ public struct SessionProcessingView: View {
                                     guard let admitted = LibraryRootInteractionPolicy
                                         .admittedProcessingAction(
                                             action,
+                                            in: state,
                                             isChatBoundaryPending: isChatBoundaryPending
                                         )
                                     else { return }
@@ -384,6 +400,7 @@ public struct SessionProcessingView: View {
                                     LibraryRootInteractionPolicy
                                         .admittedProcessingAction(
                                             action,
+                                            in: state,
                                             isChatBoundaryPending: isChatBoundaryPending
                                         ) == nil
                                 )

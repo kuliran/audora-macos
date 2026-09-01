@@ -13,6 +13,21 @@ public enum LibraryRootInteractionPolicy {
         guard !isChatBoundaryPending || action == .cancel else { return nil }
         return action
     }
+
+    /// Admission also requires the action to be advertised by the exact
+    /// presentation snapshot. Library-level recovery fences intentionally
+    /// advertise no commands.
+    public static func admittedProcessingAction(
+        _ action: SessionProcessingPresentationAction,
+        in state: SessionProcessingPresentationState,
+        isChatBoundaryPending: Bool
+    ) -> SessionProcessingPresentationAction? {
+        guard state.actions.contains(action) else { return nil }
+        return admittedProcessingAction(
+            action,
+            isChatBoundaryPending: isChatBoundaryPending
+        )
+    }
 }
 
 public struct LibraryRootView: View {

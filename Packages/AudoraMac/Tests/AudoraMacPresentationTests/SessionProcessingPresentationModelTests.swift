@@ -118,6 +118,42 @@ final class SessionProcessingPresentationModelTests: XCTestCase {
         XCTAssertEqual(presentation.actions, [])
     }
 
+    func testLibraryJobIndexFailuresStayVisibleAndAdmitNoProcessingAction() {
+        let cases: [(SessionProcessingUnavailableReason, String)] = [
+            (.jobIndexUnavailable, "unavailable"),
+            (.jobIndexIntegrityMismatch, "could not be verified"),
+            (.jobIndexIncomplete, "incomplete"),
+        ]
+
+        for (reason, expectedTitleText) in cases {
+            let presentation = SessionProcessingPresentationMapper.map(
+                .unavailable(
+                    SessionProcessingUnavailableSnapshot(
+                        selection: nil,
+                        reason: reason,
+                        actions: []
+                    )
+                )
+            )
+
+            XCTAssertEqual(presentation.status, .unavailable)
+            XCTAssertTrue(
+                presentation.title.localizedCaseInsensitiveContains(
+                    expectedTitleText
+                )
+            )
+            XCTAssertTrue(presentation.detail?.contains("Library") == true)
+            XCTAssertEqual(presentation.actions, [])
+            XCTAssertNil(
+                LibraryRootInteractionPolicy.admittedProcessingAction(
+                    .retry,
+                    in: presentation,
+                    isChatBoundaryPending: false
+                )
+            )
+        }
+    }
+
     func testModelProjectsStatesAndSendsTypedStartAndRecoveryCommands() async throws {
         let source = try makeSource()
         let feature = ScriptedSessionProcessingFeature(

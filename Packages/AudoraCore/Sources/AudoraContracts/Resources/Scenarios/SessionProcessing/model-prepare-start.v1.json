@@ -13,8 +13,8 @@
     { "kind": "start" }
   ],
   "dependencyTrace": [
-    { "port": "source", "effect": "load", "outcome": "available" },
     { "port": "jobs", "effect": "latest", "outcome": "none" },
+    { "port": "source", "effect": "load", "outcome": "available" },
     { "port": "runtime", "effect": "resolve", "outcome": "qualified" },
     { "port": "model", "effect": "verify", "outcome": "missing" },
     { "port": "runtime", "effect": "prepare", "outcome": "qualified" },

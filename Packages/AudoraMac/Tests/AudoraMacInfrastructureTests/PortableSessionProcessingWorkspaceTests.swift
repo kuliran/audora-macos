@@ -182,7 +182,7 @@ final class PortableSessionProcessingWorkspaceTests: XCTestCase {
         }
     }
 
-    func testActivationReconcilesPersistedJobAndPreservesReadySessionBinding()
+    func testActivationReconcilesPersistedJobAndRoutesRetryWithoutManualSelection()
         async throws
     {
         try await withLibrary { root, libraryID in
@@ -273,28 +273,29 @@ final class PortableSessionProcessingWorkspaceTests: XCTestCase {
             XCTAssertEqual(beforeActivation.source.selection, selected)
 
             await feature.send(.activateLibrary(scope))
-            guard case let .ready(afterActivation) = await feature.currentState else {
-                return XCTFail("activation must not replace the UI selection")
+            guard case let .interrupted(afterActivation) = await feature.currentState
+            else {
+                return XCTFail("activation must expose the recovered Job")
             }
-            XCTAssertEqual(afterActivation.source.selection, selected)
+            XCTAssertEqual(afterActivation.source.selection, abandoned)
+            XCTAssertEqual(afterActivation.job.jobID, abandonedJob.jobID)
+            XCTAssertEqual(afterActivation.job.state, .interrupted)
+            XCTAssertEqual(afterActivation.actions, [.retry])
 
-            await feature.send(.start)
+            await feature.send(.retry)
 
             let requests = await engine.requests
             let abandonedReload = await repository.latest(for: abandoned)
             let selectedReload = await repository.latest(for: selected)
-            XCTAssertEqual(requests.map(\.selection), [selected])
+            XCTAssertEqual(requests.map(\.selection), [abandoned])
             XCTAssertEqual(requests.map(\.jobID), [newJobID])
-            guard case let .loaded(interrupted) = abandonedReload else {
-                return XCTFail("expected abandoned persisted Job")
+            guard case let .loaded(retried) = abandonedReload else {
+                return XCTFail("expected retried persisted Job")
             }
-            XCTAssertEqual(interrupted.state, .interrupted)
-            guard case let .loaded(selectedJob) = selectedReload else {
-                return XCTFail("expected a new Job for the still-selected Session")
-            }
-            XCTAssertEqual(selectedJob.sessionID, selected.sessionID)
-            XCTAssertEqual(selectedJob.jobID, newJobID)
-            XCTAssertEqual(selectedJob.state, .failed)
+            XCTAssertEqual(retried.sessionID, abandoned.sessionID)
+            XCTAssertEqual(retried.jobID, newJobID)
+            XCTAssertEqual(retried.state, .failed)
+            XCTAssertEqual(selectedReload, .none)
         }
     }
 

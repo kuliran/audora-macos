@@ -18,8 +18,8 @@
   ],
   "dependencyTrace": [
     { "port": "jobs", "effect": "inventory", "outcome": "all-durable-jobs-bounded" },
-    { "port": "source", "effect": "load", "outcome": "newer-selection" },
     { "port": "engine", "effect": "recoverCandidate", "outcome": "confined-complete-hash-valid" },
+    { "port": "source", "effect": "load", "outcome": "newer-selection" },
     { "port": "runtime", "effect": "resolve", "outcome": "qualified" },
     { "port": "acousticEvidence", "effect": "resolve", "outcome": "qualified" },
     { "port": "publisher", "effect": "publish", "outcome": "staleSelection" },
