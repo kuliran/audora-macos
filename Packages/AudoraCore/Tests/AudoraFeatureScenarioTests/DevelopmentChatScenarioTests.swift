@@ -815,7 +815,7 @@ private actor ChatScenarioStore: ChatStorePort {
         }
     }
 
-    func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome {
+    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
         guard let event = consume(effect: "create") else {
             XCTFail("missing scripted create event")
             return .failed
@@ -1095,11 +1095,15 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
         case let .available(quote):
             return .available(
                 quote,
-                configuration: developmentScenarioConfigurationStamp
+                authority: ChatCreationQuoteAuthority(
+                    configuration: developmentScenarioConfigurationStamp
+                )
             )
         case .unavailable(.providerUnavailable):
             return .providerUnavailable(
-                configuration: developmentScenarioConfigurationStamp
+                authority: ChatCreationQuoteAuthority(
+                    configuration: developmentScenarioConfigurationStamp
+                )
             )
         case let .unavailable(reason):
             return .unavailable(reason)
@@ -1110,6 +1114,15 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
         _ stamp: CoachContextConfigurationStamp
     ) async -> Bool {
         stamp == developmentScenarioConfigurationStamp
+    }
+
+    func acquireNewChatCreationLease(
+        _ authority: ChatCreationQuoteAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard authority.configuration == developmentScenarioConfigurationStamp else {
+            return .stale
+        }
+        return .acquired(CoachContextAuthorityLease())
     }
 
     func quoteNewChat(
@@ -1295,6 +1308,12 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         authority.contextGeneration == UInt64(pendingResolutionCount + 1) &&
             authority.configurationGeneration == UInt64(pendingResolutionCount + 1)
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
     }
 
     func currentAttachmentProjectionPolicy()

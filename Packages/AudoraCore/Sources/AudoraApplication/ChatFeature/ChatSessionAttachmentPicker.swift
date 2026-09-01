@@ -252,6 +252,11 @@ enum ChatAttachmentResolutionOutcome: Equatable, Sendable {
 /// provider/model policy is applied.
 @_spi(CoachContextQualification)
 public struct ChatAttachmentEvidence: Equatable, Sendable {
+    /// A persistence adapter must reject a Revision larger than this before
+    /// allocating its encoded bytes for Chat projection.
+    public static let maximumLoadedRevisionBytes =
+        CoachContextInputLimits.maximumCanonicalValueUTF8Bytes
+
     public let displayLabel: String
     public let revision: TranscriptRevision
 
@@ -293,30 +298,28 @@ public struct ResolvedChatAttachmentEvidence: Equatable, Sendable {
 }
 
 @_spi(CoachContextQualification)
-public enum ChatAttachmentEvidenceCatalogOutcome: Equatable, Sendable {
-    case loaded([ChatAttachmentEvidence])
-    case readOnlyLibrary
-    case failed
-}
-
-@_spi(CoachContextQualification)
-public enum ChatAttachmentEvidenceResolutionOutcome: Equatable, Sendable {
-    case resolved([ResolvedChatAttachmentEvidence])
+public enum ChatAttachmentEvidenceTraversalOutcome: Equatable, Sendable {
+    case completed
     case readOnlyLibrary
     case failed
 }
 
 /// Persistence-only seam. Provider token estimation and delivery policy are
-/// intentionally applied by an Application decorator, never by this port.
+/// intentionally applied by the visitor supplied by the Application decorator,
+/// never by this port. Implementations must invoke the visitor serially and
+/// release each full Transcript Revision before loading the next one. A thrown
+/// visitor or cancelled traversal must terminate with `.failed`.
 @_spi(CoachContextQualification)
 public protocol ChatSessionAttachmentEvidenceSource: Sendable {
-    func loadEvidence(
-        in library: LibraryScope
-    ) async -> ChatAttachmentEvidenceCatalogOutcome
-    func resolveEvidence(
+    func forEachEvidence(
+        in library: LibraryScope,
+        _ visit: @escaping @Sendable (ChatAttachmentEvidence) throws -> Void
+    ) async -> ChatAttachmentEvidenceTraversalOutcome
+    func forEachResolvedEvidence(
         _ attachments: ChatAttachments,
-        in library: LibraryScope
-    ) async -> ChatAttachmentEvidenceResolutionOutcome
+        in library: LibraryScope,
+        _ visit: @escaping @Sendable (ResolvedChatAttachmentEvidence) throws -> Void
+    ) async -> ChatAttachmentEvidenceTraversalOutcome
 }
 
 /// The single local seam for listing selected revisions and reopening exact pins.

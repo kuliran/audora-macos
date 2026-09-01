@@ -227,6 +227,12 @@ private actor DynamicCapacitySnapshotPort: CoachContextSnapshotPort {
             authority.configurationGeneration == configurationGeneration
     }
 
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
+    }
+
     private func snapshot(
         draft: ChatDraft,
         binding: CoachContextSnapshotBinding,
@@ -297,7 +303,7 @@ private actor CapacityChatStore: ChatStorePort {
         .loaded([.available(aggregate)])
     }
 
-    func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome { .failed }
+    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome { .failed }
     func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome { .failed }
 
     func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome {

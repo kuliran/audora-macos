@@ -623,6 +623,68 @@ final class CoachContextPlannerTests: XCTestCase {
         XCTAssertEqual(outcome, .failed)
     }
 
+    func testAttachmentEvidenceIsProjectedDuringSourceTraversal() async throws {
+        let first = ChatAttachmentEvidence(
+            displayLabel: "First Session",
+            revision: try manyShortWordRevision(
+                wordCount: 1,
+                sessionID: "ses-20260830T120000000Z-3DEF",
+                revisionID: "trv-20260830T121000000Z-4FGH"
+            )
+        )
+        let second = ChatAttachmentEvidence(
+            displayLabel: "Second Session",
+            revision: try manyShortWordRevision(
+                wordCount: 1,
+                sessionID: "ses-20260830T122000000Z-5GHJ",
+                revisionID: "trv-20260830T123000000Z-6JKM"
+            )
+        )
+        let traversal = AttachmentTraversalObservation()
+        let estimator = try CoachTokenEstimator(
+            identifier: "streaming-projection-fixture-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { bytes in
+                traversal.record("project:\(bytes.count)")
+                return bytes.count
+            }
+        )
+        let source = ProjectedChatSessionAttachmentSource(
+            evidenceSource: AttachmentEvidenceSourceFixture(
+                catalog: [first, second],
+                resolutions: [],
+                traversal: traversal
+            ),
+            configurationAuthority:
+                FixedAttachmentProjectionConfigurationAuthority(
+                    policy: try CoachAttachmentProjectionPolicy(
+                        maximumInlineTranscriptTokens: Int.max,
+                        tokenEstimator: estimator
+                    )
+                )
+        )
+        let library = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T120000000Z-7NPQ")
+        )
+
+        guard case let .loaded(candidates, _) = await source.loadCandidates(
+            in: library
+        ) else {
+            return XCTFail("expected streamed evidence to project")
+        }
+
+        XCTAssertEqual(candidates.count, 2)
+        let events = traversal.events
+        XCTAssertEqual(events.count, 6)
+        XCTAssertEqual(events[0], "load:0")
+        XCTAssertTrue(events[1].hasPrefix("project:"))
+        XCTAssertEqual(events[2], "release:0")
+        XCTAssertEqual(events[3], "load:1")
+        XCTAssertTrue(events[4].hasPrefix("project:"))
+        XCTAssertEqual(events[5], "release:1")
+    }
+
     private func fixtureConfiguration(
         contextWindow: Int,
         responseReserve: Int = 32,
@@ -784,6 +846,19 @@ private final class AttachmentEncodingObservation: @unchecked Sendable {
     }
 }
 
+private final class AttachmentTraversalObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    var events: [String] {
+        lock.withLock { recorded }
+    }
+
+    func record(_ event: String) {
+        lock.withLock { recorded.append(event) }
+    }
+}
+
 private struct FixedAttachmentProjectionConfigurationAuthority:
     CoachAttachmentProjectionConfigurationAuthority
 {
@@ -812,17 +887,48 @@ private struct FixedAttachmentProjectionConfigurationAuthority:
 private struct AttachmentEvidenceSourceFixture: ChatSessionAttachmentEvidenceSource {
     let catalog: [ChatAttachmentEvidence]
     let resolutions: [ResolvedChatAttachmentEvidence]
+    var traversal: AttachmentTraversalObservation?
 
-    func loadEvidence(
-        in library: LibraryScope
-    ) async -> ChatAttachmentEvidenceCatalogOutcome {
-        .loaded(catalog)
+    init(
+        catalog: [ChatAttachmentEvidence],
+        resolutions: [ResolvedChatAttachmentEvidence],
+        traversal: AttachmentTraversalObservation? = nil
+    ) {
+        self.catalog = catalog
+        self.resolutions = resolutions
+        self.traversal = traversal
     }
 
-    func resolveEvidence(
+    func forEachEvidence(
+        in library: LibraryScope,
+        _ visit: @escaping @Sendable (ChatAttachmentEvidence) throws -> Void
+    ) async -> ChatAttachmentEvidenceTraversalOutcome {
+        do {
+            for (index, evidence) in catalog.enumerated() {
+                try Task.checkCancellation()
+                traversal?.record("load:\(index)")
+                try visit(evidence)
+                traversal?.record("release:\(index)")
+            }
+            return .completed
+        } catch {
+            return .failed
+        }
+    }
+
+    func forEachResolvedEvidence(
         _ attachments: ChatAttachments,
-        in library: LibraryScope
-    ) async -> ChatAttachmentEvidenceResolutionOutcome {
-        .resolved(resolutions)
+        in library: LibraryScope,
+        _ visit: @escaping @Sendable (ResolvedChatAttachmentEvidence) throws -> Void
+    ) async -> ChatAttachmentEvidenceTraversalOutcome {
+        do {
+            for resolution in resolutions {
+                try Task.checkCancellation()
+                try visit(resolution)
+            }
+            return .completed
+        } catch {
+            return .failed
+        }
     }
 }

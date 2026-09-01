@@ -180,6 +180,30 @@ enum CoachContextSnapshotOutcome: Sendable {
     case staleState
 }
 
+enum CoachContextSourceLeaseAuthority: Equatable, Sendable {
+    case snapshot(CoachContextSnapshotAuthority)
+    case configuration(generation: UInt64)
+}
+
+actor CoachContextAuthorityLease {
+    private var releaseAction: (@Sendable () async -> Void)?
+
+    init(release: @escaping @Sendable () async -> Void = {}) {
+        releaseAction = release
+    }
+
+    func release() async {
+        guard let action = releaseAction else { return }
+        releaseAction = nil
+        await action()
+    }
+}
+
+enum CoachContextAuthorityLeaseOutcome: Sendable {
+    case acquired(CoachContextAuthorityLease)
+    case stale
+}
+
 /// The one provider/model projection policy currently qualified for this app
 /// process. A provider can be temporarily unavailable while this configuration
 /// remains known; absence of a qualified policy is represented separately.
@@ -215,6 +239,13 @@ protocol CoachContextSnapshotPort: Sendable {
         async -> CoachAttachmentProjectionPolicyOutcome
 
     func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool
+
+    /// Acquires an opaque lease only while the exact snapshot/configuration
+    /// authority is current. Mutable adapters must defer generation advancement
+    /// until the returned lease is released.
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome
 }
 
 extension CoachContextSnapshotPort {
@@ -226,6 +257,23 @@ extension CoachContextSnapshotPort {
 
     func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool {
         false
+    }
+
+    /// Explicit opt-in for fixtures and adapters whose generations are immutable.
+    /// Mutable sources must implement lease acquisition and defer their writes.
+    func acquireImmutableAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        let current: Bool
+        switch authority {
+        case let .snapshot(snapshot):
+            current = await isCurrent(snapshot)
+        case let .configuration(generation):
+            current = await isCurrentConfiguration(generation)
+        }
+        return current
+            ? .acquired(CoachContextAuthorityLease())
+            : .stale
     }
 }
 
@@ -274,8 +322,12 @@ private struct CoachContextConfigurationAuthority:
     }
 
     func isCurrent(_ stamp: CoachContextConfigurationStamp) async -> Bool {
-        guard stamp.authorityID == authorityID else { return false }
+        guard owns(stamp) else { return false }
         return await source.isCurrentConfiguration(stamp.generation)
+    }
+
+    func owns(_ stamp: CoachContextConfigurationStamp) -> Bool {
+        stamp.authorityID == authorityID
     }
 
     func stamp(for configurationGeneration: UInt64) -> CoachContextConfigurationStamp {
@@ -313,10 +365,23 @@ enum CoachContextPendingPreparationOutcome: Equatable, Sendable {
 enum ConfigurationBoundChatCreationQuoteOutcome: Equatable, Sendable {
     case available(
         ChatCreationQuote,
-        configuration: CoachContextConfigurationStamp
+        authority: ChatCreationQuoteAuthority
     )
-    case providerUnavailable(configuration: CoachContextConfigurationStamp)
+    case providerUnavailable(authority: ChatCreationQuoteAuthority)
     case unavailable(CoachContextUnavailableReason)
+}
+
+struct ChatCreationQuoteAuthority: Equatable, Sendable {
+    let context: CoachContextSnapshotAuthority?
+    let configuration: CoachContextConfigurationStamp
+
+    init(
+        context: CoachContextSnapshotAuthority? = nil,
+        configuration: CoachContextConfigurationStamp
+    ) {
+        self.context = context
+        self.configuration = configuration
+    }
 }
 
 /// Exact bytes plus the identity/configuration fence required by the future #22
@@ -379,6 +444,10 @@ protocol ChatCoachContextCoordinating:
     func isCurrentAttachmentConfiguration(
         _ stamp: CoachContextConfigurationStamp
     ) async -> Bool
+
+    func acquireNewChatCreationLease(
+        _ authority: ChatCreationQuoteAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome
 }
 
 public struct DefaultCoachContextFeature:
@@ -418,20 +487,28 @@ public struct DefaultCoachContextFeature:
 
     init(
         source: any CoachContextSnapshotPort,
-        capacity: CoachContextCapacity = CoachContextCapacity()
+        capacity: CoachContextCapacity = CoachContextCapacity(),
+        configurationAuthorityID: UUID = UUID()
     ) {
         self.source = source
         self.capacity = capacity
-        configurationAuthority = CoachContextConfigurationAuthority(source: source)
+        configurationAuthority = CoachContextConfigurationAuthority(
+            source: source,
+            authorityID: configurationAuthorityID
+        )
         attachmentSource = UnavailableChatSessionAttachmentSource()
     }
 
     init(
         source: any CoachContextSnapshotPort,
         attachmentEvidenceSource: any ChatSessionAttachmentEvidenceSource,
-        capacity: CoachContextCapacity = CoachContextCapacity()
+        capacity: CoachContextCapacity = CoachContextCapacity(),
+        configurationAuthorityID: UUID = UUID()
     ) {
-        let configurationAuthority = CoachContextConfigurationAuthority(source: source)
+        let configurationAuthority = CoachContextConfigurationAuthority(
+            source: source,
+            authorityID: configurationAuthorityID
+        )
         self.source = source
         self.capacity = capacity
         self.configurationAuthority = configurationAuthority
@@ -474,8 +551,11 @@ public struct DefaultCoachContextFeature:
                 }
                 return .available(
                     quote,
-                    configuration: configurationAuthority.stamp(
-                        for: snapshot.authority.configurationGeneration
+                    authority: ChatCreationQuoteAuthority(
+                        context: snapshot.authority,
+                        configuration: configurationAuthority.stamp(
+                            for: snapshot.authority.configurationGeneration
+                        )
                     )
                 )
             } catch {
@@ -491,7 +571,12 @@ public struct DefaultCoachContextFeature:
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
                 return .unavailable(.staleState)
             }
-            return .providerUnavailable(configuration: configuration.stamp)
+            return .providerUnavailable(
+                authority: ChatCreationQuoteAuthority(
+                    context: nil,
+                    configuration: configuration.stamp
+                )
+            )
         case .sourceUnavailable:
             return .unavailable(.sourceUnavailable)
         case .staleState:
@@ -503,6 +588,26 @@ public struct DefaultCoachContextFeature:
         _ stamp: CoachContextConfigurationStamp
     ) async -> Bool {
         await configurationAuthority.isCurrent(stamp)
+    }
+
+    func acquireNewChatCreationLease(
+        _ authority: ChatCreationQuoteAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard configurationAuthority.owns(authority.configuration) else {
+            return .stale
+        }
+        let sourceAuthority: CoachContextSourceLeaseAuthority
+        if let context = authority.context {
+            guard context.configurationGeneration == authority.configuration.generation else {
+                return .stale
+            }
+            sourceAuthority = .snapshot(context)
+        } else {
+            sourceAuthority = .configuration(
+                generation: authority.configuration.generation
+            )
+        }
+        return await source.acquireAuthorityLease(sourceAuthority)
     }
 
     public func quoteNewChat(
@@ -654,5 +759,12 @@ struct UnavailableCoachContextSnapshotPort: CoachContextSnapshotPort {
 
     func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool {
         configurationGeneration == 1
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard authority == .configuration(generation: 1) else { return .stale }
+        return .acquired(CoachContextAuthorityLease())
     }
 }

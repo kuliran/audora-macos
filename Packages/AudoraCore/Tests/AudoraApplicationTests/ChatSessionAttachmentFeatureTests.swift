@@ -377,7 +377,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
                 )
             }
         )
-        let aggregate = try ChatAggregate.developmentChat(
+        let aggregate = try ChatAggregate.newChat(
             chatID: ChatID("cht-20260830T120000000Z-2ABC"),
             draftID: ChatDraftID("drf-20260830T120000000Z-3DEF"),
             memoryID: CoachMemoryID("mem-20260830T120000000Z-4GHJ"),
@@ -467,15 +467,19 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         )
         let store = AttachmentChatStoreFixture()
         let capacity = AttachmentCapacitySource(
-            contextWindows: [20_000, 20_000, 400],
+            contextWindow: 20_000,
             transcriptBytes: 1_000
         )
         let feature = makeFeature(
-            source: source,
+            coordinatedContext: CapacityBoundCoachContextFixture(
+                attachmentSource: source,
+                base: DefaultCoachContextFeature(
+                    source: capacity,
+                    configurationAuthorityID:
+                        attachmentFeatureConfigurationStamp.authorityID
+                )
+            ),
             store: store,
-            coachContext: DefaultCoachContextFeature(
-                source: capacity
-            )
         )
         await feature.send(.start(Self.context))
         await feature.send(.beginNewChat(Self.context))
@@ -484,6 +488,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         else { return XCTFail("Expected candidate") }
 
         await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+        await capacity.replaceContextWindow(400)
         await feature.send(.confirmNewChat(Self.context))
 
         let rejectedSeed = await store.createdSeed
@@ -764,11 +769,15 @@ private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating 
         case let .available(quote):
             return .available(
                 quote,
-                configuration: attachmentFeatureConfigurationStamp
+                authority: ChatCreationQuoteAuthority(
+                    configuration: attachmentFeatureConfigurationStamp
+                )
             )
         case .unavailable(.providerUnavailable):
             return .providerUnavailable(
-                configuration: attachmentFeatureConfigurationStamp
+                authority: ChatCreationQuoteAuthority(
+                    configuration: attachmentFeatureConfigurationStamp
+                )
             )
         case let .unavailable(reason):
             return .unavailable(reason)
@@ -779,6 +788,15 @@ private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating 
         _ stamp: CoachContextConfigurationStamp
     ) async -> Bool {
         stamp == attachmentFeatureConfigurationStamp
+    }
+
+    func acquireNewChatCreationLease(
+        _ authority: ChatCreationQuoteAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard authority.configuration == attachmentFeatureConfigurationStamp else {
+            return .stale
+        }
+        return .acquired(CoachContextAuthorityLease())
     }
 
     func quoteNewChat(
@@ -805,37 +823,108 @@ private struct AttachmentEvidenceSourceForFeature:
 {
     let evidence: ChatAttachmentEvidence
 
-    func loadEvidence(
-        in library: LibraryScope
-    ) async -> ChatAttachmentEvidenceCatalogOutcome {
-        .loaded([evidence])
+    func forEachEvidence(
+        in library: LibraryScope,
+        _ visit: @escaping @Sendable (ChatAttachmentEvidence) throws -> Void
+    ) async -> ChatAttachmentEvidenceTraversalOutcome {
+        do {
+            try Task.checkCancellation()
+            try visit(evidence)
+            return .completed
+        } catch {
+            return .failed
+        }
     }
 
-    func resolveEvidence(
+    func forEachResolvedEvidence(
         _ attachments: ChatAttachments,
-        in library: LibraryScope
-    ) async -> ChatAttachmentEvidenceResolutionOutcome {
+        in library: LibraryScope,
+        _ visit: @escaping @Sendable (ResolvedChatAttachmentEvidence) throws -> Void
+    ) async -> ChatAttachmentEvidenceTraversalOutcome {
         do {
-            return .resolved(try attachments.values.map { attachment in
-                try ResolvedChatAttachmentEvidence(
-                    attachment: attachment,
-                    resolution: attachment.sessionID == evidence.sessionID &&
-                        attachment.transcriptRevisionID ==
-                        evidence.transcriptRevisionID
-                        ? .available(evidence)
-                        : .unavailable(.missing)
+            for attachment in attachments.values {
+                try Task.checkCancellation()
+                try visit(
+                    ResolvedChatAttachmentEvidence(
+                        attachment: attachment,
+                        resolution: attachment.sessionID == evidence.sessionID &&
+                            attachment.transcriptRevisionID ==
+                            evidence.transcriptRevisionID
+                            ? .available(evidence)
+                            : .unavailable(.missing)
+                    )
                 )
-            })
+            }
+            return .completed
         } catch {
             return .failed
         }
     }
 }
 
+private struct CapacityBoundCoachContextFixture: ChatCoachContextCoordinating {
+    let attachmentSource: any ChatSessionAttachmentSource
+    let base: DefaultCoachContextFeature
+
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        await attachmentSource.loadCandidates(in: library)
+    }
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        await attachmentSource.resolve(attachments, in: library)
+    }
+
+    func quoteNewChatBoundToConfiguration(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome {
+        await base.quoteNewChatBoundToConfiguration(request)
+    }
+
+    func isCurrentAttachmentConfiguration(
+        _ stamp: CoachContextConfigurationStamp
+    ) async -> Bool {
+        await base.isCurrentAttachmentConfiguration(stamp)
+    }
+
+    func acquireNewChatCreationLease(
+        _ authority: ChatCreationQuoteAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await base.acquireNewChatCreationLease(authority)
+    }
+
+    func quoteNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ChatCreationQuoteOutcome {
+        await base.quoteNewChat(request)
+    }
+
+    func quoteChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextQuoteOutcome {
+        await base.quoteChat(request)
+    }
+
+    func preparePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextPendingPreparationOutcome {
+        await base.preparePendingUserTurn(request)
+    }
+}
+
 private actor ChangingAttachmentConfigurationSource: CoachContextSnapshotPort {
     private var configurationGeneration: UInt64 = 1
+    private var activeLeaseID: UUID?
+    private var advancementWaiters: [CheckedContinuation<Void, Never>] = []
 
-    func advanceConfiguration() {
+    func advanceConfiguration() async {
+        if activeLeaseID != nil {
+            await withCheckedContinuation { advancementWaiters.append($0) }
+        }
         configurationGeneration += 1
     }
 
@@ -936,6 +1025,35 @@ private actor ChangingAttachmentConfigurationSource: CoachContextSnapshotPort {
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         authority.contextGeneration == 1 &&
             authority.configurationGeneration == configurationGeneration
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard activeLeaseID == nil else { return .stale }
+        let current: Bool
+        switch authority {
+        case let .snapshot(snapshot):
+            current = await isCurrent(snapshot)
+        case let .configuration(generation):
+            current = generation == configurationGeneration
+        }
+        guard current else { return .stale }
+        let leaseID = UUID()
+        activeLeaseID = leaseID
+        return .acquired(
+            CoachContextAuthorityLease { [weak self] in
+                await self?.releaseLease(leaseID)
+            }
+        )
+    }
+
+    private func releaseLease(_ leaseID: UUID) {
+        guard activeLeaseID == leaseID else { return }
+        activeLeaseID = nil
+        let waiters = advancementWaiters
+        advancementWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 
     private func projectionPolicy() -> CoachAttachmentProjectionPolicy {
@@ -1042,9 +1160,14 @@ private actor MismatchedAttachmentAuthorityFixture:
         let stamp = replaced ? replacementStamp : originalStamp
         switch await base.quoteNewChat(request) {
         case let .available(quote):
-            return .available(quote, configuration: stamp)
+            return .available(
+                quote,
+                authority: ChatCreationQuoteAuthority(configuration: stamp)
+            )
         case .unavailable(.providerUnavailable):
-            return .providerUnavailable(configuration: stamp)
+            return .providerUnavailable(
+                authority: ChatCreationQuoteAuthority(configuration: stamp)
+            )
         case let .unavailable(reason):
             return .unavailable(reason)
         }
@@ -1054,6 +1177,15 @@ private actor MismatchedAttachmentAuthorityFixture:
         _ stamp: CoachContextConfigurationStamp
     ) async -> Bool {
         stamp == (replaced ? replacementStamp : originalStamp)
+    }
+
+    func acquireNewChatCreationLease(
+        _ authority: ChatCreationQuoteAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard authority.configuration == (replaced ? replacementStamp : originalStamp) else {
+            return .stale
+        }
+        return .acquired(CoachContextAuthorityLease())
     }
 
     func quoteNewChat(
@@ -1158,7 +1290,7 @@ private actor SuspendedAttachmentCatalogSource: ChatSessionAttachmentSource {
 }
 
 private actor AttachmentChatStoreFixture: ChatStorePort {
-    private(set) var createdSeed: NewDevelopmentChatSeed?
+    private(set) var createdSeed: NewChatSeed?
     private var existing: ChatAggregate?
     private(set) var mutationCount = 0
 
@@ -1169,7 +1301,7 @@ private actor AttachmentChatStoreFixture: ChatStorePort {
     func loadCatalog(in library: LibraryScope) async -> ChatCatalogOutcome {
         .loaded(existing.map { [.available($0)] } ?? [])
     }
-    func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome {
+    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
         mutationCount += 1
         createdSeed = seed
         existing = seed.aggregate
@@ -1246,27 +1378,24 @@ private struct AttachmentAutosaveFixture: ChatAutosaveScheduling {
 }
 
 private actor AttachmentCapacitySource: CoachContextSnapshotPort {
-    private let contextWindows: [Int]
+    private var contextWindow: Int
+    private var contextGeneration: UInt64 = 1
     private let transcriptBytes: Int
     private(set) var newChatResolutionCount = 0
 
     init(contextWindow: Int, transcriptBytes: Int = 32) {
-        contextWindows = [contextWindow]
+        self.contextWindow = contextWindow
         self.transcriptBytes = transcriptBytes
     }
 
-    init(contextWindows: [Int], transcriptBytes: Int = 32) {
-        precondition(!contextWindows.isEmpty)
-        self.contextWindows = contextWindows
-        self.transcriptBytes = transcriptBytes
+    func replaceContextWindow(_ replacement: Int) {
+        contextWindow = replacement
+        contextGeneration += 1
     }
 
     func resolveNewChat(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> CoachContextSnapshotOutcome {
-        let contextWindow = contextWindows[
-            min(newChatResolutionCount, contextWindows.count - 1)
-        ]
         newChatResolutionCount += 1
         do {
             let prepared = request.attachments.values.map { attachment in
@@ -1325,7 +1454,7 @@ private actor AttachmentCapacitySource: CoachContextSnapshotPort {
                             attachments: request.attachments,
                             creation: request.creation
                         ),
-                        contextGeneration: 1,
+                        contextGeneration: contextGeneration,
                         configurationGeneration: 1
                     )
                 )
@@ -1344,6 +1473,13 @@ private actor AttachmentCapacitySource: CoachContextSnapshotPort {
     ) async -> CoachContextSnapshotOutcome { .sourceUnavailable }
 
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
-        authority.contextGeneration == 1 && authority.configurationGeneration == 1
+        authority.contextGeneration == contextGeneration &&
+            authority.configurationGeneration == 1
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
     }
 }

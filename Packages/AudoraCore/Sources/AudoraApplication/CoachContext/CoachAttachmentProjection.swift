@@ -248,29 +248,22 @@ actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
         else {
             return .failed
         }
-        switch await evidenceSource.loadEvidence(in: library) {
-        case let .loaded(evidence):
-            var candidates: [ChatAttachmentCandidate] = []
-            candidates.reserveCapacity(evidence.count)
-            for item in evidence {
-                do {
-                    candidates.append(
-                        try configuration.policy
-                            .project(evidence: item)
-                            .makeCandidate()
-                    )
-                } catch is ChatAttachmentCandidateError {
-                    continue
-                } catch CoachAttachmentProjectionError.canonicalTranscriptTooLarge {
-                    continue
-                } catch {
-                    return .failed
-                }
-            }
+        let accumulator = ChatAttachmentCandidateProjectionAccumulator(
+            policy: configuration.policy
+        )
+        switch await evidenceSource.forEachEvidence(
+            in: library,
+            accumulator.visit
+        ) {
+        case .completed:
+            guard !Task.isCancelled else { return .failed }
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
                 return .configurationChanged
             }
-            return .loaded(candidates, configuration: configuration.stamp)
+            return .loaded(
+                accumulator.candidates,
+                configuration: configuration.stamp
+            )
         case .readOnlyLibrary:
             return .readOnlyLibrary
         case .failed:
@@ -288,36 +281,98 @@ actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
         else {
             return .failed
         }
-        switch await evidenceSource.resolveEvidence(attachments, in: library) {
-        case let .resolved(evidence):
-            do {
-                let resolved = try evidence.map { item in
-                    let resolution: ChatAttachmentResolution
-                    switch item.resolution {
-                    case let .available(value):
-                        let candidate = try configuration.policy
-                            .project(evidence: value)
-                            .makeCandidate()
-                        resolution = .available(candidate)
-                    case let .unavailable(reason):
-                        resolution = .unavailable(reason)
-                    }
-                    return try ResolvedChatAttachment(
-                        attachment: item.attachment,
-                        resolution: resolution
-                    )
-                }
-                guard await configurationAuthority.isCurrent(configuration.stamp) else {
-                    return .configurationChanged
-                }
-                return .resolved(resolved, configuration: configuration.stamp)
-            } catch {
-                return .failed
+        let accumulator = ResolvedChatAttachmentProjectionAccumulator(
+            policy: configuration.policy
+        )
+        switch await evidenceSource.forEachResolvedEvidence(
+            attachments,
+            in: library,
+            accumulator.visit
+        ) {
+        case .completed:
+            guard !Task.isCancelled else { return .failed }
+            guard await configurationAuthority.isCurrent(configuration.stamp) else {
+                return .configurationChanged
             }
+            return .resolved(
+                accumulator.resolutions,
+                configuration: configuration.stamp
+            )
         case .readOnlyLibrary:
             return .readOnlyLibrary
         case .failed:
             return .failed
         }
+    }
+}
+
+private final class ChatAttachmentCandidateProjectionAccumulator:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let policy: CoachAttachmentProjectionPolicy
+    private var projected: [ChatAttachmentCandidate] = []
+
+    init(policy: CoachAttachmentProjectionPolicy) {
+        self.policy = policy
+    }
+
+    func visit(_ evidence: ChatAttachmentEvidence) throws {
+        try Task.checkCancellation()
+        do {
+            let candidate = try policy.project(evidence: evidence).makeCandidate()
+            try lock.withLock {
+                guard projected.count < ChatAttachmentCandidate.maximumCatalogCount
+                else { throw ChatAttachmentCatalogError.tooManyCandidates }
+                projected.append(candidate)
+            }
+        } catch is ChatAttachmentCandidateError {
+            return
+        } catch CoachAttachmentProjectionError.canonicalTranscriptTooLarge {
+            return
+        }
+    }
+
+    var candidates: [ChatAttachmentCandidate] {
+        lock.withLock { projected }
+    }
+}
+
+private final class ResolvedChatAttachmentProjectionAccumulator:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let policy: CoachAttachmentProjectionPolicy
+    private var projected: [ResolvedChatAttachment] = []
+
+    init(policy: CoachAttachmentProjectionPolicy) {
+        self.policy = policy
+    }
+
+    func visit(_ item: ResolvedChatAttachmentEvidence) throws {
+        try Task.checkCancellation()
+        let resolution: ChatAttachmentResolution
+        switch item.resolution {
+        case let .available(evidence):
+            resolution = .available(
+                try policy.project(evidence: evidence).makeCandidate()
+            )
+        case let .unavailable(reason):
+            resolution = .unavailable(reason)
+        }
+        let value = try ResolvedChatAttachment(
+            attachment: item.attachment,
+            resolution: resolution
+        )
+        try lock.withLock {
+            guard projected.count < ChatAttachments.maximumCount else {
+                throw ChatAttachmentsError.tooManyAttachments
+            }
+            projected.append(value)
+        }
+    }
+
+    var resolutions: [ResolvedChatAttachment] {
+        lock.withLock { projected }
     }
 }

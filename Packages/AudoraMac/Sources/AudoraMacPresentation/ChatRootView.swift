@@ -110,7 +110,7 @@ public struct ChatRootView: View {
                     Button("New Chat") {
                         model.beginNewChat()
                     }
-                    .accessibilityLabel("Create New Development Chat")
+                    .accessibilityLabel("Create New Chat")
                     .disabled(!allowsNavigationAndMutation)
                 }
 

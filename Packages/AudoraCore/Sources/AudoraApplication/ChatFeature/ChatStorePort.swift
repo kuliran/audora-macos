@@ -2,7 +2,7 @@ import AudoraDomain
 
 public protocol ChatStorePort: Sendable {
     func loadCatalog(in library: LibraryScope) async -> ChatCatalogOutcome
-    func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome
+    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome
     func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome
     func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome
     func lockPendingUserTurn(
@@ -57,7 +57,7 @@ public protocol ProfileStatementGenerationReading: Sendable {
     func statementGeneration(in library: LibraryScope) async -> UInt64?
 }
 
-public struct NewDevelopmentChatSeed: Equatable, Sendable {
+public struct NewChatSeed: Equatable, Sendable {
     public let library: LibraryScope
     public let aggregate: ChatAggregate
 
@@ -71,7 +71,7 @@ public struct NewDevelopmentChatSeed: Equatable, Sendable {
         attachments: ChatAttachments = .empty
     ) throws {
         self.library = library
-        aggregate = try ChatAggregate.developmentChat(
+        aggregate = try ChatAggregate.newChat(
             chatID: chatID,
             draftID: draftID,
             memoryID: memoryID,

@@ -13,7 +13,7 @@ and publishes one immutable Session only after flush, atomic install, and strict
 reread. The portable Domain, Application, and Contracts products remain separate
 from the macOS-only Infrastructure and Presentation products.
 
-Development Chat also has a portable context-capacity coordinator. It projects
+Chat also has a portable context-capacity coordinator. It projects
 the current Profile, Coach Memory, complete successful history, Draft, framing,
 immutable attachments, one complete transcript-read exchange, response reserve,
 and safety margin through one deterministic serializer. Quotes are advisory; Send

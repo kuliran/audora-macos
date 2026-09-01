@@ -61,9 +61,12 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
 {
     private static let maximumManifestBytes = 65_536
     private static let maximumRevisionBytes = 256 * 1_024 * 1_024
+    private static let maximumChatEvidenceRevisionBytes =
+        ChatAttachmentEvidence.maximumLoadedRevisionBytes
 
     private let root: URL
     private let libraryID: LibraryID
+    private let chatEvidenceRevisionByteLimit: Int
     private let fault: @Sendable (TranscriptRevisionPersistenceFaultPoint) throws -> Void
 
     public init(
@@ -75,6 +78,24 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
     ) {
         self.root = root
         self.libraryID = libraryID
+        chatEvidenceRevisionByteLimit = Self.maximumChatEvidenceRevisionBytes
+        self.fault = fault
+    }
+
+    init(
+        root: URL,
+        libraryID: LibraryID,
+        chatEvidenceRevisionByteLimit: Int,
+        fault: @escaping @Sendable (TranscriptRevisionPersistenceFaultPoint) throws -> Void = {
+            _ in
+        }
+    ) {
+        self.root = root
+        self.libraryID = libraryID
+        self.chatEvidenceRevisionByteLimit = max(
+            0,
+            min(chatEvidenceRevisionByteLimit, Self.maximumRevisionBytes)
+        )
         self.fault = fault
     }
 
@@ -452,29 +473,34 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
     /// Lists only active Sessions and returns each currently selected immutable
     /// Transcript Revision as verified Domain evidence. Provider token and delivery
     /// policy belongs to the Application projection decorator.
-    func loadChatAttachmentEvidenceCatalogSynchronously() throws
-        -> [ChatAttachmentEvidence]
-    {
-        try activeSessionIDsSynchronously().compactMap { sessionID in
+    func forEachChatAttachmentEvidenceSynchronously(
+        _ visit: @Sendable (ChatAttachmentEvidence) throws -> Void
+    ) throws {
+        for sessionID in try activeSessionIDsSynchronously() {
+            try Task.checkCancellation()
             switch loadChatAttachmentSynchronously(
                 sessionID: sessionID,
                 transcriptRevisionID: nil
             ) {
-            case let .available(candidate): candidate
+            case let .available(candidate):
+                try visit(candidate)
             // One unreadable independent entity must not hide healthy Sessions
             // from a creation catalog. Every selected pin is re-resolved before
             // the Chat is installed.
-            case .unavailable: nil
+            case .unavailable:
+                continue
             }
         }
     }
 
     /// Reopens the exact historical revision pinned by a Chat, even if the
     /// Session later selects a different revision.
-    func resolveChatAttachmentEvidenceSynchronously(
-        _ attachments: ChatAttachments
-    ) -> [ResolvedChatAttachmentEvidence] {
-        attachments.values.map { attachment in
+    func forEachResolvedChatAttachmentEvidenceSynchronously(
+        _ attachments: ChatAttachments,
+        _ visit: @Sendable (ResolvedChatAttachmentEvidence) throws -> Void
+    ) throws {
+        for attachment in attachments.values {
+            try Task.checkCancellation()
             let read = loadChatAttachmentSynchronously(
                 sessionID: attachment.sessionID,
                 transcriptRevisionID: attachment.transcriptRevisionID
@@ -484,9 +510,11 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             case let .available(evidence): resolution = .available(evidence)
             case let .unavailable(reason): resolution = .unavailable(reason)
             }
-            return try! ResolvedChatAttachmentEvidence(
-                attachment: attachment,
-                resolution: resolution
+            try visit(
+                ResolvedChatAttachmentEvidence(
+                    attachment: attachment,
+                    resolution: resolution
+                )
             )
         }
     }
@@ -624,7 +652,8 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     expectedSHA256: expectedSHA256,
                     sessionID: sessionID,
                     audio: loaded.audio,
-                    under: transcripts
+                    under: transcripts,
+                    maximumRevisionBytes: chatEvidenceRevisionByteLimit
                 )
                 defer { Darwin.close(installed.authority.descriptor) }
                 try fault(.beforeChatAttachmentFinalRevalidation)
@@ -1080,7 +1109,8 @@ private extension PortableTranscriptRevisionRepository {
         expectedSHA256: String?,
         sessionID: SessionID,
         audio: TrustedSessionAudio,
-        under transcriptsDescriptor: Int32
+        under transcriptsDescriptor: Int32,
+        maximumRevisionBytes: Int = Self.maximumRevisionBytes
     ) throws -> LoadedInstalledRevision {
         let revisionDescriptor = try readConfined.openDirectory(
             named: revisionID.rawValue,
@@ -1099,7 +1129,7 @@ private extension PortableTranscriptRevisionRepository {
             let revisionData = try readConfined.boundedData(
                 named: "revision.json",
                 under: revisionDescriptor,
-                maximumBytes: Self.maximumRevisionBytes
+                maximumBytes: maximumRevisionBytes
             )
             let detachedData = try readConfined.boundedData(
                 named: "revision.sha256",

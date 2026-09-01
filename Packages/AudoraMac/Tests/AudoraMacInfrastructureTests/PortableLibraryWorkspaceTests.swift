@@ -916,8 +916,8 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         )
     }
 
-    private func makeChatSeed(scope: LibraryScope) throws -> NewDevelopmentChatSeed {
-        try NewDevelopmentChatSeed(
+    private func makeChatSeed(scope: LibraryScope) throws -> NewChatSeed {
+        try NewChatSeed(
             library: scope,
             chatID: ChatID("cht-20260830T120000000Z-2ABC"),
             draftID: ChatDraftID("drf-20260830T120000000Z-3DEF"),

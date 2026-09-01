@@ -59,8 +59,7 @@ for forbidden_symbol in \
   ChatAttachmentEvidence \
   ChatAttachmentEvidenceResolution \
   ResolvedChatAttachmentEvidence \
-  ChatAttachmentEvidenceCatalogOutcome \
-  ChatAttachmentEvidenceResolutionOutcome \
+  ChatAttachmentEvidenceTraversalOutcome \
   ChatSessionAttachmentEvidenceSource \
   CompleteToolResponseBudgetError \
   CompleteToolResponseBudget \

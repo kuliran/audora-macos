@@ -328,6 +328,12 @@ private struct UnconfiguredProviderUnavailableSnapshotPort:
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         false
     }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        .stale
+    }
 }
 
 private actor RecordingCoachContextSnapshotPort: CoachContextSnapshotPort {
@@ -410,6 +416,12 @@ private actor RecordingCoachContextSnapshotPort: CoachContextSnapshotPort {
 
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         authority.contextGeneration == 1 && authority.configurationGeneration == 1
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
     }
 
     private func snapshot(
@@ -524,6 +536,12 @@ private actor SuspendingAuthoritySnapshotPort: CoachContextSnapshotPort {
             authority.configurationGeneration == configurationGeneration
     }
 
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
+    }
+
     func waitUntilValidationStarts() async {
         guard !validationStarted else { return }
         await withCheckedContinuation { continuation in
@@ -607,5 +625,11 @@ private actor WrongBindingSnapshotPort: CoachContextSnapshotPort {
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         validationCount += 1
         return true
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
     }
 }

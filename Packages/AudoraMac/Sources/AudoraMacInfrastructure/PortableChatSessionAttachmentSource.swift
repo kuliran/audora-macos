@@ -11,18 +11,20 @@ public actor PortableChatSessionAttachmentSource: ChatSessionAttachmentEvidenceS
         self.workspace = workspace
     }
 
-    public func loadEvidence(
-        in library: LibraryScope
-    ) async -> ChatAttachmentEvidenceCatalogOutcome {
-        let result: ActiveLibraryOperationResult<ChatAttachmentEvidenceCatalogOutcome> =
+    public func forEachEvidence(
+        in library: LibraryScope,
+        _ visit: @escaping @Sendable (ChatAttachmentEvidence) throws -> Void
+    ) async -> ChatAttachmentEvidenceTraversalOutcome {
+        let result: ActiveLibraryOperationResult<ChatAttachmentEvidenceTraversalOutcome> =
             await workspace.performActiveReadWriteOperation(in: library) { root in
                 do {
-                    return .loaded(
-                        try PortableTranscriptRevisionRepository(
-                            root: root,
-                            libraryID: library.libraryID
-                        ).loadChatAttachmentEvidenceCatalogSynchronously()
+                    try PortableTranscriptRevisionRepository(
+                        root: root,
+                        libraryID: library.libraryID
+                    ).forEachChatAttachmentEvidenceSynchronously(
+                        visit
                     )
+                    return .completed
                 } catch {
                     return .failed
                 }
@@ -34,18 +36,25 @@ public actor PortableChatSessionAttachmentSource: ChatSessionAttachmentEvidenceS
         }
     }
 
-    public func resolveEvidence(
+    public func forEachResolvedEvidence(
         _ attachments: ChatAttachments,
-        in library: LibraryScope
-    ) async -> ChatAttachmentEvidenceResolutionOutcome {
-        let result: ActiveLibraryOperationResult<ChatAttachmentEvidenceResolutionOutcome> =
+        in library: LibraryScope,
+        _ visit: @escaping @Sendable (ResolvedChatAttachmentEvidence) throws -> Void
+    ) async -> ChatAttachmentEvidenceTraversalOutcome {
+        let result: ActiveLibraryOperationResult<ChatAttachmentEvidenceTraversalOutcome> =
             await workspace.performActiveReadWriteOperation(in: library) { root in
-                .resolved(
-                    PortableTranscriptRevisionRepository(
+                do {
+                    try PortableTranscriptRevisionRepository(
                         root: root,
                         libraryID: library.libraryID
-                    ).resolveChatAttachmentEvidenceSynchronously(attachments)
-                )
+                    ).forEachResolvedChatAttachmentEvidenceSynchronously(
+                        attachments,
+                        visit
+                    )
+                    return .completed
+                } catch {
+                    return .failed
+                }
             }
         switch result {
         case let .performed(outcome): return outcome

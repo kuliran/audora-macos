@@ -17,7 +17,6 @@
     {"port": "attachmentSource", "effect": "loadCandidates", "outcome": "loaded", "candidates": []},
     {"port": "coachContext", "effect": "quoteNewChat", "outcome": "available", "fits": true},
     {"port": "attachmentSource", "effect": "resolveAttachments", "outcome": "resolved", "resolutions": []},
-    {"port": "coachContext", "effect": "quoteNewChat", "outcome": "available", "fits": true},
     {"port": "profileHead", "effect": "readStatementGeneration", "outcome": 0},
     {"port": "clock", "effect": "now", "outcome": "2026-08-30T12:00:00.000Z"},
     {"port": "chatIdGenerator", "effect": "next", "outcome": "cht-20260830T120000000Z-2ABC"},

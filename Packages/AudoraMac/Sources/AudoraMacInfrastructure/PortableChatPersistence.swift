@@ -200,7 +200,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
     }
 
     public func create(
-        _ seed: NewDevelopmentChatSeed,
+        _ seed: NewChatSeed,
         at libraryRoot: URL
     ) throws -> ChatAggregate {
         let rootDescriptor = try openLibraryRoot(
@@ -824,7 +824,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
     }
 
     fileprivate func reconcileCommittedCreate(
-        _ seed: NewDevelopmentChatSeed,
+        _ seed: NewChatSeed,
         at libraryRoot: URL
     ) throws -> ChatAggregate? {
         let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: seed.library)
@@ -2013,7 +2013,7 @@ public actor PortableChatStore: ChatStorePort {
         }
     }
 
-    public func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome {
+    public func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
         let result: ActiveLibraryOperationResult<ChatMutationOutcome> =
             await workspace.performActiveReadWriteOperation(in: seed.library) { root in
             do {

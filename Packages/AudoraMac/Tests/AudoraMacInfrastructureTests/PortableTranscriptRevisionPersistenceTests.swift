@@ -47,6 +47,62 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
         }
     }
 
+    func testExactChatAttachmentTraversalStopsAfterCancellation() async throws {
+        try await withRecordedSession { root, receipt in
+            let first = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121000000Z-4FGH"
+            )
+            let second = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121100000Z-5GHJ"
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                first,
+                expectedSelectedRevisionID: nil
+            )
+            _ = try await repository.publishAndSelect(
+                second,
+                expectedSelectedRevisionID: first.revisionID
+            )
+            let attachments = try ChatAttachments(validating: [
+                ChatSessionAttachment(
+                    attachmentID: try ChatSessionAttachmentID("attachment-1"),
+                    sessionID: receipt.sessionID,
+                    transcriptRevisionID: first.revisionID
+                ),
+                ChatSessionAttachment(
+                    attachmentID: try ChatSessionAttachmentID("attachment-2"),
+                    sessionID: receipt.sessionID,
+                    transcriptRevisionID: second.revisionID
+                ),
+            ])
+            let visited = TestEvidenceCollector<ResolvedChatAttachmentEvidence>()
+
+            let traversal = Task {
+                try repository.forEachResolvedChatAttachmentEvidenceSynchronously(
+                    attachments
+                ) { evidence in
+                    visited.append(evidence)
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+
+            do {
+                try await traversal.value
+                XCTFail("cancellation must stop exact evidence traversal")
+            } catch is CancellationError {
+                // Expected after the first full Revision has been projected.
+            }
+            XCTAssertEqual(visited.values.count, 1)
+            XCTAssertEqual(visited.values[0].attachment, attachments.values[0])
+        }
+    }
+
     func testChatAttachmentReportsMissingExactRevisionWithoutChangingItsPin() async throws {
         try await withRecordedSession { root, receipt in
             let revision = try transcriptRevision(for: receipt)
@@ -176,6 +232,30 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
             XCTAssertEqual(catalog.count, 1)
             XCTAssertEqual(catalog[0].sessionID, receipt.sessionID)
             XCTAssertEqual(catalog[0].transcriptRevisionID, revision.revisionID)
+        }
+    }
+
+    func testChatAttachmentTraversalAppliesItsReadBoundBeforeProjection()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            _ = try await PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            ).publishAndSelect(revision, expectedSelectedRevisionID: nil)
+            let bounded = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID,
+                chatEvidenceRevisionByteLimit: 1
+            )
+            let visited = TestEvidenceCollector<ChatAttachmentEvidence>()
+
+            try bounded.forEachChatAttachmentEvidenceSynchronously {
+                visited.append($0)
+            }
+
+            XCTAssertTrue(visited.values.isEmpty)
         }
     }
 
@@ -419,7 +499,7 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
             }
 
             let instant = try UTCInstant("2026-08-30T12:20:00.000Z")
-            let seed = try NewDevelopmentChatSeed(
+            let seed = try NewChatSeed(
                 library: LibraryScope(libraryID: receipt.libraryID),
                 chatID: ChatID("cht-20260830T122000000Z-6PQR"),
                 draftID: ChatDraftID("drf-20260830T122000000Z-7STV"),
@@ -2200,4 +2280,37 @@ private func createEmptyLibrary(at root: URL, libraryID: LibraryID) throws {
 
 private extension SHA256.Digest {
     var hexLowercase: String { map { String(format: "%02x", $0) }.joined() }
+}
+
+private extension PortableTranscriptRevisionRepository {
+    func loadChatAttachmentEvidenceCatalogSynchronously() throws
+        -> [ChatAttachmentEvidence]
+    {
+        let evidence = TestEvidenceCollector<ChatAttachmentEvidence>()
+        try forEachChatAttachmentEvidenceSynchronously { evidence.append($0) }
+        return evidence.values
+    }
+
+    func resolveChatAttachmentEvidenceSynchronously(
+        _ attachments: ChatAttachments
+    ) -> [ResolvedChatAttachmentEvidence] {
+        let evidence = TestEvidenceCollector<ResolvedChatAttachmentEvidence>()
+        try! forEachResolvedChatAttachmentEvidenceSynchronously(
+            attachments
+        ) { evidence.append($0) }
+        return evidence.values
+    }
+}
+
+private final class TestEvidenceCollector<Element: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Element] = []
+
+    func append(_ value: Element) {
+        lock.withLock { storage.append(value) }
+    }
+
+    var values: [Element] {
+        lock.withLock { storage }
+    }
 }

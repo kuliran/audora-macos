@@ -548,7 +548,7 @@ final class ChatPresentationModelTests: XCTestCase {
         title: String
     ) throws -> ChatAggregate {
         let instant = try UTCInstant("2026-08-30T12:00:00.000Z")
-        let seed = try NewDevelopmentChatSeed(
+        let seed = try NewChatSeed(
             library: scope,
             chatID: ChatID(chatID),
             draftID: ChatDraftID(draftID),

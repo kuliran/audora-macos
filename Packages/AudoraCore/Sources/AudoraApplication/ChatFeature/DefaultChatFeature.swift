@@ -31,7 +31,6 @@ private enum DraftSaveDisposition: Equatable, Sendable {
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 public actor DefaultChatFeature: ChatFeature {
     private static let maximumCollisionAttempts = 3
-    private static let maximumProfileRebases = 3
     public static let draftAutosaveIntervalNanoseconds: UInt64 = 2_000_000_000
 
     private let store: any ChatStorePort
@@ -50,6 +49,7 @@ public actor DefaultChatFeature: ChatFeature {
     private var newChatAttachmentFilterQuery = ChatAttachmentFilterQuery.empty
     private var newChatAttachmentConfigurationStamp:
         CoachContextConfigurationStamp?
+    private var newChatCreationQuoteAuthority: ChatCreationQuoteAuthority?
     private var state = ChatFeatureState()
     private var operationInFlight = false
     private var operationIdleWaiters: [CheckedContinuation<Void, Never>] = []
@@ -315,6 +315,7 @@ public actor DefaultChatFeature: ChatFeature {
         guard isActive(context), case .ready = state.catalog else { return }
         newChatAttachmentFilterQuery = .empty
         newChatAttachmentConfigurationStamp = nil
+        newChatCreationQuoteAuthority = nil
         state = replacing(
             newChatPicker: .loading,
             activity: nil,
@@ -347,6 +348,7 @@ public actor DefaultChatFeature: ChatFeature {
                 await quoteNewChatSelection(snapshot, context: context)
             } catch {
                 newChatAttachmentConfigurationStamp = nil
+                newChatCreationQuoteAuthority = nil
                 state = replacing(
                     newChatPicker: .failed,
                     activity: nil,
@@ -363,6 +365,7 @@ public actor DefaultChatFeature: ChatFeature {
             )
         case .configurationChanged:
             newChatAttachmentConfigurationStamp = nil
+            newChatCreationQuoteAuthority = nil
             state = replacing(
                 newChatPicker: .failed,
                 activity: nil,
@@ -371,6 +374,7 @@ public actor DefaultChatFeature: ChatFeature {
             publish()
         case .readOnlyLibrary:
             newChatAttachmentConfigurationStamp = nil
+            newChatCreationQuoteAuthority = nil
             state = replacing(
                 newChatPicker: .failed,
                 activity: nil,
@@ -379,6 +383,7 @@ public actor DefaultChatFeature: ChatFeature {
             publish()
         case .failed:
             newChatAttachmentConfigurationStamp = nil
+            newChatCreationQuoteAuthority = nil
             state = replacing(
                 newChatPicker: .failed,
                 activity: nil,
@@ -447,6 +452,7 @@ public actor DefaultChatFeature: ChatFeature {
             feasibility: .quoting,
             issue: nil
         )
+        newChatCreationQuoteAuthority = nil
         state = replacing(
             newChatPicker: .ready(replacement),
             activity: state.activity,
@@ -460,6 +466,7 @@ public actor DefaultChatFeature: ChatFeature {
         guard isActive(context) else { return }
         newChatAttachmentFilterQuery = .empty
         newChatAttachmentConfigurationStamp = nil
+        newChatCreationQuoteAuthority = nil
         state = replacing(
             newChatPicker: .closed,
             activity: state.activity,
@@ -472,8 +479,17 @@ public actor DefaultChatFeature: ChatFeature {
         guard isActive(context), case let .ready(snapshot) = state.newChatPicker,
               snapshot.permitsConfirmation,
               let attachments = try? selectedAttachments(in: snapshot),
-              let expectedConfiguration = newChatAttachmentConfigurationStamp
+              let expectedConfiguration = newChatAttachmentConfigurationStamp,
+              let quoteAuthority = newChatCreationQuoteAuthority
         else { return }
+        guard quoteAuthority.configuration == expectedConfiguration else {
+            await refreshNewChatPickerForConfigurationChange(
+                preserving: attachments,
+                context: context,
+                remainingQuoteRefreshAttempts: 0
+            )
+            return
+        }
         let resolution = await coachContext.resolveAttachments(
             attachments,
             in: context.libraryScope
@@ -510,60 +526,10 @@ public actor DefaultChatFeature: ChatFeature {
             updatePickerIssue(.attachmentUnavailable)
             return
         }
-
-        let quote = await authoritativeCreationQuote(
-            attachments: attachments,
-            context: context
-        )
-        guard isCurrent(context) else { return }
-        switch quote {
-        case let .available(_, configuration)
-            where configuration != expectedConfiguration:
-            await refreshNewChatPickerForConfigurationChange(
-                preserving: attachments,
-                context: context,
-                remainingQuoteRefreshAttempts: 0
-            )
-            return
-        case let .available(value, _) where !value.context.fits:
-            updatePickerFeasibility(
-                .available(value),
-                issue: .contextCannotFit
-            )
-            return
-        case let .providerUnavailable(configuration)
-            where configuration != expectedConfiguration:
-            await refreshNewChatPickerForConfigurationChange(
-                preserving: attachments,
-                context: context,
-                remainingQuoteRefreshAttempts: 0
-            )
-            return
-        case .providerUnavailable:
-            break
-        case let .unavailable(reason):
-            updatePickerFeasibility(
-                .unavailable(reason),
-                issue: .contextUnavailable(reason)
-            )
-            return
-        case .available:
-            break
-        }
-        guard await coachContext.isCurrentAttachmentConfiguration(
-            expectedConfiguration
-        ) else {
-            await refreshNewChatPickerForConfigurationChange(
-                preserving: attachments,
-                context: context,
-                remainingQuoteRefreshAttempts: 0
-            )
-            return
-        }
-        await createDevelopmentChat(
+        await createNewChat(
             context: context,
             attachments: attachments,
-            expectedConfiguration: expectedConfiguration
+            quoteAuthority: quoteAuthority
         )
     }
 
@@ -572,6 +538,7 @@ public actor DefaultChatFeature: ChatFeature {
         context: ChatCommandContext,
         remainingConfigurationRefreshAttempts: Int = 1
     ) async {
+        newChatCreationQuoteAuthority = nil
         guard let attachments = try? selectedAttachments(in: expected),
               let expectedConfiguration = newChatAttachmentConfigurationStamp
         else {
@@ -589,8 +556,8 @@ public actor DefaultChatFeature: ChatFeature {
               current.selectedAttachmentIDs == expected.selectedAttachmentIDs
         else { return }
         switch outcome {
-        case let .available(quote, configuration):
-            guard configuration == expectedConfiguration else {
+        case let .available(quote, authority):
+            guard authority.configuration == expectedConfiguration else {
                 if remainingConfigurationRefreshAttempts > 0 {
                     await refreshNewChatPickerForConfigurationChange(
                         preserving: attachments,
@@ -606,12 +573,13 @@ public actor DefaultChatFeature: ChatFeature {
                 }
                 return
             }
+            newChatCreationQuoteAuthority = authority
             updatePickerFeasibility(
                 .available(quote),
                 issue: quote.context.fits ? nil : .contextCannotFit
             )
-        case let .providerUnavailable(configuration):
-            guard configuration == expectedConfiguration else {
+        case let .providerUnavailable(authority):
+            guard authority.configuration == expectedConfiguration else {
                 if remainingConfigurationRefreshAttempts > 0 {
                     await refreshNewChatPickerForConfigurationChange(
                         preserving: attachments,
@@ -627,8 +595,10 @@ public actor DefaultChatFeature: ChatFeature {
                 }
                 return
             }
+            newChatCreationQuoteAuthority = authority
             updatePickerFeasibility(.unavailable(.providerUnavailable), issue: nil)
         case let .unavailable(reason):
+            newChatCreationQuoteAuthority = nil
             updatePickerFeasibility(
                 .unavailable(reason),
                 issue: .contextUnavailable(reason)
@@ -661,6 +631,7 @@ public actor DefaultChatFeature: ChatFeature {
         context: ChatCommandContext,
         remainingQuoteRefreshAttempts: Int
     ) async {
+        newChatCreationQuoteAuthority = nil
         let outcome = await coachContext.loadAttachmentCandidates(
             in: context.libraryScope
         )
@@ -820,6 +791,7 @@ public actor DefaultChatFeature: ChatFeature {
             )
             newChatAttachmentFilterQuery = .empty
             newChatAttachmentConfigurationStamp = nil
+            newChatCreationQuoteAuthority = nil
             publish()
             await start(in: context)
         }
@@ -862,115 +834,172 @@ public actor DefaultChatFeature: ChatFeature {
         publish()
     }
 
-    private func createDevelopmentChat(
+    private func createNewChat(
         context: ChatCommandContext,
         attachments: ChatAttachments,
-        expectedConfiguration: CoachContextConfigurationStamp
+        quoteAuthority: ChatCreationQuoteAuthority
     ) async {
         guard isActive(context), case .ready = state.catalog else { return }
         guard await flushSelectedDraft(in: context) else { return }
+        let leaseOutcome = await coachContext.acquireNewChatCreationLease(
+            quoteAuthority
+        )
+        guard isActive(context) else {
+            if case let .acquired(lease) = leaseOutcome {
+                await lease.release()
+            }
+            return
+        }
+        guard case let .acquired(lease) = leaseOutcome else {
+            await requoteNewChatAfterAuthorityChange(
+                attachments: attachments,
+                context: context
+            )
+            return
+        }
         let library = context.libraryScope
-        state = replacing(activity: .creating, notice: nil)
-        publish()
-
-        let observedStatementGeneration = await profileReader.statementGeneration(in: library)
-        guard isActive(context) else { return }
-        guard var statementGeneration = observedStatementGeneration else {
+        let observedStatementGeneration = await profileReader.statementGeneration(
+            in: library
+        )
+        guard isActive(context) else {
+            await lease.release()
+            return
+        }
+        guard let profileStatementGeneration = observedStatementGeneration else {
+            await lease.release()
             state = replacing(activity: nil, notice: .createFailed)
             publish()
             return
         }
+        state = replacing(activity: .creating, notice: nil)
+        publish()
+
         let instant = await clock.now()
-        guard isActive(context) else { return }
+        guard isActive(context) else {
+            await lease.release()
+            return
+        }
 
         var collisionAttempts = 0
-        var profileRebases = 0
+        let outcome: ChatMutationOutcome
         while true {
             let chatID = await chatIDGenerator.generateChatID(at: instant)
-            guard isActive(context) else { return }
+            guard isActive(context) else {
+                await lease.release()
+                return
+            }
             let draftID = await draftIDGenerator.generateChatDraftID(at: instant)
-            guard isActive(context) else { return }
+            guard isActive(context) else {
+                await lease.release()
+                return
+            }
             let memoryID = await memoryIDGenerator.generateCoachMemoryID(at: instant)
-            guard isActive(context) else { return }
-            let seed: NewDevelopmentChatSeed
+            guard isActive(context) else {
+                await lease.release()
+                return
+            }
+            let seed: NewChatSeed
             do {
-                seed = try NewDevelopmentChatSeed(
+                seed = try NewChatSeed(
                     library: library,
                     chatID: chatID,
                     draftID: draftID,
                     memoryID: memoryID,
                     instant: instant,
-                    profileStatementGeneration: statementGeneration,
+                    profileStatementGeneration: profileStatementGeneration,
                     attachments: attachments
                 )
             } catch {
-                state = replacing(activity: nil, notice: .createFailed)
-                publish()
-                return
+                outcome = .failed
+                break
             }
 
-            guard await coachContext.isCurrentAttachmentConfiguration(
-                expectedConfiguration
-            ) else {
-                state = replacing(activity: nil, notice: nil)
-                publish()
-                await refreshNewChatPickerForConfigurationChange(
-                    preserving: attachments,
-                    context: context,
-                    remainingQuoteRefreshAttempts: 0
-                )
-                return
-            }
-
-            let outcome = await store.create(seed)
-            guard isActive(context) else { return }
-            switch outcome {
-            case let .committed(committed):
-                newChatAttachmentFilterQuery = .empty
-                newChatAttachmentConfigurationStamp = nil
-                state = replacing(
-                    newChatPicker: .closed,
-                    activity: state.activity,
-                    notice: state.notice
-                )
-                install(committed, selection: .open(committed), notice: nil)
-                await resolveOpenedAttachments(for: committed, context: context)
-                await refreshContextAdvisory(
-                    for: committed,
-                    draft: committed.chat.draft,
-                    context: context
-                )
-                return
+            let attempt = await store.create(seed)
+            switch attempt {
             case .collision:
                 collisionAttempts += 1
                 guard collisionAttempts < Self.maximumCollisionAttempts else {
-                    state = replacing(activity: nil, notice: .createCollisionLimitReached)
-                    publish()
-                    return
+                    outcome = .collision
+                    break
                 }
                 continue
-            case let .profileStatementGenerationChanged(current):
-                profileRebases += 1
-                guard profileRebases < Self.maximumProfileRebases else {
-                    state = replacing(activity: nil, notice: .createFailed)
-                    publish()
-                    return
-                }
-                statementGeneration = current
-                continue
-            case let .frozen(frozen):
-                install(frozen, selection: .frozen(frozen), notice: .chatFrozen)
-                return
-            case .readOnlyLibrary:
-                state = replacing(activity: nil, notice: .readOnlyLibrary)
-                publish()
-                return
-            case .stale, .failed:
-                state = replacing(activity: nil, notice: .createFailed)
-                publish()
-                return
+            default:
+                outcome = attempt
             }
+            break
         }
+        await lease.release()
+        guard isActive(context) else { return }
+        switch outcome {
+        case let .committed(committed):
+            newChatAttachmentFilterQuery = .empty
+            newChatAttachmentConfigurationStamp = nil
+            newChatCreationQuoteAuthority = nil
+            state = replacing(
+                newChatPicker: .closed,
+                activity: state.activity,
+                notice: state.notice
+            )
+            install(committed, selection: .open(committed), notice: nil)
+            await resolveOpenedAttachments(for: committed, context: context)
+            await refreshContextAdvisory(
+                for: committed,
+                draft: committed.chat.draft,
+                context: context
+            )
+            return
+        case .collision:
+            state = replacing(activity: nil, notice: .createCollisionLimitReached)
+            publish()
+            return
+        case .profileStatementGenerationChanged:
+            await requoteNewChatAfterAuthorityChange(
+                attachments: attachments,
+                context: context
+            )
+            return
+        case let .frozen(frozen):
+            install(frozen, selection: .frozen(frozen), notice: .chatFrozen)
+            return
+        case .readOnlyLibrary:
+            state = replacing(activity: nil, notice: .readOnlyLibrary)
+            publish()
+            return
+        case .stale, .failed:
+            state = replacing(activity: nil, notice: .createFailed)
+            publish()
+            return
+        }
+    }
+
+    private func requoteNewChatAfterAuthorityChange(
+        attachments: ChatAttachments,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context), case let .ready(snapshot) = state.newChatPicker,
+              let selected = try? selectedAttachments(in: snapshot),
+              selected == attachments
+        else {
+            state = replacing(activity: nil, notice: .createFailed)
+            publish()
+            return
+        }
+        let requoting = ChatAttachmentPickerSnapshot(
+            allRows: snapshot.allRows,
+            visibleRows: snapshot.visibleRows,
+            selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
+            filterQuery: snapshot.filterQuery,
+            feasibility: .quoting,
+            issue: nil
+        )
+        newChatCreationQuoteAuthority = nil
+        state = replacing(
+            newChatPicker: .ready(requoting),
+            activity: nil,
+            notice: nil
+        )
+        publish()
+        await quoteNewChatSelection(requoting, context: context)
     }
 
     private func rename(

@@ -538,7 +538,7 @@ public struct ChatAggregate: Equatable, Sendable {
         instant: UTCInstant,
         profileStatementGeneration: UInt64
     ) throws -> ChatAggregate {
-        try developmentChat(
+        try newChat(
             chatID: chatID,
             draftID: draftID,
             memoryID: memoryID,
@@ -548,7 +548,7 @@ public struct ChatAggregate: Equatable, Sendable {
         )
     }
 
-    public static func developmentChat(
+    public static func newChat(
         chatID: ChatID,
         draftID: ChatDraftID,
         memoryID: CoachMemoryID,
