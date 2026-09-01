@@ -180,12 +180,14 @@ namespace Audora.Contracts {
     catalogFailed: ChatStoreCatalogFailedEvent,
     attachmentCatalogLoaded: NewChatAttachmentCatalogLoadedEvent,
     attachmentCatalogReadOnly: NewChatAttachmentCatalogReadOnlyEvent,
+    attachmentCatalogQualifiedConfigurationUnavailable: NewChatAttachmentCatalogQualifiedConfigurationUnavailableEvent,
     attachmentCatalogFailed: NewChatAttachmentCatalogFailedEvent,
     newChatQuoteAvailable: NewChatQuoteAvailableEvent,
     newChatQuoteUnavailable: NewChatQuoteUnavailableEvent,
     newChatQuoteCancelled: NewChatQuoteCancelledEvent,
     chatAttachmentsResolved: ChatAttachmentsResolvedEvent,
     chatAttachmentResolutionReadOnly: ChatAttachmentResolutionReadOnlyEvent,
+    chatAttachmentResolutionQualifiedConfigurationUnavailable: ChatAttachmentResolutionQualifiedConfigurationUnavailableEvent,
     chatAttachmentResolutionFailed: ChatAttachmentResolutionFailedEvent,
     chatAttachmentResolutionCancelled: ChatAttachmentResolutionCancelledEvent,
     chatLoaded: ChatStoreChatLoadedEvent,
@@ -346,6 +348,12 @@ namespace Audora.Contracts {
     outcome: "readOnlyLibrary";
   }
 
+  model NewChatAttachmentCatalogQualifiedConfigurationUnavailableEvent {
+    port: "attachmentSource";
+    effect: "loadCandidates";
+    outcome: "qualifiedConfigurationUnavailable";
+  }
+
   model NewChatAttachmentCatalogFailedEvent {
     port: "attachmentSource";
     effect: "loadCandidates";
@@ -384,6 +392,12 @@ namespace Audora.Contracts {
     port: "attachmentSource";
     effect: "resolveAttachments";
     outcome: "readOnlyLibrary";
+  }
+
+  model ChatAttachmentResolutionQualifiedConfigurationUnavailableEvent {
+    port: "attachmentSource";
+    effect: "resolveAttachments";
+    outcome: "qualifiedConfigurationUnavailable";
   }
 
   model ChatAttachmentResolutionFailedEvent {
@@ -650,6 +664,7 @@ namespace Audora.Contracts {
     coachContextUnavailable: "coachContextUnavailable",
     messageMustBeShortened: "messageMustBeShortened",
     attachmentCatalogFailed: "attachmentCatalogFailed",
+    qualifiedCoachConfigurationUnavailable: "qualifiedCoachConfigurationUnavailable",
   }
 
   @minLength(1)

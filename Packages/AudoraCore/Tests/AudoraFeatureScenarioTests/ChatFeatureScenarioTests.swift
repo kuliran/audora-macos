@@ -1246,6 +1246,8 @@ private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
             }
         case "readOnlyLibrary":
             return .readOnlyLibrary
+        case "qualifiedConfigurationUnavailable":
+            return .qualifiedConfigurationUnavailable
         default:
             return .failed
         }
@@ -1281,6 +1283,8 @@ private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
             }
         case "readOnlyLibrary":
             return .readOnlyLibrary
+        case "qualifiedConfigurationUnavailable":
+            return .qualifiedConfigurationUnavailable
         default:
             return .failed
         }

@@ -2,8 +2,12 @@
 @_spi(CoachContextQualification) import AudoraApplication
 import AudoraDomain
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
+
+@_silgen_name("flock")
+private func attachmentFenceTestFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 
 final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
     func testChatCreateRejectsAttachmentMovedToTrashAtFinalInstallBoundary()
@@ -33,19 +37,15 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 profileStatementGeneration: 0,
                 attachments: ChatAttachments(validating: [attachment])
             )
-            let activeSession = root.appendingPathComponent(
-                "sessions/\(receipt.sessionID.rawValue)",
-                isDirectory: true
-            )
             let trashedSession = root.appendingPathComponent(
                 "trash/sessions/\(receipt.sessionID.rawValue)",
                 isDirectory: true
             )
             let persistence = PortableChatPersistence { point in
                 guard point == .beforeFinalInstall else { return }
-                try FileManager.default.moveItem(
-                    at: activeSession,
-                    to: trashedSession
+                try CooperatingSessionTrashMove.moveSynchronously(
+                    root: root,
+                    sessionID: receipt.sessionID
                 )
             }
 
@@ -68,6 +68,132 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                     atPath: root.appendingPathComponent("staging/publications").path
                 ),
                 []
+            )
+        }
+    }
+
+    func testChatCreateRejectsConfiguredRootSubstitutionAfterAttachmentValidation()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let revisions = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try revisions.publishAndSelectSynchronously(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            let attachment = ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-1"),
+                sessionID: receipt.sessionID,
+                transcriptRevisionID: revision.revisionID
+            )
+            let seed = try NewChatSeed(
+                library: LibraryScope(libraryID: receipt.libraryID),
+                chatID: ChatID("cht-20260830T122000000Z-7STV"),
+                draftID: ChatDraftID("drf-20260830T122000000Z-8TVW"),
+                memoryID: CoachMemoryID("mem-20260830T122000000Z-9VWX"),
+                instant: UTCInstant("2026-08-30T12:20:00.000Z"),
+                profileStatementGeneration: 0,
+                attachments: ChatAttachments(validating: [attachment])
+            )
+            let parent = root.deletingLastPathComponent()
+            let replacement = parent.appendingPathComponent(
+                "Replacement.audoralibrary",
+                isDirectory: true
+            )
+            let displaced = parent.appendingPathComponent(
+                "Displaced.audoralibrary",
+                isDirectory: true
+            )
+            try FileManager.default.copyItem(at: root, to: replacement)
+            let persistence = PortableChatPersistence { point in
+                guard point == .afterAttachmentValidation else { return }
+                try FileManager.default.moveItem(at: root, to: displaced)
+                try FileManager.default.moveItem(at: replacement, to: root)
+            }
+
+            XCTAssertThrowsError(try persistence.create(seed, at: root)) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .invalidLayout
+                )
+            }
+            let relativeChat = "chats/\(seed.aggregate.chat.id.rawValue)"
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: root.appendingPathComponent(relativeChat).path
+                )
+            )
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: displaced.appendingPathComponent(relativeChat).path
+                )
+            )
+        }
+    }
+
+    func testChatCreateHoldsSharedSessionFenceFromValidationThroughInstall()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let revisions = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try revisions.publishAndSelectSynchronously(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            let attachment = ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-1"),
+                sessionID: receipt.sessionID,
+                transcriptRevisionID: revision.revisionID
+            )
+            let seed = try NewChatSeed(
+                library: LibraryScope(libraryID: receipt.libraryID),
+                chatID: ChatID("cht-20260830T122000000Z-7STV"),
+                draftID: ChatDraftID("drf-20260830T122000000Z-8TVW"),
+                memoryID: CoachMemoryID("mem-20260830T122000000Z-9VWX"),
+                instant: UTCInstant("2026-08-30T12:20:00.000Z"),
+                profileStatementGeneration: 0,
+                attachments: ChatAttachments(validating: [attachment])
+            )
+            let trashMove = CooperatingSessionTrashMove(
+                root: root,
+                sessionID: receipt.sessionID
+            )
+            let persistence = PortableChatPersistence { point in
+                guard point == .afterAttachmentValidation else { return }
+                trashMove.start()
+                trashMove.waitUntilInitialLockAttemptCompletes()
+            }
+
+            let created = try persistence.create(seed, at: root)
+            trashMove.waitUntilFinished()
+
+            XCTAssertNil(trashMove.failure)
+            XCTAssertTrue(
+                trashMove.wasBlockedBySharedFence,
+                "the Chat rename must linearize before a later cooperating Trash writer"
+            )
+            XCTAssertEqual(created, seed.aggregate)
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: root.appendingPathComponent(
+                        "chats/\(seed.aggregate.chat.id.rawValue)"
+                    ).path
+                )
+            )
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: root.appendingPathComponent(
+                        "trash/sessions/\(receipt.sessionID.rawValue)"
+                    ).path
+                )
             )
         }
     }
@@ -2192,6 +2318,130 @@ private func withImportedSession(
     _ = try persistence.validateStaged(location, expected: rebound)
     let installed = try persistence.install(location, expected: rebound)
     try await body(root, libraryID, installed.session)
+}
+
+private final class CooperatingSessionTrashMove: @unchecked Sendable {
+    private enum MoveFailure: Error {
+        case openFailed
+        case lockFailed
+        case renameFailed
+    }
+
+    private let root: URL
+    private let sessionID: SessionID
+    private let stateLock = NSLock()
+    private let initialAttempt = DispatchSemaphore(value: 0)
+    private let finished = DispatchSemaphore(value: 0)
+    private var started = false
+    private var blockedBySharedFence = false
+    private var moveFailure: MoveFailure?
+
+    init(root: URL, sessionID: SessionID) {
+        self.root = root
+        self.sessionID = sessionID
+    }
+
+    static func moveSynchronously(root: URL, sessionID: SessionID) throws {
+        let move = CooperatingSessionTrashMove(root: root, sessionID: sessionID)
+        move.start()
+        move.waitUntilInitialLockAttemptCompletes()
+        move.waitUntilFinished()
+        if let failure = move.failure { throw failure }
+    }
+
+    var wasBlockedBySharedFence: Bool {
+        stateLock.withLock { blockedBySharedFence }
+    }
+
+    var failure: Error? {
+        stateLock.withLock { moveFailure }
+    }
+
+    func start() {
+        let shouldStart = stateLock.withLock { () -> Bool in
+            guard !started else { return false }
+            started = true
+            return true
+        }
+        guard shouldStart else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            performMove()
+        }
+    }
+
+    func waitUntilInitialLockAttemptCompletes() {
+        initialAttempt.wait()
+    }
+
+    func waitUntilFinished() {
+        finished.wait()
+    }
+
+    private func performMove() {
+        defer { finished.signal() }
+        let rootDescriptor = Darwin.open(
+            root.path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard rootDescriptor >= 0 else { return fail(.openFailed) }
+        defer { Darwin.close(rootDescriptor) }
+        let sessionsDescriptor = Darwin.openat(
+            rootDescriptor,
+            "sessions",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard sessionsDescriptor >= 0 else { return fail(.openFailed) }
+        defer { Darwin.close(sessionsDescriptor) }
+        let trashDescriptor = Darwin.openat(
+            rootDescriptor,
+            "trash",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard trashDescriptor >= 0 else { return fail(.openFailed) }
+        defer { Darwin.close(trashDescriptor) }
+        let trashedSessionsDescriptor = Darwin.openat(
+            trashDescriptor,
+            "sessions",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard trashedSessionsDescriptor >= 0 else { return fail(.openFailed) }
+        defer { Darwin.close(trashedSessionsDescriptor) }
+        let sessionDescriptor = sessionID.rawValue.withCString {
+            Darwin.openat(
+                sessionsDescriptor,
+                $0,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard sessionDescriptor >= 0 else { return fail(.openFailed) }
+        defer { Darwin.close(sessionDescriptor) }
+
+        if attachmentFenceTestFlock(sessionDescriptor, LOCK_EX | LOCK_NB) != 0 {
+            guard errno == EWOULDBLOCK else { return fail(.lockFailed) }
+            stateLock.withLock { blockedBySharedFence = true }
+            initialAttempt.signal()
+            while attachmentFenceTestFlock(sessionDescriptor, LOCK_EX) != 0 {
+                guard errno == EINTR else { return fail(.lockFailed) }
+            }
+        }
+        defer { _ = attachmentFenceTestFlock(sessionDescriptor, LOCK_UN) }
+
+        let renameStatus = sessionID.rawValue.withCString { name in
+            Darwin.renameat(
+                sessionsDescriptor,
+                name,
+                trashedSessionsDescriptor,
+                name
+            )
+        }
+        guard renameStatus == 0 else { return fail(.renameFailed) }
+        if !wasBlockedBySharedFence { initialAttempt.signal() }
+    }
+
+    private func fail(_ failure: MoveFailure) {
+        stateLock.withLock { moveFailure = failure }
+        initialAttempt.signal()
+    }
 }
 
 private func transcriptRevision(

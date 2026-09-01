@@ -62,6 +62,8 @@ enum ChatNoticePresentation {
         case .coachContextUnavailable: "Context capacity is unavailable for this Coach configuration."
         case .messageMustBeShortened: "Message is too long. Shorten it to send."
         case .attachmentCatalogFailed: "Sessions could not be loaded for Chat creation."
+        case .qualifiedCoachConfigurationUnavailable:
+            "No qualified Coach configuration is available. Install an Audora update with a qualified configuration before creating a Chat."
         }
     }
 
@@ -578,7 +580,7 @@ public struct ChatRootView: View {
                 }
             }
         case .unavailable(.providerUnavailable):
-            Text("Coach capacity is unavailable until a provider is configured.")
+            Text(NewChatAttachmentPickerPresentation.providerUnavailableRecoveryText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .unavailable:

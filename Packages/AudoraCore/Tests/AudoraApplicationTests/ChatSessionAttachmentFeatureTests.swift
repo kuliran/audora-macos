@@ -120,10 +120,44 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         )
 
         let catalog = await feature.loadAttachmentCandidates(in: Self.scope)
+        let defaultCatalog = await DefaultCoachContextFeature()
+            .loadAttachmentCandidates(in: Self.scope)
         let quote = await feature.quoteNewChat(request)
 
-        XCTAssertEqual(catalog, .failed)
+        XCTAssertEqual(catalog, .qualifiedConfigurationUnavailable)
+        XCTAssertEqual(defaultCatalog, .qualifiedConfigurationUnavailable)
         XCTAssertEqual(quote, .unavailable(.sourceUnavailable))
+    }
+
+    func testKnownQualifiedConfigurationWithoutAnAttachmentAdapterStaysGenericFailure()
+        async
+    {
+        let feature = previouslyQualifiedProviderUnavailableCoachContextFixture()
+
+        let catalog = await feature.loadAttachmentCandidates(in: Self.scope)
+
+        XCTAssertEqual(catalog, .failed)
+    }
+
+    func testNewChatPreservesMissingQualifiedConfigurationAsSpecificRecovery()
+        async throws
+    {
+        let context = DefaultCoachContextFeature(
+            attachmentEvidenceSource: AttachmentEvidenceSourceForFeature(
+                evidence: try attachmentEvidence()
+            )
+        )
+        let feature = makeFeature(
+            coordinatedContext: context,
+            store: AttachmentChatStoreFixture()
+        )
+        await feature.send(.start(Self.context))
+
+        await feature.send(.beginNewChat(Self.context))
+
+        let state = await feature.currentState
+        XCTAssertEqual(state.newChatPicker, .failed)
+        XCTAssertEqual(state.notice, .qualifiedCoachConfigurationUnavailable)
     }
 
     func testCatalogAndCandidateMetadataAreBoundedBeforePresentation() async throws {
@@ -255,6 +289,25 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         XCTAssertEqual(seed?.aggregate.chat.attachments, .empty)
         XCTAssertEqual(seed?.aggregate.chat.creation.kind, .newChat)
         XCTAssertNil(seed?.aggregate.chat.creation.originAttachmentID)
+    }
+
+    func testConfirmPreservesMissingQualifiedConfigurationAsSpecificRecovery() async {
+        let source = AttachmentSourceFixture(
+            candidates: [],
+            configurationUnavailableOnResolve: true
+        )
+        let store = AttachmentChatStoreFixture()
+        let feature = makeFeature(source: source, store: store)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+
+        await feature.send(.confirmNewChat(Self.context))
+
+        let createdSeed = await store.createdSeed
+        XCTAssertNil(createdSeed)
+        let state = await feature.currentState
+        XCTAssertEqual(state.newChatPicker, .failed)
+        XCTAssertEqual(state.notice, .qualifiedCoachConfigurationUnavailable)
     }
 
     func testSearchEnteredDuringCatalogLoadAppliesToTheLoadedPicker() async throws {
@@ -1150,6 +1203,8 @@ private actor MismatchedAttachmentAuthorityFixture:
             return .loaded(candidates, configuration: originalStamp)
         case .configurationChanged:
             return .configurationChanged
+        case .qualifiedConfigurationUnavailable:
+            return .qualifiedConfigurationUnavailable
         case .readOnlyLibrary:
             return .readOnlyLibrary
         case .failed:
@@ -1169,6 +1224,8 @@ private actor MismatchedAttachmentAuthorityFixture:
             )
         case .configurationChanged:
             return .configurationChanged
+        case .qualifiedConfigurationUnavailable:
+            return .qualifiedConfigurationUnavailable
         case .readOnlyLibrary:
             return .readOnlyLibrary
         case .failed:
@@ -1231,11 +1288,16 @@ private actor MismatchedAttachmentAuthorityFixture:
 
 private actor AttachmentSourceFixture: ChatSessionAttachmentSource {
     let candidates: [ChatAttachmentCandidate]
+    private let configurationUnavailableOnResolve: Bool
     private var unavailable: [String: ChatAttachmentUnavailableReason] = [:]
     private(set) var resolvedRequests: [ChatAttachments] = []
 
-    init(candidates: [ChatAttachmentCandidate]) {
+    init(
+        candidates: [ChatAttachmentCandidate],
+        configurationUnavailableOnResolve: Bool = false
+    ) {
         self.candidates = candidates
+        self.configurationUnavailableOnResolve = configurationUnavailableOnResolve
     }
 
     func loadCandidates(in library: LibraryScope) async -> ChatAttachmentCatalogOutcome {
@@ -1250,6 +1312,9 @@ private actor AttachmentSourceFixture: ChatSessionAttachmentSource {
         in library: LibraryScope
     ) async -> ChatAttachmentResolutionOutcome {
         resolvedRequests.append(attachments)
+        guard !configurationUnavailableOnResolve else {
+            return .qualifiedConfigurationUnavailable
+        }
         return .resolved(attachments.values.map { attachment in
             let key = attachment.sessionID.rawValue + ":" +
                 attachment.transcriptRevisionID.rawValue

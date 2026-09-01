@@ -234,6 +234,7 @@ enum ChatAttachmentCatalogOutcome: Equatable, Sendable {
         configuration: CoachContextConfigurationStamp
     )
     case configurationChanged
+    case qualifiedConfigurationUnavailable
     case readOnlyLibrary
     case failed
 }
@@ -244,6 +245,7 @@ enum ChatAttachmentResolutionOutcome: Equatable, Sendable {
         configuration: CoachContextConfigurationStamp
     )
     case configurationChanged
+    case qualifiedConfigurationUnavailable
     case readOnlyLibrary
     case failed
 }
@@ -345,5 +347,24 @@ struct UnavailableChatSessionAttachmentSource: ChatSessionAttachmentSource {
         in library: LibraryScope
     ) async -> ChatAttachmentResolutionOutcome {
         .failed
+    }
+}
+
+struct MissingQualifiedConfigurationChatSessionAttachmentSource:
+    ChatSessionAttachmentSource
+{
+    init() {}
+
+    func loadCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        .qualifiedConfigurationUnavailable
+    }
+
+    func resolve(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        .qualifiedConfigurationUnavailable
     }
 }

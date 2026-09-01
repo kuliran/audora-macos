@@ -3,6 +3,8 @@ import AudoraApplication
 enum NewChatAttachmentPickerPresentation {
     static let contextCannotFitRecoveryText =
         "These Sessions cannot fit together in this coach's context. Remove a Session."
+    static let providerUnavailableRecoveryText =
+        "Coach transport is temporarily unavailable. You can create this Chat locally and try coaching later."
 
     static func recoveryText(for issue: ChatAttachmentPickerIssue) -> String {
         switch issue {

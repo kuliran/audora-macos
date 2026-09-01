@@ -22,6 +22,7 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
     case afterCandidateFlush
     case beforeStagedRead
     case beforeFinalInstall
+    case afterAttachmentValidation
     case afterFinalInstall
     case afterChatsFlush
     case beforeFinalRead
@@ -104,6 +105,13 @@ public struct PortableChatPersistence: @unchecked Sendable {
     private struct DirectoryIdentity: Equatable {
         let device: dev_t
         let inode: ino_t
+    }
+
+    private struct OpenedLibraryRootAuthority {
+        let parentDescriptor: Int32
+        let rootDescriptor: Int32
+        let name: String
+        let identity: DirectoryIdentity
     }
 
     public static let maximumRootBytes = 65_536
@@ -204,13 +212,15 @@ public struct PortableChatPersistence: @unchecked Sendable {
         _ seed: NewChatSeed,
         at libraryRoot: URL
     ) throws -> ChatAggregate {
-        let rootDescriptor = try openLibraryRoot(
+        let rootAuthority = try openLibraryRootAuthority(
             at: libraryRoot,
             in: seed.library,
             expectedProfileStatementGeneration:
                 seed.aggregate.chat.profileStatementGenerationAtCreation
         )
+        let rootDescriptor = rootAuthority.rootDescriptor
         defer { Darwin.close(rootDescriptor) }
+        defer { Darwin.close(rootAuthority.parentDescriptor) }
         let stagingDescriptor = try openDirectory(named: "staging", under: rootDescriptor)
         defer { Darwin.close(stagingDescriptor) }
         try acquireExclusiveMutationLock(on: stagingDescriptor)
@@ -304,26 +314,52 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let validatedCandidateIdentity = try directoryIdentity(of: candidateDescriptor)
 
         try fault(.beforeFinalInstall)
-        guard attachmentsAreAvailable(for: seed, at: libraryRoot) else {
-            throw PortableChatPersistenceError.attachmentUnavailable
-        }
+        try revalidateConfiguredRootAuthority(rootAuthority)
         try revalidateLibraryAuthority(
             libraryID: seed.library.libraryID,
-            profileStatementGeneration: seed.aggregate.chat.profileStatementGenerationAtCreation,
+            profileStatementGeneration:
+                seed.aggregate.chat.profileStatementGenerationAtCreation,
             under: rootDescriptor
         )
-        guard try directoryIdentity(
-            named: candidateName,
-            under: publicationsDescriptor
-        ) == validatedCandidateIdentity else {
-            throw PortableChatPersistenceError.invalidLayout
+        let attachmentInstall: Bool?
+        do {
+            attachmentInstall = try PortableTranscriptRevisionRepository(
+                root: libraryRoot,
+                libraryID: seed.library.libraryID
+            ).withAvailableChatAttachmentsSynchronously(
+                seed.aggregate.chat.attachments,
+                underRootDescriptor: rootDescriptor
+            ) {
+                try fault(.afterAttachmentValidation)
+                try revalidateConfiguredRootAuthority(rootAuthority)
+                try revalidateLibraryAuthority(
+                    libraryID: seed.library.libraryID,
+                    profileStatementGeneration:
+                        seed.aggregate.chat.profileStatementGenerationAtCreation,
+                    under: rootDescriptor
+                )
+                guard try directoryIdentity(
+                    named: candidateName,
+                    under: publicationsDescriptor
+                ) == validatedCandidateIdentity else {
+                    throw PortableChatPersistenceError.invalidLayout
+                }
+                try noReplaceRename(
+                    from: candidateName,
+                    under: publicationsDescriptor,
+                    to: finalName,
+                    under: chatsDescriptor
+                )
+                return true
+            }
+        } catch let error as PortableChatPersistenceError {
+            throw error
+        } catch {
+            throw PortableChatPersistenceError.attachmentUnavailable
         }
-        try noReplaceRename(
-            from: candidateName,
-            under: publicationsDescriptor,
-            to: finalName,
-            under: chatsDescriptor
-        )
+        guard attachmentInstall == true else {
+            throw PortableChatPersistenceError.attachmentUnavailable
+        }
         let finalDescriptor = try openDirectory(named: finalName, under: chatsDescriptor)
         defer { Darwin.close(finalDescriptor) }
         guard try directoryIdentity(of: finalDescriptor) == validatedCandidateIdentity else {
@@ -871,28 +907,6 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return confirmed
     }
 
-    private func attachmentsAreAvailable(
-        for seed: NewChatSeed,
-        at root: URL
-    ) -> Bool {
-        let observations = ChatAttachmentAvailabilityAccumulator()
-        do {
-            try PortableTranscriptRevisionRepository(
-                root: root,
-                libraryID: seed.library.libraryID
-            ).forEachResolvedChatAttachmentEvidenceSynchronously(
-                seed.aggregate.chat.attachments
-            ) { item in
-                observations.observe(item)
-            }
-        } catch {
-            return false
-        }
-        return observations.validates(
-            expectedCount: seed.aggregate.chat.attachments.values.count
-        )
-    }
-
     fileprivate func reconcileCommittedRename(
         _ mutation: RenameChatMutation,
         at libraryRoot: URL
@@ -1118,34 +1132,121 @@ public struct PortableChatPersistence: @unchecked Sendable {
             throw PortableChatPersistenceError.ioFailure
         }
         do {
-            var metadata = stat()
-            guard fstat(descriptor, &metadata) == 0,
-                  (metadata.st_mode & S_IFMT) == S_IFDIR
-            else {
-                throw PortableChatPersistenceError.invalidLayout
-            }
-            switch try PortableLibraryPersistence().load(
-                from: descriptor,
-                reconcileAbandonedImports: false
-            ) {
-            case let .readWrite(authority):
-                guard authority.manifest.libraryID == scope.libraryID else {
-                    throw PortableChatPersistenceError.libraryScopeMismatch
-                }
-                if let expectedProfileStatementGeneration,
-                   authority.profileHead.statementGeneration != expectedProfileStatementGeneration
-                {
-                    throw PortableChatPersistenceError.profileStatementGenerationChanged(
-                        authority.profileHead.statementGeneration
-                    )
-                }
-            case .readOnly:
-                throw PortableChatPersistenceError.readOnlyLibrary
-            }
+            try validateLibraryRootDescriptor(
+                descriptor,
+                in: scope,
+                expectedProfileStatementGeneration: expectedProfileStatementGeneration
+            )
             return descriptor
         } catch {
             Darwin.close(descriptor)
             throw error
+        }
+    }
+
+    private func openLibraryRootAuthority(
+        at url: URL,
+        in scope: LibraryScope,
+        expectedProfileStatementGeneration: UInt64? = nil
+    ) throws -> OpenedLibraryRootAuthority {
+        let parentURL = url.deletingLastPathComponent()
+        let name = url.lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..",
+              !name.contains("/"), !name.contains("\\")
+        else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let parentDescriptor = parentURL.path.withCString { pointer -> Int32 in
+            while true {
+                let result = Darwin.open(
+                    pointer,
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+                )
+                if result < 0, errno == EINTR { continue }
+                return result
+            }
+        }
+        guard parentDescriptor >= 0 else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        let rootDescriptor = name.withCString { pointer -> Int32 in
+            while true {
+                let result = Darwin.openat(
+                    parentDescriptor,
+                    pointer,
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+                )
+                if result < 0, errno == EINTR { continue }
+                return result
+            }
+        }
+        guard rootDescriptor >= 0 else {
+            Darwin.close(parentDescriptor)
+            if urlHasSymlink(url) {
+                throw PortableChatPersistenceError.expectedPathIsSymlink
+            }
+            throw PortableChatPersistenceError.ioFailure
+        }
+        do {
+            try validateLibraryRootDescriptor(
+                rootDescriptor,
+                in: scope,
+                expectedProfileStatementGeneration: expectedProfileStatementGeneration
+            )
+            return OpenedLibraryRootAuthority(
+                parentDescriptor: parentDescriptor,
+                rootDescriptor: rootDescriptor,
+                name: name,
+                identity: try directoryIdentity(of: rootDescriptor)
+            )
+        } catch {
+            Darwin.close(rootDescriptor)
+            Darwin.close(parentDescriptor)
+            throw error
+        }
+    }
+
+    private func validateLibraryRootDescriptor(
+        _ descriptor: Int32,
+        in scope: LibraryScope,
+        expectedProfileStatementGeneration: UInt64?
+    ) throws {
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFDIR
+        else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        switch try PortableLibraryPersistence().load(
+            from: descriptor,
+            reconcileAbandonedImports: false
+        ) {
+        case let .readWrite(authority):
+            guard authority.manifest.libraryID == scope.libraryID else {
+                throw PortableChatPersistenceError.libraryScopeMismatch
+            }
+            if let expectedProfileStatementGeneration,
+               authority.profileHead.statementGeneration != expectedProfileStatementGeneration
+            {
+                throw PortableChatPersistenceError.profileStatementGenerationChanged(
+                    authority.profileHead.statementGeneration
+                )
+            }
+        case .readOnly:
+            throw PortableChatPersistenceError.readOnlyLibrary
+        }
+    }
+
+    private func revalidateConfiguredRootAuthority(
+        _ authority: OpenedLibraryRootAuthority
+    ) throws {
+        guard try directoryIdentity(of: authority.rootDescriptor) == authority.identity,
+              try directoryIdentity(
+                  named: authority.name,
+                  under: authority.parentDescriptor
+              ) == authority.identity
+        else {
+            throw PortableChatPersistenceError.invalidLayout
         }
     }
 
@@ -1999,31 +2100,6 @@ public struct PortableChatPersistence: @unchecked Sendable {
             return
         }
         _ = candidateName.withCString { Darwin.unlinkat(parent, $0, AT_REMOVEDIR) }
-    }
-}
-
-private final class ChatAttachmentAvailabilityAccumulator: @unchecked Sendable {
-    private let lock = NSLock()
-    private var count = 0
-    private var allAvailable = true
-
-    func observe(_ item: ResolvedChatAttachmentEvidence) {
-        lock.lock()
-        defer { lock.unlock() }
-        count += 1
-        guard case let .available(evidence) = item.resolution,
-              evidence.revision.sessionID == item.attachment.sessionID,
-              evidence.revision.revisionID == item.attachment.transcriptRevisionID
-        else {
-            allAvailable = false
-            return
-        }
-    }
-
-    func validates(expectedCount: Int) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return allAvailable && count == expectedCount
     }
 }
 

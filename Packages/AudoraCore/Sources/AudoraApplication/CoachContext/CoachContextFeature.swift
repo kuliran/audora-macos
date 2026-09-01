@@ -467,7 +467,7 @@ public struct DefaultCoachContextFeature:
         self.source = source
         capacity = CoachContextCapacity()
         configurationAuthority = CoachContextConfigurationAuthority(source: source)
-        attachmentSource = UnavailableChatSessionAttachmentSource()
+        attachmentSource = MissingQualifiedConfigurationChatSessionAttachmentSource()
     }
 
     @_spi(CoachContextQualification)

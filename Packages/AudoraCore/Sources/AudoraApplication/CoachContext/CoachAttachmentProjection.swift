@@ -246,7 +246,7 @@ actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
             await configurationAuthority
                 .currentAttachmentProjectionConfiguration()
         else {
-            return .failed
+            return .qualifiedConfigurationUnavailable
         }
         let accumulator = ChatAttachmentCandidateProjectionAccumulator(
             policy: configuration.policy
@@ -279,7 +279,7 @@ actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
             await configurationAuthority
                 .currentAttachmentProjectionConfiguration()
         else {
-            return .failed
+            return .qualifiedConfigurationUnavailable
         }
         let accumulator = ResolvedChatAttachmentProjectionAccumulator(
             policy: configuration.policy

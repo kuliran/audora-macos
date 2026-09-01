@@ -261,6 +261,7 @@ final class ChatPresentationModelTests: XCTestCase {
             .coachContextUnavailable,
             .messageMustBeShortened,
             .attachmentCatalogFailed,
+            .qualifiedCoachConfigurationUnavailable,
         ]
 
         for notice in notices {
@@ -297,6 +298,19 @@ final class ChatPresentationModelTests: XCTestCase {
                 for: .contextUnavailable(.sourceUnavailable)
             ),
             "Current Coach context could not be verified. Change the selection or reopen New Chat to try again."
+        )
+    }
+
+    func testMissingQualifiedConfigurationAndTemporaryTransportHaveDistinctRecoveryCopy() {
+        XCTAssertEqual(
+            ChatNoticePresentation.recoveryText(
+                for: .qualifiedCoachConfigurationUnavailable
+            ),
+            "No qualified Coach configuration is available. Install an Audora update with a qualified configuration before creating a Chat."
+        )
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.providerUnavailableRecoveryText,
+            "Coach transport is temporarily unavailable. You can create this Chat locally and try coaching later."
         )
     }
 

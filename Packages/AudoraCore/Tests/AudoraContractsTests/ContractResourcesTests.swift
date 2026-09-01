@@ -694,6 +694,7 @@ final class ContractResourcesTests: XCTestCase {
                 "draftSaveFailed", "draftChanged", "pendingUserTurnFailed",
                 "coachContextUnavailable", "messageMustBeShortened",
                 "attachmentCatalogFailed",
+                "qualifiedCoachConfigurationUnavailable",
             ]
         )
     }
@@ -791,6 +792,14 @@ final class ContractResourcesTests: XCTestCase {
         for (name, outcome) in [
             ("NewChatQuoteCancelledEvent", "cancelled"),
             ("ChatAttachmentResolutionCancelledEvent", "cancelled"),
+            (
+                "NewChatAttachmentCatalogQualifiedConfigurationUnavailableEvent",
+                "qualifiedConfigurationUnavailable"
+            ),
+            (
+                "ChatAttachmentResolutionQualifiedConfigurationUnavailableEvent",
+                "qualifiedConfigurationUnavailable"
+            ),
             ("ChatStoreCreateAttachmentUnavailableEvent", "attachmentUnavailable"),
         ] {
             let properties = try schemaProperties(name, in: definitions)

@@ -215,6 +215,9 @@
                     "$ref": "#/$defs/NewChatAttachmentCatalogReadOnlyEvent"
                 },
                 {
+                    "$ref": "#/$defs/NewChatAttachmentCatalogQualifiedConfigurationUnavailableEvent"
+                },
+                {
                     "$ref": "#/$defs/NewChatAttachmentCatalogFailedEvent"
                 },
                 {
@@ -231,6 +234,9 @@
                 },
                 {
                     "$ref": "#/$defs/ChatAttachmentResolutionReadOnlyEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatAttachmentResolutionQualifiedConfigurationUnavailableEvent"
                 },
                 {
                     "$ref": "#/$defs/ChatAttachmentResolutionFailedEvent"
@@ -897,6 +903,31 @@
                 "not": {}
             }
         },
+        "NewChatAttachmentCatalogQualifiedConfigurationUnavailableEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "attachmentSource"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "loadCandidates"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "qualifiedConfigurationUnavailable"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "NewChatAttachmentCatalogFailedEvent": {
             "type": "object",
             "properties": {
@@ -1047,6 +1078,31 @@
                 "outcome": {
                     "type": "string",
                     "const": "readOnlyLibrary"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatAttachmentResolutionQualifiedConfigurationUnavailableEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "attachmentSource"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "resolveAttachments"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "qualifiedConfigurationUnavailable"
                 }
             },
             "required": [
@@ -1696,6 +1752,10 @@
                 {
                     "type": "string",
                     "const": "attachmentCatalogFailed"
+                },
+                {
+                    "type": "string",
+                    "const": "qualifiedCoachConfigurationUnavailable"
                 }
             ]
         },

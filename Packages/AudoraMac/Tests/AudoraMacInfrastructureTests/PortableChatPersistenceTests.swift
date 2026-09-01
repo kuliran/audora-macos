@@ -233,6 +233,7 @@ final class PortableChatPersistenceTests: XCTestCase {
             .afterMemoryInstall, .afterMemoryDirectoryFlush, .beforeChatPartialWrite,
             .afterChatPartialWrite, .afterChatFileFlush, .afterChatInstall,
             .afterCandidateFlush, .beforeStagedRead, .beforeFinalInstall,
+            .afterAttachmentValidation,
             .afterFinalInstall, .afterChatsFlush, .beforeFinalRead,
         ]
         for point in points {
