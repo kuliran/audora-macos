@@ -211,6 +211,8 @@ Infrastructure implements ports with replaceable adapters:
 - the ChatGPT-authenticated Codex CLI provider;
 - the attempt-scoped Audora transcript MCP broker used by the Codex adapter for
   large attached transcripts;
+- the wall-clock adapter that suspends admission refresh until a persisted UTC
+  cooldown deadline;
 - constrained process execution for transcription and coaching;
 - derived search indexes when introduced.
 
@@ -249,8 +251,8 @@ authoritative only after the relevant use case succeeds.
 
 The executable target is the only place that knows all concrete types. It creates
 the repository, capture, player, worker, acoustic-evidence, coach, execution-host,
-and clock adapters and injects them into application services and presentation
-models.
+clock, and admission-refresh scheduling adapters and injects them into application
+services and presentation models.
 
 Tests use in-memory repositories, deterministic clocks/IDs, fake workers, and fake
 coach providers. No Domain or Application test should need microphone permission,

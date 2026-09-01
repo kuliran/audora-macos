@@ -318,6 +318,9 @@ public protocol InvocationPersistencePort: Sendable {
 @_spi(InvocationInfrastructure)
 public enum InvocationAdmissionClaimOutcome: Equatable, Sendable {
     case admitted
+    /// The ledger rename succeeded, so the debit may be committed, but its
+    /// parent-directory durability could not be proven.
+    case commitUncertain
     case cooldown(lastAdmittedAt: UTCInstant, reopensAt: UTCInstant)
     case clockRollback(lastAdmittedAt: UTCInstant)
     case ledgerFull
@@ -541,6 +544,11 @@ public actor DefaultInvocations: Invocations {
         switch await admission.claim(library: request.library, at: admittedAt) {
         case .admitted:
             break
+        case .commitUncertain:
+            return await interruptPending(
+                finalAuthority,
+                reason: .persistenceUnavailable
+            )
         case .cooldown:
             return await reject(finalAuthority, reason: .admissionCooldown)
         case .clockRollback:

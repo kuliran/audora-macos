@@ -101,6 +101,17 @@ namespace Audora.Contracts {
     admittedAt: UTCInstant;
   }
 
+  @pattern("^inv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar CoachInvocationId extends string;
+
+  @pattern("^atm-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
+  scalar CoachProviderAttemptId extends string;
+
+  @minLength(1)
+  @maxLength(128)
+  @pattern("^[0-9A-Za-z._-]+$")
+  scalar ProviderIdempotencyValue extends string;
+
   @jsonSchema
   @id("InvocationAdmissionLedger.json")
   model InvocationAdmissionLedger {
@@ -114,15 +125,4 @@ namespace Audora.Contracts {
     libraryId: LibraryId;
     lastAdmittedAt: UTCInstant;
   }
-
-  @pattern("^inv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
-  scalar CoachInvocationId extends string;
-
-  @pattern("^atm-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
-  scalar CoachProviderAttemptId extends string;
-
-  @minLength(1)
-  @maxLength(128)
-  @pattern("^[0-9A-Za-z._-]+$")
-  scalar ProviderIdempotencyValue extends string;
 }

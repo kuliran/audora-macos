@@ -425,6 +425,14 @@ atomically published is discarded rather than resumed from durable staging.
 Resolved Invocations and Attempts are deleted. Late results cannot publish because
 the response position no longer names their Invocation/Attempt authority.
 
+For the machine-local ledger, rename is the possible-commit boundary. A failure
+before rename rejects admission and unlocks a provisional new Send; a failed
+parent-directory flush after rename is durability uncertainty, so reconciliation
+preserves the exact Pending User Turn as interrupted and user-retryable. Launch
+identity preflight checks all six bounded namespaces without requiring sibling
+Chat aggregates to decode or become writable; corrupt and newer-schema siblings
+therefore freeze only themselves.
+
 ## Atomicity and recovery
 
 - Write JSON to a sibling `.partial`, flush it, then atomically replace the final
@@ -448,7 +456,8 @@ the response position no longer names their Invocation/Attempt authority.
 - Move or restore a Session or Chat as one aggregate without rewriting references.
   Restore fails rather than overwriting an existing active target.
 - Unknown newer root schemas open read-only. A corrupt individual entity does not
-  prevent healthy independent entities from loading.
+  prevent healthy independent entities from loading or reconciling their own
+  interrupted launch intent.
 
 Durable transcription candidates remain untrusted until Application validation
 promotes them. Raw provider responses are not durable candidates. A validated but

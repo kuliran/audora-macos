@@ -506,6 +506,78 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testCatalogReconcilesHealthyPreinstallPendingWhenSiblingChatIsCorrupt() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let corruptChatID = fixture.competingAuthority.request.chatID
+            try Data("not-json".utf8).write(
+                to: fixture.root
+                    .appendingPathComponent("chats", isDirectory: true)
+                    .appendingPathComponent(corruptChatID.rawValue, isDirectory: true)
+                    .appendingPathComponent("chat.json")
+            )
+
+            let relaunched = PortableChatStore(workspace: fixture.workspace)
+            guard case let .loaded(entries) = await relaunched.loadCatalog(
+                in: fixture.scope
+            ) else { return XCTFail("one corrupt Chat must not fail the catalog") }
+
+            XCTAssertEqual(entries.count, 2)
+            XCTAssertTrue(entries.contains(.frozen(
+                FrozenChatSnapshot(chatID: corruptChatID, reason: .corrupt)
+            )))
+            guard let healthy = entries.compactMap({ entry -> ChatAggregate? in
+                guard case let .available(aggregate) = entry,
+                      aggregate.chat.id == fixture.locked.chat.id
+                else { return nil }
+                return aggregate
+            }).first else { return XCTFail("healthy sibling was hidden") }
+            XCTAssertEqual(healthy.pendingUserTurn?.failure, .coachResponseInterrupted)
+            XCTAssertEqual(healthy.chat.draft, fixture.locked.chat.draft)
+            XCTAssertEqual(healthy.chat.messageIDs, [])
+        }
+    }
+
+    func testCatalogReconcilesHealthyPendingWhenSiblingHasMalformedDomainIdentity() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let malformedChatID = fixture.competingAuthority.request.chatID
+            let manifest = fixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(malformedChatID.rawValue, isDirectory: true)
+                .appendingPathComponent("chat.json")
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: Data(contentsOf: manifest)
+                ) as? [String: Any]
+            )
+            object["messageIds"] = ["not-a-message-id"]
+            try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            ).write(to: manifest)
+
+            let relaunched = PortableChatStore(workspace: fixture.workspace)
+            guard case let .loaded(entries) = await relaunched.loadCatalog(
+                in: fixture.scope
+            ) else { return XCTFail("malformed sibling identity must remain isolated") }
+
+            XCTAssertTrue(entries.contains(.frozen(
+                FrozenChatSnapshot(chatID: malformedChatID, reason: .corrupt)
+            )))
+            let healthy = entries.compactMap { entry -> ChatAggregate? in
+                guard case let .available(aggregate) = entry,
+                      aggregate.chat.id == fixture.locked.chat.id
+                else { return nil }
+                return aggregate
+            }.first
+            XCTAssertEqual(
+                healthy?.pendingUserTurn?.failure,
+                .coachResponseInterrupted
+            )
+        }
+    }
+
     func testInvocationGatewayResolutionDoesNotMisclassifyItsLivePendingAsCrashed() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)
@@ -726,6 +798,118 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                     fixture.install.authority.request
                 )
             }
+        }
+    }
+
+    func testLaunchIdentityPreflightIgnoresUnreadableSiblingAggregate() async throws {
+        for corruption in ["corrupt", "newer"] {
+            try await withTemporaryParent { parent in
+                let fixture = try await makeInvocationStoreFixture(in: parent)
+                let persistence = PortableChatPersistence()
+                let store = PortableInvocationStore(
+                    persistence: persistence,
+                    workspace: fixture.workspace
+                )
+                let reservation = await store.reserveInvocation(
+                    fixture.install.authority.request
+                )
+                XCTAssertEqual(reservation, .none)
+                let siblingManifest = fixture.root
+                    .appendingPathComponent("chats", isDirectory: true)
+                    .appendingPathComponent(
+                        fixture.competingAuthority.request.chatID.rawValue,
+                        isDirectory: true
+                    )
+                    .appendingPathComponent("chat.json")
+                if corruption == "corrupt" {
+                    try Data("not-json".utf8).write(to: siblingManifest)
+                } else {
+                    var object = try XCTUnwrap(
+                        JSONSerialization.jsonObject(
+                            with: Data(contentsOf: siblingManifest)
+                        ) as? [String: Any]
+                    )
+                    object["schemaVersion"] = Chat.schemaVersion + 1
+                    try JSONSerialization.data(
+                        withJSONObject: object,
+                        options: [.sortedKeys]
+                    ).write(to: siblingManifest)
+                }
+
+                let invocation = fixture.install.invocation
+                let candidate = InvocationLaunchIdentity(
+                    invocationID: invocation.id,
+                    attemptID: invocation.attemptID,
+                    idempotencyValue: invocation.providerIdempotencyValue,
+                    userMessageID: fixture.publication.userMessage.id,
+                    coachMessageID: fixture.publication.coachMessage.id,
+                    freshDraftID: fixture.publication.freshDraft.draftID
+                )
+
+                let availability = await store.checkLaunchIdentity(
+                    candidate,
+                    for: fixture.install.authority
+                )
+                XCTAssertEqual(availability, .available, corruption)
+                await store.cancelInvocationReservation(
+                    fixture.install.authority.request
+                )
+            }
+        }
+    }
+
+    func testLaunchIdentityPreflightFailsClosedWhenSiblingNamespaceHasIOFailure() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let persistence = PortableChatPersistence()
+            let store = PortableInvocationStore(
+                persistence: persistence,
+                workspace: fixture.workspace
+            )
+            let reservation = await store.reserveInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(reservation, .none)
+            let candidate = InvocationLaunchIdentity(
+                invocationID: fixture.install.invocation.id,
+                attemptID: fixture.install.invocation.attemptID,
+                idempotencyValue: fixture.install.invocation.providerIdempotencyValue,
+                userMessageID: fixture.publication.userMessage.id,
+                coachMessageID: fixture.publication.coachMessage.id,
+                freshDraftID: fixture.publication.freshDraft.draftID
+            )
+            let messages = fixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(
+                    fixture.competingAuthority.request.chatID.rawValue,
+                    isDirectory: true
+                )
+                .appendingPathComponent("messages", isDirectory: true)
+            let collisionFile = messages.appendingPathComponent(
+                "\(candidate.userMessageID.rawValue).json"
+            )
+            try persistence.encodeMessage(fixture.publication.userMessage).write(
+                to: collisionFile
+            )
+            XCTAssertTrue(FileManager.default.fileExists(atPath: collisionFile.path))
+            XCTAssertEqual(messages.path.withCString { Darwin.chmod($0, 0) }, 0)
+            defer {
+                _ = messages.path.withCString { Darwin.chmod($0, 0o700) }
+            }
+            let permissionProbe = messages.path.withCString {
+                Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+            }
+            if permissionProbe >= 0 { Darwin.close(permissionProbe) }
+            XCTAssertLessThan(permissionProbe, 0)
+
+            let availability = await store.checkLaunchIdentity(
+                candidate,
+                for: fixture.install.authority
+            )
+            XCTAssertEqual(availability, .unavailable)
+            await store.cancelInvocationReservation(
+                fixture.install.authority.request
+            )
         }
     }
 

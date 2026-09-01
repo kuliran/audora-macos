@@ -79,8 +79,7 @@ public actor DefaultChatFeature: ChatFeature {
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
-        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling =
-            SystemChatAdmissionRefreshScheduler(),
+        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling,
         invocations: any Invocations
     ) {
         self.store = store
@@ -107,8 +106,7 @@ public actor DefaultChatFeature: ChatFeature {
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
-        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling =
-            SystemChatAdmissionRefreshScheduler(),
+        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling,
         coachContext: any CoachContextCoordinating,
         invocations: any Invocations
     ) {

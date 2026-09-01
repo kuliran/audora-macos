@@ -146,6 +146,10 @@ CAS conflict publishes neither message and retires the installed authority. Live
 composition still fails closed because the shipping Provider descriptor is not
 qualified. Real Provider execution, automatic retries, Stop, transcript tools,
 and Profile or Memory effects remain outside this slice.
+If the machine-local ledger rename succeeds but its parent-directory flush cannot
+prove durability, Audora treats the debit as possibly committed and preserves the
+exact Pending User Turn as interrupted and user-retryable; it never unlocks that
+Draft as a pre-admission rejection.
 
 Version one accepts exactly one transcribable mono source per Session. A possible
 later extension adds dual-track capture: the Speaker's microphone plus a
@@ -220,7 +224,9 @@ The native application has a reduced set of states:
   failure. Discard hides the card and unlocks the same populated Draft without
   provider work; a stale Retry after Discard fails against the removed Pending User
   Turn. Corrupt Chat data freezes that Chat permanently and directs the Speaker to
-  create another.
+  create another. Catalog recovery and launch-identity checks isolate that failure
+  per Chat, so a corrupt or newer-schema sibling does not hide healthy Chats or
+  block their Send path.
 - **Coach context:** a subtle `X / max` text beside Send shows the latest
   provider-specific context quote, where `max` is usable input capacity after the
   current-response reserve and safety margin, and expands to Profile, Coach Memory,
@@ -308,7 +314,8 @@ Dependency direction points inward. Domain and Application do not import SwiftUI
 AppKit, AVFoundation, Convex, Crisper, Codex, or concrete filesystem code.
 Presentation sends intents to application use cases and renders application state;
 it never launches a process or edits storage directly. A composition root in the
-macOS target selects and wires concrete adapters.
+macOS target selects and wires concrete adapters, including the wall-clock
+admission-refresh scheduler.
 
 The first implementation can use Swift packages or Xcode targets for these
 boundaries:

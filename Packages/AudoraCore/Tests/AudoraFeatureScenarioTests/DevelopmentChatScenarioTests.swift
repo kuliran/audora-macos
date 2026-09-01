@@ -57,6 +57,7 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 memoryIDGenerator: scripted,
                 pendingUserTurnIDGenerator: scripted,
                 responsePositionIDGenerator: scripted,
+                admissionRefreshScheduler: ScenarioAdmissionRefreshScheduler(),
                 coachContext: DefaultCoachContextFeature(
                     source: contextSource
                 ),
@@ -1304,4 +1305,8 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
             return .sourceUnavailable
         }
     }
+}
+
+private struct ScenarioAdmissionRefreshScheduler: ChatAdmissionRefreshScheduling {
+    func sleep(until deadline: UTCInstant) async throws {}
 }

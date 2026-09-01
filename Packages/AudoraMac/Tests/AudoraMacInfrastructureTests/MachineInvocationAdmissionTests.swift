@@ -159,6 +159,28 @@ final class MachineInvocationAdmissionTests: XCTestCase {
         ) else { return XCTFail("second Library debit must survive") }
     }
 
+    func testDirectorySyncFailureAfterLedgerRenameReportsCommitUncertainty() async throws {
+        let fixture = try Fixture()
+        let admission = ApplicationSupportInvocationAdmission(
+            fileURL: fixture.fileURL,
+            directorySynchronizer: { _ in false }
+        )
+
+        let outcome = await admission.claim(
+            library: fixture.firstLibrary,
+            at: fixture.instant(0)
+        )
+
+        XCTAssertEqual(outcome, .commitUncertain)
+        let relaunched = ApplicationSupportInvocationAdmission(fileURL: fixture.fileURL)
+        guard case .cooldown = await relaunched.claim(
+            library: fixture.firstLibrary,
+            at: fixture.instant(1)
+        ) else {
+            return XCTFail("the renamed ledger must remain a possible committed debit")
+        }
+    }
+
     func testCorruptOversizedAndSymlinkLedgersFailClosed() async throws {
         for setup in [FixtureSetup.corrupt, .oversized, .symlink] {
             let fixture = try Fixture(setup: setup)

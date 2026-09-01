@@ -8,6 +8,7 @@ private func invocationAdmissionFlock(_ descriptor: Int32, _ operation: Int32) -
 
 private enum MachineInvocationAdmissionError: Error {
     case unavailable
+    case commitUncertain
     case invalidLedger
     case ledgerTooLarge
 }
@@ -35,6 +36,7 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
 
     private let fileURL: URL
     private let maximumLibraries: Int
+    private let directorySynchronizer: @Sendable (Int32) -> Bool
 
     public init(
         fileURL: URL,
@@ -42,6 +44,17 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
     ) {
         self.fileURL = fileURL
         self.maximumLibraries = maximumLibraries
+        directorySynchronizer = Self.fsyncRetrying
+    }
+
+    init(
+        fileURL: URL,
+        maximumLibraries: Int = RollingInvocationAdmissionLedger.defaultMaximumLibraries,
+        directorySynchronizer: @escaping @Sendable (Int32) -> Bool
+    ) {
+        self.fileURL = fileURL
+        self.maximumLibraries = maximumLibraries
+        self.directorySynchronizer = directorySynchronizer
     }
 
     public func claim(
@@ -50,6 +63,8 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
     ) async -> InvocationAdmissionClaimOutcome {
         do {
             return try claimSynchronously(library: library, at: instant)
+        } catch MachineInvocationAdmissionError.commitUncertain {
+            return .commitUncertain
         } catch {
             return .unavailable
         }
@@ -314,7 +329,7 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
             }
             return true
         }
-        guard wroteAll, fsyncRetrying(descriptor) else {
+        guard wroteAll, Self.fsyncRetrying(descriptor) else {
             throw MachineInvocationAdmissionError.unavailable
         }
         let renameStatus = partialName.withCString { source in
@@ -324,7 +339,9 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
         }
         guard renameStatus == 0 else { throw MachineInvocationAdmissionError.unavailable }
         ownsPartial = false
-        guard fsyncRetrying(parent) else { throw MachineInvocationAdmissionError.unavailable }
+        guard directorySynchronizer(parent) else {
+            throw MachineInvocationAdmissionError.commitUncertain
+        }
     }
 
     private func encode<T: Encodable>(_ value: T) throws -> Data {
@@ -335,7 +352,7 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
         return data
     }
 
-    private func fsyncRetrying(_ descriptor: Int32) -> Bool {
+    private static func fsyncRetrying(_ descriptor: Int32) -> Bool {
         while Darwin.fsync(descriptor) != 0 {
             if errno == EINTR { continue }
             return false

@@ -80,7 +80,10 @@ exception: it keeps the Pending User Turn under
 `CoachContextCannotFitUserRetryable`. A rare failure after the admission ledger is
 committed but before the Invocation is installed may waste one admission unit and
 leaves the underlying intent interrupted and user-retryable; it must never launch
-unrecorded provider work.
+unrecorded provider work. The ledger rename is the possible-commit boundary:
+failure before it is a pre-admission rejection, while failure to flush the parent
+directory afterward is durability uncertainty and preserves the exact Pending
+intent for Retry/Discard.
 
 Only one Invocation may process at a time across the active Library. At most one
 new Invocation is admitted in a rolling 60-second window. The ledger is stored in
@@ -466,7 +469,9 @@ Memory compaction is backlog work.
 
 If persisted Chat data, including Memory, fails structural or integrity validation,
 Audora freezes that Chat and instructs the Speaker to create a new one. It does not
-silently replace damaged state with empty Memory.
+silently replace damaged state with empty Memory. Catalog recovery and launch
+identity checks isolate independent Chat roots, so a frozen sibling remains visible
+without preventing a healthy Chat from reconciling or sending.
 
 ## Structured Coach Response
 

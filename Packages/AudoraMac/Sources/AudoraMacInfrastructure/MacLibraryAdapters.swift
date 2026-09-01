@@ -315,6 +315,41 @@ public struct SystemLibraryClock: LibraryClock, ChatClock {
     }
 }
 
+private enum RandomPortableIdentifierFormatter {
+    enum Prefix: String {
+        case library = "lib-"
+        case session = "ses-"
+        case chat = "cht-"
+        case draft = "drf-"
+        case memory = "mem-"
+        case pendingUserTurn = "ptu-"
+        case responsePosition = "rsp-"
+        case invocation = "inv-"
+        case attempt = "atm-"
+        case message = "msg-"
+    }
+
+    private static let crockford = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+    static func make(_ prefix: Prefix, at instant: UTCInstant) -> String {
+        let compact = instant.rawValue
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: ":", with: "")
+            .replacingOccurrences(of: ".", with: "")
+        var generator = SystemRandomNumberGenerator()
+        let suffix = String((0 ..< 4).map { _ in
+            crockford.randomElement(using: &generator)!
+        })
+        return "\(prefix.rawValue)\(compact)-\(suffix)"
+    }
+
+    static func incrementingFinalCrockfordDigit(of value: String) -> String {
+        let last = value.last!
+        let index = crockford.firstIndex(of: last)!
+        return String(value.dropLast()) + String(crockford[(index + 1) % crockford.count])
+    }
+}
+
 public struct RandomChatIdentityGenerator:
     ChatIDGenerator,
     ChatDraftIDGenerator,
@@ -322,84 +357,60 @@ public struct RandomChatIdentityGenerator:
     PendingUserTurnIDGenerator,
     ChatResponsePositionIDGenerator
 {
-    private static let crockford = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
-
     public init() {}
 
     public func generateChatID(at instant: UTCInstant) async -> ChatID {
-        try! ChatID(Self.identifier(prefix: "cht-", instant: instant))
+        try! ChatID(RandomPortableIdentifierFormatter.make(.chat, at: instant))
     }
 
     public func generateChatDraftID(at instant: UTCInstant) async -> ChatDraftID {
-        try! ChatDraftID(Self.identifier(prefix: "drf-", instant: instant))
+        try! ChatDraftID(RandomPortableIdentifierFormatter.make(.draft, at: instant))
     }
 
     public func generateCoachMemoryID(at instant: UTCInstant) async -> CoachMemoryID {
-        try! CoachMemoryID(Self.identifier(prefix: "mem-", instant: instant))
+        try! CoachMemoryID(RandomPortableIdentifierFormatter.make(.memory, at: instant))
     }
 
     public func generatePendingUserTurnID(at instant: UTCInstant) async -> PendingUserTurnID {
-        try! PendingUserTurnID(Self.identifier(prefix: "ptu-", instant: instant))
+        try! PendingUserTurnID(
+            RandomPortableIdentifierFormatter.make(.pendingUserTurn, at: instant)
+        )
     }
 
     public func generateChatResponsePositionID(
         at instant: UTCInstant
     ) async -> ChatResponsePositionID {
-        try! ChatResponsePositionID(Self.identifier(prefix: "rsp-", instant: instant))
-    }
-
-    private static func identifier(prefix: String, instant: UTCInstant) -> String {
-        let compact = instant.rawValue
-            .replacingOccurrences(of: "-", with: "")
-            .replacingOccurrences(of: ":", with: "")
-            .replacingOccurrences(of: ".", with: "")
-        var generator = SystemRandomNumberGenerator()
-        let suffix = String((0..<4).map { _ in crockford.randomElement(using: &generator)! })
-        return "\(prefix)\(compact)-\(suffix)"
+        try! ChatResponsePositionID(
+            RandomPortableIdentifierFormatter.make(.responsePosition, at: instant)
+        )
     }
 }
 
 @_spi(InvocationInfrastructure)
 public struct RandomInvocationIdentityGenerator: InvocationIdentityGenerating {
-    private static let crockford = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
-
     public init() {}
 
     public func generate(at instant: UTCInstant) async -> InvocationLaunchIdentity {
         let attemptID = try! CoachProviderAttemptID(
-            Self.identifier(prefix: "atm-", instant: instant)
+            RandomPortableIdentifierFormatter.make(.attempt, at: instant)
         )
-        let userMessageRaw = Self.identifier(prefix: "msg-", instant: instant)
+        let userMessageRaw = RandomPortableIdentifierFormatter.make(.message, at: instant)
         return InvocationLaunchIdentity(
             invocationID: try! CoachInvocationID(
-                Self.identifier(prefix: "inv-", instant: instant)
+                RandomPortableIdentifierFormatter.make(.invocation, at: instant)
             ),
             attemptID: attemptID,
             idempotencyValue: try! ProviderIdempotencyValue(attemptID.rawValue),
             userMessageID: try! ChatMessageID(userMessageRaw),
             coachMessageID: try! ChatMessageID(
-                Self.nextIdentifier(after: userMessageRaw)
+                RandomPortableIdentifierFormatter.incrementingFinalCrockfordDigit(
+                    of: userMessageRaw
+                )
             ),
             freshDraftID: try! ChatDraftID(
-                Self.identifier(prefix: "drf-", instant: instant)
+                RandomPortableIdentifierFormatter.make(.draft, at: instant)
             )
         )
-    }
-
-    private static func identifier(prefix: String, instant: UTCInstant) -> String {
-        let compact = instant.rawValue
-            .replacingOccurrences(of: "-", with: "")
-            .replacingOccurrences(of: ":", with: "")
-            .replacingOccurrences(of: ".", with: "")
-        var generator = SystemRandomNumberGenerator()
-        let suffix = String((0..<4).map { _ in crockford.randomElement(using: &generator)! })
-        return "\(prefix)\(compact)-\(suffix)"
-    }
-
-    private static func nextIdentifier(after value: String) -> String {
-        let last = value.last!
-        let index = crockford.firstIndex(of: last)!
-        return String(value.dropLast()) + String(crockford[(index + 1) % crockford.count])
     }
 }
 
@@ -416,35 +427,17 @@ public struct ActiveLibraryProfileStatementGenerationReader: ProfileStatementGen
 }
 
 public struct RandomLibraryIDGenerator: LibraryIDGenerator {
-    private static let crockford = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
-
     public init() {}
 
     public func generateLibraryID(at instant: UTCInstant) async -> LibraryID {
-        let compact = instant.rawValue
-            .replacingOccurrences(of: "-", with: "")
-            .replacingOccurrences(of: ":", with: "")
-            .replacingOccurrences(of: ".", with: "")
-        var generator = SystemRandomNumberGenerator()
-        let suffix = String((0..<4).map { _ in Self.crockford.randomElement(using: &generator)! })
-        return try! LibraryID("lib-\(compact)-\(suffix)")
+        try! LibraryID(RandomPortableIdentifierFormatter.make(.library, at: instant))
     }
 }
 
 public struct RandomSessionIDGenerator: SessionIDGenerator {
-    private static let crockford = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
-
     public init() {}
 
     public func generateSessionID(at instant: UTCInstant) async -> SessionID {
-        let compact = instant.rawValue
-            .replacingOccurrences(of: "-", with: "")
-            .replacingOccurrences(of: ":", with: "")
-            .replacingOccurrences(of: ".", with: "")
-        var generator = SystemRandomNumberGenerator()
-        let suffix = String((0..<4).map { _ in
-            Self.crockford.randomElement(using: &generator)!
-        })
-        return try! SessionID("ses-\(compact)-\(suffix)")
+        try! SessionID(RandomPortableIdentifierFormatter.make(.session, at: instant))
     }
 }

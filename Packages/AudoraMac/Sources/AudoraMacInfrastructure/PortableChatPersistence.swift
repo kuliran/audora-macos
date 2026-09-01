@@ -38,6 +38,36 @@ private enum PortableInvocationLivenessRegistry {
     }
 }
 
+/// Typed ownership of the stable Invocations-directory namespace. It keeps the
+/// in-process registry claim and cross-process `flock` coupled to the same file
+/// descriptor so every acquisition path has one idempotent release lifecycle.
+private final class PortableInvocationNamespaceLock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var descriptor: Int32?
+    let key: PortableInvocationLivenessKey
+
+    init(descriptor: Int32, key: PortableInvocationLivenessKey) {
+        self.descriptor = descriptor
+        self.key = key
+    }
+
+    func release() {
+        lock.lock()
+        guard let descriptor else {
+            lock.unlock()
+            return
+        }
+        self.descriptor = nil
+        lock.unlock()
+
+        _ = audoraFlock(descriptor, LOCK_UN)
+        Darwin.close(descriptor)
+        PortableInvocationLivenessRegistry.release(key)
+    }
+
+    deinit { release() }
+}
+
 /// Exact Pending-file authority shared by the winning Invocation lease and
 /// ordinary Pending mutations. The in-process registry complements `flock`
 /// because Darwin may coalesce independently opened locks in one process.
@@ -75,23 +105,20 @@ private final class PortablePendingUserTurnFileLease: @unchecked Sendable {
 private final class PortableInvocationLivenessLease: @unchecked Sendable {
     private let lock = NSLock()
     private var rootDescriptor: Int32?
-    private var invocationsDescriptor: Int32?
-    private let key: PortableInvocationLivenessKey
+    private var namespaceLock: PortableInvocationNamespaceLock?
     private let reservedAuthority: PortableInvocationLivenessAuthority
     private let pendingUserTurnLease: PortablePendingUserTurnFileLease
     private let reservedRequest: PendingCoachInvocationRequest
 
     init(
         rootDescriptor: Int32,
-        invocationsDescriptor: Int32,
-        key: PortableInvocationLivenessKey,
+        namespaceLock: PortableInvocationNamespaceLock,
         authority: PortableInvocationLivenessAuthority,
         pendingUserTurnLease: PortablePendingUserTurnFileLease,
         reservedRequest: PendingCoachInvocationRequest
     ) {
         self.rootDescriptor = rootDescriptor
-        self.invocationsDescriptor = invocationsDescriptor
-        self.key = key
+        self.namespaceLock = namespaceLock
         reservedAuthority = authority
         self.pendingUserTurnLease = pendingUserTurnLease
         self.reservedRequest = reservedRequest
@@ -100,7 +127,7 @@ private final class PortableInvocationLivenessLease: @unchecked Sendable {
     func authority() -> PortableInvocationLivenessAuthority? {
         lock.lock()
         defer { lock.unlock() }
-        guard rootDescriptor != nil, invocationsDescriptor != nil else { return nil }
+        guard rootDescriptor != nil, namespaceLock != nil else { return nil }
         return reservedAuthority
     }
 
@@ -117,18 +144,18 @@ private final class PortableInvocationLivenessLease: @unchecked Sendable {
     )? {
         lock.lock()
         defer { lock.unlock() }
-        guard rootDescriptor != nil, invocationsDescriptor != nil else { return nil }
+        guard rootDescriptor != nil, namespaceLock != nil else { return nil }
         return (reservedAuthority, reservedRequest)
     }
 
     func release() {
         lock.lock()
-        guard let rootDescriptor, let invocationsDescriptor else {
+        guard let rootDescriptor, let namespaceLock else {
             lock.unlock()
             return
         }
         self.rootDescriptor = nil
-        self.invocationsDescriptor = nil
+        self.namespaceLock = nil
         lock.unlock()
 
         // Release the exact Pending fence before advertising that the Library
@@ -136,10 +163,8 @@ private final class PortableInvocationLivenessLease: @unchecked Sendable {
         // namespace after this point can then acquire Pending authority instead
         // of observing a transient half-released owner.
         pendingUserTurnLease.release()
-        _ = audoraFlock(invocationsDescriptor, LOCK_UN)
-        Darwin.close(invocationsDescriptor)
+        namespaceLock.release()
         Darwin.close(rootDescriptor)
-        PortableInvocationLivenessRegistry.release(key)
     }
 
     deinit { release() }
@@ -152,43 +177,38 @@ private final class PortableInvocationLivenessLease: @unchecked Sendable {
 private final class PortableInvocationRecoveryLease: @unchecked Sendable {
     private let lock = NSLock()
     private var rootDescriptor: Int32?
-    private var invocationsDescriptor: Int32?
-    private let key: PortableInvocationLivenessKey
+    private var namespaceLock: PortableInvocationNamespaceLock?
     private let reservedAuthority: PortableInvocationLivenessAuthority
 
     init(
         rootDescriptor: Int32,
-        invocationsDescriptor: Int32,
-        key: PortableInvocationLivenessKey,
+        namespaceLock: PortableInvocationNamespaceLock,
         authority: PortableInvocationLivenessAuthority
     ) {
         self.rootDescriptor = rootDescriptor
-        self.invocationsDescriptor = invocationsDescriptor
-        self.key = key
+        self.namespaceLock = namespaceLock
         reservedAuthority = authority
     }
 
     func authority() -> PortableInvocationLivenessAuthority? {
         lock.lock()
         defer { lock.unlock() }
-        guard rootDescriptor != nil, invocationsDescriptor != nil else { return nil }
+        guard rootDescriptor != nil, namespaceLock != nil else { return nil }
         return reservedAuthority
     }
 
     func release() {
         lock.lock()
-        guard let rootDescriptor, let invocationsDescriptor else {
+        guard let rootDescriptor, let namespaceLock else {
             lock.unlock()
             return
         }
         self.rootDescriptor = nil
-        self.invocationsDescriptor = nil
+        self.namespaceLock = nil
         lock.unlock()
 
-        _ = audoraFlock(invocationsDescriptor, LOCK_UN)
-        Darwin.close(invocationsDescriptor)
+        namespaceLock.release()
         Darwin.close(rootDescriptor)
-        PortableInvocationLivenessRegistry.release(key)
     }
 
     deinit { release() }
@@ -344,36 +364,12 @@ public struct PortableChatPersistence: @unchecked Sendable {
         try acquireExclusiveMutationLock(on: stagingDescriptor)
         defer { releaseMutationLock(on: stagingDescriptor) }
 
-        let invocationsDescriptor = try openDirectory(
-            named: "invocations",
-            under: rootDescriptor
-        )
-        var ownsDescriptor = true
-        defer {
-            if ownsDescriptor { Darwin.close(invocationsDescriptor) }
-        }
         let rootIdentity = try invocationLivenessIdentity(of: rootDescriptor)
-        let key = try invocationLivenessIdentity(of: invocationsDescriptor)
-        guard PortableInvocationLivenessRegistry.claim(key) else { return nil }
-        var ownsRegistryClaim = true
-        defer {
-            if ownsRegistryClaim { PortableInvocationLivenessRegistry.release(key) }
-        }
-
-        while audoraFlock(invocationsDescriptor, LOCK_EX | LOCK_NB) != 0 {
-            if errno == EINTR { continue }
-            if errno == EWOULDBLOCK || errno == EAGAIN { return nil }
-            throw PortableChatPersistenceError.ioFailure
-        }
-        var ownsFileLock = true
-        defer {
-            if ownsFileLock { _ = audoraFlock(invocationsDescriptor, LOCK_UN) }
-        }
+        guard let namespaceLock = try acquireInvocationNamespaceLock(
+            under: rootDescriptor
+        ) else { return nil }
 
         try revalidateLibraryAuthority(libraryID: scope.libraryID, under: rootDescriptor)
-        guard try directoryIdentity(named: "invocations", under: rootDescriptor) ==
-            directoryIdentity(of: invocationsDescriptor)
-        else { throw PortableChatPersistenceError.invalidLayout }
 
         let chatsDescriptor = try openDirectory(named: "chats", under: rootDescriptor)
         defer { Darwin.close(chatsDescriptor) }
@@ -400,18 +396,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
             throw PortableChatPersistenceError.invalidLayout
         }
 
-        ownsDescriptor = false
         ownsRootDescriptor = false
-        ownsRegistryClaim = false
-        ownsFileLock = false
         return PortableInvocationLivenessLease(
             rootDescriptor: rootDescriptor,
-            invocationsDescriptor: invocationsDescriptor,
-            key: key,
+            namespaceLock: namespaceLock,
             authority: PortableInvocationLivenessAuthority(
                 libraryID: scope.libraryID,
                 root: rootIdentity,
-                invocations: key,
+                invocations: namespaceLock.key,
                 pendingUserTurn: pendingUserTurnLease.key
             ),
             pendingUserTurnLease: pendingUserTurnLease,
@@ -431,53 +423,62 @@ public struct PortableChatPersistence: @unchecked Sendable {
         defer {
             if ownsRootDescriptor { Darwin.close(rootDescriptor) }
         }
-        let invocationsDescriptor = try openDirectory(
+
+        let rootIdentity = try invocationLivenessIdentity(of: rootDescriptor)
+        guard let namespaceLock = try acquireInvocationNamespaceLock(
+            under: rootDescriptor
+        ) else { return nil }
+
+        try revalidateLibraryAuthority(libraryID: scope.libraryID, under: rootDescriptor)
+
+        ownsRootDescriptor = false
+        return PortableInvocationRecoveryLease(
+            rootDescriptor: rootDescriptor,
+            namespaceLock: namespaceLock,
+            authority: PortableInvocationLivenessAuthority(
+                libraryID: scope.libraryID,
+                root: rootIdentity,
+                invocations: namespaceLock.key,
+                pendingUserTurn: nil
+            )
+        )
+    }
+
+    private func acquireInvocationNamespaceLock(
+        under rootDescriptor: Int32
+    ) throws -> PortableInvocationNamespaceLock? {
+        let descriptor = try openDirectory(
             named: "invocations",
             under: rootDescriptor
         )
-        var ownsInvocationsDescriptor = true
+        var ownsDescriptor = true
         defer {
-            if ownsInvocationsDescriptor { Darwin.close(invocationsDescriptor) }
+            if ownsDescriptor { Darwin.close(descriptor) }
         }
-
-        let rootIdentity = try invocationLivenessIdentity(of: rootDescriptor)
-        let key = try invocationLivenessIdentity(of: invocationsDescriptor)
+        let key = try invocationLivenessIdentity(of: descriptor)
         guard PortableInvocationLivenessRegistry.claim(key) else { return nil }
         var ownsRegistryClaim = true
         defer {
             if ownsRegistryClaim { PortableInvocationLivenessRegistry.release(key) }
         }
 
-        while audoraFlock(invocationsDescriptor, LOCK_EX | LOCK_NB) != 0 {
+        while audoraFlock(descriptor, LOCK_EX | LOCK_NB) != 0 {
             if errno == EINTR { continue }
             if errno == EWOULDBLOCK || errno == EAGAIN { return nil }
             throw PortableChatPersistenceError.ioFailure
         }
         var ownsFileLock = true
         defer {
-            if ownsFileLock { _ = audoraFlock(invocationsDescriptor, LOCK_UN) }
+            if ownsFileLock { _ = audoraFlock(descriptor, LOCK_UN) }
         }
-
-        try revalidateLibraryAuthority(libraryID: scope.libraryID, under: rootDescriptor)
         guard try directoryIdentity(named: "invocations", under: rootDescriptor) ==
-            directoryIdentity(of: invocationsDescriptor)
+            directoryIdentity(of: descriptor)
         else { throw PortableChatPersistenceError.invalidLayout }
 
-        ownsRootDescriptor = false
-        ownsInvocationsDescriptor = false
+        ownsDescriptor = false
         ownsRegistryClaim = false
         ownsFileLock = false
-        return PortableInvocationRecoveryLease(
-            rootDescriptor: rootDescriptor,
-            invocationsDescriptor: invocationsDescriptor,
-            key: key,
-            authority: PortableInvocationLivenessAuthority(
-                libraryID: scope.libraryID,
-                root: rootIdentity,
-                invocations: key,
-                pendingUserTurn: nil
-            )
-        )
+        return PortableInvocationNamespaceLock(descriptor: descriptor, key: key)
     }
 
     fileprivate func reconcileInterruptedInvocationsIfUnowned(
@@ -571,6 +572,15 @@ public struct PortableChatPersistence: @unchecked Sendable {
                         )
                     )
                 )
+            } catch let error as PortableChatPersistenceError
+                where frozenChatSnapshot(for: error, chatID: chatID) != nil
+            {
+                // Recovery is per Chat. A permanently frozen sibling has no
+                // launch authority, and must not hide or strand healthy
+                // Pending intents elsewhere in the Library.
+                continue
+            } catch {
+                throw error
             }
         }
 
@@ -1808,14 +1818,33 @@ public struct PortableChatPersistence: @unchecked Sendable {
             maximumCount: Self.maximumChatCatalogEntries
         )
         for chatName in chatNames {
-            guard let chatID = try? ChatID(chatName) else {
-                throw PortableChatPersistenceError.invalidLayout
+            guard let chatID = try? ChatID(chatName) else { continue }
+            let chatDescriptor: Int32
+            do {
+                chatDescriptor = try openDirectory(
+                    named: chatName,
+                    under: chatsDescriptor
+                )
+            } catch let error as PortableChatPersistenceError {
+                if error == .invalidLayout,
+                   (try? directoryIdentity(
+                       named: chatName,
+                       under: chatsDescriptor
+                   )) != nil
+                {
+                    throw PortableChatPersistenceError.ioFailure
+                }
+                guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
+                    throw error
+                }
+                continue
+            } catch {
+                throw error
             }
-            let chatDescriptor = try openDirectory(named: chatName, under: chatsDescriptor)
             defer { Darwin.close(chatDescriptor) }
-            try acquireExclusiveMutationLock(on: chatDescriptor)
-            defer { releaseMutationLock(on: chatDescriptor) }
             if chatID == authority.request.chatID {
+                try acquireExclusiveMutationLock(on: chatDescriptor)
+                defer { releaseMutationLock(on: chatDescriptor) }
                 guard let expectedPending = livenessAuthority.pendingUserTurn,
                       try regularFileLivenessIdentity(
                           named: "pending-user-turn.json",
@@ -1823,41 +1852,102 @@ public struct PortableChatPersistence: @unchecked Sendable {
                       ) == expectedPending
                 else { throw PortableChatPersistenceError.invalidLayout }
             }
-            let messagesDescriptor = try openDirectory(
-                named: "messages",
-                under: chatDescriptor
-            )
-            defer { Darwin.close(messagesDescriptor) }
-            if try entryExists(
-                named: "\(identity.userMessageID.rawValue).json",
-                under: messagesDescriptor
-            ) {
-                recordCollision(.userMessageID)
+
+            do {
+                let messagesDescriptor = try openDirectory(
+                    named: "messages",
+                    under: chatDescriptor
+                )
+                defer { Darwin.close(messagesDescriptor) }
+                if try entryExists(
+                    named: "\(identity.userMessageID.rawValue).json",
+                    under: messagesDescriptor
+                ) {
+                    recordCollision(.userMessageID)
+                }
+                if try entryExists(
+                    named: "\(identity.coachMessageID.rawValue).json",
+                    under: messagesDescriptor
+                ) {
+                    recordCollision(.coachMessageID)
+                }
+            } catch let error as PortableChatPersistenceError {
+                if error == .invalidLayout,
+                   (try? directoryIdentity(
+                       named: "messages",
+                       under: chatDescriptor
+                   )) != nil
+                {
+                    throw PortableChatPersistenceError.ioFailure
+                }
+                guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
+                    throw error
+                }
+                // Invalid sibling layout freezes that Chat. Transient I/O is
+                // not equivalent to proving the candidate namespace free.
+            } catch {
+                throw error
             }
-            if try entryExists(
-                named: "\(identity.coachMessageID.rawValue).json",
-                under: messagesDescriptor
-            ) {
-                recordCollision(.coachMessageID)
-            }
-            let loaded = try loadChat(
-                from: chatDescriptor,
-                expectedID: chatID,
-                reconcileTransients: true,
-                beforeDestructiveMutation: revalidateLiveness
-            )
-            guard case let .readWrite(aggregate) = loaded else {
-                throw PortableChatPersistenceError.invalidLayout
-            }
-            if chatID == authority.request.chatID { current = aggregate }
-            if aggregate.chat.messageIDs.contains(identity.userMessageID) {
-                recordCollision(.userMessageID)
-            }
-            if aggregate.chat.messageIDs.contains(identity.coachMessageID) {
-                recordCollision(.coachMessageID)
-            }
-            if aggregate.chat.draft.draftID == identity.freshDraftID {
-                recordCollision(.freshDraftID)
+
+            if chatID == authority.request.chatID {
+                let loaded = try loadChat(
+                    from: chatDescriptor,
+                    expectedID: chatID,
+                    reconcileTransients: true,
+                    beforeDestructiveMutation: revalidateLiveness
+                )
+                guard case let .readWrite(aggregate) = loaded else {
+                    return .stale(nil)
+                }
+                current = aggregate
+                if aggregate.chat.messageIDs.contains(identity.userMessageID) {
+                    recordCollision(.userMessageID)
+                }
+                if aggregate.chat.messageIDs.contains(identity.coachMessageID) {
+                    recordCollision(.coachMessageID)
+                }
+                if aggregate.chat.draft.draftID == identity.freshDraftID {
+                    recordCollision(.freshDraftID)
+                }
+            } else {
+                do {
+                    let manifest = try boundedData(
+                        named: "chat.json",
+                        under: chatDescriptor
+                    )
+                    // Sibling Chats are independent failure domains. Their bounded
+                    // root bytes are sufficient for conservative identity
+                    // detection even when a newer schema or corruption makes the
+                    // aggregate permanently frozen. A literal hit may regenerate
+                    // unnecessarily, but can never admit a known collision.
+                    if manifest.range(
+                        of: Data(identity.userMessageID.rawValue.utf8)
+                    ) != nil {
+                        recordCollision(.userMessageID)
+                    }
+                    if manifest.range(
+                        of: Data(identity.coachMessageID.rawValue.utf8)
+                    ) != nil {
+                        recordCollision(.coachMessageID)
+                    }
+                    if manifest.range(
+                        of: Data(identity.freshDraftID.rawValue.utf8)
+                    ) != nil {
+                        recordCollision(.freshDraftID)
+                    }
+                } catch let error as PortableChatPersistenceError {
+                    if error == .invalidLayout,
+                       isRegularFile(named: "chat.json", under: chatDescriptor)
+                    {
+                        throw PortableChatPersistenceError.ioFailure
+                    }
+                    guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
+                        throw error
+                    }
+                    // This sibling has no readable root identity to reserve.
+                } catch {
+                    throw error
+                }
             }
         }
         guard let current else { return .stale(nil) }
@@ -3062,7 +3152,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
         guard chatVersion == UInt64(Chat.schemaVersion) else {
             throw PortableChatPersistenceError.unsupportedOlderSchema
         }
-        let chat = try decodeChat(chatData)
+        let chat = try mapPersistedDomainValidation {
+            try decodeChat(chatData)
+        }
         guard chat.id == expectedID else {
             throw PortableChatPersistenceError.invalidLayout
         }
@@ -3094,7 +3186,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
             guard pendingVersion == UInt64(PendingUserTurn.schemaVersion) else {
                 throw PortableChatPersistenceError.unsupportedOlderSchema
             }
-            decodedPendingUserTurn = try decodePendingUserTurn(pendingData)
+            decodedPendingUserTurn = try mapPersistedDomainValidation {
+                try decodePendingUserTurn(pendingData)
+            }
         } else {
             decodedPendingUserTurn = nil
         }
@@ -3124,7 +3218,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
             }
             if referencedNames.contains(name) {
                 let messageData = try boundedData(named: name, under: messagesDescriptor)
-                let message = try decodeMessage(messageData)
+                let message = try mapPersistedDomainValidation {
+                    try decodeMessage(messageData)
+                }
                 guard message.id == messageID else {
                     throw PortableChatPersistenceError.invalidLayout
                 }
@@ -3190,12 +3286,16 @@ public struct PortableChatPersistence: @unchecked Sendable {
         guard memoryVersion == UInt64(CoachMemory.schemaVersion) else {
             throw PortableChatPersistenceError.unsupportedOlderSchema
         }
-        let memory = try decodeMemory(memoryData, attachments: chat.attachments)
-        let aggregate = try ChatAggregate(
-            chat: chat,
-            memory: memory,
-            pendingUserTurn: pendingUserTurn
-        )
+        let memory = try mapPersistedDomainValidation {
+            try decodeMemory(memoryData, attachments: chat.attachments)
+        }
+        let aggregate = try mapPersistedDomainValidation {
+            try ChatAggregate(
+                chat: chat,
+                memory: memory,
+                pendingUserTurn: pendingUserTurn
+            )
+        }
         if reconcileTransients {
             try reconcileRootMutationPartials(
                 under: chatDescriptor,
@@ -3402,9 +3502,10 @@ public struct PortableChatPersistence: @unchecked Sendable {
     ) throws {
         let marker = "aborting-invocation.json"
         guard try entryExists(named: marker, under: chatDescriptor) else { return }
-        let invocation = try decodeInvocation(
-            boundedData(named: marker, under: chatDescriptor)
-        )
+        let invocationData = try boundedData(named: marker, under: chatDescriptor)
+        let invocation = try mapPersistedDomainValidation {
+            try decodeInvocation(invocationData)
+        }
         guard invocation.chatID == chat.id,
               invocation.draftID == chat.draft.draftID,
               invocation.draftVersion == chat.draft.version
@@ -4505,6 +4606,18 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     private func decode<T: Decodable>(_ type: T.Type, _ data: Data) throws -> T {
         try confined.decode(type, from: data)
+    }
+
+    private func mapPersistedDomainValidation<T>(
+        _ operation: () throws -> T
+    ) throws -> T {
+        do {
+            return try operation()
+        } catch let error as PortableChatPersistenceError {
+            throw error
+        } catch {
+            throw PortableChatPersistenceError.invalidJSON
+        }
     }
 
     private func deterministicJSON<T: Encodable>(_ value: T) throws -> Data {

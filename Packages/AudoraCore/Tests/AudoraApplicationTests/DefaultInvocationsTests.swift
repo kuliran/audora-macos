@@ -142,6 +142,29 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(publicationCount, 0)
     }
 
+    func testAdmissionCommitUncertaintyRetainsExactPendingAsInterrupted() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            admissionDecision: .commitUncertain
+        )
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .interrupted(aggregate, .persistenceUnavailable) = outcome else {
+            return XCTFail("a possibly committed debit must remain user-retryable")
+        }
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
+        let claimCount = await fixture.admission.claimCount
+        let launchCount = await fixture.provider.launchCount
+        XCTAssertEqual(claimCount, 1)
+        XCTAssertEqual(launchCount, 0)
+    }
+
     func testInstallFailureAfterDurableDebitNeverLaunchesAndRetainsRetryableIntent() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         await fixture.persistence.failNextInstall()

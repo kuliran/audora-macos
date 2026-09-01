@@ -175,6 +175,7 @@ final class ChatContextCapacityTransitionTests: XCTestCase {
             pendingUserTurnIDGenerator: CapacityIDs(),
             responsePositionIDGenerator: CapacityIDs(),
             autosaveScheduler: CapacityAutosaveScheduler(),
+            admissionRefreshScheduler: CapacityAdmissionRefreshScheduler(),
             coachContext: DefaultCoachContextFeature(source: source),
             invocations: invocations
         )
@@ -557,4 +558,8 @@ private struct CapacityIDs: ChatIDGenerator, ChatDraftIDGenerator,
 
 private struct CapacityAutosaveScheduler: ChatAutosaveScheduling {
     func sleep(forNanoseconds nanoseconds: UInt64) async throws {}
+}
+
+private struct CapacityAdmissionRefreshScheduler: ChatAdmissionRefreshScheduling {
+    func sleep(until deadline: UTCInstant) async throws {}
 }

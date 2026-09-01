@@ -97,6 +97,7 @@ struct AudoraApp: App {
             memoryIDGenerator: chatIdentityGenerator,
             pendingUserTurnIDGenerator: chatIdentityGenerator,
             responsePositionIDGenerator: chatIdentityGenerator,
+            admissionRefreshScheduler: SystemChatAdmissionRefreshScheduler(),
             invocations: invocations
         )
         let applicationCommands = DefaultApplicationCommandFeature(
