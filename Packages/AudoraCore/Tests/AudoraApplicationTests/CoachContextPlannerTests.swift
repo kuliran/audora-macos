@@ -873,7 +873,23 @@ private struct FixedAttachmentProjectionConfigurationAuthority:
     {
         .configured(
             CoachAttachmentProjectionConfiguration(
-                policy: policy,
+                configuration: try! CoachContextConfiguration(
+                    descriptor: CoachProviderDescriptor(
+                        displayName: "Fixed attachment projection fixture",
+                        contextBudget: CoachContextBudget(
+                            contextWindowTokens: 100_000,
+                            responseReservedTokens: 32,
+                            safetyMarginTokens: 8
+                        ),
+                        coachMemoryMaxTokens: 1
+                    ),
+                    policy: CoachProviderEstimationPolicy(
+                        providerIdentifier: "fixed-attachment-projection-v1",
+                        responseCollectorByteCeiling: 8_192,
+                        framing: CoachProviderFraming(),
+                        attachmentProjectionPolicy: policy
+                    )
+                ),
                 stamp: stamp
             )
         )

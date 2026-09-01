@@ -211,12 +211,12 @@ enum CoachContextAuthorityLeaseOutcome: Sendable {
     case stale
 }
 
-/// The one provider/model projection policy currently qualified for this app
-/// process. A provider can be temporarily unavailable while this configuration
-/// remains known; absence of a qualified policy is represented separately.
-enum CoachAttachmentProjectionPolicyOutcome: Sendable {
+/// The one provider/model configuration currently qualified for this app
+/// process. A provider can be temporarily unavailable while this complete
+/// deterministic capacity authority remains known.
+enum CoachQualifiedConfigurationOutcome: Sendable {
     case knownQualified(
-        policy: CoachAttachmentProjectionPolicy,
+        configuration: CoachContextConfiguration,
         configurationGeneration: UInt64
     )
     case unavailable
@@ -242,8 +242,8 @@ protocol CoachContextSnapshotPort: Sendable {
 
     /// Reads the same configuration generation used by quote and final
     /// preparation. Attachment projection must never capture a parallel policy.
-    func currentAttachmentProjectionPolicy()
-        async -> CoachAttachmentProjectionPolicyOutcome
+    func currentQualifiedConfiguration()
+        async -> CoachQualifiedConfigurationOutcome
 
     func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool
 
@@ -256,8 +256,8 @@ protocol CoachContextSnapshotPort: Sendable {
 }
 
 extension CoachContextSnapshotPort {
-    func currentAttachmentProjectionPolicy()
-        async -> CoachAttachmentProjectionPolicyOutcome
+    func currentQualifiedConfiguration()
+        async -> CoachQualifiedConfigurationOutcome
     {
         .unavailable
     }
@@ -285,8 +285,12 @@ extension CoachContextSnapshotPort {
 }
 
 struct CoachAttachmentProjectionConfiguration: Sendable {
-    let policy: CoachAttachmentProjectionPolicy
+    let configuration: CoachContextConfiguration
     let stamp: CoachContextConfigurationStamp
+
+    var policy: CoachAttachmentProjectionPolicy {
+        configuration.policy.attachmentProjectionPolicy
+    }
 }
 
 enum CoachAttachmentProjectionConfigurationOutcome: Sendable {
@@ -315,11 +319,11 @@ private struct CoachContextConfigurationAuthority:
     func currentAttachmentProjectionConfiguration()
         async -> CoachAttachmentProjectionConfigurationOutcome
     {
-        switch await source.currentAttachmentProjectionPolicy() {
-        case let .knownQualified(policy, configurationGeneration):
+        switch await source.currentQualifiedConfiguration() {
+        case let .knownQualified(configuration, configurationGeneration):
             return .configured(
                 CoachAttachmentProjectionConfiguration(
-                    policy: policy,
+                    configuration: configuration,
                     stamp: stamp(for: configurationGeneration)
                 )
             )
@@ -374,7 +378,10 @@ enum ConfigurationBoundChatCreationQuoteOutcome: Equatable, Sendable {
         ChatCreationQuote,
         authority: ChatCreationQuoteAuthority
     )
-    case providerUnavailable(authority: ChatCreationQuoteAuthority)
+    case providerUnavailable(
+        ChatCreationCapacityLowerBound,
+        authority: ChatCreationQuoteAuthority
+    )
     case unavailable(CoachContextUnavailableReason)
 }
 
@@ -448,10 +455,6 @@ protocol ChatCoachContextCoordinating:
         _ request: CoachContextNewChatQuoteRequest
     ) async -> ConfigurationBoundChatCreationQuoteOutcome
 
-    func isCurrentAttachmentConfiguration(
-        _ stamp: CoachContextConfigurationStamp
-    ) async -> Bool
-
     func acquireNewChatCreationLease(
         _ authority: ChatCreationQuoteAuthority
     ) async -> CoachContextAuthorityLeaseOutcome
@@ -467,6 +470,7 @@ public struct DefaultCoachContextFeature:
     private let capacity: CoachContextCapacity
     private let configurationAuthority: CoachContextConfigurationAuthority
     private let attachmentSource: any ChatSessionAttachmentSource
+    private let attachmentCapacityPreparer: any ChatAttachmentCapacityPreparing
 
     /// Live composition fails closed until a provider descriptor is qualified.
     public init() {
@@ -475,6 +479,7 @@ public struct DefaultCoachContextFeature:
         capacity = CoachContextCapacity()
         configurationAuthority = CoachContextConfigurationAuthority(source: source)
         attachmentSource = MissingQualifiedConfigurationChatSessionAttachmentSource()
+        attachmentCapacityPreparer = UnavailableChatAttachmentCapacityPreparer()
     }
 
     @_spi(CoachContextQualification)
@@ -486,10 +491,12 @@ public struct DefaultCoachContextFeature:
         self.source = source
         capacity = CoachContextCapacity()
         self.configurationAuthority = configurationAuthority
-        attachmentSource = ProjectedChatSessionAttachmentSource(
+        let projectedAttachmentSource = ProjectedChatSessionAttachmentSource(
             evidenceSource: attachmentEvidenceSource,
             configurationAuthority: configurationAuthority
         )
+        attachmentSource = projectedAttachmentSource
+        attachmentCapacityPreparer = projectedAttachmentSource
     }
 
     init(
@@ -504,6 +511,7 @@ public struct DefaultCoachContextFeature:
             authorityID: configurationAuthorityID
         )
         attachmentSource = UnavailableChatSessionAttachmentSource()
+        attachmentCapacityPreparer = UnavailableChatAttachmentCapacityPreparer()
     }
 
     init(
@@ -519,10 +527,12 @@ public struct DefaultCoachContextFeature:
         self.source = source
         self.capacity = capacity
         self.configurationAuthority = configurationAuthority
-        attachmentSource = ProjectedChatSessionAttachmentSource(
+        let projectedAttachmentSource = ProjectedChatSessionAttachmentSource(
             evidenceSource: attachmentEvidenceSource,
             configurationAuthority: configurationAuthority
         )
+        attachmentSource = projectedAttachmentSource
+        attachmentCapacityPreparer = projectedAttachmentSource
     }
 
     func loadAttachmentCandidates(
@@ -578,23 +588,52 @@ public struct DefaultCoachContextFeature:
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
                 return .unavailable(.staleState)
             }
-            return .providerUnavailable(
-                authority: ChatCreationQuoteAuthority(
-                    context: nil,
-                    configuration: configuration.stamp
+            let preparedAttachments: [PreparedCoachAttachment]
+            if request.attachments.values.isEmpty {
+                preparedAttachments = []
+            } else {
+                switch await attachmentCapacityPreparer.prepareCapacityAttachments(
+                    request.attachments,
+                    in: request.library
+                ) {
+                case let .prepared(prepared, preparedConfiguration):
+                    guard preparedConfiguration == configuration.stamp else {
+                        return .unavailable(.staleState)
+                    }
+                    preparedAttachments = prepared
+                case .configurationChanged:
+                    return .unavailable(.staleState)
+                case .qualifiedConfigurationUnavailable:
+                    return .unavailable(.sourceUnavailable)
+                case .attachmentUnavailable:
+                    return .unavailable(.invalidContext)
+                case .failed:
+                    return .unavailable(.sourceUnavailable)
+                }
+            }
+            guard await configurationAuthority.isCurrent(configuration.stamp) else {
+                return .unavailable(.staleState)
+            }
+            do {
+                return .providerUnavailable(
+                    try capacity.lowerBoundNewChat(
+                        creation: request.creation,
+                        attachments: preparedAttachments,
+                        configuration: configuration.configuration
+                    ),
+                    authority: ChatCreationQuoteAuthority(
+                        context: nil,
+                        configuration: configuration.stamp
+                    )
                 )
-            )
+            } catch {
+                return .unavailable(.invalidContext)
+            }
         case .sourceUnavailable:
             return .unavailable(.sourceUnavailable)
         case .staleState:
             return .unavailable(.staleState)
         }
-    }
-
-    func isCurrentAttachmentConfiguration(
-        _ stamp: CoachContextConfigurationStamp
-    ) async -> Bool {
-        await configurationAuthority.isCurrent(stamp)
     }
 
     func acquireNewChatCreationLease(

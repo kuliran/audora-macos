@@ -31,6 +31,12 @@ private struct CompletedNewChatPickerWork<Outcome: Sendable>: Sendable {
     let lease: CoachContextAuthorityLease?
 }
 
+private struct NewChatConfirmationBinding: Equatable, Sendable {
+    let token: NewChatConfirmationToken
+    let attachments: ChatAttachments
+    let quoteAuthority: ChatCreationQuoteAuthority
+}
+
 private struct SessionTranscriptRevisionPair: Hashable, Sendable {
     let sessionID: SessionID
     let transcriptRevisionID: TranscriptRevisionID
@@ -184,7 +190,7 @@ public actor DefaultChatFeature: ChatFeature {
     private var newChatAttachmentFilterQuery = ChatAttachmentFilterQuery.empty
     private var newChatAttachmentConfigurationStamp:
         CoachContextConfigurationStamp?
-    private var newChatCreationQuoteAuthority: ChatCreationQuoteAuthority?
+    private var newChatConfirmation: NewChatConfirmationBinding?
     private var newChatPickerWork: NewChatPickerWork?
     private var nextNewChatPickerWorkID: UInt64 = 0
     private var isOrderlyTerminationPending = false
@@ -427,8 +433,11 @@ public actor DefaultChatFeature: ChatFeature {
             await toggleNewChatAttachment(attachmentID, context: context)
         case let .cancelNewChat(context):
             await cancelNewChat(context: context)
-        case let .confirmNewChat(context):
-            await confirmNewChat(context: context)
+        case let .confirmNewChat(context, confirmationToken):
+            await confirmNewChat(
+                confirmationToken: confirmationToken,
+                context: context
+            )
         case let .rename(context, chatID, title, expectedRevision):
             await rename(
                 chatID,
@@ -463,7 +472,7 @@ public actor DefaultChatFeature: ChatFeature {
         guard isActive(context), case .ready = state.catalog else { return }
         newChatAttachmentFilterQuery = .empty
         newChatAttachmentConfigurationStamp = nil
-        newChatCreationQuoteAuthority = nil
+        newChatConfirmation = nil
         await invalidateNewChatPickerWork()
         state = replacing(
             newChatPicker: .loading,
@@ -498,7 +507,7 @@ public actor DefaultChatFeature: ChatFeature {
                 await quoteNewChatSelection(snapshot, context: context)
             } catch {
                 newChatAttachmentConfigurationStamp = nil
-                newChatCreationQuoteAuthority = nil
+                newChatConfirmation = nil
                 state = replacing(
                     newChatPicker: .failed,
                     activity: nil,
@@ -515,7 +524,7 @@ public actor DefaultChatFeature: ChatFeature {
             )
         case .configurationChanged:
             newChatAttachmentConfigurationStamp = nil
-            newChatCreationQuoteAuthority = nil
+            newChatConfirmation = nil
             state = replacing(
                 newChatPicker: .failed,
                 activity: nil,
@@ -526,7 +535,7 @@ public actor DefaultChatFeature: ChatFeature {
             failNewChatForMissingQualifiedConfiguration()
         case .readOnlyLibrary:
             newChatAttachmentConfigurationStamp = nil
-            newChatCreationQuoteAuthority = nil
+            newChatConfirmation = nil
             state = replacing(
                 newChatPicker: .failed,
                 activity: nil,
@@ -535,7 +544,7 @@ public actor DefaultChatFeature: ChatFeature {
             publish()
         case .failed:
             newChatAttachmentConfigurationStamp = nil
-            newChatCreationQuoteAuthority = nil
+            newChatConfirmation = nil
             state = replacing(
                 newChatPicker: .failed,
                 activity: nil,
@@ -554,7 +563,8 @@ public actor DefaultChatFeature: ChatFeature {
             selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
             filterQuery: query,
             feasibility: snapshot.feasibility,
-            issue: snapshot.issue
+            issue: snapshot.issue,
+            confirmationToken: snapshot.confirmationToken
         )
         state = replacing(
             newChatPicker: .ready(replacement),
@@ -584,7 +594,8 @@ public actor DefaultChatFeature: ChatFeature {
                     feasibility: snapshot.feasibility,
                     issue: .selectionLimitReached(
                         maximum: ChatAttachments.maximumCount
-                    )
+                    ),
+                    confirmationToken: snapshot.confirmationToken
                 )
                 state = replacing(
                     newChatPicker: .ready(replacement),
@@ -604,7 +615,7 @@ public actor DefaultChatFeature: ChatFeature {
             feasibility: .quoting,
             issue: nil
         )
-        newChatCreationQuoteAuthority = nil
+        newChatConfirmation = nil
         state = replacing(
             newChatPicker: .ready(replacement),
             activity: state.activity,
@@ -619,7 +630,7 @@ public actor DefaultChatFeature: ChatFeature {
         await invalidateNewChatPickerWork()
         newChatAttachmentFilterQuery = .empty
         newChatAttachmentConfigurationStamp = nil
-        newChatCreationQuoteAuthority = nil
+        newChatConfirmation = nil
         state = replacing(
             newChatPicker: .closed,
             activity: state.activity,
@@ -628,14 +639,20 @@ public actor DefaultChatFeature: ChatFeature {
         publish()
     }
 
-    private func confirmNewChat(context: ChatCommandContext) async {
+    private func confirmNewChat(
+        confirmationToken: NewChatConfirmationToken,
+        context: ChatCommandContext
+    ) async {
         guard isActive(context), case let .ready(snapshot) = state.newChatPicker,
               snapshot.permitsConfirmation,
+              snapshot.confirmationToken == confirmationToken,
               let attachments = try? selectedAttachments(in: snapshot),
               let expectedConfiguration = newChatAttachmentConfigurationStamp,
-              let quoteAuthority = newChatCreationQuoteAuthority
+              let confirmation = newChatConfirmation,
+              confirmation.token == confirmationToken,
+              confirmation.attachments == attachments
         else { return }
-        guard quoteAuthority.configuration == expectedConfiguration else {
+        guard confirmation.quoteAuthority.configuration == expectedConfiguration else {
             await refreshNewChatPickerForConfigurationChange(
                 preserving: attachments,
                 context: context,
@@ -645,8 +662,7 @@ public actor DefaultChatFeature: ChatFeature {
         }
         await createNewChat(
             context: context,
-            attachments: attachments,
-            quoteAuthority: quoteAuthority
+            confirmation: confirmation
         )
     }
 
@@ -655,7 +671,7 @@ public actor DefaultChatFeature: ChatFeature {
         context: ChatCommandContext,
         remainingConfigurationRefreshAttempts: Int = 1
     ) async {
-        newChatCreationQuoteAuthority = nil
+        newChatConfirmation = nil
         guard let attachments = try? selectedAttachments(in: expected),
               let expectedConfiguration = newChatAttachmentConfigurationStamp
         else {
@@ -685,16 +701,27 @@ public actor DefaultChatFeature: ChatFeature {
         }
         switch outcome {
         case let .available(quote, authority):
-            newChatCreationQuoteAuthority = authority
             updatePickerFeasibility(
                 .available(quote),
-                issue: quote.context.fits ? nil : .contextCannotFit
+                issue: quote.context.fits ? nil : .contextCannotFit,
+                confirmation: NewChatConfirmationBinding(
+                    token: NewChatConfirmationToken(),
+                    attachments: attachments,
+                    quoteAuthority: authority
+                )
             )
-        case let .providerUnavailable(authority):
-            newChatCreationQuoteAuthority = authority
-            updatePickerFeasibility(.unavailable(.providerUnavailable), issue: nil)
+        case let .providerUnavailable(lowerBound, authority):
+            updatePickerFeasibility(
+                .providerUnavailable(lowerBound),
+                issue: lowerBound.provesImpossible ? .contextCannotFit : nil,
+                confirmation: NewChatConfirmationBinding(
+                    token: NewChatConfirmationToken(),
+                    attachments: attachments,
+                    quoteAuthority: authority
+                )
+            )
         case let .unavailable(reason):
-            newChatCreationQuoteAuthority = nil
+            newChatConfirmation = nil
             updatePickerFeasibility(
                 .unavailable(reason),
                 issue: .contextUnavailable(reason)
@@ -750,7 +777,23 @@ public actor DefaultChatFeature: ChatFeature {
         context: ChatCommandContext,
         remainingQuoteRefreshAttempts: Int
     ) async {
-        newChatCreationQuoteAuthority = nil
+        newChatConfirmation = nil
+        if case let .ready(current) = state.newChatPicker {
+            let invalidated = ChatAttachmentPickerSnapshot(
+                allRows: current.allRows,
+                visibleRows: current.visibleRows,
+                selectedAttachmentIDs: current.selectedAttachmentIDs,
+                filterQuery: current.filterQuery,
+                feasibility: .quoting,
+                issue: nil
+            )
+            state = replacing(
+                newChatPicker: .ready(invalidated),
+                activity: state.activity,
+                notice: nil
+            )
+            publish()
+        }
         let coachContext = coachContext
         guard let outcome = await performNewChatPickerWork({
             await coachContext.loadAttachmentCandidates(in: context.libraryScope)
@@ -829,7 +872,7 @@ public actor DefaultChatFeature: ChatFeature {
         guard nextNewChatPickerWorkID < .max else {
             await invalidateNewChatPickerWork()
             newChatAttachmentConfigurationStamp = nil
-            newChatCreationQuoteAuthority = nil
+            newChatConfirmation = nil
             state = replacing(
                 newChatPicker: .failed,
                 activity: nil,
@@ -875,16 +918,23 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func updatePickerFeasibility(
         _ feasibility: ChatCreationFeasibility,
-        issue: ChatAttachmentPickerIssue?
+        issue: ChatAttachmentPickerIssue?,
+        confirmation: NewChatConfirmationBinding? = nil
     ) {
         guard case let .ready(snapshot) = state.newChatPicker else { return }
+        let acceptedConfirmation =
+            feasibility.permitsCreation && issue?.blocksConfirmation != true
+                ? confirmation
+                : nil
+        newChatConfirmation = acceptedConfirmation
         let replacement = ChatAttachmentPickerSnapshot(
             allRows: snapshot.allRows,
             visibleRows: snapshot.visibleRows,
             selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
             filterQuery: snapshot.filterQuery,
             feasibility: feasibility,
-            issue: issue
+            issue: issue,
+            confirmationToken: acceptedConfirmation?.token
         )
         state = replacing(
             newChatPicker: .ready(replacement),
@@ -896,13 +946,15 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func updatePickerIssue(_ issue: ChatAttachmentPickerIssue) {
         guard case let .ready(snapshot) = state.newChatPicker else { return }
+        newChatConfirmation = nil
         let replacement = ChatAttachmentPickerSnapshot(
             allRows: snapshot.allRows,
             visibleRows: snapshot.visibleRows,
             selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
             filterQuery: snapshot.filterQuery,
             feasibility: snapshot.feasibility,
-            issue: issue
+            issue: issue,
+            confirmationToken: nil
         )
         state = replacing(
             newChatPicker: .ready(replacement),
@@ -914,7 +966,7 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func failNewChatForMissingQualifiedConfiguration() {
         newChatAttachmentConfigurationStamp = nil
-        newChatCreationQuoteAuthority = nil
+        newChatConfirmation = nil
         state = replacing(
             newChatPicker: .failed,
             activity: nil,
@@ -990,7 +1042,7 @@ public actor DefaultChatFeature: ChatFeature {
             )
             newChatAttachmentFilterQuery = .empty
             newChatAttachmentConfigurationStamp = nil
-            newChatCreationQuoteAuthority = nil
+            newChatConfirmation = nil
             publish()
             await start(in: context)
         }
@@ -1035,19 +1087,18 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func createNewChat(
         context: ChatCommandContext,
-        attachments: ChatAttachments,
-        quoteAuthority: ChatCreationQuoteAuthority
+        confirmation: NewChatConfirmationBinding
     ) async {
+        let attachments = confirmation.attachments
+        let quoteAuthority = confirmation.quoteAuthority
         guard isCurrentNewChatConfirmation(
             context: context,
-            attachments: attachments,
-            quoteAuthority: quoteAuthority
+            confirmation: confirmation
         ), case .ready = state.catalog else { return }
         guard await flushSelectedDraft(in: context) else { return }
         guard isCurrentNewChatConfirmation(
             context: context,
-            attachments: attachments,
-            quoteAuthority: quoteAuthority
+            confirmation: confirmation
         ) else { return }
 
         let coachContext = coachContext
@@ -1164,8 +1215,7 @@ public actor DefaultChatFeature: ChatFeature {
         }
         guard isCurrentNewChatConfirmation(
             context: context,
-            attachments: attachments,
-            quoteAuthority: quoteAuthority
+            confirmation: confirmation
         ) else {
             lease.releaseDetached()
             return
@@ -1220,7 +1270,7 @@ public actor DefaultChatFeature: ChatFeature {
         case let .committed(committed):
             newChatAttachmentFilterQuery = .empty
             newChatAttachmentConfigurationStamp = nil
-            newChatCreationQuoteAuthority = nil
+            newChatConfirmation = nil
             state = replacing(
                 newChatPicker: .closed,
                 activity: state.activity,
@@ -1264,18 +1314,18 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func isCurrentNewChatConfirmation(
         context: ChatCommandContext,
-        attachments: ChatAttachments,
-        quoteAuthority: ChatCreationQuoteAuthority
+        confirmation: NewChatConfirmationBinding
     ) -> Bool {
         guard isActive(context),
               case let .ready(snapshot) = state.newChatPicker,
               snapshot.permitsConfirmation,
-              newChatCreationQuoteAuthority == quoteAuthority,
+              snapshot.confirmationToken == confirmation.token,
+              newChatConfirmation == confirmation,
               let currentAttachments = try? selectedAttachments(in: snapshot)
         else {
             return false
         }
-        return currentAttachments == attachments
+        return currentAttachments == confirmation.attachments
     }
 
     private func requoteNewChatAfterAuthorityChange(
@@ -1298,7 +1348,7 @@ public actor DefaultChatFeature: ChatFeature {
             feasibility: .quoting,
             issue: nil
         )
-        newChatCreationQuoteAuthority = nil
+        newChatConfirmation = nil
         state = replacing(
             newChatPicker: .ready(requoting),
             activity: nil,
@@ -1550,7 +1600,7 @@ public actor DefaultChatFeature: ChatFeature {
         await invalidateNewChatPickerWork()
         newChatAttachmentFilterQuery = .empty
         newChatAttachmentConfigurationStamp = nil
-        newChatCreationQuoteAuthority = nil
+        newChatConfirmation = nil
         guard state.newChatPicker != .closed else { return }
         state = replacing(
             newChatPicker: .closed,
@@ -2570,7 +2620,7 @@ private extension ChatCommand {
         switch self {
         case let .start(context), let .beginNewChat(context),
              let .cancelNewChat(context),
-             let .confirmNewChat(context):
+             let .confirmNewChat(context, _):
             context
         case let .setNewChatAttachmentFilter(context, _),
              let .toggleNewChatAttachment(context, _),
@@ -2602,7 +2652,7 @@ private extension ConfigurationBoundChatCreationQuoteOutcome {
     var creationAuthority: ChatCreationQuoteAuthority? {
         switch self {
         case let .available(_, authority),
-             let .providerUnavailable(authority):
+             let .providerUnavailable(_, authority):
             authority
         case .unavailable:
             nil

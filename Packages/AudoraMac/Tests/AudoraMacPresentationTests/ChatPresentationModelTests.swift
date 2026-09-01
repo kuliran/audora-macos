@@ -1,4 +1,4 @@
-import AudoraApplication
+@_spi(ChatConfirmationTesting) import AudoraApplication
 import AudoraDomain
 @testable import AudoraMacPresentation
 import Foundation
@@ -51,9 +51,24 @@ final class ChatPresentationModelTests: XCTestCase {
     }
 
     func testNewChatKeyboardInteractionsDispatchSearchManyToggleDefaultAndCancel() async throws {
+        let confirmationToken = NewChatConfirmationToken(
+            testingValue: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000325"
+            )!
+        )
         let feature = RecordingPresentationChatFeature(
             initial: ChatFeatureState(
-                catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
+                catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])),
+                newChatPicker: .ready(
+                    ChatAttachmentPickerSnapshot(
+                        allRows: [],
+                        visibleRows: [],
+                        selectedAttachmentIDs: [],
+                        filterQuery: .empty,
+                        feasibility: .quoting,
+                        confirmationToken: confirmationToken
+                    )
+                )
             )
         )
         let model = makeChatPresentationModel(feature: feature)
@@ -93,7 +108,7 @@ final class ChatPresentationModelTests: XCTestCase {
                 ),
                 .toggleNewChatAttachment(context, first),
                 .toggleNewChatAttachment(context, second),
-                .confirmNewChat(context),
+                .confirmNewChat(context, confirmationToken),
                 .cancelNewChat(context),
             ]
         )

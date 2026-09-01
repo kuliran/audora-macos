@@ -16,7 +16,7 @@ public enum ChatCommand: Equatable, Sendable {
     case setNewChatAttachmentFilter(ChatCommandContext, ChatAttachmentFilterQuery)
     case toggleNewChatAttachment(ChatCommandContext, ChatSessionAttachmentID)
     case cancelNewChat(ChatCommandContext)
-    case confirmNewChat(ChatCommandContext)
+    case confirmNewChat(ChatCommandContext, NewChatConfirmationToken)
     case rename(
         ChatCommandContext,
         ChatID,

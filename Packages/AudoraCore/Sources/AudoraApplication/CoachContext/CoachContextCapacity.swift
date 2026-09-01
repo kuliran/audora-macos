@@ -382,6 +382,34 @@ public struct ChatCreationQuote: Equatable, Sendable {
     }
 }
 
+/// A fail-closed capacity floor derived without claiming a current Profile or
+/// Coach Memory snapshot. When this floor exceeds the qualified input ceiling,
+/// no live context using the same immutable evidence can fit.
+public struct ChatCreationCapacityLowerBound: Equatable, Sendable {
+    public let minimumCompleteInputTokens: Int
+    public let inputCeilingTokens: Int
+    public let reservedResponseTokens: Int
+    public let safetyMarginTokens: Int
+    public let minimumTotalContextTokens: Int
+    public let minimumCategoryCosts:
+        [CoachContextCostCategory: CoachContextComponentCost]
+    public let estimatorIdentifier: String
+
+    public var provesImpossible: Bool {
+        minimumCompleteInputTokens > inputCeilingTokens
+    }
+
+    init(estimate: CoachContextCapacityLowerBoundEstimate) {
+        minimumCompleteInputTokens = estimate.minimumCompleteInputTokens
+        inputCeilingTokens = estimate.inputCeilingTokens
+        reservedResponseTokens = estimate.reservedResponseTokens
+        safetyMarginTokens = estimate.safetyMarginTokens
+        minimumTotalContextTokens = estimate.minimumTotalContextTokens
+        minimumCategoryCosts = estimate.minimumComponentCosts
+        estimatorIdentifier = estimate.estimatorIdentifier
+    }
+}
+
 public enum CoachContextRecoveryAction: String, CaseIterable, Equatable, Sendable {
     case retry
     case discard
@@ -434,6 +462,29 @@ struct CoachContextCapacity: Sendable {
         }
         return ChatCreationQuote(
             context: try quoteChat(input, configuration: configuration)
+        )
+    }
+
+    func lowerBoundNewChat(
+        creation: ChatCreation,
+        attachments: [PreparedCoachAttachment],
+        configuration: CoachContextConfiguration
+    ) throws -> ChatCreationCapacityLowerBound {
+        let input = try CoachContextQuoteInput(
+            profile: .object(["statements": .array([])]),
+            memory: .object([
+                "generalNotes": .string(""),
+                "sessionSummaries": .array([]),
+            ]),
+            creation: creation,
+            attachments: attachments
+        )
+        return ChatCreationCapacityLowerBound(
+            estimate: try planner.estimateCapacityLowerBound(
+                input.preparedContext(),
+                descriptor: configuration.descriptor,
+                policy: configuration.policy
+            )
         )
     }
 

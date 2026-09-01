@@ -579,7 +579,7 @@ public struct ChatRootView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-        case .unavailable(.providerUnavailable):
+        case .providerUnavailable:
             Text(NewChatAttachmentPickerPresentation.providerUnavailableRecoveryText)
                 .font(.caption)
                 .foregroundStyle(.secondary)

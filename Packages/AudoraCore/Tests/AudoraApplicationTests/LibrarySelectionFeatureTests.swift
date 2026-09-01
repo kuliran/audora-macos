@@ -56,13 +56,14 @@ final class ApplicationCommandFeatureTests: XCTestCase {
             ),
             generation: 1
         )
+        let token = NewChatConfirmationToken()
 
-        let boundary = feature.enqueue(.confirmNewChat(context))
+        let boundary = feature.enqueue(.confirmNewChat(context, token))
 
         XCTAssertTrue(feature.admissionState.isChatBoundaryPending)
         await chat.waitUntilCommandStarts()
         let commandsWhileSuspended = await chat.commands
-        XCTAssertEqual(commandsWhileSuspended, [.confirmNewChat(context)])
+        XCTAssertEqual(commandsWhileSuspended, [.confirmNewChat(context, token)])
         await chat.resume()
         await boundary.value
         XCTAssertEqual(feature.admissionState, .idle)
@@ -79,8 +80,9 @@ final class ApplicationCommandFeatureTests: XCTestCase {
             ),
             generation: 1
         )
+        let token = NewChatConfirmationToken()
 
-        let confirmation = feature.enqueue(.confirmNewChat(context))
+        let confirmation = feature.enqueue(.confirmNewChat(context, token))
         XCTAssertTrue(feature.admissionState.isChatBoundaryPending)
         await chat.waitUntilConfirmationStarts()
         let cancel = feature.enqueue(.cancelNewChat(context))
@@ -97,7 +99,7 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         let commands = await chat.commands
         XCTAssertEqual(
             commands,
-            [.confirmNewChat(context), .cancelNewChat(context)]
+            [.confirmNewChat(context, token), .cancelNewChat(context)]
         )
     }
 
@@ -114,8 +116,9 @@ final class ApplicationCommandFeatureTests: XCTestCase {
             ),
             generation: 1
         )
+        let token = NewChatConfirmationToken()
 
-        let confirmation = feature.enqueue(.confirmNewChat(context))
+        let confirmation = feature.enqueue(.confirmNewChat(context, token))
         await chat.waitUntilConfirmationStarts()
 
         let termination = feature.flushForOrderlyTermination()

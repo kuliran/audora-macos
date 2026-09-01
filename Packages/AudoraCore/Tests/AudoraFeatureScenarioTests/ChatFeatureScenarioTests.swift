@@ -70,6 +70,12 @@ final class ChatFeatureScenarioTests: XCTestCase {
                 coachContext: ScenarioBoundCoachContext(
                     attachmentSource: attachmentSource,
                     base: baseCoachContext,
+                    providerUnavailable:
+                        dto.dependencyTrace.contains {
+                            $0.port == "coachContext" &&
+                                $0.effect == "quoteNewChat" &&
+                                $0.outcome.rendered == "providerUnavailable"
+                        },
                     rejectsCreationLease:
                         dto.suspendedEffect ==
                             "newChatQuoteAfterAttachmentResolution"
@@ -413,6 +419,8 @@ final class ChatFeatureScenarioTests: XCTestCase {
         return switch snapshot.feasibility {
         case .quoting: "quoting"
         case let .available(quote): quote.context.fits ? "fits" : "cannotFit"
+        case let .providerUnavailable(lowerBound):
+            lowerBound.provesImpossible ? "cannotFit" : "providerUnavailable"
         case let .unavailable(reason): reason.rawValue
         }
     }
@@ -502,7 +510,8 @@ private struct ChatScenarioCommandDTO: Decodable {
     func applicationCommand(
         context: ChatCommandContext,
         activeChatID: ChatID?,
-        activeDraft: ChatDraft?
+        activeDraft: ChatDraft?,
+        newChatConfirmationToken: NewChatConfirmationToken?
     ) throws -> ChatCommand {
         switch kind {
             case "beginNewChat":
@@ -550,7 +559,10 @@ private struct ChatScenarioCommandDTO: Decodable {
                 else {
                     throw ScenarioFailure.command
                 }
-                return .confirmNewChat(context)
+                return .confirmNewChat(
+                    context,
+                    newChatConfirmationToken ?? NewChatConfirmationToken()
+                )
             case "rename":
                 guard libraryId == nil, let chatId, let title, let expectedRevision,
                       query == nil, text == nil, pendingUserTurnId == nil
@@ -677,7 +689,13 @@ private func contextualizedCommand(
     return try command.applicationCommand(
         context: activeContext,
         activeChatID: identity?.0,
-        activeDraft: identity?.1
+        activeDraft: identity?.1,
+        newChatConfirmationToken: {
+            guard case let .ready(snapshot) = activeState.newChatPicker else {
+                return nil
+            }
+            return snapshot.confirmationToken
+        }()
     )
 }
 
@@ -1143,6 +1161,7 @@ private let developmentScenarioConfigurationStamp = CoachContextConfigurationSta
 private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
     let attachmentSource: any ChatSessionAttachmentSource
     let base: any CoachContextCoordinating
+    let providerUnavailable: Bool
     let rejectsCreationLease: Bool
 
     func loadAttachmentCandidates(
@@ -1161,7 +1180,12 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
     func quoteNewChatBoundToConfiguration(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> ConfigurationBoundChatCreationQuoteOutcome {
-        switch await base.quoteNewChat(request) {
+        let outcome = await base.quoteNewChat(request)
+        let classifiedOutcome: ChatCreationQuoteOutcome =
+            providerUnavailable && outcome == .unavailable(.sourceUnavailable)
+                ? .unavailable(.providerUnavailable)
+                : outcome
+        switch classifiedOutcome {
         case let .available(quote):
             return .available(
                 quote,
@@ -1171,6 +1195,7 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
             )
         case .unavailable(.providerUnavailable):
             return .providerUnavailable(
+                scenarioProviderUnavailableCapacityLowerBound(),
                 authority: ChatCreationQuoteAuthority(
                     configuration: developmentScenarioConfigurationStamp
                 )
@@ -1178,12 +1203,6 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
         case let .unavailable(reason):
             return .unavailable(reason)
         }
-    }
-
-    func isCurrentAttachmentConfiguration(
-        _ stamp: CoachContextConfigurationStamp
-    ) async -> Bool {
-        stamp == developmentScenarioConfigurationStamp
     }
 
     func acquireNewChatCreationLease(
@@ -1310,6 +1329,39 @@ private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
     }
 }
 
+private func scenarioProviderUnavailableCapacityLowerBound()
+    -> ChatCreationCapacityLowerBound
+{
+    try! CoachContextCapacity().lowerBoundNewChat(
+        creation: try! ChatCreation(
+            kind: .newChat,
+            originAttachmentID: nil,
+            attachments: .empty
+        ),
+        attachments: [],
+        configuration: try! CoachContextConfiguration(
+            descriptor: CoachProviderDescriptor(
+                displayName: "Scenario provider-unavailable fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: 100_000,
+                    responseReservedTokens: 32,
+                    safetyMarginTokens: 8
+                ),
+                coachMemoryMaxTokens: 1
+            ),
+            policy: CoachProviderEstimationPolicy(
+                providerIdentifier: "scenario-provider-unavailable-v1",
+                responseCollectorByteCeiling: 8_192,
+                framing: CoachProviderFraming(),
+                attachmentProjectionPolicy: try! CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 8_192,
+                    tokenEstimator: .utf8ByteUpperBound()
+                )
+            )
+        )
+    )
+}
+
 private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
     private let mode: String
     private var events: [ChatDependencyEventDTO]
@@ -1413,20 +1465,40 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
         await acquireImmutableAuthorityLease(authority)
     }
 
-    func currentAttachmentProjectionPolicy()
-        async -> CoachAttachmentProjectionPolicyOutcome
+    func currentQualifiedConfiguration()
+        async -> CoachQualifiedConfigurationOutcome
     {
         .knownQualified(
-            policy: try! CoachAttachmentProjectionPolicy(
-                maximumInlineTranscriptTokens: 8_192,
-                tokenEstimator: .utf8ByteUpperBound()
-            ),
+            configuration: try! qualifiedConfiguration(),
             configurationGeneration: UInt64(pendingResolutionCount + 1)
         )
     }
 
     func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool {
         configurationGeneration == UInt64(pendingResolutionCount + 1)
+    }
+
+    private func qualifiedConfiguration() throws -> CoachContextConfiguration {
+        try CoachContextConfiguration(
+            descriptor: CoachProviderDescriptor(
+                displayName: "Synthetic scenario fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: 100_000,
+                    responseReservedTokens: 32,
+                    safetyMarginTokens: 8
+                ),
+                coachMemoryMaxTokens: 1
+            ),
+            policy: CoachProviderEstimationPolicy(
+                providerIdentifier: "synthetic-scenario-v1",
+                responseCollectorByteCeiling: 8_192,
+                framing: CoachProviderFraming(),
+                attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 8_192,
+                    tokenEstimator: .utf8ByteUpperBound()
+                )
+            )
+        )
     }
 
     private func newChatSnapshot(

@@ -223,9 +223,41 @@ public struct CoachAttachmentProjection: Equatable, Sendable {
     }
 }
 
+enum ChatAttachmentCapacityPreparationOutcome: Sendable {
+    case prepared(
+        [PreparedCoachAttachment],
+        configuration: CoachContextConfigurationStamp
+    )
+    case configurationChanged
+    case qualifiedConfigurationUnavailable
+    case attachmentUnavailable
+    case failed
+}
+
+protocol ChatAttachmentCapacityPreparing: Sendable {
+    func prepareCapacityAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentCapacityPreparationOutcome
+}
+
+struct UnavailableChatAttachmentCapacityPreparer:
+    ChatAttachmentCapacityPreparing
+{
+    func prepareCapacityAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentCapacityPreparationOutcome {
+        .failed
+    }
+}
+
 /// Application decorator that turns verified immutable transcript evidence into
 /// the picker/reopen projection consumed by Chat use cases.
-actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
+actor ProjectedChatSessionAttachmentSource:
+    ChatSessionAttachmentSource,
+    ChatAttachmentCapacityPreparing
+{
     private let evidenceSource: any ChatSessionAttachmentEvidenceSource
     private let configurationAuthority:
         any CoachAttachmentProjectionConfigurationAuthority
@@ -304,6 +336,39 @@ actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
             return .failed
         }
     }
+
+    func prepareCapacityAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentCapacityPreparationOutcome {
+        guard case let .configured(configuration) =
+            await configurationAuthority
+                .currentAttachmentProjectionConfiguration()
+        else {
+            return .qualifiedConfigurationUnavailable
+        }
+        let accumulator = CapacityAttachmentProjectionAccumulator(
+            attachments: attachments,
+            policy: configuration.policy
+        )
+        switch await evidenceSource.forEachResolvedEvidence(
+            attachments,
+            in: library,
+            accumulator.visit
+        ) {
+        case .completed:
+            guard !Task.isCancelled else { return .failed }
+            guard await configurationAuthority.isCurrent(configuration.stamp) else {
+                return .configurationChanged
+            }
+            guard let prepared = accumulator.prepared else {
+                return .attachmentUnavailable
+            }
+            return .prepared(prepared, configuration: configuration.stamp)
+        case .readOnlyLibrary, .failed:
+            return .failed
+        }
+    }
 }
 
 private final class ChatAttachmentCandidateProjectionAccumulator:
@@ -374,5 +439,58 @@ private final class ResolvedChatAttachmentProjectionAccumulator:
 
     var resolutions: [ResolvedChatAttachment] {
         lock.withLock { projected }
+    }
+}
+
+private final class CapacityAttachmentProjectionAccumulator:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let attachments: [ChatSessionAttachment]
+    private let policy: CoachAttachmentProjectionPolicy
+    private var values: [PreparedCoachAttachment] = []
+    private var invalid = false
+
+    init(
+        attachments: ChatAttachments,
+        policy: CoachAttachmentProjectionPolicy
+    ) {
+        self.attachments = attachments.values
+        self.policy = policy
+    }
+
+    func visit(_ item: ResolvedChatAttachmentEvidence) throws {
+        try Task.checkCancellation()
+        try lock.withLock {
+            let index = values.count
+            guard !invalid,
+                  index < attachments.count,
+                  item.attachment == attachments[index],
+                  case let .available(evidence) = item.resolution
+            else {
+                invalid = true
+                return
+            }
+            let projection = try policy.project(evidence: evidence)
+            values.append(
+                try projection.prepareAttachment(
+                    attachment: item.attachment,
+                    transcriptHandle: capacityHandle(index: index)
+                )
+            )
+        }
+    }
+
+    var prepared: [PreparedCoachAttachment]? {
+        lock.withLock {
+            guard !invalid, values.count == attachments.count else { return nil }
+            return values
+        }
+    }
+
+    private func capacityHandle(index: Int) throws -> PreparedCoachTranscriptHandle {
+        try PreparedCoachTranscriptHandle(
+            String(format: "00000000-0000-0000-0000-%012x", index + 1)
+        )
     }
 }

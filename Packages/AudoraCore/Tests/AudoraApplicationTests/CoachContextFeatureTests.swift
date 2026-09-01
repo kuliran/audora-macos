@@ -96,11 +96,12 @@ final class CoachContextFeatureTests: XCTestCase {
             .unavailable(.sourceUnavailable)
         )
 
-        guard case let .providerUnavailable(authority) =
+        guard case let .providerUnavailable(lowerBound, authority) =
             await knownFeature.quoteNewChatBoundToConfiguration(request)
         else {
             return XCTFail("expected the explicit known configuration authority")
         }
+        XCTAssertFalse(lowerBound.provesImpossible)
         guard case let .acquired(lease) =
             await knownFeature.acquireNewChatCreationLease(authority)
         else {

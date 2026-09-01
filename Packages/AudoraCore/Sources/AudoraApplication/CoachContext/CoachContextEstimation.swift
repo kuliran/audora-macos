@@ -354,6 +354,16 @@ public struct CoachContextComponentCost: Equatable, Sendable {
     }
 }
 
+struct CoachContextCapacityLowerBoundEstimate: Equatable, Sendable {
+    let minimumCompleteInputTokens: Int
+    let inputCeilingTokens: Int
+    let reservedResponseTokens: Int
+    let safetyMarginTokens: Int
+    let minimumTotalContextTokens: Int
+    let minimumComponentCosts: [CoachContextCostCategory: CoachContextComponentCost]
+    let estimatorIdentifier: String
+}
+
 @_spi(CoachContextQualification)
 public struct CanonicalCoachExchange: Equatable, Sendable {
     public let request: Data
@@ -524,6 +534,106 @@ public struct CoachContextPlanner: Sendable {
             exchange: exchange,
             estimatorIdentifier: policy.tokenEstimator.identifier,
             estimatorMode: policy.tokenEstimator.mode
+        )
+    }
+
+    /// Computes a deterministic floor from the exact canonical exchange bytes
+    /// and the qualified estimator's maximum bytes per token. It is used only
+    /// to prove that a Chat creation configuration is impossible while the
+    /// provider cannot supply current Profile context.
+    func estimateCapacityLowerBound(
+        _ context: PreparedCoachContext,
+        descriptor: CoachProviderDescriptor,
+        policy: CoachProviderEstimationPolicy
+    ) throws -> CoachContextCapacityLowerBoundEstimate {
+        if let descriptorError = basicValidationError(
+            descriptor: descriptor,
+            policy: policy
+        ) {
+            throw CoachContextEstimationError.invalidDescriptor(descriptorError)
+        }
+
+        let prepared = try buildSegments(context: context, framing: policy.framing)
+        let maximumBytesPerToken = policy.tokenEstimator.maximumUTF8BytesPerToken
+        var minimumCompleteInputTokens = 0
+        for unit in prepared.tokenizationUnits {
+            minimumCompleteInputTokens = try checkedAdd(
+                minimumCompleteInputTokens,
+                minimumTokenCount(
+                    forUTF8ByteCount: unit.count,
+                    maximumBytesPerToken: maximumBytesPerToken
+                )
+            )
+        }
+        minimumCompleteInputTokens = try checkedAdd(
+            minimumCompleteInputTokens,
+            policy.framing.initialRequestHiddenTokens
+        )
+        if prepared.transcriptReadRequest != nil {
+            minimumCompleteInputTokens = try checkedAdd(
+                minimumCompleteInputTokens,
+                policy.framing.transcriptReadExchangeHiddenTokens
+            )
+        }
+
+        let reservedAndMargin = try checkedAdd(
+            descriptor.contextBudget.responseReservedTokens,
+            descriptor.contextBudget.safetyMarginTokens
+        )
+        let inputCeiling = descriptor.contextBudget.contextWindowTokens -
+            reservedAndMargin
+        let minimumTotalContextTokens = try checkedAdd(
+            minimumCompleteInputTokens,
+            reservedAndMargin
+        )
+
+        var minimumComponentCosts:
+            [CoachContextCostCategory: CoachContextComponentCost] = [:]
+        for component in CoachContextCostCategory.allCases {
+            switch component {
+            case .responseReserve:
+                minimumComponentCosts[component] = CoachContextComponentCost(
+                    utf8ByteCount: 0,
+                    estimatedTokenCount: descriptor.contextBudget.responseReservedTokens
+                )
+            case .safetyMargin:
+                minimumComponentCosts[component] = CoachContextComponentCost(
+                    utf8ByteCount: 0,
+                    estimatedTokenCount: descriptor.contextBudget.safetyMarginTokens
+                )
+            default:
+                let data = prepared.componentData[component, default: Data()]
+                var minimumTokens = minimumTokenCount(
+                    forUTF8ByteCount: data.count,
+                    maximumBytesPerToken: maximumBytesPerToken
+                )
+                if component == .framing {
+                    minimumTokens = try checkedAdd(
+                        minimumTokens,
+                        policy.framing.initialRequestHiddenTokens
+                    )
+                    if prepared.transcriptReadRequest != nil {
+                        minimumTokens = try checkedAdd(
+                            minimumTokens,
+                            policy.framing.transcriptReadExchangeHiddenTokens
+                        )
+                    }
+                }
+                minimumComponentCosts[component] = CoachContextComponentCost(
+                    utf8ByteCount: data.count,
+                    estimatedTokenCount: minimumTokens
+                )
+            }
+        }
+
+        return CoachContextCapacityLowerBoundEstimate(
+            minimumCompleteInputTokens: minimumCompleteInputTokens,
+            inputCeilingTokens: inputCeiling,
+            reservedResponseTokens: descriptor.contextBudget.responseReservedTokens,
+            safetyMarginTokens: descriptor.contextBudget.safetyMarginTokens,
+            minimumTotalContextTokens: minimumTotalContextTokens,
+            minimumComponentCosts: minimumComponentCosts,
+            estimatorIdentifier: policy.tokenEstimator.identifier
         )
     }
 
@@ -848,6 +958,14 @@ private func checkedAdd(_ lhs: Int, _ rhs: Int) throws -> Int {
         throw CoachContextEstimationError.integerOverflow
     }
     return result.partialValue
+}
+
+private func minimumTokenCount(
+    forUTF8ByteCount byteCount: Int,
+    maximumBytesPerToken: Int
+) -> Int {
+    byteCount / maximumBytesPerToken +
+        (byteCount.isMultiple(of: maximumBytesPerToken) ? 0 : 1)
 }
 
 private func checkedMultiply(_ lhs: Int, _ rhs: Int) throws -> Int {

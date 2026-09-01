@@ -111,6 +111,7 @@ public struct ChatAttachmentPickerRow: Equatable, Identifiable, Sendable {
 public enum ChatCreationFeasibility: Equatable, Sendable {
     case quoting
     case available(ChatCreationQuote)
+    case providerUnavailable(ChatCreationCapacityLowerBound)
     case unavailable(CoachContextUnavailableReason)
 
     public var permitsCreation: Bool {
@@ -119,8 +120,8 @@ public enum ChatCreationFeasibility: Equatable, Sendable {
             false
         case let .available(quote):
             quote.context.fits
-        case .unavailable(.providerUnavailable):
-            true
+        case let .providerUnavailable(lowerBound):
+            !lowerBound.provesImpossible
         case .unavailable:
             false
         }
@@ -143,6 +144,21 @@ public enum ChatAttachmentPickerIssue: Equatable, Sendable {
     }
 }
 
+/// Opaque authority for one exact new-Chat proposal and its displayed quote.
+/// Presentation may only carry this value back; it has no stable serialization.
+public struct NewChatConfirmationToken: Equatable, Sendable {
+    private let value: UUID
+
+    init() {
+        value = UUID()
+    }
+
+    @_spi(ChatConfirmationTesting)
+    public init(testingValue: UUID) {
+        value = testingValue
+    }
+}
+
 public struct ChatAttachmentPickerSnapshot: Equatable, Sendable {
     public let allRows: [ChatAttachmentPickerRow]
     public let visibleRows: [ChatAttachmentPickerRow]
@@ -150,10 +166,12 @@ public struct ChatAttachmentPickerSnapshot: Equatable, Sendable {
     public let filterQuery: ChatAttachmentFilterQuery
     public let feasibility: ChatCreationFeasibility
     public let issue: ChatAttachmentPickerIssue?
+    public let confirmationToken: NewChatConfirmationToken?
 
     public var selectionCount: Int { selectedAttachmentIDs.count }
     public var permitsConfirmation: Bool {
-        feasibility.permitsCreation && issue?.blocksConfirmation != true
+        confirmationToken != nil && feasibility.permitsCreation &&
+            issue?.blocksConfirmation != true
     }
 
     public init(
@@ -162,7 +180,8 @@ public struct ChatAttachmentPickerSnapshot: Equatable, Sendable {
         selectedAttachmentIDs: Set<ChatSessionAttachmentID>,
         filterQuery: ChatAttachmentFilterQuery,
         feasibility: ChatCreationFeasibility,
-        issue: ChatAttachmentPickerIssue? = nil
+        issue: ChatAttachmentPickerIssue? = nil,
+        confirmationToken: NewChatConfirmationToken? = nil
     ) {
         self.allRows = allRows
         self.visibleRows = visibleRows
@@ -170,6 +189,7 @@ public struct ChatAttachmentPickerSnapshot: Equatable, Sendable {
         self.filterQuery = filterQuery
         self.feasibility = feasibility
         self.issue = issue
+        self.confirmationToken = confirmationToken
     }
 }
 

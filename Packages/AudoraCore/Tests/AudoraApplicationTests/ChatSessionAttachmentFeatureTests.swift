@@ -93,8 +93,13 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         }
     }
 
-    func testOnlyProviderUnavailabilityPermitsCreationWithoutAQuote() {
+    func testOnlyFeasibleQualifiedProviderOutagePermitsCreationWithoutAQuote() {
         XCTAssertTrue(
+            ChatCreationFeasibility.providerUnavailable(
+                previouslyQualifiedProviderUnavailableCapacityLowerBound()
+            ).permitsCreation
+        )
+        XCTAssertFalse(
             ChatCreationFeasibility.unavailable(.providerUnavailable).permitsCreation
         )
         XCTAssertFalse(
@@ -137,6 +142,44 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         let catalog = await feature.loadAttachmentCandidates(in: Self.scope)
 
         XCTAssertEqual(catalog, .failed)
+    }
+
+    func testProviderUnavailableRejectsEvidenceThatCannotFitQualifiedInputCeiling()
+        async throws
+    {
+        let evidence = try attachmentEvidence(
+            transcriptText: String(repeating: "x", count: 1_000)
+        )
+        let context = DefaultCoachContextFeature(
+            source: try KnownQualifiedProviderUnavailableCapacitySource(
+                contextWindow: 400
+            ),
+            attachmentEvidenceSource: AttachmentEvidenceSourceForFeature(
+                evidence: evidence
+            ),
+            configurationAuthorityID:
+                attachmentFeatureConfigurationStamp.authorityID
+        )
+        let store = AttachmentChatStoreFixture()
+        let feature = makeFeature(coordinatedContext: context, store: store)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initial) = await feature.currentState.newChatPicker,
+              let row = initial.allRows.first
+        else { return XCTFail("Expected exact projected evidence") }
+
+        await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+
+        guard case let .ready(rejected) = await feature.currentState.newChatPicker else {
+            return XCTFail("Expected the impossible selection to remain visible")
+        }
+        XCTAssertEqual(rejected.issue, .contextCannotFit)
+        XCTAssertFalse(rejected.permitsConfirmation)
+
+        await feature.sendCurrentNewChatConfirmation(Self.context)
+
+        let createdSeed = await store.createdSeed
+        XCTAssertNil(createdSeed)
     }
 
     func testNewChatPreservesMissingQualifiedConfigurationAsSpecificRecovery()
@@ -252,8 +295,19 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         guard case let .ready(initial) = await feature.currentState.newChatPicker else {
             return XCTFail("Expected ready picker")
         }
-        for row in initial.allRows.prefix(ChatAttachments.maximumCount) {
+        for (index, row) in initial.allRows
+            .prefix(ChatAttachments.maximumCount)
+            .enumerated()
+        {
             await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+            guard case let .ready(intermediate) = await feature.currentState.newChatPicker else {
+                return XCTFail("Selection \(index + 1) must keep the picker ready")
+            }
+            XCTAssertTrue(
+                intermediate.permitsConfirmation,
+                "Selection \(index + 1) must remain confirmable; issue: " +
+                    String(describing: intermediate.issue)
+            )
         }
 
         await feature.send(
@@ -283,7 +337,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         await feature.send(.start(Self.context))
         await feature.send(.beginNewChat(Self.context))
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seed = await store.createdSeed
         XCTAssertEqual(seed?.aggregate.chat.attachments, .empty)
@@ -301,7 +355,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         await feature.send(.start(Self.context))
         await feature.send(.beginNewChat(Self.context))
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let createdSeed = await store.createdSeed
         XCTAssertNil(createdSeed)
@@ -392,7 +446,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         for row in initial.allRows {
             await feature.send(.toggleNewChatAttachment(Self.context, row.id))
         }
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seed = await store.createdSeed
         XCTAssertEqual(
@@ -503,9 +557,13 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
               let row = picker.allRows.first
         else { return XCTFail("Expected candidate") }
         await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+        guard case let .ready(quoted) = await feature.currentState.newChatPicker else {
+            return XCTFail("Expected the selected proposal to remain ready")
+        }
+        XCTAssertTrue(quoted.permitsConfirmation, "Expected a confirmable quote: \(quoted)")
         await source.markUnavailable(candidate)
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let rejectedSeed = await store.createdSeed
         let rejectedState = await feature.currentState
@@ -517,7 +575,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         XCTAssertEqual(rejectedPicker.issue, .attachmentUnavailable)
         XCTAssertFalse(rejectedPicker.permitsConfirmation)
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let resolvedRequests = await source.resolvedRequests
         XCTAssertEqual(resolvedRequests.count, 1)
@@ -563,7 +621,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
 
         await feature.send(.toggleNewChatAttachment(Self.context, row.id))
         await capacity.replaceContextWindow(400)
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let rejectedSeed = await store.createdSeed
         let rejectedState = await feature.currentState
@@ -575,7 +633,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         XCTAssertEqual(rejectedPicker.issue, .contextCannotFit)
         XCTAssertFalse(rejectedPicker.permitsConfirmation)
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let quoteCount = await capacity.newChatResolutionCount
         XCTAssertEqual(quoteCount, 3)
@@ -607,7 +665,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         )
 
         await authority.advanceConfiguration()
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seedBeforeFreshConfirmation = await store.createdSeed
         XCTAssertNil(seedBeforeFreshConfirmation)
@@ -619,7 +677,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         XCTAssertEqual(refreshed.selectedAttachmentIDs, Set([refreshedRow.id]))
         XCTAssertTrue(refreshed.permitsConfirmation)
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let committedSeed = await store.createdSeed
         XCTAssertNotNil(committedSeed)
@@ -650,7 +708,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         await feature.send(.toggleNewChatAttachment(Self.context, row.id))
 
         await coordinator.replaceConfigurationAuthorityWithoutChangingGeneration()
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seed = await store.createdSeed
         XCTAssertNil(seed)
@@ -730,7 +788,9 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         )
     }
 
-    private func attachmentEvidence() throws -> ChatAttachmentEvidence {
+    private func attachmentEvidence(
+        transcriptText: String = "hello"
+    ) throws -> ChatAttachmentEvidence {
         let fingerprint = try AudioFingerprint(
             sha256: String(repeating: "a", count: 64)
         )
@@ -792,15 +852,15 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
                         order: 0,
                         audioSourceID: .microphone,
                         timeRange: timeRange,
-                        text: "hello",
+                        text: transcriptText,
                         words: [
                             TranscriptWord(
                                 wordID: TranscriptWordID("w000000"),
                                 ordinal: 0,
-                                text: "hello",
+                                text: transcriptText,
                                 displayRange: LineTextRange(
                                     startUTF8Byte: 0,
-                                    endUTF8Byte: 5
+                                    endUTF8Byte: transcriptText.utf8.count
                                 ),
                                 timeRange: timeRange,
                                 confidence: 0.99,
@@ -840,7 +900,10 @@ private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating 
     func quoteNewChatBoundToConfiguration(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> ConfigurationBoundChatCreationQuoteOutcome {
-        switch await base.quoteNewChat(request) {
+        switch await fixtureNewChatQuotePreservingProviderOutage(
+            from: base,
+            request: request
+        ) {
         case let .available(quote):
             return .available(
                 quote,
@@ -850,6 +913,7 @@ private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating 
             )
         case .unavailable(.providerUnavailable):
             return .providerUnavailable(
+                previouslyQualifiedProviderUnavailableCapacityLowerBound(),
                 authority: ChatCreationQuoteAuthority(
                     configuration: attachmentFeatureConfigurationStamp
                 )
@@ -857,12 +921,6 @@ private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating 
         case let .unavailable(reason):
             return .unavailable(reason)
         }
-    }
-
-    func isCurrentAttachmentConfiguration(
-        _ stamp: CoachContextConfigurationStamp
-    ) async -> Bool {
-        stamp == attachmentFeatureConfigurationStamp
     }
 
     func acquireNewChatCreationLease(
@@ -960,12 +1018,6 @@ private struct CapacityBoundCoachContextFixture: ChatCoachContextCoordinating {
         await base.quoteNewChatBoundToConfiguration(request)
     }
 
-    func isCurrentAttachmentConfiguration(
-        _ stamp: CoachContextConfigurationStamp
-    ) async -> Bool {
-        await base.isCurrentAttachmentConfiguration(stamp)
-    }
-
     func acquireNewChatCreationLease(
         _ authority: ChatCreationQuoteAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
@@ -1003,11 +1055,12 @@ private actor ChangingAttachmentConfigurationSource: CoachContextSnapshotPort {
         configurationGeneration += 1
     }
 
-    func currentAttachmentProjectionPolicy()
-        async -> CoachAttachmentProjectionPolicyOutcome
+    func currentQualifiedConfiguration()
+        async -> CoachQualifiedConfigurationOutcome
     {
-        .knownQualified(
-            policy: projectionPolicy(),
+        let policy = projectionPolicy()
+        return .knownQualified(
+            configuration: try! configuration(policy: policy),
             configurationGeneration: configurationGeneration
         )
     }
@@ -1237,7 +1290,10 @@ private actor MismatchedAttachmentAuthorityFixture:
         _ request: CoachContextNewChatQuoteRequest
     ) async -> ConfigurationBoundChatCreationQuoteOutcome {
         let stamp = replaced ? replacementStamp : originalStamp
-        switch await base.quoteNewChat(request) {
+        switch await fixtureNewChatQuotePreservingProviderOutage(
+            from: base,
+            request: request
+        ) {
         case let .available(quote):
             return .available(
                 quote,
@@ -1245,17 +1301,12 @@ private actor MismatchedAttachmentAuthorityFixture:
             )
         case .unavailable(.providerUnavailable):
             return .providerUnavailable(
+                previouslyQualifiedProviderUnavailableCapacityLowerBound(),
                 authority: ChatCreationQuoteAuthority(configuration: stamp)
             )
         case let .unavailable(reason):
             return .unavailable(reason)
         }
-    }
-
-    func isCurrentAttachmentConfiguration(
-        _ stamp: CoachContextConfigurationStamp
-    ) async -> Bool {
-        stamp == (replaced ? replacementStamp : originalStamp)
     }
 
     func acquireNewChatCreationLease(
@@ -1568,5 +1619,79 @@ private actor AttachmentCapacitySource: CoachContextSnapshotPort {
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
         await acquireImmutableAuthorityLease(authority)
+    }
+}
+
+private struct KnownQualifiedProviderUnavailableCapacitySource:
+    CoachContextSnapshotPort
+{
+    private let configurationGeneration: UInt64 = 1
+    let configuration: CoachContextConfiguration
+
+    init(contextWindow: Int) throws {
+        configuration = try CoachContextConfiguration(
+            descriptor: CoachProviderDescriptor(
+                displayName: "Previously qualified unavailable fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: contextWindow,
+                    responseReservedTokens: 32,
+                    safetyMarginTokens: 8
+                ),
+                coachMemoryMaxTokens: 1
+            ),
+            policy: CoachProviderEstimationPolicy(
+                providerIdentifier: "previously-qualified-unavailable-v1",
+                responseCollectorByteCeiling: 8_192,
+                framing: CoachProviderFraming(),
+                attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 8_192,
+                    tokenEstimator: .utf8ByteUpperBound()
+                )
+            )
+        )
+    }
+
+    func resolveNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .providerUnavailable
+    }
+
+    func resolveChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .providerUnavailable
+    }
+
+    func resolvePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .providerUnavailable
+    }
+
+    func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
+        false
+    }
+
+    func currentQualifiedConfiguration()
+        async -> CoachQualifiedConfigurationOutcome
+    {
+        .knownQualified(
+            configuration: configuration,
+            configurationGeneration: configurationGeneration
+        )
+    }
+
+    func isCurrentConfiguration(_ candidate: UInt64) async -> Bool {
+        candidate == configurationGeneration
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard authority == .configuration(generation: configurationGeneration) else {
+            return .stale
+        }
+        return .acquired(CoachContextAuthorityLease())
     }
 }

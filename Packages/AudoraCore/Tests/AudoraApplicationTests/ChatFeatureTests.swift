@@ -19,7 +19,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(firstContext))
         await feature.send(.start(secondContext))
 
-        await feature.send(.confirmNewChat(firstContext))
+        await feature.sendCurrentNewChatConfirmation(firstContext)
 
         let calls = await store.calls
         XCTAssertEqual(calls, [.loadCatalog, .loadCatalog])
@@ -48,7 +48,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(Self.context))
 
         await feature.send(.beginNewChat(Self.context))
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seeds = await store.createSeeds
         let seed = try XCTUnwrap(seeds.first)
@@ -68,7 +68,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(Self.context))
 
         await feature.send(.beginNewChat(Self.context))
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seedCount = await store.createSeeds.count
         let state = await feature.currentState
@@ -89,7 +89,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(Self.context))
 
         await feature.send(.beginNewChat(Self.context))
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let generationsBeforeFreshConfirmation = await store.createSeeds.map(
             \.aggregate.chat.profileStatementGenerationAtCreation
@@ -102,7 +102,7 @@ final class ChatFeatureTests: XCTestCase {
         }
         XCTAssertTrue(requotedPicker.permitsConfirmation)
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let generationsAfterFreshConfirmation = await store.createSeeds.map(
             \.aggregate.chat.profileStatementGenerationAtCreation
@@ -141,7 +141,7 @@ final class ChatFeatureTests: XCTestCase {
         }
         XCTAssertTrue(initialQuote.context.fits)
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seeds = await store.createSeeds
         XCTAssertEqual(seeds.count, 1)
@@ -160,7 +160,7 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(refreshedPicker.issue, .contextCannotFit)
         XCTAssertFalse(refreshedPicker.permitsConfirmation)
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let createCountAfterBlockedConfirmation = await store.createSeeds.count
         XCTAssertEqual(createCountAfterBlockedConfirmation, 1)
@@ -191,7 +191,7 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertTrue(initialPicker.permitsConfirmation)
         await source.installExpandedProfile()
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seedsBeforeFreshConfirmation = await store.createSeeds
         XCTAssertEqual(seedsBeforeFreshConfirmation.count, 0)
@@ -206,7 +206,7 @@ final class ChatFeatureTests: XCTestCase {
         )
         XCTAssertTrue(refreshedPicker.permitsConfirmation)
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seedsAfterFreshConfirmation = await store.createSeeds
         XCTAssertEqual(seedsAfterFreshConfirmation.count, 1)
@@ -226,7 +226,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(Self.context))
 
         await feature.send(.beginNewChat(Self.context))
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let firstConfirmationSeeds = await store.createSeeds
         XCTAssertEqual(
@@ -236,7 +236,7 @@ final class ChatFeatureTests: XCTestCase {
             [7]
         )
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let secondConfirmationSeeds = await store.createSeeds
         XCTAssertEqual(
@@ -246,7 +246,7 @@ final class ChatFeatureTests: XCTestCase {
             [7, 8]
         )
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let finalSeeds = await store.createSeeds
         XCTAssertEqual(
@@ -260,6 +260,105 @@ final class ChatFeatureTests: XCTestCase {
         )
     }
 
+    func testQueuedConfirmationCannotAdoptReplacementQuoteToken() async throws {
+        let aggregate = try Self.aggregate()
+        let store = RecordingChatStore(
+            catalog: [.available(aggregate)],
+            createOutcomes: [.profileStatementGenerationChanged(9)],
+            suspendNextDraftSave: true
+        )
+        let scheduler = ControlledChatAutosaveScheduler()
+        let feature = makeFeature(
+            store: store,
+            profileReader: SequencedProfileReader(generations: [7, 9]),
+            autosaveScheduler: scheduler
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Keep this draft durable before creating."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initialPicker) = await feature.currentState.newChatPicker,
+              let tokenA = initialPicker.confirmationToken
+        else {
+            return XCTFail("the initial quote must publish confirmation A")
+        }
+
+        async let firstConfirmation: Void = feature.send(
+            .confirmNewChat(Self.context, tokenA)
+        )
+        await store.waitUntilDraftSaveStarts()
+        await feature.send(.confirmNewChat(Self.context, tokenA))
+        await store.resumeDraftSave()
+        await firstConfirmation
+
+        let seedsAfterStaleConfirmation = await store.createSeeds
+        XCTAssertEqual(seedsAfterStaleConfirmation.count, 1)
+        let replacementState = await feature.currentState
+        guard case let .ready(replacementPicker) = replacementState.newChatPicker,
+              let tokenB = replacementPicker.confirmationToken
+        else {
+            return XCTFail("the profile conflict must publish replacement confirmation B")
+        }
+        XCTAssertNotEqual(tokenB, tokenA)
+
+        await feature.send(.confirmNewChat(Self.context, tokenB))
+
+        let seedsAfterCurrentConfirmation = await store.createSeeds
+        XCTAssertEqual(seedsAfterCurrentConfirmation.count, 2)
+        let committedState = await feature.currentState
+        XCTAssertNotNil(Self.openAggregate(in: committedState))
+    }
+
+    func testStaleProposalTokenCannotPublishOrCreateButCurrentTokenSucceeds()
+        async throws
+    {
+        let candidate = try Self.attachmentCandidate()
+        let coordinator = ScriptedNewChatCoachContext(candidates: [candidate])
+        let store = RecordingChatStore()
+        let feature = makeFeature(store: store, coachContext: coordinator)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initialPicker) = await feature.currentState.newChatPicker,
+              let row = initialPicker.allRows.first,
+              let staleToken = initialPicker.confirmationToken
+        else {
+            return XCTFail("the initial proposal must be confirmable")
+        }
+
+        await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+
+        let selectedState = await feature.currentState
+        guard case let .ready(selectedPicker) = selectedState.newChatPicker,
+              let currentToken = selectedPicker.confirmationToken
+        else {
+            return XCTFail("the selected proposal must publish a fresh token")
+        }
+        XCTAssertNotEqual(currentToken, staleToken)
+
+        await feature.send(.confirmNewChat(Self.context, staleToken))
+
+        let stateAfterStaleConfirmation = await feature.currentState
+        let seedsAfterStaleConfirmation = await store.createSeeds
+        let resolutionCountAfterStaleConfirmation = await coordinator.resolutionCount
+        XCTAssertEqual(stateAfterStaleConfirmation, selectedState)
+        XCTAssertTrue(seedsAfterStaleConfirmation.isEmpty)
+        XCTAssertEqual(resolutionCountAfterStaleConfirmation, 0)
+
+        await feature.send(.confirmNewChat(Self.context, currentToken))
+
+        let seeds = await store.createSeeds
+        XCTAssertEqual(seeds.count, 1)
+        XCTAssertEqual(seeds.first?.aggregate.chat.attachments.values.count, 1)
+    }
+
     func testConfigurationCannotAdvanceAcrossSuspendedCreateCommit() async throws {
         let coordinator = AdvancingConfigurationChatContextFixture(
             base: DefaultCoachContextFeature(
@@ -271,7 +370,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(Self.context))
         await feature.send(.beginNewChat(Self.context))
 
-        async let confirmation: Void = feature.send(.confirmNewChat(Self.context))
+        async let confirmation: Void = feature.sendCurrentNewChatConfirmation(Self.context)
         await store.waitUntilCreateStarts()
         async let advancement: Void = coordinator.advanceConfiguration()
         await coordinator.waitUntilAdvanceIsRequested()
@@ -293,7 +392,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(Self.context))
         await feature.send(.beginNewChat(Self.context))
 
-        async let confirmation: Void = feature.send(.confirmNewChat(Self.context))
+        async let confirmation: Void = feature.sendCurrentNewChatConfirmation(Self.context)
         await store.waitUntilCreateStarts()
         let creatingState = await feature.currentState
         XCTAssertEqual(creatingState.activity, .creating)
@@ -398,7 +497,7 @@ final class ChatFeatureTests: XCTestCase {
         }
         await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
 
-        async let quoting: Void = feature.send(.confirmNewChat(Self.context))
+        async let quoting: Void = feature.sendCurrentNewChatConfirmation(Self.context)
         await coordinator.waitUntilQuoteStarts()
         await feature.send(.cancelNewChat(Self.context))
         await quoting
@@ -473,7 +572,7 @@ final class ChatFeatureTests: XCTestCase {
         }
         await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
 
-        async let resolving: Void = feature.send(.confirmNewChat(Self.context))
+        async let resolving: Void = feature.sendCurrentNewChatConfirmation(Self.context)
         await coordinator.waitUntilResolutionStarts()
         await feature.send(.cancelNewChat(Self.context))
         await resolving
@@ -520,7 +619,7 @@ final class ChatFeatureTests: XCTestCase {
         }
         await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
 
-        async let resolving: Void = feature.send(.confirmNewChat(Self.context))
+        async let resolving: Void = feature.sendCurrentNewChatConfirmation(Self.context)
         await coordinator.waitUntilResolutionStarts()
         async let mayTerminate: Bool = feature.flushForOrderlyTermination()
 
@@ -558,7 +657,7 @@ final class ChatFeatureTests: XCTestCase {
 
         let confirmation = CompletionProbe<Void>()
         Task {
-            await feature.send(.confirmNewChat(context))
+            await feature.sendCurrentNewChatConfirmation(context)
             await confirmation.complete(())
         }
         await coordinator.waitUntilResolutionStarts()
@@ -591,7 +690,7 @@ final class ChatFeatureTests: XCTestCase {
 
         let confirmation = CompletionProbe<Void>()
         Task {
-            await feature.send(.confirmNewChat(context))
+            await feature.sendCurrentNewChatConfirmation(context)
             await confirmation.complete(())
         }
         await coordinator.waitUntilLeaseAcquisitionStarts()
@@ -630,7 +729,7 @@ final class ChatFeatureTests: XCTestCase {
 
         let confirmation = CompletionProbe<Void>()
         Task {
-            await feature.send(.confirmNewChat(context))
+            await feature.sendCurrentNewChatConfirmation(context)
             await confirmation.complete(())
         }
         await profile.waitUntilReadStarts()
@@ -672,7 +771,7 @@ final class ChatFeatureTests: XCTestCase {
 
         let confirmation = CompletionProbe<Void>()
         Task { [weak feature] in
-            await feature?.send(.confirmNewChat(context))
+            await feature?.sendCurrentNewChatConfirmation(context)
             await confirmation.complete(())
         }
         await profile.waitUntilReadStarts()
@@ -731,7 +830,7 @@ final class ChatFeatureTests: XCTestCase {
 
         let confirmation = CompletionProbe<Void>()
         Task { [weak feature] in
-            await feature?.send(.confirmNewChat(context))
+            await feature?.sendCurrentNewChatConfirmation(context)
             await confirmation.complete(())
         }
         await profile.waitUntilReadStarts()
@@ -788,7 +887,7 @@ final class ChatFeatureTests: XCTestCase {
 
         let confirmation = CompletionProbe<Void>()
         Task {
-            await feature.send(.confirmNewChat(context))
+            await feature.sendCurrentNewChatConfirmation(context)
             await confirmation.complete(())
         }
         await coordinator.waitUntilCreationLeaseReleaseStarts()
@@ -827,7 +926,7 @@ final class ChatFeatureTests: XCTestCase {
 
         let confirmation = CompletionProbe<Void>()
         Task { [weak feature] in
-            await feature?.send(.confirmNewChat(context))
+            await feature?.sendCurrentNewChatConfirmation(context)
             await confirmation.complete(())
         }
         await coordinator.waitUntilCreationLeaseReleaseStarts()
@@ -872,7 +971,7 @@ final class ChatFeatureTests: XCTestCase {
 
         let confirmation = CompletionProbe<Void>()
         Task {
-            await feature.send(.confirmNewChat(context))
+            await feature.sendCurrentNewChatConfirmation(context)
             await confirmation.complete(())
         }
         await clock.waitUntilReadStarts()
@@ -928,7 +1027,7 @@ final class ChatFeatureTests: XCTestCase {
 
         let confirmation = CompletionProbe<Void>()
         Task {
-            await feature.send(.confirmNewChat(context))
+            await feature.sendCurrentNewChatConfirmation(context)
             await confirmation.complete(())
         }
         await identifiers.waitUntilChatIDRequestStarts()
@@ -1011,7 +1110,7 @@ final class ChatFeatureTests: XCTestCase {
         }
         await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
 
-        await feature.send(.confirmNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let state = await feature.currentState
         guard case let .ready(repairedPicker) = state.newChatPicker else {
@@ -1040,7 +1139,7 @@ final class ChatFeatureTests: XCTestCase {
         }
         await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
 
-        async let confirmation: Void = feature.send(.confirmNewChat(Self.context))
+        async let confirmation: Void = feature.sendCurrentNewChatConfirmation(Self.context)
         await store.waitUntilCreateStarts()
         let seedsAtFinalBoundary = await store.createSeeds
         XCTAssertEqual(
@@ -2263,6 +2362,20 @@ final class ChatFeatureTests: XCTestCase {
     }
 }
 
+extension DefaultChatFeature {
+    func sendCurrentNewChatConfirmation(_ context: ChatCommandContext) async {
+        let token: NewChatConfirmationToken
+        if case let .ready(snapshot) = currentState.newChatPicker,
+           let currentToken = snapshot.confirmationToken
+        {
+            token = currentToken
+        } else {
+            token = NewChatConfirmationToken()
+        }
+        await send(.confirmNewChat(context, token))
+    }
+}
+
 private let chatFeatureConfigurationStamp = CoachContextConfigurationStamp(
     authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000125")!,
     generation: 1
@@ -2289,12 +2402,6 @@ private struct ChatFeatureBoundCoachContextFixture: ChatCoachContextCoordinating
         _ request: CoachContextNewChatQuoteRequest
     ) async -> ConfigurationBoundChatCreationQuoteOutcome {
         await base.quoteNewChatBoundToConfiguration(request)
-    }
-
-    func isCurrentAttachmentConfiguration(
-        _ stamp: CoachContextConfigurationStamp
-    ) async -> Bool {
-        await base.isCurrentAttachmentConfiguration(stamp)
     }
 
     func acquireNewChatCreationLease(
@@ -2418,16 +2525,11 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
             await suspendUntilCancelled()
         }
         return .providerUnavailable(
+            previouslyQualifiedProviderUnavailableCapacityLowerBound(),
             authority: ChatCreationQuoteAuthority(
                 configuration: chatFeatureConfigurationStamp
             )
         )
-    }
-
-    func isCurrentAttachmentConfiguration(
-        _ stamp: CoachContextConfigurationStamp
-    ) async -> Bool {
-        stamp == chatFeatureConfigurationStamp
     }
 
     func acquireNewChatCreationLease(
@@ -2574,7 +2676,10 @@ private actor AdvancingConfigurationChatContextFixture:
     func quoteNewChatBoundToConfiguration(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> ConfigurationBoundChatCreationQuoteOutcome {
-        switch await base.quoteNewChat(request) {
+        switch await fixtureNewChatQuotePreservingProviderOutage(
+            from: base,
+            request: request
+        ) {
         case let .available(quote):
             return .available(
                 quote,
@@ -2582,17 +2687,12 @@ private actor AdvancingConfigurationChatContextFixture:
             )
         case .unavailable(.providerUnavailable):
             return .providerUnavailable(
+                previouslyQualifiedProviderUnavailableCapacityLowerBound(),
                 authority: ChatCreationQuoteAuthority(configuration: stamp)
             )
         case let .unavailable(reason):
             return .unavailable(reason)
         }
-    }
-
-    func isCurrentAttachmentConfiguration(
-        _ candidate: CoachContextConfigurationStamp
-    ) async -> Bool {
-        candidate == stamp
     }
 
     func acquireNewChatCreationLease(
@@ -3002,14 +3102,11 @@ private actor GrowingNewChatProfileSnapshotPort: CoachContextSnapshotPort {
             authority.configurationGeneration == configurationGeneration
     }
 
-    func currentAttachmentProjectionPolicy()
-        async -> CoachAttachmentProjectionPolicyOutcome
+    func currentQualifiedConfiguration()
+        async -> CoachQualifiedConfigurationOutcome
     {
         .knownQualified(
-            policy: try! CoachAttachmentProjectionPolicy(
-                maximumInlineTranscriptTokens: 8_192,
-                tokenEstimator: .utf8ByteUpperBound()
-            ),
+            configuration: try! configuration(),
             configurationGeneration: configurationGeneration
         )
     }

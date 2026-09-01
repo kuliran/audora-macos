@@ -161,8 +161,11 @@ public final class ChatPresentationModel: ObservableObject {
     }
 
     public func confirmNewChat() {
-        guard let context = commandContext else { return }
-        send(.confirmNewChat(context))
+        guard let context = commandContext,
+              case let .ready(picker) = snapshot.newChatPicker,
+              let confirmationToken = picker.confirmationToken
+        else { return }
+        send(.confirmNewChat(context, confirmationToken))
     }
 
     public func open(_ chatID: ChatID) {
