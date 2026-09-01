@@ -36,7 +36,7 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
 
     private let fileURL: URL
     private let maximumLibraries: Int
-    private let directorySynchronizer: @Sendable (Int32) -> Bool
+    private let confined: ConfinedPersistencePrimitives<MachineInvocationAdmissionError>
 
     public init(
         fileURL: URL,
@@ -44,17 +44,17 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
     ) {
         self.fileURL = fileURL
         self.maximumLibraries = maximumLibraries
-        directorySynchronizer = Self.fsyncRetrying
+        confined = Self.makeConfined()
     }
 
     init(
         fileURL: URL,
         maximumLibraries: Int = RollingInvocationAdmissionLedger.defaultMaximumLibraries,
-        directorySynchronizer: @escaping @Sendable (Int32) -> Bool
+        descriptorOperations: ConfinedPersistenceDescriptorOperations
     ) {
         self.fileURL = fileURL
         self.maximumLibraries = maximumLibraries
-        self.directorySynchronizer = directorySynchronizer
+        confined = Self.makeConfined(descriptorOperations: descriptorOperations)
     }
 
     public func claim(
@@ -183,71 +183,30 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
         named name: String,
         under parent: Int32
     ) throws -> RollingInvocationAdmissionLedger {
-        let descriptor = name.withCString { pointer -> Int32 in
-            while true {
-                let value = Darwin.openat(
-                    parent,
-                    pointer,
-                    O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
-                )
-                if value < 0, errno == EINTR { continue }
-                return value
-            }
-        }
-        if descriptor < 0 {
-            guard errno == ENOENT else { throw MachineInvocationAdmissionError.unavailable }
+        guard try confined.entryExists(named: name, under: parent) else {
             return try RollingInvocationAdmissionLedger(
                 validating: [],
                 maximumLibraries: maximumLibraries
             )
         }
-        defer { Darwin.close(descriptor) }
-        var metadata = stat()
-        guard fstat(descriptor, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG,
-              metadata.st_nlink == 1,
-              metadata.st_size >= 0
-        else { throw MachineInvocationAdmissionError.invalidLedger }
-        guard metadata.st_size <= Self.maximumLedgerBytes else {
-            throw MachineInvocationAdmissionError.ledgerTooLarge
-        }
-        var data = Data(count: Int(metadata.st_size) + 1)
-        let count = data.withUnsafeMutableBytes { bytes -> Int in
-            guard let base = bytes.baseAddress else { return 0 }
-            var offset = 0
-            while offset < bytes.count {
-                let value = Darwin.read(
-                    descriptor,
-                    base.advanced(by: offset),
-                    bytes.count - offset
-                )
-                if value == 0 { break }
-                if value < 0 {
-                    if errno == EINTR { continue }
-                    return -1
-                }
-                offset += value
-            }
-            return offset
-        }
-        guard count >= 0,
-              count == Int(metadata.st_size),
-              count <= Self.maximumLedgerBytes
-        else { throw MachineInvocationAdmissionError.invalidLedger }
-        data.removeSubrange(count ..< data.count)
-        return try decode(data)
+        return try decode(confined.boundedData(
+            named: name,
+            under: parent,
+            maximumBytes: Self.maximumLedgerBytes,
+            requireSingleLink: true
+        ))
     }
 
     private func decode(_ data: Data) throws -> RollingInvocationAdmissionLedger {
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(root.keys) == ["schemaVersion", "entries"],
-              let rawEntries = root["entries"] as? [[String: Any]],
+        let root = try confined.jsonDictionary(data)
+        try confined.requireExactKeys(root, ["schemaVersion", "entries"])
+        guard let rawEntries = root["entries"] as? [[String: Any]],
               rawEntries.count <= maximumLibraries,
               rawEntries.allSatisfy({ Set($0.keys) == ["libraryId", "lastAdmittedAt"] })
         else { throw MachineInvocationAdmissionError.invalidLedger }
-        let dto = try JSONDecoder().decode(LedgerDTO.self, from: data)
+        let dto = try confined.decode(LedgerDTO.self, from: data)
         guard dto.schemaVersion == RollingInvocationAdmissionLedger.schemaVersion,
-              try encode(dto) == data
+              try confined.deterministicJSON(dto) == data
         else { throw MachineInvocationAdmissionError.invalidLedger }
         let entries = try dto.entries.map { entry in
             RollingInvocationAdmissionEntry(
@@ -275,89 +234,33 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
                 )
             }
         )
-        let data = try encode(dto)
+        let data = try confined.deterministicJSON(dto)
         guard data.count <= Self.maximumLedgerBytes else {
             throw MachineInvocationAdmissionError.ledgerTooLarge
         }
-        let partialName = ".\(name).partial"
-        var partialMetadata = stat()
-        let partialStatus = partialName.withCString {
-            Darwin.fstatat(parent, $0, &partialMetadata, AT_SYMLINK_NOFOLLOW)
-        }
-        if partialStatus == 0 {
-            guard (partialMetadata.st_mode & S_IFMT) == S_IFREG,
-                  partialMetadata.st_nlink == 1,
-                  unlinkat(parent, partialName, 0) == 0
-            else { throw MachineInvocationAdmissionError.unavailable }
-        } else if errno != ENOENT {
-            throw MachineInvocationAdmissionError.unavailable
-        }
-
-        let descriptor = partialName.withCString { pointer -> Int32 in
-            while true {
-                let value = Darwin.openat(
-                    parent,
-                    pointer,
-                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                    0o600
-                )
-                if value < 0, errno == EINTR { continue }
-                return value
-            }
-        }
-        guard descriptor >= 0 else { throw MachineInvocationAdmissionError.unavailable }
-        var ownsPartial = true
-        defer {
-            Darwin.close(descriptor)
-            if ownsPartial { _ = unlinkat(parent, partialName, 0) }
-        }
-        let wroteAll = data.withUnsafeBytes { bytes -> Bool in
-            guard let base = bytes.baseAddress else { return data.isEmpty }
-            var offset = 0
-            while offset < bytes.count {
-                let value = Darwin.write(
-                    descriptor,
-                    base.advanced(by: offset),
-                    bytes.count - offset
-                )
-                if value < 0 {
-                    if errno == EINTR { continue }
-                    return false
-                }
-                if value == 0 { return false }
-                offset += value
-            }
-            return true
-        }
-        guard wroteAll, Self.fsyncRetrying(descriptor) else {
-            throw MachineInvocationAdmissionError.unavailable
-        }
-        let renameStatus = partialName.withCString { source in
-            name.withCString { destination in
-                Darwin.renameat(parent, source, parent, destination)
-            }
-        }
-        guard renameStatus == 0 else { throw MachineInvocationAdmissionError.unavailable }
-        ownsPartial = false
-        guard directorySynchronizer(parent) else {
+        guard try confined.replaceAtomically(
+            data,
+            named: name,
+            via: ".\(name).partial",
+            under: parent
+        ) == .committed else {
             throw MachineInvocationAdmissionError.commitUncertain
         }
     }
 
-    private func encode<T: Encodable>(_ value: T) throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        var data = try encoder.encode(value)
-        data.append(0x0A)
-        return data
-    }
-
-    private static func fsyncRetrying(_ descriptor: Int32) -> Bool {
-        while Darwin.fsync(descriptor) != 0 {
-            if errno == EINTR { continue }
-            return false
-        }
-        return true
+    private static func makeConfined(
+        descriptorOperations: ConfinedPersistenceDescriptorOperations = .init()
+    ) -> ConfinedPersistencePrimitives<MachineInvocationAdmissionError> {
+        ConfinedPersistencePrimitives(
+            ioFailure: .unavailable,
+            invalidLayout: .invalidLedger,
+            expectedPathIsSymlink: .invalidLedger,
+            rootTooLarge: .ledgerTooLarge,
+            invalidJSON: .invalidLedger,
+            invalidSchemaVersion: .invalidLedger,
+            unknownKey: .invalidLedger,
+            descriptorOperations: descriptorOperations
+        )
     }
 }
 

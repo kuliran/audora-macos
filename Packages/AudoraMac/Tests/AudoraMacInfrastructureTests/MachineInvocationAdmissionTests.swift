@@ -1,6 +1,7 @@
 @testable @_spi(InvocationInfrastructure) import AudoraApplication
 @testable @_spi(InvocationInfrastructure) import AudoraMacInfrastructure
 import AudoraDomain
+import Darwin
 import Foundation
 import XCTest
 
@@ -163,7 +164,9 @@ final class MachineInvocationAdmissionTests: XCTestCase {
         let fixture = try Fixture()
         let admission = ApplicationSupportInvocationAdmission(
             fileURL: fixture.fileURL,
-            directorySynchronizer: { _ in false }
+            descriptorOperations: ConfinedPersistenceDescriptorOperations(
+                synchronizeDirectory: { _ in false }
+            )
         )
 
         let outcome = await admission.claim(
@@ -181,8 +184,65 @@ final class MachineInvocationAdmissionTests: XCTestCase {
         }
     }
 
-    func testCorruptOversizedAndSymlinkLedgersFailClosed() async throws {
-        for setup in [FixtureSetup.corrupt, .oversized, .symlink] {
+    func testLedgerCloseFailureFailsClosedWithoutInstallingDebit() async throws {
+        let fixture = try Fixture()
+        let admission = ApplicationSupportInvocationAdmission(
+            fileURL: fixture.fileURL,
+            descriptorOperations: ConfinedPersistenceDescriptorOperations(
+                close: { descriptor in
+                    _ = Darwin.close(descriptor)
+                    return -1
+                }
+            )
+        )
+
+        let outcome = await admission.claim(
+            library: fixture.firstLibrary,
+            at: fixture.instant(0)
+        )
+
+        XCTAssertEqual(outcome, .unavailable)
+        let relaunched = ApplicationSupportInvocationAdmission(fileURL: fixture.fileURL)
+        let relaunchedOutcome = await relaunched.claim(
+            library: fixture.firstLibrary,
+            at: fixture.instant(0)
+        )
+        XCTAssertEqual(
+            relaunchedOutcome,
+            .admitted,
+            "a ledger whose close failed must not install a debit"
+        )
+    }
+
+    func testLedgerWriteWithoutProgressFailsClosedWithoutInstallingDebit() async throws {
+        let fixture = try Fixture()
+        let admission = ApplicationSupportInvocationAdmission(
+            fileURL: fixture.fileURL,
+            descriptorOperations: ConfinedPersistenceDescriptorOperations(
+                write: { _, _, _ in 0 }
+            )
+        )
+
+        let outcome = await admission.claim(
+            library: fixture.firstLibrary,
+            at: fixture.instant(0)
+        )
+
+        XCTAssertEqual(outcome, .unavailable)
+        let relaunched = ApplicationSupportInvocationAdmission(fileURL: fixture.fileURL)
+        let relaunchedOutcome = await relaunched.claim(
+            library: fixture.firstLibrary,
+            at: fixture.instant(0)
+        )
+        XCTAssertEqual(
+            relaunchedOutcome,
+            .admitted,
+            "a zero-progress ledger write must not install a debit"
+        )
+    }
+
+    func testCorruptOversizedAndLinkedLedgersFailClosed() async throws {
+        for setup in [FixtureSetup.corrupt, .oversized, .symlink, .hardLink] {
             let fixture = try Fixture(setup: setup)
             let admission = ApplicationSupportInvocationAdmission(fileURL: fixture.fileURL)
             let outcome = await admission.claim(
@@ -199,6 +259,7 @@ private enum FixtureSetup {
     case corrupt
     case oversized
     case symlink
+    case hardLink
 }
 
 private final class Fixture: @unchecked Sendable {
@@ -230,6 +291,10 @@ private final class Fixture: @unchecked Sendable {
             let target = root.appendingPathComponent("target.json")
             try Data("{}\n".utf8).write(to: target)
             try FileManager.default.createSymbolicLink(at: fileURL, withDestinationURL: target)
+        case .hardLink:
+            let target = root.appendingPathComponent("target.json")
+            try Data("{\"entries\":[],\"schemaVersion\":1}\n".utf8).write(to: target)
+            try FileManager.default.linkItem(at: target, to: fileURL)
         }
     }
 
