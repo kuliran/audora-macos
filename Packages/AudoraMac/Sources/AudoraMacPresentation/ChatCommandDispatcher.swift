@@ -58,6 +58,12 @@ public final class ChatCommandDispatcher: ObservableObject {
 }
 
 @MainActor
+public protocol LibrarySelectionCommandDispatching: AnyObject {
+    @discardableResult
+    func sendAndWait(_ intent: LibrarySelectionIntent) async -> Bool
+}
+
+@MainActor
 public final class LibrarySelectionCommandDispatcher {
     private let commandDispatcher: ChatCommandDispatcher
 
@@ -77,3 +83,5 @@ public final class LibrarySelectionCommandDispatcher {
         await enqueue(intent).value
     }
 }
+
+extension LibrarySelectionCommandDispatcher: LibrarySelectionCommandDispatching {}

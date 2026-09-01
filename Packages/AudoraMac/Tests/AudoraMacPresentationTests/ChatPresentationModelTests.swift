@@ -385,7 +385,9 @@ private actor PassivePresentationLibraryFeature: LibraryFeature {
         LibraryFeatureState(selection: .awaitingBootstrap)
     }
 
-    func send(_ command: LibraryCommand) async {}
+    func send(_ command: LibraryCommand) async -> LibraryCommandResult {
+        .noSelectionMutation
+    }
 }
 
 private actor SuspendedOldActionPresentationChatFeature: ChatFeature {

@@ -117,7 +117,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private var commandInFlight = false
     private var cancellationFinalizationInFlight = false
     private var pendingSelectionCommand: PendingSelectionCommand?
-    private var pendingLibraryActivationScope: LibraryScope?
+    private var pendingLibraryActivation: LibraryActivation?
     private var libraryNavigationReserved = false
     private var cancelledRunJobID: TranscriptionJobID?
     private var invalidCompletedJobs: [CompletedRecoveryKey: SessionProcessingJob]
@@ -126,10 +126,12 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         = [:]
     /// Every Library activation event installs a fail-closed launch fence. Only
     /// a complete pass over the exact retained root generation may clear it.
-    private var libraryReconciliationFence: LibraryScope?
-    private var successfullyReconciledLibraryScope: LibraryScope?
+    private var libraryReconciliationFence: LibraryActivation?
+    private var successfullyReconciledLibraryActivation: LibraryActivation?
+    private var latestLibraryActivation: LibraryActivation?
+    private var legacyActivationGeneration: UInt64 = 0
     private var hasObservedLibraryActivation = false
-    private var activeReconciliationScope: LibraryScope?
+    private var activeReconciliationActivation: LibraryActivation?
     private var suppressStateTransitions = false
     private var stateContinuations: [UInt64: AsyncStream<SessionProcessingFeatureState>.Continuation]
         = [:]
@@ -165,7 +167,13 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         }
     }
 
-    public func send(_ command: SessionProcessingCommand) async {
+    public func send(_ requestedCommand: SessionProcessingCommand) async {
+        guard let command = normalizedCommand(requestedCommand) else { return }
+        if case let .activateLibraryAuthority(activation) = command,
+           !observeLibraryActivation(activation)
+        {
+            return
+        }
         if command == .cancel {
             await cancel()
             return
@@ -188,8 +196,13 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         commandInFlight = false
     }
 
+    public func activateLibrary(_ activation: LibraryActivation) async {
+        await send(.activateLibraryAuthority(activation))
+    }
+
     public func reserveLibraryNavigation() async -> Bool {
         guard !libraryNavigationReserved,
+              libraryReconciliationFence == nil,
               !state.ownsLibraryMutationAuthority,
               !commandInFlight,
               !cancellationFinalizationInFlight
@@ -207,7 +220,12 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private func perform(_ command: SessionProcessingCommand) async {
         switch command {
         case let .activateLibrary(scope):
-            await reconcileActiveLibrary(scope)
+            guard let activation = reserveLegacyActivation(for: scope),
+                  observeLibraryActivation(activation)
+            else { return }
+            await reconcileActiveLibrary(activation)
+        case let .activateLibraryAuthority(activation):
+            await reconcileActiveLibrary(activation)
         case let .selectSession(selection):
             await select(selection)
         case .clearSelection:
@@ -223,6 +241,58 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         case .reinstall:
             await prepare(.reinstall)
         }
+    }
+
+    private func normalizedCommand(
+        _ command: SessionProcessingCommand
+    ) -> SessionProcessingCommand? {
+        guard case let .activateLibrary(scope) = command else { return command }
+        guard let activation = reserveLegacyActivation(for: scope) else {
+            hasObservedLibraryActivation = true
+            if let latestLibraryActivation {
+                libraryReconciliationFence = latestLibraryActivation
+            }
+            return nil
+        }
+        return .activateLibraryAuthority(activation)
+    }
+
+    private func reserveLegacyActivation(
+        for scope: LibraryScope
+    ) -> LibraryActivation? {
+        let latestGeneration = latestLibraryActivation?.generation ?? 0
+        let floor = max(legacyActivationGeneration, latestGeneration)
+        guard floor < .max else { return nil }
+        let generation = floor + 1
+        legacyActivationGeneration = generation
+        return LibraryActivation(scope: scope, generation: generation)
+    }
+
+    private func observeLibraryActivation(_ activation: LibraryActivation) -> Bool {
+        hasObservedLibraryActivation = true
+        guard activation.generation > 0 else {
+            latestLibraryActivation = activation
+            libraryReconciliationFence = activation
+            successfullyReconciledLibraryActivation = nil
+            return false
+        }
+        if let latest = latestLibraryActivation {
+            if activation.generation < latest.generation {
+                return false
+            }
+            if activation.generation == latest.generation {
+                guard activation == latest else {
+                    latestLibraryActivation = activation
+                    libraryReconciliationFence = activation
+                    successfullyReconciledLibraryActivation = nil
+                    return false
+                }
+                return false
+            }
+        }
+        latestLibraryActivation = activation
+        libraryReconciliationFence = activation
+        return true
     }
 
     private func clearSelection() {
@@ -245,9 +315,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     /// Session selection. Infrastructure binds the inventory capability to one
     /// retained Library generation; every subsequent source/job/publication
     /// boundary fails closed if that authority is no longer current.
-    private func reconcileActiveLibrary(_ scope: LibraryScope) async {
-        hasObservedLibraryActivation = true
-        libraryReconciliationFence = scope
+    private func reconcileActiveLibrary(_ activation: LibraryActivation) async {
+        let scope = activation.scope
         let inventory: SessionProcessingJobInventory
         switch await jobs.inventory(for: scope) {
         case let .available(available):
@@ -256,7 +325,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             return
         }
         let reconciliationID = inventory.reconciliationID
-        guard inventory.scope == scope else {
+        guard latestLibraryActivation == activation,
+              libraryReconciliationFence == activation,
+              inventory.scope == scope
+        else {
             await jobs.finishReconciliation(reconciliationID)
             return
         }
@@ -267,14 +339,19 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         // One writable Library is active at a time. Its bounded inventory is
         // the authority for launch-time completed-Job recovery errors.
         if classified.isComplete {
-            invalidCompletedJobs.removeAll(keepingCapacity: true)
-            activationRecovery.removeAll(keepingCapacity: true)
+            invalidCompletedJobs.removeAll(keepingCapacity: false)
+            activationRecovery.removeAll(keepingCapacity: false)
         }
 
         let preservedProfile = selectedProfile
-        activeReconciliationScope = scope
+        activeReconciliationActivation = activation
         suppressStateTransitions = true
+        var superseded = false
         for job in classified.jobs {
+            guard latestLibraryActivation == activation else {
+                superseded = true
+                break
+            }
             // A newer inventoried Job supersedes only the prior exact-winner
             // presentation. Every unresolved nonterminal Job remains fenced by
             // exact Job identity until a later activation proves it settled.
@@ -286,11 +363,18 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 scope: scope,
                 reconciliationID: reconciliationID
             )
+            if latestLibraryActivation != activation {
+                superseded = true
+                break
+            }
         }
         suppressStateTransitions = false
-        activeReconciliationScope = nil
+        activeReconciliationActivation = nil
         selectedProfile = preservedProfile
         await jobs.finishReconciliation(reconciliationID)
+        guard !superseded,
+              latestLibraryActivation == activation
+        else { return }
 
         let libraryID = scope.libraryID.rawValue
         let hasInvalidCompletedAuthority = invalidCompletedJobs.keys.contains {
@@ -301,10 +385,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         }
         if classified.isComplete,
            !hasInvalidCompletedAuthority, !hasUnconfirmedAuthority,
-           libraryReconciliationFence == scope
+           libraryReconciliationFence == activation
         {
             libraryReconciliationFence = nil
-            successfullyReconciledLibraryScope = scope
+            successfullyReconciledLibraryActivation = activation
         }
 
         // Activation may have changed the durable authority for the Session
@@ -1596,17 +1680,19 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         // fenced behind its in-flight run. Library activation is a lifecycle
         // obligation for a newly active authority and must still reconcile its
         // durable Jobs without inheriting this run's UI state.
-        while let scope = pendingLibraryActivationScope {
-            pendingLibraryActivationScope = nil
-            await reconcileActiveLibrary(scope)
+        while let activation = pendingLibraryActivation {
+            pendingLibraryActivation = nil
+            await reconcileActiveLibrary(activation)
         }
         await finishCancellationFinalization()
     }
 
     private func retainLatestSelectionCommand(_ command: SessionProcessingCommand) {
         switch command {
-        case let .activateLibrary(scope):
-            pendingLibraryActivationScope = scope
+        case .activateLibrary:
+            break
+        case let .activateLibraryAuthority(activation):
+            pendingLibraryActivation = activation
         case let .selectSession(selection):
             pendingSelectionCommand = .select(selection)
         case .clearSelection:
@@ -1617,9 +1703,9 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     }
 
     private func takePendingContextCommand() -> SessionProcessingCommand? {
-        if let scope = pendingLibraryActivationScope {
-            pendingLibraryActivationScope = nil
-            return .activateLibrary(scope)
+        if let activation = pendingLibraryActivation {
+            pendingLibraryActivation = nil
+            return .activateLibraryAuthority(activation)
         }
         defer { pendingSelectionCommand = nil }
         return pendingSelectionCommand?.command
@@ -1628,7 +1714,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private func finishCancellationFinalization() async {
         cancellationFinalizationInFlight = false
         guard !commandInFlight,
-              pendingSelectionCommand != nil || pendingLibraryActivationScope != nil
+              pendingSelectionCommand != nil || pendingLibraryActivation != nil
         else { return }
         commandInFlight = true
         while let current = takePendingContextCommand() {
@@ -1754,10 +1840,14 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
 
     private var selectedLibraryHasCompletedReconciliation: Bool {
         guard hasObservedLibraryActivation else { return true }
-        guard libraryReconciliationFence == nil, let lastSelection else {
+        guard libraryReconciliationFence == nil,
+              let activation = latestLibraryActivation,
+              let lastSelection,
+              activation.scope == lastSelection.scope
+        else {
             return false
         }
-        return successfullyReconciledLibraryScope == lastSelection.scope
+        return successfullyReconciledLibraryActivation == activation
     }
 
     private func runtimeUnavailable(
@@ -1839,7 +1929,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         _ recovery: ActivationRecovery,
         for job: SessionProcessingJob
     ) {
-        guard let scope = activeReconciliationScope else { return }
+        guard let scope = activeReconciliationActivation?.scope else { return }
         let key = CompletedRecoveryKey(
             SessionProcessingSelection(scope: scope, sessionID: job.sessionID)
         )
@@ -1864,7 +1954,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private func resolveUnconfirmedActivationRecovery(
         for job: SessionProcessingJob
     ) {
-        guard let scope = activeReconciliationScope else { return }
+        guard let scope = activeReconciliationActivation?.scope else { return }
         let key = CompletedRecoveryKey(
             SessionProcessingSelection(scope: scope, sessionID: job.sessionID)
         )

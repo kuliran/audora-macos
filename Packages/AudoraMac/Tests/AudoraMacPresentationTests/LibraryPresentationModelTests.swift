@@ -14,7 +14,11 @@ final class LibraryPresentationModelTests: XCTestCase {
                 ),
             ]
         )
-        let model = LibraryPresentationModel(feature: feature)
+        let dispatcher = LibrarySelectionDispatcherProbe()
+        let model = LibraryPresentationModel(
+            feature: feature,
+            librarySelection: dispatcher
+        )
 
         await model.start()
         await model.start()
@@ -26,7 +30,8 @@ final class LibraryPresentationModelTests: XCTestCase {
             )
         )
         let commands = await feature.commands
-        XCTAssertEqual(commands, [.start])
+        XCTAssertEqual(commands, [])
+        XCTAssertEqual(dispatcher.intents, [.start])
     }
 
     func testRepeatedOpenFocusesAndReopensTheSameSingletonWindowIdentity() {
@@ -199,8 +204,19 @@ private actor ScriptedLibraryFeature: LibraryFeature {
         state
     }
 
-    func send(_ command: LibraryCommand) async {
+    func send(_ command: LibraryCommand) async -> LibraryCommandResult {
         commands.append(command)
+        return .noSelectionMutation
+    }
+}
+
+@MainActor
+private final class LibrarySelectionDispatcherProbe: LibrarySelectionCommandDispatching {
+    private(set) var intents: [LibrarySelectionIntent] = []
+
+    func sendAndWait(_ intent: LibrarySelectionIntent) async -> Bool {
+        intents.append(intent)
+        return true
     }
 }
 

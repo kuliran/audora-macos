@@ -62,6 +62,7 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
 
     private var commandTail: Task<Void, Never>?
     private var admittedCommandCount = 0
+    private var pendingLibraryNavigationCount = 0
     private var deferredStarts: [(ChatCommand, DeferredApplicationCommandCompletion)] = []
     private var admissionContinuations:
         [Int: AsyncStream<ApplicationCommandAdmissionState>.Continuation] = [:]
@@ -120,9 +121,17 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
     public func enqueue(
         _ intent: LibrarySelectionIntent
     ) -> ApplicationCommandReceipt<Bool> {
-        guard admissionState == .idle else {
+        guard !admissionState.isOrderlyTerminationPending,
+              !admissionState.isChatBoundaryPending
+        else {
             return completedReceipt(false)
         }
+        if admissionState.isLibraryNavigationPending {
+            guard case .openExternal = intent else {
+                return completedReceipt(false)
+            }
+        }
+        pendingLibraryNavigationCount += 1
         updateAdmissionState(isLibraryNavigationPending: true)
         admittedCommandCount += 1
         let predecessor = commandTail
@@ -144,12 +153,15 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
                 finishLibraryNavigation()
                 return false
             }
-            await library.send(intent.command)
+            let result = await library.send(intent.command)
+            if let activation = result.activation {
+                await sessionProcessing?.activateLibrary(activation)
+            }
             await sessionProcessing?.finishLibraryNavigation(
-                didMutateLibrary: true
+                didMutateLibrary: result.didMutateSelection
             )
             finishLibraryNavigation()
-            return true
+            return result.didMutateSelection
         }
         commandTail = Task { _ = await operation.value }
         return ApplicationCommandReceipt(task: operation)
@@ -204,6 +216,9 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
     }
 
     private func finishLibraryNavigation() {
+        precondition(pendingLibraryNavigationCount > 0)
+        pendingLibraryNavigationCount -= 1
+        guard pendingLibraryNavigationCount == 0 else { return }
         updateAdmissionState(isLibraryNavigationPending: false)
         releaseDeferredStartsIfPossible()
     }

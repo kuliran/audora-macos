@@ -197,6 +197,10 @@ public protocol SessionProcessingFeature: Sendable {
     var states: AsyncStream<SessionProcessingFeatureState> { get }
     func send(_ command: SessionProcessingCommand) async
 
+    /// Reconciles one exact process-local Library activation. A newer
+    /// generation supersedes every older same-ID reconciliation completion.
+    func activateLibrary(_ activation: LibraryActivation) async
+
     /// Atomically excludes Start/Retry/Prepare while Application coordinates a
     /// Library-selection mutation. Returns false when processing already owns
     /// active or recovery authority.
@@ -205,4 +209,11 @@ public protocol SessionProcessingFeature: Sendable {
     /// Releases the reservation. A successful Library mutation also clears the
     /// old Session selection before launch admission reopens.
     func finishLibraryNavigation(didMutateLibrary: Bool) async
+}
+
+@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+public extension SessionProcessingFeature {
+    func activateLibrary(_ activation: LibraryActivation) async {
+        await send(.activateLibraryAuthority(activation))
+    }
 }

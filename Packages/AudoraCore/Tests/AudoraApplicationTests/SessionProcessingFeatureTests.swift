@@ -917,6 +917,26 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(releasedRequests, 1)
     }
 
+    func testLibraryNavigationReservationRejectsHiddenActivationFenceWithoutSession()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let feature = fixture.makeFeature(
+            jobs: JobProbe(inventoryResult: .unavailable),
+            engine: EngineProbe(result: .failure(.launchFailed))
+        )
+
+        await feature.send(.activateLibrary(fixture.selection.scope))
+
+        guard case let .unavailable(snapshot) = await feature.currentState else {
+            return XCTFail("activation must not invent a selected Session")
+        }
+        XCTAssertNil(snapshot.selection)
+        XCTAssertEqual(snapshot.reason, .noSession)
+        let reserved = await feature.reserveLibraryNavigation()
+        XCTAssertFalse(reserved)
+    }
+
     func testMissingModelCanBePreparedThenStartedWithoutChangingEngine() async throws {
         let fixture = try ProcessingFixture()
         let runtime = RuntimeProbe(.qualified(fixture.profile))
@@ -1934,6 +1954,127 @@ final class SessionProcessingFeatureTests: XCTestCase {
 
         let requestCount = await engine.requestCount()
         XCTAssertEqual(requestCount, 0)
+    }
+
+    func testSameIDReplacementGenerationFencesStartUntilSecondInventoryCompletes()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let jobs = SuspendedActivationGenerationJobProbe(
+            scope: fixture.selection.scope,
+            firstReconciliationID: try SessionProcessingReconciliationID(
+                "reconcile-generation-one"
+            ),
+            secondReconciliationID: try SessionProcessingReconciliationID(
+                "reconcile-generation-two"
+            )
+        )
+        let engine = EngineProbe(result: .failure(.launchFailed))
+        let feature = DefaultSessionProcessingFeature(
+            source: SourceProbe(.available(fixture.source)),
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+        let first = LibraryActivation(
+            scope: fixture.selection.scope,
+            generation: 1
+        )
+        let replacement = LibraryActivation(
+            scope: fixture.selection.scope,
+            generation: 2
+        )
+
+        await feature.activateLibrary(first)
+        await feature.send(.selectSession(fixture.selection))
+        let replacementTask = Task {
+            await feature.activateLibrary(replacement)
+        }
+        await jobs.waitUntilSecondInventorySuspends()
+
+        await feature.send(.start)
+        let requestsWhileReplacementIsUnreconciled = await engine.requestCount()
+        XCTAssertEqual(requestsWhileReplacementIsUnreconciled, 0)
+
+        await feature.activateLibrary(first)
+        let inventoryCallsAfterStaleActivation = await jobs.inventoryCallCount
+        XCTAssertEqual(inventoryCallsAfterStaleActivation, 2)
+
+        await jobs.resumeSecondInventory()
+        await replacementTask.value
+        await feature.send(.start)
+
+        let finalInventoryCallCount = await jobs.inventoryCallCount
+        let requestsAfterReplacementReconciliation = await engine.requestCount()
+        XCTAssertEqual(finalInventoryCallCount, 2)
+        XCTAssertEqual(requestsAfterReplacementReconciliation, 1)
+    }
+
+    func testSameIDReplacementSupersedesAnOlderSuspendedReconciliation()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let jobs = SuspendedActivationGenerationJobProbe(
+            scope: fixture.selection.scope,
+            firstReconciliationID: try SessionProcessingReconciliationID(
+                "reconcile-overlapped-generation-one"
+            ),
+            secondReconciliationID: try SessionProcessingReconciliationID(
+                "reconcile-overlapped-generation-two"
+            ),
+            suspendFirstInventory: true
+        )
+        let engine = EngineProbe(result: .failure(.launchFailed))
+        let feature = DefaultSessionProcessingFeature(
+            source: SourceProbe(.available(fixture.source)),
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+        let first = LibraryActivation(
+            scope: fixture.selection.scope,
+            generation: 1
+        )
+        let replacement = LibraryActivation(
+            scope: fixture.selection.scope,
+            generation: 2
+        )
+
+        let firstTask = Task { await feature.activateLibrary(first) }
+        await jobs.waitUntilFirstInventorySuspends()
+        await feature.activateLibrary(replacement)
+        await jobs.resumeFirstInventory()
+        await jobs.waitUntilSecondInventorySuspends()
+
+        await feature.send(.selectSession(fixture.selection))
+        await feature.send(.start)
+        let requestsBeforeReplacementCompletes = await engine.requestCount()
+        XCTAssertEqual(requestsBeforeReplacementCompletes, 0)
+
+        await jobs.resumeSecondInventory()
+        await firstTask.value
+        await feature.send(.start)
+
+        let inventoryCalls = await jobs.inventoryCallCount
+        let requestsAfterReplacementCompletes = await engine.requestCount()
+        XCTAssertEqual(inventoryCalls, 2)
+        XCTAssertEqual(requestsAfterReplacementCompletes, 1)
     }
 
     func testFailedDifferentLibraryActivationGloballyFencesOldAndUnactivatedSelections()
@@ -4926,6 +5067,116 @@ private actor SequencedInventoryJobProbe: SessionProcessingJobPort {
         else { return .stale }
         self.current = job
         return .written(job)
+    }
+}
+
+private actor SuspendedActivationGenerationJobProbe: SessionProcessingJobPort {
+    private let scope: LibraryScope
+    private let firstReconciliationID: SessionProcessingReconciliationID
+    private let secondReconciliationID: SessionProcessingReconciliationID
+    private var current: SessionProcessingJob?
+    private let suspendFirstInventory: Bool
+    private var firstInventoryContinuation: CheckedContinuation<Void, Never>?
+    private var firstInventoryIsSuspended = false
+    private var secondInventoryContinuation: CheckedContinuation<Void, Never>?
+    private var secondInventoryIsSuspended = false
+    private(set) var inventoryCallCount = 0
+
+    init(
+        scope: LibraryScope,
+        firstReconciliationID: SessionProcessingReconciliationID,
+        secondReconciliationID: SessionProcessingReconciliationID,
+        suspendFirstInventory: Bool = false
+    ) {
+        self.scope = scope
+        self.firstReconciliationID = firstReconciliationID
+        self.secondReconciliationID = secondReconciliationID
+        self.suspendFirstInventory = suspendFirstInventory
+    }
+
+    func inventory(
+        for scope: LibraryScope
+    ) async -> SessionProcessingJobInventoryResult {
+        guard scope == self.scope else { return .unavailable }
+        inventoryCallCount += 1
+        switch inventoryCallCount {
+        case 1:
+            if suspendFirstInventory {
+                firstInventoryIsSuspended = true
+                await withCheckedContinuation { firstInventoryContinuation = $0 }
+            }
+            return .available(
+                SessionProcessingJobInventory(
+                    reconciliationID: firstReconciliationID,
+                    scope: scope,
+                    jobs: []
+                )
+            )
+        case 2:
+            secondInventoryIsSuspended = true
+            await withCheckedContinuation { secondInventoryContinuation = $0 }
+            return .available(
+                SessionProcessingJobInventory(
+                    reconciliationID: secondReconciliationID,
+                    scope: scope,
+                    jobs: []
+                )
+            )
+        default:
+            return .integrityMismatch
+        }
+    }
+
+    func latest(for selection: SessionProcessingSelection) async
+        -> SessionProcessingJobLoadResult
+    {
+        current.map(SessionProcessingJobLoadResult.loaded) ?? .none
+    }
+
+    func load(
+        jobID: TranscriptionJobID,
+        for selection: SessionProcessingSelection
+    ) async -> SessionProcessingJobLoadResult {
+        guard let current,
+              current.jobID == jobID,
+              current.sessionID == selection.sessionID
+        else { return .none }
+        return .loaded(current)
+    }
+
+    func create(_ job: SessionProcessingJob) async -> SessionProcessingJobWriteResult {
+        current = job
+        return .written(job)
+    }
+
+    func transition(
+        _ job: SessionProcessingJob,
+        from expected: SessionProcessingJobState
+    ) async -> SessionProcessingJobWriteResult {
+        guard let current,
+              current.jobID == job.jobID,
+              current.state == expected
+        else { return .stale }
+        self.current = job
+        return .written(job)
+    }
+
+    func waitUntilSecondInventorySuspends() async {
+        while !secondInventoryIsSuspended { await Task.yield() }
+    }
+
+    func waitUntilFirstInventorySuspends() async {
+        while !firstInventoryIsSuspended { await Task.yield() }
+    }
+
+    func resumeFirstInventory() {
+        firstInventoryContinuation?.resume()
+        firstInventoryContinuation = nil
+    }
+
+    func resumeSecondInventory() {
+        secondInventoryContinuation?.resume()
+        secondInventoryContinuation = nil
     }
 }
 

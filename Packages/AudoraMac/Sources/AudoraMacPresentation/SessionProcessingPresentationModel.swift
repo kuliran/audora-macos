@@ -315,13 +315,6 @@ public final class SessionProcessingPresentationModel: ObservableObject {
         Task { await feature.send(.selectSession(selection)) }
     }
 
-    /// Library activation is a system lifecycle event, not a user Session
-    /// selection. It triggers bounded durable-Job reconciliation while leaving
-    /// this panel's selected Session unchanged.
-    public func activateLibrary(_ scope: LibraryScope) {
-        Task { await feature.send(.activateLibrary(scope)) }
-    }
-
     public func clearSelection() {
         Task { await feature.send(.clearSelection) }
     }

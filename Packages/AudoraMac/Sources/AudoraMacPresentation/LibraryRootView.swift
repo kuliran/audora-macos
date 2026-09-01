@@ -21,7 +21,12 @@ public struct LibraryRootView: View {
         librarySelectionDispatcher: LibrarySelectionCommandDispatcher,
         windowCoordinator: MainWindowCoordinator
     ) {
-        _model = StateObject(wrappedValue: LibraryPresentationModel(feature: feature))
+        _model = StateObject(
+            wrappedValue: LibraryPresentationModel(
+                feature: feature,
+                librarySelection: librarySelectionDispatcher
+            )
+        )
         _audioImportModel = StateObject(
             wrappedValue: AudioImportPresentationModel(feature: audioImportFeature)
         )
@@ -54,10 +59,16 @@ public struct LibraryRootView: View {
                     )
                 )
                 HStack {
-                    Button("Create Library") { model.send(.create) }
-                    Button("Choose Library…") { model.send(.chooseExisting) }
+                    Button("Create Library") {
+                        librarySelectionDispatcher.enqueue(.create)
+                    }
+                    Button("Choose Library…") {
+                        librarySelectionDispatcher.enqueue(.chooseExisting)
+                    }
                     if recentAvailable {
-                        Button("Reopen Recent") { model.send(.reopenRecent) }
+                        Button("Reopen Recent") {
+                            librarySelectionDispatcher.enqueue(.reopenRecent)
+                        }
                     }
                 }
 
@@ -140,7 +151,6 @@ public struct LibraryRootView: View {
                 recordingModel.selectLibrary(
                     .writable(scope)
                 )
-                sessionProcessingModel.activateLibrary(scope)
             case .readOnly:
                 recordingModel.selectLibrary(.readOnly)
             case .awaitingBootstrap, .noLibrarySelected, nil:
@@ -158,7 +168,7 @@ public struct LibraryRootView: View {
 
     private var libraryActions: some View {
         HStack {
-            Button("Reveal Library") { model.send(.reveal) }
+            Button("Reveal Library") { model.reveal() }
                 .disabled(!interactionAvailability.canRevealLibrary)
             Button("Choose Another…") {
                 librarySelectionDispatcher.enqueue(.chooseExisting)

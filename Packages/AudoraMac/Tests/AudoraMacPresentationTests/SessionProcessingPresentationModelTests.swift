@@ -129,22 +129,6 @@ final class SessionProcessingPresentationModelTests: XCTestCase {
         XCTAssertEqual(commands, [.start, .prepare, .reinstall, .retry])
     }
 
-    func testWritableLibraryActivationRequestsRelaunchReconciliationWithoutSelection()
-        async throws
-    {
-        let feature = ScriptedSessionProcessingFeature(snapshots: [])
-        let model = SessionProcessingPresentationModel(feature: feature)
-        let scope = LibraryScope(
-            libraryID: try LibraryID("lib-20260830T120000000Z-1ABC")
-        )
-
-        model.activateLibrary(scope)
-        await feature.waitForCommandCount(1)
-
-        let commands = await feature.recordedCommands()
-        XCTAssertEqual(commands, [.activateLibrary(scope)])
-    }
-
     func testNonterminalRelaunchStateDoesNotOfferIssue16Controls() throws {
         let job = SessionProcessingJob(
             jobID: try TranscriptionJobID("job-20260830T120500000Z-5GHJ"),

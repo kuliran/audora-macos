@@ -687,6 +687,9 @@ public enum SessionProcessingCommand: Equatable, Sendable {
     /// System lifecycle command. It reconciles durable Jobs without selecting
     /// any Session in the user-facing processing panel.
     case activateLibrary(LibraryScope)
+    /// Application-owned lifecycle event. Its process-local generation
+    /// distinguishes replacement roots that intentionally share a Library ID.
+    case activateLibraryAuthority(LibraryActivation)
     case selectSession(SessionProcessingSelection)
     case clearSelection
     case start

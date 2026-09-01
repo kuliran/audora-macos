@@ -87,6 +87,33 @@ final class LibraryFeatureTests: XCTestCase {
         XCTAssertEqual(cancelledState, LibraryFeatureState(selection: .active(original)))
     }
 
+    func testIdenticalWritableOpenAllocatesFreshProcessLocalActivation() async throws {
+        let identical = try snapshot(id: "lib-20260830T120000000Z-2ABC")
+        let workspace = ScriptedWorkspace(
+            restore: [.opened(identical)],
+            choose: [.opened(identical)]
+        )
+        let feature = makeFeature(workspace)
+
+        let initial = await feature.send(.start)
+        let replacement = await feature.send(.chooseExisting)
+
+        let scope = LibraryScope(libraryID: identical.libraryID)
+        XCTAssertEqual(
+            initial,
+            .activated(LibraryActivation(scope: scope, generation: 1))
+        )
+        XCTAssertEqual(
+            replacement,
+            .activated(LibraryActivation(scope: scope, generation: 2))
+        )
+        let finalState = await feature.currentState
+        XCTAssertEqual(
+            finalState,
+            LibraryFeatureState(selection: .active(identical))
+        )
+    }
+
     func testCloseAndReopenRecentRestoreTheIdenticalSnapshot() async throws {
         let original = try snapshot(id: "lib-20260830T120000000Z-2ABC")
         let workspace = ScriptedWorkspace(

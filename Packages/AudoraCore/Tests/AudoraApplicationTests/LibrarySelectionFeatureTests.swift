@@ -232,6 +232,189 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         XCTAssertEqual(events, ["chat.flush", "library.close"])
     }
 
+    func testSuccessfulIdenticalLibraryReplacementExplicitlyActivatesProcessing()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: true, trace: trace)
+        let snapshot = ActiveLibrarySnapshot(
+            libraryID: try LibraryID("lib-20260830T120000000Z-2ABC"),
+            preferences: .defaults,
+            profile: .nullProfile(statementCount: 0)
+        )
+        let library = IdenticalReplacementLibraryFeature(
+            snapshot: snapshot,
+            trace: trace
+        )
+        let processing = NavigationActivationProcessingProbe()
+        let feature = DefaultApplicationCommandFeature(
+            library: library,
+            chat: chat,
+            sessionProcessing: processing
+        )
+
+        let succeeded = await feature.enqueue(.chooseExisting).value
+
+        XCTAssertTrue(succeeded)
+        let commands = await processing.commands
+        XCTAssertEqual(
+            commands,
+            [
+                .activateLibraryAuthority(
+                    LibraryActivation(
+                        scope: LibraryScope(libraryID: snapshot.libraryID),
+                        generation: 2
+                    )
+                ),
+            ]
+        )
+        let navigationMutations = await processing.navigationMutations
+        XCTAssertEqual(navigationMutations, [true])
+    }
+
+    func testInitialRestoreExplicitlyActivatesProcessingThroughApplicationCoordinator()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: true, trace: trace)
+        let snapshot = ActiveLibrarySnapshot(
+            libraryID: try LibraryID("lib-20260830T120000000Z-2ABC"),
+            preferences: .defaults,
+            profile: .nullProfile(statementCount: 0)
+        )
+        let library = IdenticalReplacementLibraryFeature(
+            snapshot: snapshot,
+            activationGeneration: 1,
+            trace: trace
+        )
+        let processing = NavigationActivationProcessingProbe()
+        let feature = DefaultApplicationCommandFeature(
+            library: library,
+            chat: chat,
+            sessionProcessing: processing
+        )
+
+        let succeeded = await feature.enqueue(.start).value
+
+        XCTAssertTrue(succeeded)
+        let libraryCommands = await library.commands
+        XCTAssertEqual(libraryCommands, [.start])
+        let processingCommands = await processing.commands
+        XCTAssertEqual(
+            processingCommands,
+            [
+                .activateLibraryAuthority(
+                    LibraryActivation(
+                        scope: LibraryScope(libraryID: snapshot.libraryID),
+                        generation: 1
+                    )
+                ),
+            ]
+        )
+        let navigationMutations = await processing.navigationMutations
+        XCTAssertEqual(navigationMutations, [true])
+    }
+
+    func testExternalOpenQueuedDuringInitialRestoreActivatesBothExactAuthorities()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: true, trace: trace)
+        let initialScope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T120000000Z-2ABC")
+        )
+        let externalScope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T121000000Z-3DEF")
+        )
+        let library = SuspendedActivationLibraryFeature(
+            results: [
+                .activated(LibraryActivation(scope: initialScope, generation: 1)),
+                .activated(LibraryActivation(scope: externalScope, generation: 2)),
+            ]
+        )
+        let processing = NavigationActivationProcessingProbe()
+        let feature = DefaultApplicationCommandFeature(
+            library: library,
+            chat: chat,
+            sessionProcessing: processing
+        )
+        let token = try XCTUnwrap(LibraryOpenRequestToken("queued_external"))
+
+        let startup = feature.enqueue(LibrarySelectionIntent.start)
+        await library.waitForCommandCount(1)
+        let external = feature.enqueue(.openExternal(token))
+        let externalCompletion = BooleanReceiptProbe()
+        let externalWaiter = Task {
+            await externalCompletion.complete(await external.value)
+        }
+
+        XCTAssertTrue(feature.admissionState.isLibraryNavigationPending)
+        for _ in 0..<100 { await Task.yield() }
+        if let earlyResult = await externalCompletion.result {
+            await library.resumeNextCommand()
+            _ = await startup.value
+            await externalWaiter.value
+            return XCTFail(
+                "queued external open returned early with \(earlyResult)"
+            )
+        }
+        await library.resumeNextCommand()
+        await library.waitForCommandCount(2)
+        XCTAssertTrue(feature.admissionState.isLibraryNavigationPending)
+        await library.resumeNextCommand()
+
+        let startupSucceeded = await startup.value
+        await externalWaiter.value
+        let externalSucceeded = await externalCompletion.result
+        XCTAssertTrue(startupSucceeded)
+        XCTAssertEqual(externalSucceeded, true)
+        XCTAssertEqual(feature.admissionState, .idle)
+        let libraryCommands = await library.commands
+        XCTAssertEqual(libraryCommands, [.start, .openExternal(token)])
+        let processingCommands = await processing.commands
+        XCTAssertEqual(
+            processingCommands,
+            [
+                .activateLibraryAuthority(
+                    LibraryActivation(scope: initialScope, generation: 1)
+                ),
+                .activateLibraryAuthority(
+                    LibraryActivation(scope: externalScope, generation: 2)
+                ),
+            ]
+        )
+    }
+
+    func testFailedLibraryNavigationDoesNotActivateOrInvalidateProcessing()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: true, trace: trace)
+        let snapshot = ActiveLibrarySnapshot(
+            libraryID: try LibraryID("lib-20260830T120000000Z-2ABC"),
+            preferences: .defaults,
+            profile: .nullProfile(statementCount: 0)
+        )
+        let library = FailedReplacementLibraryFeature(
+            snapshot: snapshot,
+            trace: trace
+        )
+        let processing = NavigationActivationProcessingProbe()
+        let feature = DefaultApplicationCommandFeature(
+            library: library,
+            chat: chat,
+            sessionProcessing: processing
+        )
+
+        let succeeded = await feature.enqueue(.chooseExisting).value
+
+        XCTAssertFalse(succeeded)
+        let commands = await processing.commands
+        XCTAssertEqual(commands, [])
+        let navigationMutations = await processing.navigationMutations
+        XCTAssertEqual(navigationMutations, [false])
+    }
+
     func testSelectionFencesLateChatIngressUntilLibrarySendCompletes() async throws {
         let trace = LibrarySelectionTrace()
         let chat = SelectionChatFeature(flushResult: true, trace: trace)
@@ -373,6 +556,34 @@ private actor NavigationReservationProcessingProbe: SessionProcessingFeature {
 
     func finishLibraryNavigation(didMutateLibrary: Bool) async {
         navigationReserved = false
+    }
+}
+
+private actor NavigationActivationProcessingProbe: SessionProcessingFeature {
+    nonisolated let states = AsyncStream<SessionProcessingFeatureState> { continuation in
+        continuation.finish()
+    }
+    private(set) var commands: [SessionProcessingCommand] = []
+    private(set) var navigationMutations: [Bool] = []
+
+    var currentState: SessionProcessingFeatureState {
+        .unavailable(
+            SessionProcessingUnavailableSnapshot(
+                selection: nil,
+                reason: .noSession,
+                actions: []
+            )
+        )
+    }
+
+    func send(_ command: SessionProcessingCommand) async {
+        commands.append(command)
+    }
+
+    func reserveLibraryNavigation() async -> Bool { true }
+
+    func finishLibraryNavigation(didMutateLibrary: Bool) async {
+        navigationMutations.append(didMutateLibrary)
     }
 }
 
@@ -584,10 +795,11 @@ private actor SuspendedSelectionLibraryFeature: LibraryFeature {
         LibraryFeatureState(selection: .awaitingBootstrap)
     }
 
-    func send(_ command: LibraryCommand) async {
+    func send(_ command: LibraryCommand) async -> LibraryCommandResult {
         await trace.append("library.suspended")
         sendStarted = true
         await withCheckedContinuation { continuation = $0 }
+        return .deactivated
     }
 
     func waitUntilSendStarts() async {
@@ -615,12 +827,117 @@ private actor SelectionLibraryFeature: LibraryFeature {
         LibraryFeatureState(selection: .awaitingBootstrap)
     }
 
-    func send(_ command: LibraryCommand) async {
+    func send(_ command: LibraryCommand) async -> LibraryCommandResult {
         switch command {
         case .close:
             await trace.append("library.close")
+            return .deactivated
         default:
             await trace.append("library.other")
+            return .deactivated
         }
+    }
+}
+
+private actor IdenticalReplacementLibraryFeature: LibraryFeature {
+    nonisolated let states = AsyncStream<LibraryFeatureState> { continuation in
+        continuation.finish()
+    }
+
+    private let snapshot: ActiveLibrarySnapshot
+    private let activationGeneration: UInt64
+    private let trace: LibrarySelectionTrace
+    private(set) var commands: [LibraryCommand] = []
+
+    init(
+        snapshot: ActiveLibrarySnapshot,
+        activationGeneration: UInt64 = 2,
+        trace: LibrarySelectionTrace
+    ) {
+        self.snapshot = snapshot
+        self.activationGeneration = activationGeneration
+        self.trace = trace
+    }
+
+    var currentState: LibraryFeatureState {
+        LibraryFeatureState(selection: .active(snapshot))
+    }
+
+    func send(_ command: LibraryCommand) async -> LibraryCommandResult {
+        commands.append(command)
+        await trace.append("library.identicalReplacement")
+        return .activated(
+            LibraryActivation(
+                scope: LibraryScope(libraryID: snapshot.libraryID),
+                generation: activationGeneration
+            )
+        )
+    }
+}
+
+private actor FailedReplacementLibraryFeature: LibraryFeature {
+    nonisolated let states = AsyncStream<LibraryFeatureState> { continuation in
+        continuation.finish()
+    }
+
+    private let snapshot: ActiveLibrarySnapshot
+    private let trace: LibrarySelectionTrace
+
+    init(snapshot: ActiveLibrarySnapshot, trace: LibrarySelectionTrace) {
+        self.snapshot = snapshot
+        self.trace = trace
+    }
+
+    var currentState: LibraryFeatureState {
+        LibraryFeatureState(
+            selection: .active(snapshot),
+            notice: .candidateUnavailable
+        )
+    }
+
+    func send(_ command: LibraryCommand) async -> LibraryCommandResult {
+        await trace.append("library.failedReplacement")
+        return .noSelectionMutation
+    }
+}
+
+private actor SuspendedActivationLibraryFeature: LibraryFeature {
+    nonisolated let states = AsyncStream<LibraryFeatureState> { continuation in
+        continuation.finish()
+    }
+
+    private var results: [LibraryCommandResult]
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private(set) var commands: [LibraryCommand] = []
+
+    init(results: [LibraryCommandResult]) {
+        self.results = results
+    }
+
+    var currentState: LibraryFeatureState {
+        LibraryFeatureState(selection: .awaitingBootstrap)
+    }
+
+    func send(_ command: LibraryCommand) async -> LibraryCommandResult {
+        commands.append(command)
+        await withCheckedContinuation { continuations.append($0) }
+        return results.removeFirst()
+    }
+
+    func waitForCommandCount(_ count: Int) async {
+        while commands.count < count { await Task.yield() }
+    }
+
+    func resumeNextCommand() {
+        guard !continuations.isEmpty else { return }
+        continuations.removeFirst().resume()
+    }
+}
+
+private actor BooleanReceiptProbe {
+    private(set) var result: Bool?
+
+    func complete(_ result: Bool) {
+        self.result = result
     }
 }
