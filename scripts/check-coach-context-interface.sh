@@ -132,6 +132,23 @@ then
 fi
 
 if printf '%s\n' \
+  'import AudoraApplication' \
+  'import AudoraDomain' \
+  'import AudoraMacInfrastructure' \
+  'import Foundation' \
+  'let persistence = PortableChatPersistence()' \
+  'let bypass: (NewChatSeed, URL) throws -> ChatAggregate = persistence.create' \
+  | swiftc -typecheck \
+    -module-cache-path "$module_cache" \
+    -I "$mac_modules_dir" \
+    -I "$modules_dir" \
+    - >/dev/null 2>&1
+then
+  echo 'PortableChatPersistence raw NewChatSeed creation is visible to a normal client' >&2
+  exit 1
+fi
+
+if printf '%s\n' \
   'import AudoraMacInfrastructure' \
   'let _ = PortableChatSessionAttachmentSource.self' \
   | swiftc -typecheck \

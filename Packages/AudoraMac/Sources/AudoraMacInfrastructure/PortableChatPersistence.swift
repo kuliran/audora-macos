@@ -210,7 +210,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
-    public func create(
+    func create(
         _ seed: NewChatSeed,
         at libraryRoot: URL
     ) throws -> ChatAggregate {
