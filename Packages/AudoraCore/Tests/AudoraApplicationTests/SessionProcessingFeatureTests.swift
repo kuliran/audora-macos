@@ -1250,6 +1250,82 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(state.reason, .noSession)
     }
 
+    func testLibraryActivationImmediatelyAcceptsSecondStaleCompletedWinnerWithoutSelection()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let queued = fixture.job(state: .queued)
+        let validating = fixture.job(
+            state: .validating,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+        let completed = fixture.job(
+            state: .completed,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+        let reconciliationID = try SessionProcessingReconciliationID(
+            "reconcile-second-stale-completed-winner"
+        )
+        let jobs = ActivationWinnerProbe(
+            scope: fixture.selection.scope,
+            reconciliationID: reconciliationID,
+            inventoried: queued,
+            firstWinner: validating,
+            secondWinner: completed
+        )
+        let source = ReconciliationSourceProbe(
+            sources: [fixture.source],
+            reconciliationID: reconciliationID
+        )
+        let revisions = RevisionProbe()
+        let engine = EngineProbe(
+            result: .failure(.launchFailed),
+            recovered: .available(
+                VerifiedTranscriptionCandidate(
+                    candidate: fixture.candidate,
+                    artifactFingerprint: fixture.candidateFingerprint
+                )
+            )
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.activateLibrary(fixture.selection.scope))
+
+        let durable = await jobs.currentJob
+        let sourceLoads = await source.selections
+        let exactLoadCount = await jobs.exactLoadCount
+        let exactReopenCount = await revisions.exactReopenCount
+        let publishCount = await revisions.publishCountValue()
+        let recovered = await engine.recoveryJobs
+        let transitionCount = await jobs.transitionCount
+        let finished = await jobs.finishedReconciliationIDs
+        XCTAssertEqual(durable, completed)
+        XCTAssertEqual(sourceLoads, [fixture.selection, fixture.selection])
+        XCTAssertEqual(exactLoadCount, 2)
+        XCTAssertEqual(exactReopenCount, 2)
+        XCTAssertEqual(publishCount, 1)
+        XCTAssertEqual(recovered, [validating])
+        XCTAssertEqual(transitionCount, 2)
+        XCTAssertEqual(finished, [reconciliationID])
+        guard case let .unavailable(state) = await feature.currentState else {
+            return XCTFail("launch reconciliation must not select a Session")
+        }
+        XCTAssertEqual(state.reason, .noSession)
+    }
+
     func testLibraryActivationImmediatelyVerifiesStaleCompletedWinnerWithoutSelection()
         async throws
     {
@@ -3613,6 +3689,7 @@ private actor ActivationWinnerProbe: SessionProcessingJobPort {
     private let reconciliationID: SessionProcessingReconciliationID
     private let inventoried: SessionProcessingJob
     private let firstWinner: SessionProcessingJob
+    private let secondWinner: SessionProcessingJob?
     private(set) var transitionCount = 0
     private(set) var exactLoadCount = 0
     private(set) var currentJob: SessionProcessingJob?
@@ -3623,12 +3700,14 @@ private actor ActivationWinnerProbe: SessionProcessingJobPort {
         scope: LibraryScope,
         reconciliationID: SessionProcessingReconciliationID,
         inventoried: SessionProcessingJob,
-        firstWinner: SessionProcessingJob
+        firstWinner: SessionProcessingJob,
+        secondWinner: SessionProcessingJob? = nil
     ) {
         self.scope = scope
         self.reconciliationID = reconciliationID
         self.inventoried = inventoried
         self.firstWinner = firstWinner
+        self.secondWinner = secondWinner
         currentJob = inventoried
     }
 
@@ -3681,6 +3760,10 @@ private actor ActivationWinnerProbe: SessionProcessingJobPort {
         transitionCount += 1
         if transitionCount == 1 {
             currentJob = firstWinner
+            return .stale
+        }
+        if transitionCount == 2, let secondWinner {
+            currentJob = secondWinner
             return .stale
         }
         currentJob = job
