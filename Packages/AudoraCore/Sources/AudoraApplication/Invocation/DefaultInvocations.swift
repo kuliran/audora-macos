@@ -396,52 +396,108 @@ public enum InvocationPublicationRecoveryOutcome: Equatable, Sendable {
 }
 
 @_spi(InvocationInfrastructure)
-public protocol InvocationPersistencePort: Sendable {
-    /// Acquires Library-wide Invocation liveness before atomically installing
-    /// and binding the exact new Pending. Every non-prepared result owns no
-    /// liveness lease.
-    func prepareNewPendingInvocation(
-        _ request: NewPendingCoachInvocationRequest
-    ) async -> InvocationPendingPreparationOutcome
+public enum InvocationPendingSessionPreparationOutcome: Sendable {
+    case opened(any InvocationPendingPersistenceSession)
+    case stale(ChatAggregate)
+    case frozen(FrozenChatSnapshot)
+    case readOnlyLibrary
+    case blockedByActiveInvocation
+    case unavailable
+}
 
-    /// Acquires the Library-wide Invocation liveness authority before reading
-    /// and resolving this exact Pending. Any non-acquired result owns no lease.
-    func acquirePendingInvocation(
-        _ request: PendingCoachInvocationRequest
-    ) async -> InvocationPendingAcquisitionOutcome
+@_spi(InvocationInfrastructure)
+public enum InvocationPendingSessionAcquisitionOutcome: Sendable {
+    case opened(any InvocationPendingPersistenceSession)
+    case ineligible(ChatAggregate?)
+    case blockedByActiveInvocation
+    case unavailable
+}
 
-    /// Rereads the exact Pending while the acquisition lease remains held.
-    /// Persistence releases that lease before returning `.ineligible`.
-    func revalidatePendingInvocation(
-        _ authority: InvocationPendingAuthority
-    ) async -> InvocationPendingResolutionOutcome
+@_spi(InvocationInfrastructure)
+public enum InvocationPendingTermination: Sendable {
+    case contextCapacityFailure
+    case interrupted
+    case rejected
+}
 
-    func installInvocation(
-        _ mutation: InstallCoachInvocationMutation
-    ) async -> InvocationInstallOutcome
+@_spi(InvocationInfrastructure)
+public enum InvocationTerminalPersistenceOutcome: Equatable, Sendable {
+    case committed(ChatAggregate)
+    case stale(ChatAggregate?)
+    /// The terminal write failed after releasing liveness. Persistence has
+    /// already reconciled and reread the exact Pending before returning.
+    case recovered(InvocationPendingResolutionOutcome)
+}
 
-    /// Releases only this exact pending reservation when no current Pending
-    /// authority remains available for a terminal mutation.
-    func cancelInvocationReservation(
-        _ request: PendingCoachInvocationRequest
-    ) async
+@_spi(InvocationInfrastructure)
+public enum InvocationSessionInstallOutcome: Sendable {
+    case installed(any InvocationActivePersistenceSession)
+    case blockedByActiveInvocation
+    case stale(ChatAggregate?)
+    case failed
+}
 
-    /// Persistence owns every durable identity namespace. This check runs while
-    /// the exact Pending/Library reservation is held and before admission debit.
+/// Stateful, one-shot persistence authority for one exact Pending. The
+/// capability owns its Library-wide liveness lease and the transition into an
+/// active Invocation, so callers cannot mix requests or invoke active-only
+/// persistence operations before installation.
+@_spi(InvocationInfrastructure)
+public protocol InvocationPendingPersistenceSession: Sendable {
+    var authority: InvocationPendingAuthority { get }
+
+    func revalidate() async -> InvocationPendingResolutionOutcome
+
+    /// Checks every durable identity namespace while this exact Pending lease
+    /// remains held.
     func checkLaunchIdentity(
-        _ identity: InvocationLaunchIdentity,
-        for authority: InvocationPendingAuthority
+        _ identity: InvocationLaunchIdentity
     ) async -> InvocationLaunchIdentityAvailabilityOutcome
 
-    func markContextCapacityFailure(
-        _ authority: InvocationPendingAuthority
-    ) async -> InvocationPendingMutationOutcome
+    func install(
+        _ mutation: InstallCoachInvocationMutation
+    ) async -> InvocationSessionInstallOutcome
 
-    /// Releases the exact pre-install reservation while durably retaining the
-    /// Pending intent as an interrupted user-retryable failure.
-    func markInterruptedNewSend(
-        _ authority: InvocationPendingAuthority
-    ) async -> InvocationPendingMutationOutcome
+    /// Completes a pre-install path and releases liveness. A failed terminal
+    /// write is reconciled and reread before the method returns.
+    func terminate(
+        _ termination: InvocationPendingTermination
+    ) async -> InvocationTerminalPersistenceOutcome
+
+    func abandon() async
+}
+
+/// Stateful persistence authority for one exact installed Invocation. Pending
+/// operations are absent from this interface; publication and abort cannot be
+/// directed at another Invocation.
+@_spi(InvocationInfrastructure)
+public protocol InvocationActivePersistenceSession: Sendable {
+    var invocation: CoachInvocation { get }
+
+    /// Releases liveness and reconciles/rereads the Pending if abort fails.
+    func abort() async -> InvocationTerminalPersistenceOutcome
+
+    func publish(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationOutcome
+
+    func recoverPublished(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome
+}
+
+@_spi(InvocationInfrastructure)
+public protocol InvocationPersistencePort: Sendable {
+    /// Opens a session after acquiring Library-wide liveness and atomically
+    /// installing the exact new Pending.
+    func openNewPendingInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> InvocationPendingSessionPreparationOutcome
+
+    /// Opens a session after acquiring Library-wide liveness and resolving the
+    /// exact durable Pending.
+    func openPendingInvocation(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationPendingSessionAcquisitionOutcome
 
     /// Runs only after the terminal owner has released its liveness lease.
     /// Persistence may reconcile an interrupted Invocation/Pending and then
@@ -450,18 +506,6 @@ public protocol InvocationPersistencePort: Sendable {
     func recoverPendingAfterTerminalFailure(
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationPendingResolutionOutcome
-
-    func rejectNewSend(
-        _ authority: InvocationPendingAuthority
-    ) async -> InvocationPendingMutationOutcome
-
-    func abortInstalledNewSend(
-        _ invocation: CoachInvocation
-    ) async -> InvocationPendingMutationOutcome
-
-    func publish(
-        _ mutation: PublishCoachInvocationMutation
-    ) async -> InvocationPublicationOutcome
 
     /// Proves an exact already-published response from authoritative storage.
     /// Application must not infer publication from aggregate shape or IDs.
@@ -569,7 +613,9 @@ public actor DefaultInvocations: Invocations {
     private let clock: any ChatClock
     private let identities: any InvocationIdentityGenerating
     private var inFlightRequests: Set<PendingCoachInvocationRequest> = []
-    private var preparedAuthorities: [UUID: InvocationPendingAuthority] = [:]
+    private var preparedSessions: [
+        UUID: any InvocationPendingPersistenceSession
+    ] = [:]
     private var operationalRetrySnapshots: [
         PendingCoachInvocationRequest: OperationalRetrySnapshot
     ] = [:]
@@ -611,10 +657,11 @@ public actor DefaultInvocations: Invocations {
     public func prepareNewInvocation(
         _ request: NewPendingCoachInvocationRequest
     ) async -> NewPendingCoachInvocationOutcome {
-        switch await persistence.prepareNewPendingInvocation(request) {
-        case let .prepared(authority):
+        switch await persistence.openNewPendingInvocation(request) {
+        case let .opened(session):
+            let authority = session.authority
             let prepared = PreparedPendingCoachInvocation(authority: authority)
-            preparedAuthorities[prepared.capabilityID] = authority
+            preparedSessions[prepared.capabilityID] = session
             return .prepared(prepared)
         case let .stale(current):
             return .stale(current)
@@ -622,7 +669,7 @@ public actor DefaultInvocations: Invocations {
             return .frozen(frozen)
         case .readOnlyLibrary:
             return .readOnlyLibrary
-        case .activeExists:
+        case .blockedByActiveInvocation:
             return .activeInvocation
         case .unavailable:
             return .failed
@@ -632,32 +679,32 @@ public actor DefaultInvocations: Invocations {
     public func abandonPreparedInvocation(
         _ prepared: PreparedPendingCoachInvocation
     ) async {
-        guard let authority = preparedAuthorities[prepared.capabilityID],
-              authority.request == prepared.request,
-              authority.aggregate == prepared.aggregate
+        guard let session = preparedSessions[prepared.capabilityID],
+              session.authority.request == prepared.request,
+              session.authority.aggregate == prepared.aggregate
         else { return }
-        preparedAuthorities.removeValue(forKey: prepared.capabilityID)
-        await persistence.cancelInvocationReservation(authority.request)
+        preparedSessions.removeValue(forKey: prepared.capabilityID)
+        await session.abandon()
     }
 
     public func tryInvoke(
         _ prepared: PreparedPendingCoachInvocation
     ) async -> InvocationTryOutcome {
-        guard let authority = preparedAuthorities[prepared.capabilityID],
-              authority.request == prepared.request,
-              authority.aggregate == prepared.aggregate
+        guard let session = preparedSessions[prepared.capabilityID],
+              session.authority.request == prepared.request,
+              session.authority.aggregate == prepared.aggregate
         else {
             return .rejected(nil, .eligibilityChanged)
         }
-        preparedAuthorities.removeValue(forKey: prepared.capabilityID)
+        preparedSessions.removeValue(forKey: prepared.capabilityID)
         let request = prepared.request
         guard inFlightRequests.insert(request).inserted else {
-            await persistence.cancelInvocationReservation(request)
+            await session.abandon()
             return .rejected(nil, .activeInvocation)
         }
         defer { inFlightRequests.remove(request) }
 
-        return await invoke(request, firstAuthority: authority)
+        return await invoke(session)
     }
 
     public func tryInvoke(
@@ -672,36 +719,38 @@ public actor DefaultInvocations: Invocations {
             return retryOutcome
         }
 
-        let firstAuthority: InvocationPendingAuthority
-        switch await persistence.acquirePendingInvocation(request) {
-        case let .acquired(authority):
-            firstAuthority = authority
+        let session: any InvocationPendingPersistenceSession
+        switch await persistence.openPendingInvocation(request) {
+        case let .opened(opened):
+            session = opened
         case let .ineligible(current):
             return .rejected(current, .eligibilityChanged)
-        case .activeExists:
+        case .blockedByActiveInvocation:
             return .rejected(nil, .activeInvocation)
         case .unavailable:
             return .rejected(nil, .persistenceUnavailable)
         }
 
-        return await invoke(request, firstAuthority: firstAuthority)
+        return await invoke(session)
     }
 
     private func invoke(
-        _ request: PendingCoachInvocationRequest,
-        firstAuthority: InvocationPendingAuthority
+        _ session: any InvocationPendingPersistenceSession
     ) async -> InvocationTryOutcome {
+        let firstAuthority = session.authority
+        let request = firstAuthority.request
         let draft = firstAuthority.aggregate.chat.draft
         guard draft.text.utf8.count <= CoachContextInputLimits.maximumUserMessageUTF8Bytes else {
             return await reject(
-                firstAuthority,
+                session,
+                fallback: firstAuthority,
                 reason: .messageMustBeShortened(
                     maximumUTF8Bytes: CoachContextInputLimits.maximumUserMessageUTF8Bytes
                 )
             )
         }
         guard draft.text.unicodeScalars.contains(where: { !$0.properties.isWhitespace }) else {
-            return await reject(firstAuthority, reason: .eligibilityChanged)
+            return await reject(session, fallback: firstAuthority, reason: .eligibilityChanged)
         }
 
         let contextRequest: CoachContextPendingTurnRequest
@@ -713,7 +762,7 @@ public actor DefaultInvocations: Invocations {
                 pendingUserTurn: firstAuthority.pendingUserTurn
             )
         } catch {
-            return await reject(firstAuthority, reason: .eligibilityChanged)
+            return await reject(session, fallback: firstAuthority, reason: .eligibilityChanged)
         }
 
         let prepared: PreparedCoachLaunchContext
@@ -721,36 +770,46 @@ public actor DefaultInvocations: Invocations {
         case let .prepared(value):
             prepared = value
         case let .cannotFit(failure):
-            switch await persistence.markContextCapacityFailure(firstAuthority) {
+            switch await session.terminate(.contextCapacityFailure) {
             case let .committed(aggregate):
                 return .contextCapacityFailure(aggregate, failure.quote)
             case let .stale(current):
                 return .rejected(current, .eligibilityChanged)
-            case .failed:
-                return await interruptionAfterTerminalFailure(
+            case let .recovered(resolution):
+                return interruptionAfterTerminalRecovery(
+                    resolution,
                     request: firstAuthority.request,
                     fallback: firstAuthority.aggregate
                 )
             }
         case let .messageTooLong(maximumUTF8Bytes):
             return await reject(
-                firstAuthority,
+                session,
+                fallback: firstAuthority,
                 reason: .messageMustBeShortened(maximumUTF8Bytes: maximumUTF8Bytes)
             )
         case let .unavailable(reason):
-            return await reject(firstAuthority, reason: .contextUnavailable(reason))
+            return await reject(
+                session,
+                fallback: firstAuthority,
+                reason: .contextUnavailable(reason)
+            )
         }
 
         let finalAuthority: InvocationPendingAuthority
-        switch await persistence.revalidatePendingInvocation(firstAuthority) {
+        switch await session.revalidate() {
         case let .eligible(authority) where authority == firstAuthority:
             finalAuthority = authority
         case let .eligible(authority):
-            return await reject(authority, reason: .eligibilityChanged)
+            return await reject(session, fallback: authority, reason: .eligibilityChanged)
         case let .ineligible(current):
             return .rejected(current, .eligibilityChanged)
         case .unavailable:
-            return await reject(firstAuthority, reason: .persistenceUnavailable)
+            return await reject(
+                session,
+                fallback: firstAuthority,
+                reason: .persistenceUnavailable
+            )
         }
 
         let identityInstant = await clock.now()
@@ -758,10 +817,7 @@ public actor DefaultInvocations: Invocations {
         var lastCollision: InvocationLaunchIdentityCollision?
         for _ in 0 ..< Self.maximumLaunchIdentityCandidates {
             let candidate = await identities.generate(at: identityInstant)
-            switch await persistence.checkLaunchIdentity(
-                candidate,
-                for: finalAuthority
-            ) {
+            switch await session.checkLaunchIdentity(candidate) {
             case .available:
                 selectedIdentity = candidate
             case let .collision(collision):
@@ -774,18 +830,27 @@ public actor DefaultInvocations: Invocations {
                        aggregate: current
                    )
                 {
-                    return await reject(currentAuthority, reason: .eligibilityChanged)
+                    return await reject(
+                        session,
+                        fallback: currentAuthority,
+                        reason: .eligibilityChanged
+                    )
                 }
-                await persistence.cancelInvocationReservation(finalAuthority.request)
+                await session.abandon()
                 return .rejected(current, .eligibilityChanged)
             case .unavailable:
-                return await reject(finalAuthority, reason: .persistenceUnavailable)
+                return await reject(
+                    session,
+                    fallback: finalAuthority,
+                    reason: .persistenceUnavailable
+                )
             }
             break
         }
         guard let identity = selectedIdentity else {
             return await reject(
-                finalAuthority,
+                session,
+                fallback: finalAuthority,
                 reason: .identityCollisionExhausted(
                     lastCollision: lastCollision ?? .invocationID
                 )
@@ -801,17 +866,18 @@ public actor DefaultInvocations: Invocations {
             break
         case .commitUncertain:
             return await interruptPending(
-                finalAuthority,
+                session,
+                fallback: finalAuthority,
                 reason: .persistenceUnavailable
             )
         case .cooldown:
-            return await reject(finalAuthority, reason: .admissionCooldown)
+            return await reject(session, fallback: finalAuthority, reason: .admissionCooldown)
         case .clockRollback:
-            return await reject(finalAuthority, reason: .clockRollback)
+            return await reject(session, fallback: finalAuthority, reason: .clockRollback)
         case .ledgerFull:
-            return await reject(finalAuthority, reason: .admissionLedgerFull)
+            return await reject(session, fallback: finalAuthority, reason: .admissionLedgerFull)
         case .unavailable:
-            return await reject(finalAuthority, reason: .admissionUnavailable)
+            return await reject(session, fallback: finalAuthority, reason: .admissionUnavailable)
         }
 
         let install: InstallCoachInvocationMutation
@@ -824,18 +890,20 @@ public actor DefaultInvocations: Invocations {
             )
         } catch {
             return await interruptPending(
-                finalAuthority,
+                session,
+                fallback: finalAuthority,
                 reason: .persistenceUnavailable
             )
         }
 
-        let invocation: CoachInvocation
-        switch await persistence.installInvocation(install) {
-        case let .installed(value):
-            invocation = value
-        case .activeExists:
+        let activeSession: any InvocationActivePersistenceSession
+        switch await session.install(install) {
+        case let .installed(installed):
+            activeSession = installed
+        case .blockedByActiveInvocation:
             return await interruptPending(
-                finalAuthority,
+                session,
+                fallback: finalAuthority,
                 reason: .persistenceUnavailable
             )
         case let .stale(current):
@@ -846,27 +914,31 @@ public actor DefaultInvocations: Invocations {
                )
             {
                 return await interruptPending(
-                    currentAuthority,
+                    session,
+                    fallback: currentAuthority,
                     reason: .persistenceUnavailable
                 )
             }
-            await persistence.cancelInvocationReservation(finalAuthority.request)
+            await session.abandon()
             return .rejected(current, .eligibilityChanged)
         case .failed:
             return await interruptPending(
-                finalAuthority,
+                session,
+                fallback: finalAuthority,
                 reason: .persistenceUnavailable
             )
         }
+        let invocation = activeSession.invocation
 
         guard await coachContext.isPreparedContextCurrent(prepared) else {
-            switch await persistence.abortInstalledNewSend(invocation) {
+            switch await activeSession.abort() {
             case let .committed(aggregate):
                 return .rejected(aggregate, .contextChanged)
             case let .stale(current):
                 return .rejected(current, .contextChanged)
-            case .failed:
-                return await interruptionAfterTerminalFailure(
+            case let .recovered(resolution):
+                return interruptionAfterTerminalRecovery(
+                    resolution,
                     request: finalAuthority.request,
                     fallback: finalAuthority.aggregate
                 )
@@ -883,7 +955,7 @@ public actor DefaultInvocations: Invocations {
             )
         } catch {
             return await interruptAndAbort(
-                invocation,
+                activeSession,
                 fallback: finalAuthority.aggregate,
                 reason: .providerFailed
             )
@@ -901,18 +973,18 @@ public actor DefaultInvocations: Invocations {
             )
         } catch {
             return await interruptAndAbort(
-                invocation,
+                activeSession,
                 fallback: finalAuthority.aggregate,
                 reason: .invalidProviderResponse
             )
         }
 
-        switch await persistence.publish(publication) {
+        switch await activeSession.publish(publication) {
         case let .committed(aggregate):
             return .published(aggregate, prepared.quote)
         case let .stale(current):
             return await interruptAndAbort(
-                invocation,
+                activeSession,
                 fallback: current ?? finalAuthority.aggregate,
                 reason: .publicationConflict,
                 publication: PublicationRecoveryIntent(
@@ -922,7 +994,7 @@ public actor DefaultInvocations: Invocations {
             )
         case .failed:
             return await interruptAndAbort(
-                invocation,
+                activeSession,
                 fallback: finalAuthority.aggregate,
                 reason: .persistenceUnavailable,
                 publication: PublicationRecoveryIntent(
@@ -941,18 +1013,22 @@ public actor DefaultInvocations: Invocations {
     }
 
     private func interruptAndAbort(
-        _ invocation: CoachInvocation,
+        _ session: any InvocationActivePersistenceSession,
         fallback: ChatAggregate,
         reason: InvocationInterruptionReason,
         publication: PublicationRecoveryIntent? = nil
     ) async -> InvocationTryOutcome {
+        let invocation = session.invocation
         var publicationRecovery: PublicationRecoveryResolution?
         if let publication {
-            let resolution = await resolvePublicationRecovery(publication)
+            let resolution = await resolvePublicationRecovery(
+                publication,
+                using: session
+            )
             if case let .published(outcome) = resolution { return outcome }
             publicationRecovery = resolution
         }
-        return switch await persistence.abortInstalledNewSend(invocation) {
+        return switch await session.abort() {
         case let .committed(aggregate):
             await outcomeAfterAbort(
                 current: aggregate,
@@ -971,9 +1047,50 @@ public actor DefaultInvocations: Invocations {
                 publication: publication,
                 priorRecovery: publicationRecovery
             )
-        case .failed:
-            await interruptionAfterTerminalFailure(
+        case let .recovered(resolution):
+            await outcomeAfterRecoveredAbort(
+                resolution,
                 request: pendingRequest(for: invocation),
+                fallback: fallback,
+                publication: publication,
+                priorRecovery: publicationRecovery
+            )
+        }
+    }
+
+    private func outcomeAfterRecoveredAbort(
+        _ pendingResolution: InvocationPendingResolutionOutcome,
+        request: PendingCoachInvocationRequest,
+        fallback: ChatAggregate,
+        publication: PublicationRecoveryIntent?,
+        priorRecovery: PublicationRecoveryResolution?
+    ) async -> InvocationTryOutcome {
+        guard let publication else {
+            return interruptionAfterTerminalRecovery(
+                pendingResolution,
+                request: request,
+                fallback: fallback
+            )
+        }
+        if case .notPublished? = priorRecovery {
+            return interruptionAfterTerminalRecovery(
+                pendingResolution,
+                request: request,
+                fallback: fallback
+            )
+        }
+        switch await resolvePublicationRecovery(publication) {
+        case let .published(outcome):
+            return outcome
+        case .notPublished:
+            return interruptionAfterTerminalRecovery(
+                pendingResolution,
+                request: request,
+                fallback: fallback
+            )
+        case .unavailable:
+            return retainOperationalRetry(
+                request: request,
                 fallback: fallback,
                 publication: publication
             )
@@ -1019,9 +1136,16 @@ public actor DefaultInvocations: Invocations {
     }
 
     private func resolvePublicationRecovery(
-        _ publication: PublicationRecoveryIntent
+        _ publication: PublicationRecoveryIntent,
+        using session: (any InvocationActivePersistenceSession)? = nil
     ) async -> PublicationRecoveryResolution {
-        switch await persistence.recoverPublishedInvocation(publication.mutation) {
+        let recovery: InvocationPublicationRecoveryOutcome
+        if let session {
+            recovery = await session.recoverPublished(publication.mutation)
+        } else {
+            recovery = await persistence.recoverPublishedInvocation(publication.mutation)
+        }
+        switch recovery {
         case let .published(aggregate):
             operationalRetrySnapshots.removeValue(
                 forKey: pendingRequest(for: publication.mutation.invocation)
@@ -1035,18 +1159,39 @@ public actor DefaultInvocations: Invocations {
     }
 
     private func interruptPending(
-        _ authority: InvocationPendingAuthority,
+        _ session: any InvocationPendingPersistenceSession,
+        fallback authority: InvocationPendingAuthority,
         reason: InvocationInterruptionReason
     ) async -> InvocationTryOutcome {
-        switch await persistence.markInterruptedNewSend(authority) {
+        switch await session.terminate(.interrupted) {
         case let .committed(aggregate):
             .interrupted(aggregate, reason)
         case let .stale(current):
             .interrupted(current ?? authority.aggregate, reason)
-        case .failed:
-            await interruptionAfterTerminalFailure(
+        case let .recovered(resolution):
+            interruptionAfterTerminalRecovery(
+                resolution,
                 request: authority.request,
                 fallback: authority.aggregate
+            )
+        }
+    }
+
+    private func interruptionAfterTerminalRecovery(
+        _ resolution: InvocationPendingResolutionOutcome,
+        request: PendingCoachInvocationRequest,
+        fallback: ChatAggregate
+    ) -> InvocationTryOutcome {
+        switch resolution {
+        case let .eligible(authority):
+            return interruptionOutcome(current: authority.aggregate, request: request)
+        case let .ineligible(current):
+            return interruptionOutcome(current: current, request: request)
+        case .unavailable:
+            return retainOperationalRetry(
+                request: request,
+                fallback: fallback,
+                publication: nil
             )
         }
     }
@@ -1194,20 +1339,22 @@ public actor DefaultInvocations: Invocations {
     }
 
     private func reject(
-        _ authority: InvocationPendingAuthority,
+        _ session: any InvocationPendingPersistenceSession,
+        fallback authority: InvocationPendingAuthority,
         reason: InvocationRejectionReason
     ) async -> InvocationTryOutcome {
         if authority.pendingUserTurn.failure != nil {
-            await persistence.cancelInvocationReservation(authority.request)
+            await session.abandon()
             return .rejected(authority.aggregate, reason)
         }
-        return switch await persistence.rejectNewSend(authority) {
+        return switch await session.terminate(.rejected) {
         case let .committed(aggregate):
             .rejected(aggregate, reason)
         case let .stale(current):
             .rejected(current, .eligibilityChanged)
-        case .failed:
-            await interruptionAfterTerminalFailure(
+        case let .recovered(resolution):
+            interruptionAfterTerminalRecovery(
+                resolution,
                 request: authority.request,
                 fallback: authority.aggregate
             )

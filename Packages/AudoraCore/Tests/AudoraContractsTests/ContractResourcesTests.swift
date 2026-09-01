@@ -665,10 +665,14 @@ final class ContractResourcesTests: XCTestCase {
                     with: ContractResources.data(for: resource)
                 ) as? [String: Any]
             )
-            let executesFake = resource == .fakeProviderSuccessDevelopmentChatScenario
+            let executesProviderAttempt = [
+                ContractResource.draftSendDiscardDevelopmentChatScenario,
+                .contextCapacityRecoveryDevelopmentChatScenario,
+                .fakeProviderSuccessDevelopmentChatScenario,
+            ].contains(resource)
             XCTAssertEqual(
                 (object["expectedProviderCalls"] as? NSNumber)?.intValue,
-                executesFake ? 1 : 0
+                executesProviderAttempt ? 1 : 0
             )
             let expectedInvocationCalls = if resource ==
                 .contextCapacityRecoveryDevelopmentChatScenario
@@ -688,8 +692,16 @@ final class ContractResourcesTests: XCTestCase {
             )
             XCTAssertEqual(
                 (object["expectedAdmissionCalls"] as? NSNumber)?.intValue,
-                executesFake ? 1 : 0
+                executesProviderAttempt ? 1 : 0
             )
+            if resource == .fakeProviderSuccessDevelopmentChatScenario {
+                XCTAssertEqual(object["providerAvailability"] as? String, "available")
+            } else if [
+                ContractResource.draftSendDiscardDevelopmentChatScenario,
+                .contextCapacityRecoveryDevelopmentChatScenario,
+            ].contains(resource) {
+                XCTAssertEqual(object["providerAvailability"] as? String, "unavailable")
+            }
         }
     }
 

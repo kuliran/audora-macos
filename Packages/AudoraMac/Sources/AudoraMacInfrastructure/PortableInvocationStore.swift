@@ -41,7 +41,51 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         )
     }
 
-    public func prepareNewPendingInvocation(
+    public func openNewPendingInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> InvocationPendingSessionPreparationOutcome {
+        switch await prepareNewPendingInvocation(request) {
+        case let .prepared(authority):
+            return .opened(
+                PortablePendingInvocationSession(
+                    store: self,
+                    authority: authority
+                )
+            )
+        case let .stale(current):
+            return .stale(current)
+        case let .frozen(frozen):
+            return .frozen(frozen)
+        case .readOnlyLibrary:
+            return .readOnlyLibrary
+        case .activeExists:
+            return .blockedByActiveInvocation
+        case .unavailable:
+            return .unavailable
+        }
+    }
+
+    public func openPendingInvocation(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationPendingSessionAcquisitionOutcome {
+        switch await acquirePendingInvocation(request) {
+        case let .acquired(authority):
+            return .opened(
+                PortablePendingInvocationSession(
+                    store: self,
+                    authority: authority
+                )
+            )
+        case let .ineligible(current):
+            return .ineligible(current)
+        case .activeExists:
+            return .blockedByActiveInvocation
+        case .unavailable:
+            return .unavailable
+        }
+    }
+
+    func prepareNewPendingInvocation(
         _ request: NewPendingCoachInvocationRequest
     ) async -> InvocationPendingPreparationOutcome {
         let libraryID = request.library.libraryID
@@ -62,7 +106,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         }
     }
 
-    public func acquirePendingInvocation(
+    func acquirePendingInvocation(
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationPendingAcquisitionOutcome {
         let libraryID = request.library.libraryID
@@ -83,7 +127,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         }
     }
 
-    public func revalidatePendingInvocation(
+    func revalidatePendingInvocation(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingResolutionOutcome {
         let request = authority.request
@@ -95,7 +139,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         return outcome
     }
 
-    public func installInvocation(
+    func installInvocation(
         _ mutation: InstallCoachInvocationMutation
     ) async -> InvocationInstallOutcome {
         let request = mutation.authority.request
@@ -136,7 +180,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         return outcome
     }
 
-    public func checkLaunchIdentity(
+    func checkLaunchIdentity(
         _ identity: InvocationLaunchIdentity,
         for authority: InvocationPendingAuthority
     ) async -> InvocationLaunchIdentityAvailabilityOutcome {
@@ -150,19 +194,19 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         )
     }
 
-    public func cancelInvocationReservation(
+    func cancelInvocationReservation(
         _ request: PendingCoachInvocationRequest
     ) async {
         releasePendingLease(for: request)
     }
 
-    public func markContextCapacityFailure(
+    func markContextCapacityFailure(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
         await markPendingFailure(authority, failure: .coachContextCannotFit)
     }
 
-    public func markInterruptedNewSend(
+    func markInterruptedNewSend(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
         await markPendingFailure(authority, failure: .coachResponseInterrupted)
@@ -188,7 +232,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         )
     }
 
-    public func rejectNewSend(
+    func rejectNewSend(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
         let lease = pendingLease(for: authority.request)
@@ -197,7 +241,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         return await transactions.rejectNewSend(authority, holding: lease)
     }
 
-    public func abortInstalledNewSend(
+    func abortInstalledNewSend(
         _ invocation: CoachInvocation
     ) async -> InvocationPendingMutationOutcome {
         guard let lease = activeLease(for: invocation) else { return .failed }
@@ -208,7 +252,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         )
     }
 
-    public func publish(
+    func publish(
         _ mutation: PublishCoachInvocationMutation
     ) async -> InvocationPublicationOutcome {
         guard let lease = activeLease(for: mutation.invocation) else {
@@ -295,5 +339,229 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         }
         invocationLeases.removeValue(forKey: libraryID)
         state.lease.release()
+    }
+}
+
+private actor PortablePendingInvocationSession: InvocationPendingPersistenceSession {
+    private enum State {
+        case pending(InvocationPendingAuthority)
+        case transitioning
+        case finished
+    }
+
+    nonisolated let authority: InvocationPendingAuthority
+    private let store: PortableInvocationStore
+    private var state: State
+
+    init(
+        store: PortableInvocationStore,
+        authority: InvocationPendingAuthority
+    ) {
+        self.store = store
+        self.authority = authority
+        state = .pending(authority)
+    }
+
+    deinit {
+        let store = store
+        let request = authority.request
+        Task { await store.cancelInvocationReservation(request) }
+    }
+
+    func revalidate() async -> InvocationPendingResolutionOutcome {
+        guard case let .pending(current) = state else { return .unavailable }
+        state = .transitioning
+        let outcome = await store.revalidatePendingInvocation(current)
+        switch outcome {
+        case let .eligible(updated):
+            state = .pending(updated)
+        case .ineligible:
+            state = .finished
+        case .unavailable:
+            state = .pending(current)
+        }
+        return outcome
+    }
+
+    func checkLaunchIdentity(
+        _ identity: InvocationLaunchIdentity
+    ) async -> InvocationLaunchIdentityAvailabilityOutcome {
+        guard case let .pending(current) = state else { return .unavailable }
+        state = .transitioning
+        let outcome = await store.checkLaunchIdentity(identity, for: current)
+        switch outcome {
+        case let .stale(aggregate):
+            if let aggregate,
+               let updated = try? InvocationPendingAuthority(
+                   request: current.request,
+                   aggregate: aggregate
+               )
+            {
+                state = .pending(updated)
+            } else {
+                state = .pending(current)
+            }
+        case .available, .collision, .unavailable:
+            state = .pending(current)
+        }
+        return outcome
+    }
+
+    func install(
+        _ mutation: InstallCoachInvocationMutation
+    ) async -> InvocationSessionInstallOutcome {
+        guard case let .pending(current) = state,
+              mutation.authority == current
+        else { return .failed }
+        state = .transitioning
+        switch await store.installInvocation(mutation) {
+        case let .installed(invocation) where invocation == mutation.invocation:
+            state = .finished
+            return .installed(
+                PortableActiveInvocationSession(
+                    store: store,
+                    invocation: invocation
+                )
+            )
+        case .installed:
+            state = .pending(current)
+            return .failed
+        case .activeExists:
+            state = .pending(current)
+            return .blockedByActiveInvocation
+        case let .stale(aggregate):
+            if let aggregate,
+               let updated = try? InvocationPendingAuthority(
+                   request: current.request,
+                   aggregate: aggregate
+               )
+            {
+                state = .pending(updated)
+            } else {
+                state = .pending(current)
+            }
+            return .stale(aggregate)
+        case .failed:
+            state = .pending(current)
+            return .failed
+        }
+    }
+
+    func terminate(
+        _ termination: InvocationPendingTermination
+    ) async -> InvocationTerminalPersistenceOutcome {
+        guard case let .pending(current) = state else {
+            return .recovered(.unavailable)
+        }
+        state = .finished
+        let outcome: InvocationPendingMutationOutcome = switch termination {
+        case .contextCapacityFailure:
+            await store.markContextCapacityFailure(current)
+        case .interrupted:
+            await store.markInterruptedNewSend(current)
+        case .rejected:
+            await store.rejectNewSend(current)
+        }
+        return await terminalOutcome(outcome, request: current.request)
+    }
+
+    func abandon() async {
+        guard case let .pending(current) = state else { return }
+        state = .finished
+        await store.cancelInvocationReservation(current.request)
+    }
+
+    private func terminalOutcome(
+        _ outcome: InvocationPendingMutationOutcome,
+        request: PendingCoachInvocationRequest
+    ) async -> InvocationTerminalPersistenceOutcome {
+        switch outcome {
+        case let .committed(aggregate):
+            return .committed(aggregate)
+        case let .stale(current):
+            return .stale(current)
+        case .failed:
+            return .recovered(
+                await store.recoverPendingAfterTerminalFailure(request)
+            )
+        }
+    }
+}
+
+private actor PortableActiveInvocationSession: InvocationActivePersistenceSession {
+    private enum State {
+        case active
+        case transitioning
+        case finished
+    }
+
+    nonisolated let invocation: CoachInvocation
+    private let store: PortableInvocationStore
+    private var state: State = .active
+
+    init(store: PortableInvocationStore, invocation: CoachInvocation) {
+        self.store = store
+        self.invocation = invocation
+    }
+
+    deinit {
+        let store = store
+        let invocation = invocation
+        Task { _ = await store.abortInstalledNewSend(invocation) }
+    }
+
+    func abort() async -> InvocationTerminalPersistenceOutcome {
+        guard case .active = state else { return .recovered(.unavailable) }
+        state = .finished
+        switch await store.abortInstalledNewSend(invocation) {
+        case let .committed(aggregate):
+            return .committed(aggregate)
+        case let .stale(current):
+            return .stale(current)
+        case .failed:
+            return .recovered(
+                await store.recoverPendingAfterTerminalFailure(
+                    PendingCoachInvocationRequest(
+                        library: LibraryScope(libraryID: invocation.libraryID),
+                        chatID: invocation.chatID,
+                        pendingUserTurnID: invocation.pendingUserTurnID
+                    )
+                )
+            )
+        }
+    }
+
+    func publish(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationOutcome {
+        guard case .active = state,
+              mutation.invocation == invocation
+        else { return .failed }
+        state = .transitioning
+        let outcome = await store.publish(mutation)
+        switch outcome {
+        case .committed:
+            state = .finished
+        case .stale, .failed:
+            state = .active
+        }
+        return outcome
+    }
+
+    func recoverPublished(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome {
+        guard case .active = state,
+              mutation.invocation == invocation
+        else { return .unavailable }
+        state = .transitioning
+        let outcome = await store.recoverPublishedInvocation(mutation)
+        switch outcome {
+        case .published:
+            state = .finished
+        case .notPublished, .unavailable:
+            state = .active
+        }
+        return outcome
     }
 }

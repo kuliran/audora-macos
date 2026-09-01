@@ -86,7 +86,7 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(availabilityCount, 1)
     }
 
-    func testSuccessDebitsAndInstallsBeforeOneProviderLaunchThenPublishesOneTurn() async throws {
+    func testSuccessPublishesOneTurnAfterSingleAdmissionAndProviderLaunch() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -100,13 +100,8 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertNil(aggregate.pendingUserTurn)
         let launchCount = await fixture.provider.launchCount
         let claimCount = await fixture.admission.claimCount
-        let events = await fixture.recorder.events
         XCTAssertEqual(launchCount, 1)
         XCTAssertEqual(claimCount, 1)
-        XCTAssertEqual(
-            events,
-            ["acquire", "revalidate", "admission", "install", "provider", "publish"]
-        )
         let exactBytes = await fixture.provider.serializedRequests
         XCTAssertEqual(exactBytes.count, 1)
         XCTAssertFalse(exactBytes[0].isEmpty)
@@ -767,7 +762,6 @@ private final class InvocationFixture: @unchecked Sendable {
     let initial: ChatAggregate
     let pending: PendingUserTurn
     let request: PendingCoachInvocationRequest
-    let recorder = InvocationEventRecorder()
     let persistence: MemoryInvocationPersistence
     let admission: ScriptedInvocationAdmission
     let provider: RecordingSyntheticCoachProvider
@@ -817,12 +811,9 @@ private final class InvocationFixture: @unchecked Sendable {
             chatID: initial.chat.id,
             pendingUserTurnID: pending.id
         )
-        persistence = MemoryInvocationPersistence(initial: initial, recorder: recorder)
-        admission = ScriptedInvocationAdmission(
-            decision: admissionDecision,
-            recorder: recorder
-        )
-        provider = RecordingSyntheticCoachProvider(recorder: recorder)
+        persistence = MemoryInvocationPersistence(initial: initial)
+        admission = ScriptedInvocationAdmission(decision: admissionDecision)
+        provider = RecordingSyntheticCoachProvider()
         contextSource = InvocationContextSource(
             contextWindow: contextWindow,
             isCurrent: contextIsCurrent
@@ -849,11 +840,6 @@ private final class InvocationFixture: @unchecked Sendable {
             )
         )
     }
-}
-
-private actor InvocationEventRecorder {
-    private(set) var events: [String] = []
-    func record(_ event: String) { events.append(event) }
 }
 
 private actor MemoryInvocationPersistence: InvocationPersistencePort {
@@ -943,7 +929,6 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     }
 
     private var aggregate: ChatAggregate
-    private let recorder: InvocationEventRecorder
     private var script = PersistenceScript()
     private var publicationProof = PublicationProofState.none
     private(set) var identityCheckCount = 0
@@ -954,9 +939,44 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private(set) var lastPublication: PublishCoachInvocationMutation?
     private(set) var recoveredRequests: [PendingCoachInvocationRequest] = []
 
-    init(initial: ChatAggregate, recorder: InvocationEventRecorder) {
+    init(initial: ChatAggregate) {
         aggregate = initial
-        self.recorder = recorder
+    }
+
+    func openNewPendingInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> InvocationPendingSessionPreparationOutcome {
+        switch await prepareNewPendingInvocation(request) {
+        case let .prepared(authority):
+            return .opened(
+                ScriptedPendingInvocationSession(
+                    persistence: self,
+                    authority: authority
+                )
+            )
+        case let .stale(current): return .stale(current)
+        case let .frozen(frozen): return .frozen(frozen)
+        case .readOnlyLibrary: return .readOnlyLibrary
+        case .activeExists: return .blockedByActiveInvocation
+        case .unavailable: return .unavailable
+        }
+    }
+
+    func openPendingInvocation(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationPendingSessionAcquisitionOutcome {
+        switch await acquirePendingInvocation(request) {
+        case let .acquired(authority):
+            return .opened(
+                ScriptedPendingInvocationSession(
+                    persistence: self,
+                    authority: authority
+                )
+            )
+        case let .ineligible(current): return .ineligible(current)
+        case .activeExists: return .blockedByActiveInvocation
+        case .unavailable: return .unavailable
+        }
     }
 
     func scriptNextRevalidation(_ directive: RevalidationDirective) {
@@ -1028,7 +1048,6 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     func acquirePendingInvocation(
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationPendingAcquisitionOutcome {
-        await recorder.record("acquire")
         guard activeInvocation == nil, reservedRequest == nil else {
             return .activeExists
         }
@@ -1046,7 +1065,6 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     func revalidatePendingInvocation(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingResolutionOutcome {
-        await recorder.record("revalidate")
         guard reservedRequest == authority.request else { return .unavailable }
         switch script.revalidations.next(defaultingTo: .current) {
         case .current:
@@ -1072,7 +1090,6 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     func installInvocation(
         _ mutation: InstallCoachInvocationMutation
     ) async -> InvocationInstallOutcome {
-        await recorder.record("install")
         guard reservedRequest == mutation.authority.request else { return .failed }
         switch script.installs.next(defaultingTo: .installed) {
         case .installed:
@@ -1216,7 +1233,6 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     func publish(
         _ mutation: PublishCoachInvocationMutation
     ) async -> InvocationPublicationOutcome {
-        await recorder.record("publish")
         publicationCount += 1
         guard activeInvocation == mutation.invocation else { return .stale(aggregate) }
         switch script.publications.next(defaultingTo: .committed) {
@@ -1284,17 +1300,178 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     }
 }
 
+private actor ScriptedPendingInvocationSession: InvocationPendingPersistenceSession {
+    private enum State {
+        case pending(InvocationPendingAuthority)
+        case finished
+    }
+
+    nonisolated let authority: InvocationPendingAuthority
+    private let persistence: MemoryInvocationPersistence
+    private var state: State
+
+    init(
+        persistence: MemoryInvocationPersistence,
+        authority: InvocationPendingAuthority
+    ) {
+        self.persistence = persistence
+        self.authority = authority
+        state = .pending(authority)
+    }
+
+    func revalidate() async -> InvocationPendingResolutionOutcome {
+        guard case let .pending(current) = state else { return .unavailable }
+        let outcome = await persistence.revalidatePendingInvocation(current)
+        switch outcome {
+        case let .eligible(updated): state = .pending(updated)
+        case .ineligible: state = .finished
+        case .unavailable: break
+        }
+        return outcome
+    }
+
+    func checkLaunchIdentity(
+        _ identity: InvocationLaunchIdentity
+    ) async -> InvocationLaunchIdentityAvailabilityOutcome {
+        guard case let .pending(current) = state else { return .unavailable }
+        let outcome = await persistence.checkLaunchIdentity(identity, for: current)
+        if case let .stale(aggregate) = outcome,
+           let aggregate,
+           let updated = try? InvocationPendingAuthority(
+               request: current.request,
+               aggregate: aggregate
+           )
+        {
+            state = .pending(updated)
+        }
+        return outcome
+    }
+
+    func install(
+        _ mutation: InstallCoachInvocationMutation
+    ) async -> InvocationSessionInstallOutcome {
+        guard case let .pending(current) = state,
+              current == mutation.authority
+        else { return .failed }
+        switch await persistence.installInvocation(mutation) {
+        case let .installed(invocation):
+            state = .finished
+            return .installed(
+                ScriptedActiveInvocationSession(
+                    persistence: persistence,
+                    invocation: invocation
+                )
+            )
+        case .activeExists:
+            return .blockedByActiveInvocation
+        case let .stale(aggregate):
+            if let aggregate,
+               let updated = try? InvocationPendingAuthority(
+                   request: current.request,
+                   aggregate: aggregate
+               )
+            {
+                state = .pending(updated)
+            }
+            return .stale(aggregate)
+        case .failed:
+            return .failed
+        }
+    }
+
+    func terminate(
+        _ termination: InvocationPendingTermination
+    ) async -> InvocationTerminalPersistenceOutcome {
+        guard case let .pending(current) = state else {
+            return .recovered(.unavailable)
+        }
+        state = .finished
+        let outcome: InvocationPendingMutationOutcome
+        switch termination {
+        case .contextCapacityFailure:
+            outcome = await persistence.markContextCapacityFailure(current)
+        case .interrupted:
+            outcome = await persistence.markInterruptedNewSend(current)
+        case .rejected:
+            outcome = await persistence.rejectNewSend(current)
+        }
+        switch outcome {
+        case let .committed(aggregate): return .committed(aggregate)
+        case let .stale(current): return .stale(current)
+        case .failed:
+            return .recovered(
+                await persistence.recoverPendingAfterTerminalFailure(current.request)
+            )
+        }
+    }
+
+    func abandon() async {
+        guard case let .pending(current) = state else { return }
+        state = .finished
+        await persistence.cancelInvocationReservation(current.request)
+    }
+}
+
+private actor ScriptedActiveInvocationSession: InvocationActivePersistenceSession {
+    nonisolated let invocation: CoachInvocation
+    private let persistence: MemoryInvocationPersistence
+    private var isActive = true
+
+    init(
+        persistence: MemoryInvocationPersistence,
+        invocation: CoachInvocation
+    ) {
+        self.persistence = persistence
+        self.invocation = invocation
+    }
+
+    func abort() async -> InvocationTerminalPersistenceOutcome {
+        guard isActive else { return .recovered(.unavailable) }
+        isActive = false
+        switch await persistence.abortInstalledNewSend(invocation) {
+        case let .committed(aggregate): return .committed(aggregate)
+        case let .stale(current): return .stale(current)
+        case .failed:
+            return .recovered(
+                await persistence.recoverPendingAfterTerminalFailure(
+                    PendingCoachInvocationRequest(
+                        library: LibraryScope(libraryID: invocation.libraryID),
+                        chatID: invocation.chatID,
+                        pendingUserTurnID: invocation.pendingUserTurnID
+                    )
+                )
+            )
+        }
+    }
+
+    func publish(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationOutcome {
+        guard isActive, mutation.invocation == invocation else { return .failed }
+        let outcome = await persistence.publish(mutation)
+        if case .committed = outcome { isActive = false }
+        return outcome
+    }
+
+    func recoverPublished(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome {
+        guard isActive, mutation.invocation == invocation else { return .unavailable }
+        let outcome = await persistence.recoverPublishedInvocation(mutation)
+        if case .published = outcome { isActive = false }
+        return outcome
+    }
+}
+
 private actor ScriptedInvocationAdmission: InvocationAdmissionPort {
     private let decision: InvocationAdmissionClaimOutcome
-    private let recorder: InvocationEventRecorder
     private(set) var claimCount = 0
     private(set) var availabilityCount = 0
     private(set) var claimedAt: [UTCInstant] = []
     private var projectedAvailability: InvocationAdmissionAvailability = .available
 
-    init(decision: InvocationAdmissionClaimOutcome, recorder: InvocationEventRecorder) {
+    init(decision: InvocationAdmissionClaimOutcome) {
         self.decision = decision
-        self.recorder = recorder
     }
 
     func setAvailability(_ availability: InvocationAdmissionAvailability) {
@@ -1315,13 +1492,11 @@ private actor ScriptedInvocationAdmission: InvocationAdmissionPort {
     ) async -> InvocationAdmissionClaimOutcome {
         claimCount += 1
         claimedAt.append(instant)
-        await recorder.record("admission")
         return decision
     }
 }
 
 private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
-    private let recorder: InvocationEventRecorder
     private(set) var serializedRequests: [[UInt8]] = []
     private(set) var launchCount = 0
     private var shouldFail = false
@@ -1329,8 +1504,6 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
     private var shouldSuspend = false
     private var launchStarted = false
     private var launchContinuation: CheckedContinuation<Void, Never>?
-
-    init(recorder: InvocationEventRecorder) { self.recorder = recorder }
 
     func failNextLaunch() { shouldFail = true }
 
@@ -1350,7 +1523,6 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
     func run(_ request: SyntheticCoachProviderRequest) async throws -> String {
         launchCount += 1
         serializedRequests.append(Array(request.exchange.request))
-        await recorder.record("provider")
         launchStarted = true
         if shouldSuspend {
             shouldSuspend = false

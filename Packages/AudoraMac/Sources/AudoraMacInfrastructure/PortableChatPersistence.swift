@@ -104,19 +104,22 @@ final class PortableInvocationLivenessLease: @unchecked Sendable {
     private let reservedAuthority: PortableInvocationLivenessAuthority
     private let pendingUserTurnLease: PortablePendingUserTurnFileLease
     private let reservedRequest: PendingCoachInvocationRequest
+    private let didRelease: @Sendable () -> Void
 
     fileprivate init(
         rootDescriptor: Int32,
         namespaceLock: PortableInvocationNamespaceLock,
         authority: PortableInvocationLivenessAuthority,
         pendingUserTurnLease: PortablePendingUserTurnFileLease,
-        reservedRequest: PendingCoachInvocationRequest
+        reservedRequest: PendingCoachInvocationRequest,
+        didRelease: @escaping @Sendable () -> Void
     ) {
         self.rootDescriptor = rootDescriptor
         self.namespaceLock = namespaceLock
         reservedAuthority = authority
         self.pendingUserTurnLease = pendingUserTurnLease
         self.reservedRequest = reservedRequest
+        self.didRelease = didRelease
     }
 
     fileprivate func authority() -> PortableInvocationLivenessAuthority? {
@@ -160,6 +163,7 @@ final class PortableInvocationLivenessLease: @unchecked Sendable {
         pendingUserTurnLease.release()
         namespaceLock.release()
         Darwin.close(rootDescriptor)
+        didRelease()
     }
 
     deinit { release() }
@@ -357,11 +361,21 @@ public struct PortableChatPersistence: @unchecked Sendable {
     static let maximumInvocationDirectoryEntries = 16
 
     private let fault: @Sendable (PortableChatFaultPoint) throws -> Void
+    private let invocationLivenessReleased: @Sendable () -> Void
 
     public init(
         fault: @escaping @Sendable (PortableChatFaultPoint) throws -> Void = { _ in }
     ) {
         self.fault = fault
+        invocationLivenessReleased = {}
+    }
+
+    init(
+        fault: @escaping @Sendable (PortableChatFaultPoint) throws -> Void,
+        invocationLivenessReleased: @escaping @Sendable () -> Void
+    ) {
+        self.fault = fault
+        self.invocationLivenessReleased = invocationLivenessReleased
     }
 
     /// Reserves the one live provider authority for this exact Library. `nil`
@@ -427,7 +441,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 pendingUserTurn: pendingUserTurnLease.key
             ),
             pendingUserTurnLease: pendingUserTurnLease,
-            reservedRequest: request
+            reservedRequest: request,
+            didRelease: invocationLivenessReleased
         )
     }
 
@@ -535,7 +550,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     pendingUserTurn: pendingLease.key
                 ),
                 pendingUserTurnLease: pendingLease,
-                reservedRequest: pendingRequest
+                reservedRequest: pendingRequest,
+                didRelease: invocationLivenessReleased
             )
             do {
                 try fault(.afterPendingInvocationAuthorityBound)
