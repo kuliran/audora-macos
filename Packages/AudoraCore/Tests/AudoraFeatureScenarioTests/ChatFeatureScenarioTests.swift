@@ -432,6 +432,8 @@ final class ChatFeatureScenarioTests: XCTestCase {
         case .attachmentUnavailable: "attachmentUnavailable"
         case .contextCannotFit: "contextCannotFit"
         case let .contextUnavailable(reason): reason.rawValue
+        case .qualifiedConfigurationUnavailable:
+            "qualifiedConfigurationUnavailable"
         }
     }
 

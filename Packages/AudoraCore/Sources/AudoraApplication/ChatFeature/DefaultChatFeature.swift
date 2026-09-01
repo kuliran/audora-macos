@@ -377,6 +377,18 @@ public actor DefaultChatFeature: ChatFeature {
         remainingConfigurationRefreshAttempts: Int = 1
     ) async {
         guard isActive(context), case .ready = state.catalog else { return }
+        if case let .ready(snapshot) = state.newChatPicker,
+           snapshot.issue == .qualifiedConfigurationUnavailable,
+           let attachments = try? selectedAttachments(in: snapshot)
+        {
+            await refreshNewChatPickerForConfigurationChange(
+                preserving: attachments,
+                context: context,
+                remainingQuoteRefreshAttempts:
+                    remainingConfigurationRefreshAttempts
+            )
+            return
+        }
         newChatAttachmentFilterQuery = .empty
         newChatAttachmentConfigurationStamp = nil
         newChatConfirmation = nil
@@ -802,6 +814,23 @@ public actor DefaultChatFeature: ChatFeature {
     private func failNewChatForMissingQualifiedConfiguration() {
         newChatAttachmentConfigurationStamp = nil
         newChatConfirmation = nil
+        if case let .ready(snapshot) = state.newChatPicker {
+            let blocked = ChatAttachmentPickerSnapshot(
+                allRows: snapshot.allRows,
+                visibleRows: snapshot.visibleRows,
+                selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
+                filterQuery: snapshot.filterQuery,
+                feasibility: .unavailable(.sourceUnavailable),
+                issue: .qualifiedConfigurationUnavailable
+            )
+            state = replacing(
+                newChatPicker: .ready(blocked),
+                activity: nil,
+                notice: .qualifiedCoachConfigurationUnavailable
+            )
+            publish()
+            return
+        }
         state = replacing(
             newChatPicker: .failed,
             activity: nil,

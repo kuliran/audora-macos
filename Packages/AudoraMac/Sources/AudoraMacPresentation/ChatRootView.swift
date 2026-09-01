@@ -517,6 +517,17 @@ public struct ChatRootView: View {
                             for: issue
                         )
                     )
+                    if issue == .qualifiedConfigurationUnavailable {
+                        Button("Check Again") {
+                            model.retryNewChatConfiguration()
+                        }
+                        .disabled(
+                            !newChatSheetInteractionPresentation.allowsControlInteraction
+                        )
+                        .accessibilityHint(
+                            "Reloads Sessions and recalculates context while retaining every still-available exact selection"
+                        )
+                    }
                 }
                 HStack {
                     Text("\(picker.selectionCount) selected")
@@ -570,21 +581,36 @@ public struct ChatRootView: View {
             ProgressView("Estimating current Profile and Session context…")
                 .controlSize(.small)
         case let .available(quote):
+            creationContextMeter(NewChatCreationContextPresentation(quote.context))
+        case let .providerUnavailable(lowerBound):
             VStack(alignment: .leading, spacing: 4) {
-                Text(CoachContextQuotePresentation.summary(quote.context))
-                    .font(.callout.monospacedDigit())
-                if let profile = quote.context.categoryCosts[.profile] {
-                    Text("Current Profile: ~\(profile.estimatedTokenCount) tokens")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
+                creationContextMeter(NewChatCreationContextPresentation(lowerBound))
+                Text(NewChatAttachmentPickerPresentation.providerUnavailableRecoveryText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-        case .providerUnavailable:
-            Text(NewChatAttachmentPickerPresentation.providerUnavailableRecoveryText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
         case .unavailable:
             EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func creationContextMeter(
+        _ presentation: NewChatCreationContextPresentation
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(presentation.summary)
+                .font(.callout.monospacedDigit())
+            ProgressView(
+                value: Double(presentation.usedTokens),
+                total: Double(presentation.maximumTokens)
+            )
+            .accessibilityLabel(presentation.accessibilityLabel)
+            if let profileContribution = presentation.profileContribution {
+                Text(profileContribution)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

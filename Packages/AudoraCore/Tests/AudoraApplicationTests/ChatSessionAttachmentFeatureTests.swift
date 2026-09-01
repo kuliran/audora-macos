@@ -345,23 +345,141 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         XCTAssertNil(seed?.aggregate.chat.creation.originAttachmentID)
     }
 
-    func testConfirmPreservesMissingQualifiedConfigurationAsSpecificRecovery() async {
+    func testConfirmMissingQualifiedConfigurationKeepsExactSelectionAndRequiresFreshConfirmation()
+        async throws
+    {
+        let candidate = try candidate(
+            session: "ses-20260830T110000000Z-5KMN",
+            revision: "trv-20260830T111000000Z-6PQR",
+            label: "Pinned during configuration outage"
+        )
         let source = AttachmentSourceFixture(
-            candidates: [],
+            candidates: [candidate],
             configurationUnavailableOnResolve: true
         )
         let store = AttachmentChatStoreFixture()
         let feature = makeFeature(source: source, store: store)
         await feature.send(.start(Self.context))
         await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initial) = await feature.currentState.newChatPicker,
+              let row = initial.allRows.first
+        else { return XCTFail("Expected the exact candidate") }
+        await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+        guard case let .ready(quoted) = await feature.currentState.newChatPicker,
+              let quotedToken = quoted.confirmationToken
+        else { return XCTFail("Expected a quoted exact selection") }
 
-        await feature.sendCurrentNewChatConfirmation(Self.context)
+        await feature.send(.confirmNewChat(Self.context, quotedToken))
 
         let createdSeed = await store.createdSeed
         XCTAssertNil(createdSeed)
         let state = await feature.currentState
-        XCTAssertEqual(state.newChatPicker, .failed)
         XCTAssertEqual(state.notice, .qualifiedCoachConfigurationUnavailable)
+        guard case let .ready(blocked) = state.newChatPicker else {
+            return XCTFail("The ready picker and exact pins must survive the outage")
+        }
+        XCTAssertEqual(blocked.allRows, quoted.allRows)
+        XCTAssertEqual(blocked.visibleRows, quoted.visibleRows)
+        XCTAssertEqual(blocked.selectedAttachmentIDs, quoted.selectedAttachmentIDs)
+        let selectedRows = blocked.allRows.filter {
+            blocked.selectedAttachmentIDs.contains($0.id)
+        }
+        XCTAssertEqual(selectedRows.map(\.attachment.sessionID), [candidate.sessionID])
+        XCTAssertEqual(
+            selectedRows.map(\.attachment.transcriptRevisionID),
+            [candidate.transcriptRevisionID]
+        )
+        XCTAssertEqual(blocked.issue, .qualifiedConfigurationUnavailable)
+        XCTAssertNil(blocked.confirmationToken)
+        XCTAssertFalse(blocked.permitsConfirmation)
+    }
+
+    func testConfigurationRecoveryReprojectsExactSelectionsAndRequiresFreshConfirmation()
+        async throws
+    {
+        let first = try candidate(
+            session: "ses-20260830T110000000Z-5KMN",
+            revision: "trv-20260830T111000000Z-6PQR",
+            label: "First original projection",
+            tokens: 100
+        )
+        let second = try candidate(
+            session: "ses-20260830T112000000Z-7STV",
+            revision: "trv-20260830T113000000Z-8WXY",
+            label: "Second original projection",
+            tokens: 200
+        )
+        let source = AttachmentSourceFixture(candidates: [first, second])
+        let store = AttachmentChatStoreFixture()
+        let feature = makeFeature(source: source, store: store)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initial) = await feature.currentState.newChatPicker else {
+            return XCTFail("Expected the initial projection")
+        }
+        for row in initial.allRows {
+            await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+        }
+        guard case let .ready(quoted) = await feature.currentState.newChatPicker,
+              let staleToken = quoted.confirmationToken
+        else { return XCTFail("Expected the exact quoted selections") }
+        await source.setConfigurationUnavailableOnResolve(true)
+        await feature.send(.confirmNewChat(Self.context, staleToken))
+
+        let refreshedFirst = try candidate(
+            session: first.sessionID.rawValue,
+            revision: first.transcriptRevisionID.rawValue,
+            label: "First refreshed projection",
+            tokens: 300,
+            delivery: .onDemand
+        )
+        let refreshedSecond = try candidate(
+            session: second.sessionID.rawValue,
+            revision: second.transcriptRevisionID.rawValue,
+            label: "Second refreshed projection",
+            tokens: 400,
+            delivery: .onDemand
+        )
+        await source.replaceCandidates([refreshedFirst, refreshedSecond])
+        await source.setConfigurationUnavailableOnResolve(false)
+
+        await feature.send(.beginNewChat(Self.context))
+
+        guard case let .ready(recovered) = await feature.currentState.newChatPicker,
+              let freshToken = recovered.confirmationToken
+        else { return XCTFail("Expected a recovered, freshly quoted picker") }
+        XCTAssertEqual(recovered.allRows.map(\.displayLabel), [
+            "First refreshed projection", "Second refreshed projection",
+        ])
+        XCTAssertEqual(recovered.allRows.map(\.approximateTranscriptTokens), [300, 400])
+        let selectedRows = recovered.allRows.filter {
+            recovered.selectedAttachmentIDs.contains($0.id)
+        }
+        XCTAssertEqual(selectedRows.map(\.attachment.sessionID), [
+            first.sessionID, second.sessionID,
+        ])
+        XCTAssertEqual(selectedRows.map(\.attachment.transcriptRevisionID), [
+            first.transcriptRevisionID, second.transcriptRevisionID,
+        ])
+        XCTAssertNotEqual(freshToken, staleToken)
+        XCTAssertNil(recovered.issue)
+        let recoveredState = await feature.currentState
+        XCTAssertNil(recoveredState.notice)
+        XCTAssertTrue(recovered.permitsConfirmation)
+        let seedBeforeFreshConfirmation = await store.createdSeed
+        XCTAssertNil(seedBeforeFreshConfirmation)
+
+        await feature.send(.confirmNewChat(Self.context, freshToken))
+
+        let createdSeed = await store.createdSeed
+        let created = try XCTUnwrap(createdSeed)
+        XCTAssertEqual(created.aggregate.chat.attachments.values.map(\.sessionID), [
+            first.sessionID, second.sessionID,
+        ])
+        XCTAssertEqual(
+            created.aggregate.chat.attachments.values.map(\.transcriptRevisionID),
+            [first.transcriptRevisionID, second.transcriptRevisionID]
+        )
     }
 
     func testSearchEnteredDuringCatalogLoadAppliesToTheLoadedPicker() async throws {
@@ -1388,8 +1506,8 @@ private actor MismatchedAttachmentAuthorityFixture:
 }
 
 private actor AttachmentSourceFixture: ChatSessionAttachmentSource {
-    let candidates: [ChatAttachmentCandidate]
-    private let configurationUnavailableOnResolve: Bool
+    private var candidates: [ChatAttachmentCandidate]
+    private var configurationUnavailableOnResolve: Bool
     private var unavailable: [String: ChatAttachmentUnavailableReason] = [:]
     private(set) var resolvedRequests: [ChatAttachments] = []
 
@@ -1439,6 +1557,14 @@ private actor AttachmentSourceFixture: ChatSessionAttachmentSource {
         unavailable[
             candidate.sessionID.rawValue + ":" + candidate.transcriptRevisionID.rawValue
         ] = reason
+    }
+
+    func replaceCandidates(_ replacement: [ChatAttachmentCandidate]) {
+        candidates = replacement
+    }
+
+    func setConfigurationUnavailableOnResolve(_ unavailable: Bool) {
+        configurationUnavailableOnResolve = unavailable
     }
 }
 

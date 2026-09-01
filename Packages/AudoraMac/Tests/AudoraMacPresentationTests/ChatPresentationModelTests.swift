@@ -114,6 +114,37 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    func testNewChatConfigurationRecoveryDispatchesCandidateReprojection() async throws {
+        let feature = RecordingPresentationChatFeature(
+            initial: ChatFeatureState(
+                catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])),
+                newChatPicker: .ready(
+                    ChatAttachmentPickerSnapshot(
+                        allRows: [],
+                        visibleRows: [],
+                        selectedAttachmentIDs: [],
+                        filterQuery: .empty,
+                        feasibility: .unavailable(.sourceUnavailable),
+                        issue: .qualifiedConfigurationUnavailable
+                    )
+                )
+            )
+        )
+        let model = makeChatPresentationModel(feature: feature)
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        await model.start(in: scope)
+        let startCommands = await feature.commands
+        let context = try XCTUnwrap(startContexts(in: startCommands).first)
+
+        model.retryNewChatConfiguration()
+        await waitForCommandCount(2, in: feature)
+
+        let commands = await feature.commands
+        XCTAssertEqual(commands, [.start(context), .beginNewChat(context)])
+    }
+
     func testNewChatSheetProjectionKeepsCancellationAvailableUntilDurableCreation() {
         let readyState = ChatFeatureState(
             catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
@@ -314,6 +345,12 @@ final class ChatPresentationModelTests: XCTestCase {
             ),
             "Current Coach context could not be verified. Change the selection or reopen New Chat to try again."
         )
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.recoveryText(
+                for: .qualifiedConfigurationUnavailable
+            ),
+            "No qualified Coach configuration is available. Check again after installing a configuration update."
+        )
     }
 
     func testMissingQualifiedConfigurationAndTemporaryTransportHaveDistinctRecoveryCopy() {
@@ -420,6 +457,56 @@ final class ChatPresentationModelTests: XCTestCase {
                 "Provider framing", "Attachments", "Transcript exchange reserve",
                 "Response reserve", "Safety margin",
             ]
+        )
+    }
+
+    func testNewChatCreationLiveContextUsesTheFullWindowAndTotalReservedUsage() {
+        let presentation = NewChatCreationContextPresentation(
+            totalContextTokens: 682,
+            inputCeilingTokens: 4_032,
+            reservedResponseTokens: 32,
+            safetyMarginTokens: 8,
+            profileTokens: 128
+        )
+
+        XCTAssertEqual(presentation.usedTokens, 682)
+        XCTAssertEqual(presentation.maximumTokens, 4_072)
+        XCTAssertEqual(
+            presentation.summary,
+            "~682 / 4072 total context tokens"
+        )
+        XCTAssertEqual(
+            presentation.profileContribution,
+            "Current Profile: ~128 tokens"
+        )
+        XCTAssertEqual(
+            presentation.accessibilityLabel,
+            "Estimated total context, 682 of 4072 tokens"
+        )
+    }
+
+    func testNewChatCreationProviderOutageShowsTheAvailableLowerBoundAndProfile() {
+        let presentation = NewChatCreationContextPresentation(
+            minimumTotalContextTokens: 420,
+            inputCeilingTokens: 4_032,
+            reservedResponseTokens: 32,
+            safetyMarginTokens: 8,
+            minimumProfileTokens: 12
+        )
+
+        XCTAssertEqual(presentation.usedTokens, 420)
+        XCTAssertEqual(presentation.maximumTokens, 4_072)
+        XCTAssertEqual(
+            presentation.summary,
+            "At least ~420 / 4072 total context tokens"
+        )
+        XCTAssertEqual(
+            presentation.profileContribution,
+            "Profile lower bound: ~12 tokens"
+        )
+        XCTAssertEqual(
+            presentation.accessibilityLabel,
+            "Minimum total context, at least 420 of 4072 tokens"
         )
     }
 

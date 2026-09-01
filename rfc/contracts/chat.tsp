@@ -608,6 +608,7 @@ namespace Audora.Contracts {
     sourceUnavailable: "sourceUnavailable",
     staleState: "staleState",
     invalidContext: "invalidContext",
+    qualifiedConfigurationUnavailable: "qualifiedConfigurationUnavailable",
   }
 
   union NewChatAttachmentDelivery {

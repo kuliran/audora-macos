@@ -133,12 +133,14 @@ public enum ChatAttachmentPickerIssue: Equatable, Sendable {
     case attachmentUnavailable
     case contextCannotFit
     case contextUnavailable(CoachContextUnavailableReason)
+    case qualifiedConfigurationUnavailable
 
     public var blocksConfirmation: Bool {
         switch self {
         case .selectionLimitReached:
             false
-        case .attachmentUnavailable, .contextCannotFit, .contextUnavailable:
+        case .attachmentUnavailable, .contextCannotFit, .contextUnavailable,
+             .qualifiedConfigurationUnavailable:
             true
         }
     }

@@ -132,6 +132,14 @@ public final class ChatPresentationModel: ObservableObject {
         send(.beginNewChat(context))
     }
 
+    public func retryNewChatConfiguration() {
+        guard let context = commandContext,
+              case let .ready(picker) = snapshot.newChatPicker,
+              picker.issue == .qualifiedConfigurationUnavailable
+        else { return }
+        send(.beginNewChat(context))
+    }
+
     public func updateNewChatAttachmentFilter(_ value: String) {
         newChatAttachmentFilterText = value
         guard let context = commandContext,
