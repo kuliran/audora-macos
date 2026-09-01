@@ -100,6 +100,24 @@ final class SessionProcessingPresentationModelTests: XCTestCase {
         XCTAssertEqual(presentation.actions, [])
     }
 
+    func testNewerJobIndexDirectsCompatibleUpdateWithoutRetry() {
+        let presentation = SessionProcessingPresentationMapper.map(
+            .unavailable(
+                SessionProcessingUnavailableSnapshot(
+                    selection: nil,
+                    reason: .jobIndexSchemaNewer(version: 2),
+                    actions: []
+                )
+            )
+        )
+
+        XCTAssertEqual(presentation.status, .unavailable)
+        XCTAssertEqual(presentation.title, "Processing needs a newer Audora")
+        XCTAssertTrue(presentation.detail?.contains("schema version 2") == true)
+        XCTAssertTrue(presentation.detail?.contains("compatible update") == true)
+        XCTAssertEqual(presentation.actions, [])
+    }
+
     func testModelProjectsStatesAndSendsTypedStartAndRecoveryCommands() async throws {
         let source = try makeSource()
         let feature = ScriptedSessionProcessingFeature(
@@ -127,6 +145,34 @@ final class SessionProcessingPresentationModelTests: XCTestCase {
 
         XCTAssertEqual(model.state?.title, "Offline model is not prepared")
         XCTAssertEqual(commands, [.start, .prepare, .reinstall, .retry])
+    }
+
+    func testPendingChatBoundaryStillAdmitsAndEmitsProcessingCancel() async throws {
+        let feature = ScriptedSessionProcessingFeature(snapshots: [])
+        let model = SessionProcessingPresentationModel(feature: feature)
+
+        let admitted = LibraryRootInteractionPolicy.admittedProcessingAction(
+            .cancel,
+            isChatBoundaryPending: true
+        )
+        XCTAssertEqual(admitted, .cancel)
+        XCTAssertNil(
+            LibraryRootInteractionPolicy.admittedProcessingAction(
+                .start,
+                isChatBoundaryPending: true
+            )
+        )
+        XCTAssertNil(
+            LibraryRootInteractionPolicy.admittedProcessingAction(
+                .retry,
+                isChatBoundaryPending: true
+            )
+        )
+
+        model.perform(try XCTUnwrap(admitted))
+        await feature.waitForCommandCount(1)
+        let commands = await feature.recordedCommands()
+        XCTAssertEqual(commands, [.cancel])
     }
 
     func testNonterminalRelaunchStateDoesNotOfferIssue16Controls() throws {

@@ -941,6 +941,54 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(releasedRequests, 1)
     }
 
+    func testLibraryNavigationActivationPreservesRecoveredRouteWhenReservationFinishes()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let queued = fixture.job(state: .queued)
+        let reconciliationID = try SessionProcessingReconciliationID(
+            "reconcile-navigation-recovered-route"
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: ReconciliationAndOrdinarySourceProbe(
+                source: fixture.source,
+                reconciliationID: reconciliationID
+            ),
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: JobProbe(
+                inventoryResult: .available(
+                    SessionProcessingJobInventory(
+                        reconciliationID: reconciliationID,
+                        scope: fixture.selection.scope,
+                        jobs: [queued]
+                    )
+                ),
+                tracksLatestWrites: true
+            ),
+            engine: EngineProbe(result: .failure(.launchFailed)),
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        let reserved = await feature.reserveLibraryNavigation()
+        XCTAssertTrue(reserved)
+        await feature.send(.activateLibrary(fixture.selection.scope))
+        await feature.finishLibraryNavigation(didMutateLibrary: true)
+
+        guard case let .interrupted(recovered) = await feature.currentState else {
+            return XCTFail("finishing navigation must preserve recovered Retry")
+        }
+        XCTAssertEqual(recovered.source.selection, fixture.selection)
+        XCTAssertEqual(recovered.job, queued.transitioning(to: .interrupted))
+        XCTAssertEqual(recovered.actions, [.retry])
+    }
+
     func testLibraryNavigationReservationRejectsHiddenActivationFenceWithoutSession()
         async throws
     {
@@ -1496,7 +1544,7 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(final.reason, .engineFailed)
     }
 
-    func testLibraryActivationReconcilesEveryQueuedJobWithoutSelectingASession()
+    func testLibraryActivationReconcilesEveryQueuedJobAndProjectsDeterministicRetry()
         async throws
     {
         let fixture = try ProcessingFixture()
@@ -1538,7 +1586,9 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: fixture.selection.scope,
-                    jobs: [firstJob, secondJob]
+                    // Deliberately reverse Session order: recovered routing must
+                    // not depend on repository inventory order.
+                    jobs: [secondJob, firstJob]
                 )
             )
         )
@@ -1570,17 +1620,13 @@ final class SessionProcessingFeatureTests: XCTestCase {
         let finished = await jobs.finishedReconciliationIDs
         let presenceCount = await engine.presenceQueryCount()
         let requestCount = await engine.requestCount()
-        XCTAssertEqual(
-            current,
-            .unavailable(
-                SessionProcessingUnavailableSnapshot(
-                    selection: nil,
-                    reason: .noSession,
-                    actions: []
-                )
-            )
-        )
-        XCTAssertEqual(reconciled.map(\.jobID), [firstJob.jobID, secondJob.jobID])
+        guard case let .interrupted(recovered) = current else {
+            return XCTFail("activation must route to a recovered Retry")
+        }
+        XCTAssertEqual(recovered.source.selection, fixture.selection)
+        XCTAssertEqual(recovered.job, firstJob.transitioning(to: .interrupted))
+        XCTAssertEqual(recovered.actions, [.retry])
+        XCTAssertEqual(reconciled.map(\.jobID), [secondJob.jobID, firstJob.jobID])
         XCTAssertEqual(reconciled.map(\.state), [.interrupted, .interrupted])
         XCTAssertEqual(loadedSelections, [])
         XCTAssertEqual(finished, [reconciliationID])
@@ -1873,10 +1919,9 @@ final class SessionProcessingFeatureTests: XCTestCase {
         )
 
         await feature.send(.activateLibrary(fixture.selection.scope))
-        await feature.send(.selectSession(fixture.selection))
 
         guard case let .failed(failure) = await feature.currentState else {
-            return XCTFail("the exact first durable winner must remain observable")
+            return XCTFail("activation must route to the exact durable failure")
         }
         XCTAssertEqual(failure.job, winner)
         XCTAssertEqual(failure.reason, .engineFailed)
@@ -1962,6 +2007,13 @@ final class SessionProcessingFeatureTests: XCTestCase {
         )
 
         await feature.send(.activateLibrary(fixture.selection.scope))
+        guard case let .unavailable(activationState) = await feature.currentState else {
+            return XCTFail("newer attempt coordination must be visibly unavailable")
+        }
+        XCTAssertEqual(activationState.selection, nil)
+        XCTAssertEqual(activationState.reason, .jobIndexSchemaNewer(version: 2))
+        XCTAssertEqual(activationState.actions, [])
+
         await feature.send(.selectSession(fixture.selection))
         await feature.send(.start)
         await feature.send(.retry)
@@ -1969,13 +2021,15 @@ final class SessionProcessingFeatureTests: XCTestCase {
         let sourceLoads = await source.loadCount
         let writes = await jobs.snapshots
         let requests = await engine.requestCount()
-        XCTAssertEqual(sourceLoads, 2)
+        XCTAssertEqual(sourceLoads, 1)
         XCTAssertEqual(writes, [])
         XCTAssertEqual(requests, 0)
-        guard case let .failed(snapshot) = await feature.currentState else {
+        guard case let .unavailable(snapshot) = await feature.currentState else {
             return XCTFail("newer attempt coordination must remain visibly frozen")
         }
-        XCTAssertEqual(snapshot.reason, .jobPersistenceFailed)
+        XCTAssertEqual(snapshot.selection, fixture.selection)
+        XCTAssertEqual(snapshot.reason, .jobIndexSchemaNewer(version: 2))
+        XCTAssertEqual(snapshot.actions, [])
     }
 
     func testSameLibraryRootRefreshReinstallsFenceBeforeInventoryResolution()
@@ -2250,7 +2304,7 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(publishCount, 1)
         XCTAssertEqual(finished, [reconciliationID])
         guard case let .unavailable(state) = await feature.currentState else {
-            return XCTFail("launch reconciliation must not select a Session")
+            return XCTFail("completed recovery must not select a Session")
         }
         XCTAssertEqual(state.reason, .noSession)
     }
@@ -2440,10 +2494,11 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(presenceQueries, [running.executionReference])
         XCTAssertEqual(sourceLoads, [])
         XCTAssertEqual(transitionCount, 2)
-        guard case let .unavailable(state) = await feature.currentState else {
-            return XCTFail("launch reconciliation must not select a Session")
+        guard case let .interrupted(recovered) = await feature.currentState else {
+            return XCTFail("launch reconciliation must expose interrupted Retry")
         }
-        XCTAssertEqual(state.reason, .noSession)
+        XCTAssertEqual(recovered.job, running.transitioning(to: .interrupted))
+        XCTAssertEqual(recovered.actions, [.retry])
     }
 
     func testLibraryActivationInterruptsStaleValidatingWinnerWhenSourceCapabilityFails()
@@ -3005,10 +3060,11 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(transitions, [])
         XCTAssertEqual(presenceCount, 0)
         XCTAssertEqual(requestCount, 0)
-        guard case let .unavailable(state) = await feature.currentState else {
-            return XCTFail("activation must not replace the Session UI selection")
+        guard case let .interrupted(recovered) = await feature.currentState else {
+            return XCTFail("activation must expose the latest terminal Retry")
         }
-        XCTAssertEqual(state.reason, .noSession)
+        XCTAssertEqual(recovered.job, otherTerminalJobs.last)
+        XCTAssertEqual(recovered.actions, [.retry])
     }
 
     func testLibraryActivationFailsClosedForInvalidCompletedAuthorityWithoutRerun()
@@ -3210,6 +3266,70 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(selectedRevisionID, newerRevisionID)
         let persistedStates = await jobs.states
         XCTAssertEqual(persistedStates, [.failed])
+    }
+
+    func testRelaunchRetainsHashValidCandidateUntilTrustedValidationContextReturns()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let validating = fixture.job(
+            state: .validating,
+            candidateArtifactSHA256: fixture.candidateFingerprint.sha256
+        )
+        let jobs = JobProbe(latest: validating, tracksLatestWrites: true)
+        let runtime = RuntimeProbe(.unavailable(.runtimeMissing))
+        let revisions = RevisionProbe()
+        let engine = EngineProbe(
+            result: .failure(.launchFailed),
+            recovered: .available(
+                VerifiedTranscriptionCandidate(
+                    candidate: fixture.candidate,
+                    artifactFingerprint: fixture.candidateFingerprint
+                )
+            )
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: SourceProbe(.available(fixture.source)),
+            runtime: runtime,
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+
+        guard case let .recoveryRequired(preserved) = await feature.currentState else {
+            return XCTFail("expected validation to wait for trusted runtime context")
+        }
+        XCTAssertEqual(preserved, validating)
+        let initiallyPersistedStates = await jobs.states
+        let initialPublishCount = await revisions.publishCountValue()
+        let initialRequestCount = await engine.requestCount()
+        XCTAssertEqual(initiallyPersistedStates, [])
+        XCTAssertEqual(initialPublishCount, 0)
+        XCTAssertEqual(initialRequestCount, 0)
+
+        await runtime.setResolution(.qualified(fixture.profile))
+        await feature.send(.selectSession(fixture.selection))
+
+        guard case let .completed(completed) = await feature.currentState else {
+            return XCTFail("expected the retained candidate to publish")
+        }
+        XCTAssertEqual(completed.jobID, validating.jobID)
+        XCTAssertEqual(completed.revisionID, validating.revisionID)
+        let persistedStates = await jobs.states
+        let publishCount = await revisions.publishCountValue()
+        let requestCount = await engine.requestCount()
+        XCTAssertEqual(persistedStates, [.completed])
+        XCTAssertEqual(publishCount, 1)
+        XCTAssertEqual(requestCount, 0)
     }
 
     func testRelaunchInterruptsValidatingJobWhenStagedCandidateIsCorrupt()
@@ -4830,11 +4950,15 @@ private struct ProcessingFixture {
 }
 
 private actor RuntimeProbe: TranscriptionRuntimePort {
-    private let resolution: TranscriptionRuntimeResolution
+    private var resolution: TranscriptionRuntimeResolution
     private(set) var preparationActions: [SessionProcessingRecoveryAction] = []
     private(set) var resolutionCount = 0
 
     init(_ resolution: TranscriptionRuntimeResolution) {
+        self.resolution = resolution
+    }
+
+    func setResolution(_ resolution: TranscriptionRuntimeResolution) {
         self.resolution = resolution
     }
 
@@ -5782,7 +5906,10 @@ private actor ReconciliationSourceProbe: SessionTranscriptionSourcePort {
     func load(_ selection: SessionProcessingSelection) async
         -> SessionTranscriptionSourceResult
     {
-        .unavailable
+        guard let source = sources.first(where: { $0.selection == selection }) else {
+            return .unavailable
+        }
+        return .available(source)
     }
 
     func load(

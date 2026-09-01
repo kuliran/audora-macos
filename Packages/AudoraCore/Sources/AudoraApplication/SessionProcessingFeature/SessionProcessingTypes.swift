@@ -256,6 +256,9 @@ public enum SessionProcessingRecoveryAction: String, Equatable, Sendable {
 
 public enum SessionProcessingUnavailableReason: Equatable, Sendable {
     case noSession
+    /// The authoritative durable Job index was written by a newer Audora.
+    /// Existing bytes remain frozen until a compatible app version opens it.
+    case jobIndexSchemaNewer(version: UInt32)
     case sourceUnavailable
     case sourceIntegrityMismatch
     case acousticEvidenceUnavailable

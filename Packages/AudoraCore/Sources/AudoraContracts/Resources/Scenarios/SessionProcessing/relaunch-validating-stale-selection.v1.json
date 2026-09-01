@@ -23,12 +23,13 @@
     { "port": "runtime", "effect": "resolve", "outcome": "qualified" },
     { "port": "acousticEvidence", "effect": "resolve", "outcome": "qualified" },
     { "port": "publisher", "effect": "publish", "outcome": "staleSelection" },
-    { "port": "jobs", "effect": "transitionFailed", "outcome": "written" }
+    { "port": "jobs", "effect": "transitionFailed", "outcome": "written" },
+    { "port": "source", "effect": "load", "outcome": "newer-selection" }
   ],
   "expectedState": {
-    "status": "unavailable",
-    "reason": "noSession",
-    "actions": []
+    "status": "failed",
+    "reason": "staleSelection",
+    "actions": ["retry"]
   },
   "expectedJobs": [
     {

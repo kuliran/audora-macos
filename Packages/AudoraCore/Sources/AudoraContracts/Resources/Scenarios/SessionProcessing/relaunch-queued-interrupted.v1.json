@@ -22,12 +22,13 @@
       "port": "jobs",
       "effect": "transitionInterrupted",
       "outcome": "cas-written-once"
-    }
+    },
+    { "port": "source", "effect": "load", "outcome": "available" }
   ],
   "expectedState": {
-    "status": "unavailable",
-    "reason": "noSession",
-    "actions": []
+    "status": "interrupted",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "actions": ["retry"]
   },
   "expectedJobs": [
     {

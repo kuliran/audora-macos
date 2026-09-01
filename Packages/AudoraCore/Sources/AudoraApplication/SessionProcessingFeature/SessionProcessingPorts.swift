@@ -213,8 +213,9 @@ public protocol SessionProcessingFeature: Sendable {
     /// active or recovery authority.
     func reserveLibraryNavigation() async -> Bool
 
-    /// Releases the reservation. A successful Library mutation also clears the
-    /// old Session selection before launch admission reopens.
+    /// Releases the reservation. An accepted activation has already replaced
+    /// the old Session context; a mutation with no writable activation clears
+    /// it before launch admission reopens.
     func finishLibraryNavigation(didMutateLibrary: Bool) async
 }
 

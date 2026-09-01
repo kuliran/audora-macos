@@ -2,6 +2,19 @@ import AudoraApplication
 import AudoraDomain
 import SwiftUI
 
+public enum LibraryRootInteractionPolicy {
+    /// Chat command admission fences every ordinary root interaction, but an
+    /// already-running transcription owns independent cancellation authority.
+    /// Cancel therefore remains an immediate processing command.
+    public static func admittedProcessingAction(
+        _ action: SessionProcessingPresentationAction,
+        isChatBoundaryPending: Bool
+    ) -> SessionProcessingPresentationAction? {
+        guard !isChatBoundaryPending || action == .cancel else { return nil }
+        return action
+    }
+}
+
 public struct LibraryRootView: View {
     @StateObject private var model: LibraryPresentationModel
     @StateObject private var audioImportModel: AudioImportPresentationModel
@@ -71,6 +84,7 @@ public struct LibraryRootView: View {
                         }
                     }
                 }
+                .disabled(chatDispatcher.isChatBoundaryPending)
 
             case let .some(.active(library)):
                 Image(systemName: "waveform.circle.fill")
@@ -84,17 +98,28 @@ public struct LibraryRootView: View {
                 Text(profileDescription(library.profile))
                     .foregroundStyle(.secondary)
                 libraryActions
+                    .disabled(chatDispatcher.isChatBoundaryPending)
                 audioImportActions
-                    .disabled(!interactionAvailability.canUseAudioImportControls)
+                    .disabled(
+                        !interactionAvailability.canUseAudioImportControls ||
+                            chatDispatcher.isChatBoundaryPending
+                    )
                 RecordingView(model: recordingModel)
-                    .disabled(!interactionAvailability.canUseRecordingControls)
-                SessionProcessingView(model: sessionProcessingModel)
+                    .disabled(
+                        !interactionAvailability.canUseRecordingControls ||
+                            chatDispatcher.isChatBoundaryPending
+                    )
+                SessionProcessingView(
+                    model: sessionProcessingModel,
+                    isChatBoundaryPending: chatDispatcher.isChatBoundaryPending
+                )
                 Divider()
                 ChatRootView(
                     dispatcher: chatDispatcher,
                     scope: LibraryScope(libraryID: library.libraryID)
                 )
                 .id(library.libraryID.rawValue)
+                .disabled(chatDispatcher.isChatBoundaryPending)
 
             case .some(.readOnly):
                 ContentUnavailableView(
@@ -105,6 +130,7 @@ public struct LibraryRootView: View {
                     )
                 )
                 libraryActions
+                    .disabled(chatDispatcher.isChatBoundaryPending)
             }
 
             if let notice = model.snapshot?.notice {
@@ -123,7 +149,6 @@ public struct LibraryRootView: View {
         .disabled(
             model.snapshot?.activity != nil ||
                 chatDispatcher.isLibraryNavigationPending ||
-                chatDispatcher.isChatBoundaryPending ||
                 chatDispatcher.isOrderlyTerminationPending
         )
         .task {
@@ -160,9 +185,10 @@ public struct LibraryRootView: View {
         .onChange(of: processingSelection, initial: true) { _, selection in
             if let selection {
                 sessionProcessingModel.selectSession(selection)
-            } else {
-                sessionProcessingModel.clearSelection()
             }
+            // A nil transient receipt does not mean there is no durable
+            // processing route. Library navigation owns clearing old context;
+            // activation recovery may have selected a persisted Session.
         }
     }
 

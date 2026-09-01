@@ -381,6 +381,7 @@ private struct FeatureScenarioState: Equatable, Sendable {
     ) -> String {
         switch reason {
         case .noSession: "noSession"
+        case .jobIndexSchemaNewer: "jobIndexSchemaNewer"
         case .sourceUnavailable: "sourceUnavailable"
         case .sourceIntegrityMismatch: "sourceIntegrityMismatch"
         case .acousticEvidenceUnavailable: "acousticEvidenceUnavailable"
@@ -663,7 +664,7 @@ private struct SessionProcessingFeatureScenarioRunner {
                     effects.insert("stagedCandidateRevalidated")
                 }
                 if revisionMetrics.lastExpectedSelection == nil,
-                   sourceSelections.count == 1
+                   sourceSelections.first == fixture.selection
                 {
                     effects.insert("startSelectionBaselinePreserved")
                 }

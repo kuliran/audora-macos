@@ -140,6 +140,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private var pendingSelectionCommand: PendingSelectionCommand?
     private var pendingLibraryActivation: LibraryActivation?
     private var libraryNavigationReserved = false
+    private var libraryNavigationActivation: LibraryActivation?
     private var cancelledRunJobID: TranscriptionJobID?
     private var invalidCompletedJobs: [CompletedRecoveryKey: SessionProcessingJob]
         = [:]
@@ -229,12 +230,20 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
               !cancellationFinalizationInFlight
         else { return false }
         libraryNavigationReserved = true
+        libraryNavigationActivation = nil
         return true
     }
 
     public func finishLibraryNavigation(didMutateLibrary: Bool) async {
         guard libraryNavigationReserved else { return }
-        if didMutateLibrary { clearSelection() }
+        // An accepted activation already cleared the prior context before its
+        // inventory pass and may have installed a recovered route. Preserve
+        // that result; only a mutation with no writable activation (for
+        // example Close or read-only Open) needs a final clear here.
+        if didMutateLibrary, libraryNavigationActivation == nil {
+            clearSelection()
+        }
+        libraryNavigationActivation = nil
         libraryNavigationReserved = false
     }
 
@@ -338,11 +347,21 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     /// boundary fails closed if that authority is no longer current.
     private func reconcileActiveLibrary(_ activation: LibraryActivation) async {
         let scope = activation.scope
+        if libraryNavigationReserved {
+            clearSelection()
+            libraryNavigationActivation = activation
+        }
         let inventory: SessionProcessingJobInventory
         switch await jobs.inventory(for: scope) {
         case let .available(available):
             inventory = available
-        case .unsupportedSchema, .unavailable, .integrityMismatch:
+        case let .unsupportedSchema(version):
+            presentUnsupportedJobIndex(
+                version: version,
+                selection: lastSelection?.scope == scope ? lastSelection : nil
+            )
+            return
+        case .unavailable, .integrityMismatch:
             return
         }
         let reconciliationID = inventory.reconciliationID
@@ -412,14 +431,19 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             successfullyReconciledLibraryActivation = activation
         }
 
-        // Activation may have changed the durable authority for the Session
-        // already on screen. Refresh it before releasing command serialization,
-        // unless a newer selection/clear command is already waiting to win.
-        guard pendingSelectionCommand == nil,
-              let selected = lastSelection,
-              selected.scope == scope
+        // Activation may have changed durable authority. Refresh the Session
+        // already on screen first. With no transient selection, expose one
+        // deterministic recovered route only after the complete bounded pass;
+        // every sibling has still been reconciled above.
+        guard pendingSelectionCommand == nil else { return }
+        if let selected = lastSelection {
+            if selected.scope == scope { await select(selected) }
+            return
+        }
+        guard successfullyReconciledLibraryActivation == activation,
+              let recovered = deterministicRecoveredSelection(for: scope)
         else { return }
-        await select(selected)
+        await select(recovered)
     }
 
     /// Preserve the repository's causal order while bounding hostile or corrupt
@@ -600,7 +624,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                     )
                     return
                 }
-                let outcome = await resumeValidation(job, source: source)
+                guard let outcome = await resumeValidation(job, source: source) else {
+                    projectDeferredValidation(job, context: context)
+                    return
+                }
                 switch await recoveryContinuation(
                     after: outcome,
                     job: job,
@@ -716,6 +743,21 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         }
     }
 
+    /// A hash-valid staged candidate remains the authority for this validating
+    /// Job even when the mutable machine qualification context cannot currently
+    /// be re-established. Keep the Job unchanged and retry publication only
+    /// after trusted app-owned runtime and acoustic evidence become available.
+    private func projectDeferredValidation(
+        _ job: SessionProcessingJob,
+        context: DurableRecoveryContext
+    ) {
+        if context.isLibraryActivation {
+            retainActivationRecovery(.exactWinner(job), for: job)
+        } else {
+            transition(to: .recoveryRequired(job))
+        }
+    }
+
     private func projectInvalidCompleted(
         _ job: SessionProcessingJob,
         context: DurableRecoveryContext
@@ -767,13 +809,15 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private func projectRecoveredTerminal(
         _ job: SessionProcessingJob,
         context: DurableRecoveryContext,
-        isExactWinner: Bool
+        isExactWinner _: Bool
     ) {
         switch context {
         case .libraryActivation:
-            if isExactWinner {
-                retainActivationRecovery(.exactWinner(job), for: job)
-            }
+            // Inventory is in causal order and each newer Job clears only the
+            // prior exact presentation for its own Session. Retaining every
+            // durable terminal here therefore leaves that Session's exact
+            // current winner available after the full pass.
+            retainActivationRecovery(.exactWinner(job), for: job)
         case let .selectedSession(source):
             switch job.state {
             case .failed:
@@ -831,6 +875,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         let terminal = job.transitioning(to: state)
         switch await jobs.transition(terminal, from: job.state) {
         case .written:
+            retainActivationRecovery(.exactWinner(terminal), for: terminal)
             return .settled
         case .stale:
             return .stale
@@ -881,6 +926,21 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         )
     }
 
+    private func presentUnsupportedJobIndex(
+        version: UInt32,
+        selection: SessionProcessingSelection?
+    ) {
+        transition(
+            to: .unavailable(
+                SessionProcessingUnavailableSnapshot(
+                    selection: selection,
+                    reason: .jobIndexSchemaNewer(version: version),
+                    actions: []
+                )
+            )
+        )
+    }
+
     private func select(_ selection: SessionProcessingSelection) async {
         lastSelection = selection
         selectedSource = nil
@@ -924,7 +984,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             case let .loaded(latest):
                 await reconcile(latest, source: source)
                 return
-            case .unsupportedSchema, .integrityMismatch, .unavailable:
+            case let .unsupportedSchema(version):
+                presentUnsupportedJobIndex(version: version, selection: selection)
+                return
+            case .integrityMismatch, .unavailable:
                 transition(
                     to: .failed(
                         SessionProcessingFailedSnapshot(
@@ -993,7 +1056,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             return false
         case .loaded, .none:
             return true
-        case .unsupportedSchema, .unavailable, .integrityMismatch:
+        case let .unsupportedSchema(version):
+            presentUnsupportedJobIndex(version: version, selection: selection)
+            return false
+        case .unavailable, .integrityMismatch:
             transition(
                 to: .failed(
                     SessionProcessingFailedSnapshot(
@@ -1343,7 +1409,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private func resumeValidation(
         _ job: SessionProcessingJob,
         source: SessionTranscriptionSource
-    ) async -> DurableMutationOutcome {
+    ) async -> DurableMutationOutcome? {
         // Publication is manifest-last: the exact immutable Revision may be
         // installed even when the publisher returned installedNeedsRefresh or
         // the validating->completed Job CAS failed. Prove this Job's Revision
@@ -1378,7 +1444,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
               ),
               evidence.isValid(for: source, profile: profile)
         else {
-            return await interrupt(job, source: source)
+            return nil
         }
         selectedProfile = profile
         transition(
@@ -1924,7 +1990,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     ) -> SessionProcessingUnavailableSnapshot {
         let actions: [SessionProcessingRecoveryAction]
         switch reason {
-        case .noSession:
+        case .noSession, .jobIndexSchemaNewer:
             actions = []
         case .sourceUnavailable, .sourceIntegrityMismatch,
              .acousticEvidenceUnavailable:
@@ -2035,6 +2101,32 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         return winner
     }
 
+    /// Complete activation inventories are capped at
+    /// `maximumReconciledJobCount`; sorting the retained one-per-Session
+    /// winners is therefore deterministic and bounded independently of the
+    /// repository's cross-Session inventory order.
+    private func deterministicRecoveredSelection(
+        for scope: LibraryScope
+    ) -> SessionProcessingSelection? {
+        let libraryID = scope.libraryID.rawValue
+        return activationRecovery.compactMap { key, ledger in
+            guard key.libraryID == libraryID, let job = ledger.exactWinner else {
+                return nil
+            }
+            switch job.state {
+            case .failed, .cancelled, .interrupted:
+                return SessionProcessingSelection(
+                    scope: scope,
+                    sessionID: job.sessionID
+                )
+            case .queued, .preparing, .running, .validating, .completed:
+                return nil
+            }
+        }.min {
+            $0.sessionID.rawValue < $1.sessionID.rawValue
+        }
+    }
+
     private func retainSuppressedActivationRecovery(
         _ next: SessionProcessingFeatureState
     ) {
@@ -2049,8 +2141,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                     : .exactWinner(job),
                 for: job
             )
+        case let .cancelled(snapshot), let .interrupted(snapshot):
+            retainActivationRecovery(.exactWinner(snapshot.job), for: snapshot.job)
         case .unavailable, .ready, .preparing, .queued, .running, .cancelling,
-             .validating, .completed, .cancelled, .interrupted:
+             .validating, .completed:
             return
         }
     }

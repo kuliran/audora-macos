@@ -214,6 +214,11 @@ public enum SessionProcessingPresentationMapper {
         switch reason {
         case .noSession:
             ("Choose a Session", "Offline transcription needs a selected Session.")
+        case let .jobIndexSchemaNewer(version):
+            (
+                "Processing needs a newer Audora",
+                "This Library’s processing job index uses schema version \(version). Install a compatible update to resume processing; Audora left the existing processing data unchanged."
+            )
         case .sourceUnavailable:
             ("Session audio is unavailable", "Retry after the sealed audio is available.")
         case .sourceIntegrityMismatch:
@@ -322,9 +327,14 @@ public final class SessionProcessingPresentationModel: ObservableObject {
 
 public struct SessionProcessingView: View {
     @ObservedObject private var model: SessionProcessingPresentationModel
+    private let isChatBoundaryPending: Bool
 
-    public init(model: SessionProcessingPresentationModel) {
+    public init(
+        model: SessionProcessingPresentationModel,
+        isChatBoundaryPending: Bool = false
+    ) {
         self.model = model
+        self.isChatBoundaryPending = isChatBoundaryPending
     }
 
     public var body: some View {
@@ -361,7 +371,22 @@ public struct SessionProcessingView: View {
                     if !state.actions.isEmpty {
                         HStack {
                             ForEach(state.actions, id: \.self) { action in
-                                Button(action.label) { model.perform(action) }
+                                Button(action.label) {
+                                    guard let admitted = LibraryRootInteractionPolicy
+                                        .admittedProcessingAction(
+                                            action,
+                                            isChatBoundaryPending: isChatBoundaryPending
+                                        )
+                                    else { return }
+                                    model.perform(admitted)
+                                }
+                                .disabled(
+                                    LibraryRootInteractionPolicy
+                                        .admittedProcessingAction(
+                                            action,
+                                            isChatBoundaryPending: isChatBoundaryPending
+                                        ) == nil
+                                )
                             }
                         }
                     }

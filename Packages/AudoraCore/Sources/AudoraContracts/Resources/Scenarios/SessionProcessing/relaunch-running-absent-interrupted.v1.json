@@ -19,12 +19,13 @@
   "dependencyTrace": [
     { "port": "jobs", "effect": "inventory", "outcome": "all-durable-jobs-bounded" },
     { "port": "engine", "effect": "workerPresence", "outcome": "absent" },
-    { "port": "jobs", "effect": "transitionInterrupted", "outcome": "written" }
+    { "port": "jobs", "effect": "transitionInterrupted", "outcome": "written" },
+    { "port": "source", "effect": "load", "outcome": "available" }
   ],
   "expectedState": {
-    "status": "unavailable",
-    "reason": "noSession",
-    "actions": []
+    "status": "interrupted",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "actions": ["retry"]
   },
   "expectedJobs": [
     {

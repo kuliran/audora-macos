@@ -423,6 +423,7 @@ namespace Audora.Contracts {
     status: "unavailable";
     reason:
       | "noSession"
+      | "jobIndexSchemaNewer"
       | "qualificationBlocked"
       | "runtimeMissing"
       | "runtimeLockMismatch"

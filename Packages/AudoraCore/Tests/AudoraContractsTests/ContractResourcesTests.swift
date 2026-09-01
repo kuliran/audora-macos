@@ -352,9 +352,12 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(queuedInitial["status"] as? String, "unavailable")
         XCTAssertEqual(queuedInitial["reason"] as? String, "noSession")
         XCTAssertEqual(queuedInitial["actions"] as? [String], [])
-        XCTAssertEqual(queuedExpected["status"] as? String, "unavailable")
-        XCTAssertEqual(queuedExpected["reason"] as? String, "noSession")
-        XCTAssertEqual(queuedExpected["actions"] as? [String], [])
+        XCTAssertEqual(queuedExpected["status"] as? String, "interrupted")
+        XCTAssertEqual(
+            queuedExpected["jobId"] as? String,
+            "job-20260830T120500000Z-5GHJ"
+        )
+        XCTAssertEqual(queuedExpected["actions"] as? [String], ["retry"])
         let queuedInitialJobs = try XCTUnwrap(
             queuedRelaunch["initialJobs"] as? [[String: Any]]
         )
@@ -403,7 +406,13 @@ final class ContractResourcesTests: XCTestCase {
                     $0["outcome"] as? String == "all-durable-jobs-bounded"
             }
         )
-        XCTAssertFalse(queuedTrace.contains { $0["port"] as? String == "source" })
+        XCTAssertTrue(
+            queuedTrace.contains {
+                $0["port"] as? String == "source" &&
+                    $0["effect"] as? String == "load" &&
+                    $0["outcome"] as? String == "available"
+            }
+        )
         let queuedEffects = try XCTUnwrap(
             queuedRelaunch["expectedEffects"] as? [[String: Any]]
         )
@@ -425,8 +434,8 @@ final class ContractResourcesTests: XCTestCase {
         )
         XCTAssertEqual(runningInitial["status"] as? String, "unavailable")
         XCTAssertEqual(runningInitial["reason"] as? String, "noSession")
-        XCTAssertEqual(runningExpected["status"] as? String, "unavailable")
-        XCTAssertEqual(runningExpected["reason"] as? String, "noSession")
+        XCTAssertEqual(runningExpected["status"] as? String, "interrupted")
+        XCTAssertEqual(runningExpected["actions"] as? [String], ["retry"])
         let runningInitialJobs = try XCTUnwrap(
             runningRelaunch["initialJobs"] as? [[String: Any]]
         )
@@ -443,8 +452,9 @@ final class ContractResourcesTests: XCTestCase {
             .sessionProcessingRelaunchStaleSelectionScenario
         )
         let staleState = try XCTUnwrap(stale["expectedState"] as? [String: Any])
-        XCTAssertEqual(staleState["status"] as? String, "unavailable")
-        XCTAssertEqual(staleState["reason"] as? String, "noSession")
+        XCTAssertEqual(staleState["status"] as? String, "failed")
+        XCTAssertEqual(staleState["reason"] as? String, "staleSelection")
+        XCTAssertEqual(staleState["actions"] as? [String], ["retry"])
         let staleInitialJobs = try XCTUnwrap(
             stale["initialJobs"] as? [[String: Any]]
         )
