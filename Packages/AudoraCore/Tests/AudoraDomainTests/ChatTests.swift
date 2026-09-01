@@ -1,7 +1,7 @@
 import AudoraDomain
 import XCTest
 
-final class DevelopmentChatTests: XCTestCase {
+final class ChatTests: XCTestCase {
     func testCapacityFailureReplacementPreservesPendingTurnIdentity() throws {
         let pending = PendingUserTurn(
             id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),

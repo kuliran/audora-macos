@@ -68,6 +68,37 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         XCTAssertEqual(feature.admissionState, .idle)
     }
 
+    func testNewChatCancelBypassesSuspendedPickerWorkInApplicationFIFO() async throws {
+        let trace = LibrarySelectionTrace()
+        let chat = SuspendedNewChatPickerApplicationChatFeature()
+        let library = SelectionLibraryFeature(trace: trace)
+        let feature = DefaultApplicationCommandFeature(library: library, chat: chat)
+        let context = ChatCommandContext(
+            libraryScope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+
+        let begin = feature.enqueue(.beginNewChat(context))
+        await chat.waitUntilBeginStarts()
+        let cancel = feature.enqueue(.cancelNewChat(context))
+        for _ in 0..<100 { await Task.yield() }
+        let deliveredWhileBeginWasSuspended = await chat.cancelReceived
+        if !deliveredWhileBeginWasSuspended {
+            await chat.forceResumeBegin()
+        }
+        await cancel.value
+        await begin.value
+
+        XCTAssertTrue(deliveredWhileBeginWasSuspended)
+        let commands = await chat.commands
+        XCTAssertEqual(
+            commands,
+            [.beginNewChat(context), .cancelNewChat(context)]
+        )
+    }
+
     func testOneApplicationFIFOOrdersDraftSendDeferredStartAndTermination() async throws {
         let firstScope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
@@ -352,6 +383,47 @@ private actor SuspendedBoundaryChatFeature: ChatFeature {
     func resume() {
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private actor SuspendedNewChatPickerApplicationChatFeature: ChatFeature {
+    nonisolated let states = AsyncStream<ChatFeatureState> { continuation in
+        continuation.finish()
+    }
+
+    private var beginStarted = false
+    private var beginContinuation: CheckedContinuation<Void, Never>?
+    private(set) var cancelReceived = false
+    private(set) var commands: [ChatCommand] = []
+
+    var currentState: ChatFeatureState { ChatFeatureState() }
+
+    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+
+    func send(_ command: ChatCommand) async {
+        commands.append(command)
+        switch command {
+        case .beginNewChat:
+            beginStarted = true
+            await withCheckedContinuation { beginContinuation = $0 }
+        case .cancelNewChat:
+            cancelReceived = true
+            beginContinuation?.resume()
+            beginContinuation = nil
+        default:
+            break
+        }
+    }
+
+    func flushForOrderlyTermination() async -> Bool { true }
+
+    func waitUntilBeginStarts() async {
+        while !beginStarted { await Task.yield() }
+    }
+
+    func forceResumeBegin() {
+        beginContinuation?.resume()
+        beginContinuation = nil
     }
 }
 

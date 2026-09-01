@@ -5,28 +5,28 @@ import Foundation
 import XCTest
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
-final class DevelopmentChatScenarioTests: XCTestCase {
-    func testEveryDevelopmentChatScenarioMatchesTheSwiftFeature() async throws {
+final class ChatFeatureScenarioTests: XCTestCase {
+    func testEveryChatFeatureScenarioMatchesTheSwiftFeature() async throws {
         let resources: [ContractResource] = [
             .createDevelopmentChatScenario,
-            .draftSendDiscardDevelopmentChatScenario,
-            .contextCapacityRecoveryDevelopmentChatScenario,
-            .renameDevelopmentChatScenario,
-            .filterDevelopmentChatsScenario,
-            .relaunchDevelopmentChatScenario,
-            .staleRenameDevelopmentChatScenario,
-            .wrongLibraryDevelopmentChatScenario,
-            .corruptDevelopmentChatScenario,
-            .newerDevelopmentChatScenario,
-            .collisionDevelopmentChatScenario,
-            .providerUnavailableDevelopmentChatScenario,
-            .invalidContextDevelopmentChatScenario,
-            .suspendedLibrarySwitchDevelopmentChatScenario,
+            .draftSendDiscardChatScenario,
+            .contextCapacityRecoveryChatScenario,
+            .renameChatScenario,
+            .filterChatsScenario,
+            .relaunchChatScenario,
+            .staleRenameChatScenario,
+            .wrongLibraryChatScenario,
+            .corruptChatScenario,
+            .newerChatScenario,
+            .collisionChatScenario,
+            .providerUnavailableNewChatScenario,
+            .invalidContextNewChatScenario,
+            .suspendedLibrarySwitchChatScenario,
         ]
 
         for resource in resources {
             let dto = try JSONDecoder().decode(
-                DevelopmentChatScenarioDTO.self,
+                ChatFeatureScenarioDTO.self,
                 from: ContractResources.data(for: resource)
             )
             XCTAssertEqual(dto.schemaVersion, 1, dto.scenarioId)
@@ -226,7 +226,7 @@ final class DevelopmentChatScenarioTests: XCTestCase {
         }
     }
 
-    private func aggregate(_ dto: DevelopmentChatSnapshotDTO) throws -> ChatAggregate {
+    private func aggregate(_ dto: ChatScenarioSnapshotDTO) throws -> ChatAggregate {
         let attachments = try ChatAttachments(
             validating: dto.attachments.map {
                 ChatSessionAttachment(
@@ -368,7 +368,7 @@ final class DevelopmentChatScenarioTests: XCTestCase {
 
     private func openedAttachmentStatuses(
         _ state: ChatFeatureState
-    ) -> [DevelopmentChatOpenedAttachmentStatusDTO]? {
+    ) -> [ChatOpenedAttachmentStatusDTO]? {
         guard case let .resolved(resolutions) = state.openedAttachments else { return nil }
         return resolutions.map { resolved in
             let status: String
@@ -376,7 +376,7 @@ final class DevelopmentChatScenarioTests: XCTestCase {
             case .available: status = "available"
             case let .unavailable(reason): status = reason.rawValue
             }
-            return DevelopmentChatOpenedAttachmentStatusDTO(
+            return ChatOpenedAttachmentStatusDTO(
                 attachmentId: resolved.attachment.attachmentID.rawValue,
                 status: status
             )
@@ -384,14 +384,14 @@ final class DevelopmentChatScenarioTests: XCTestCase {
     }
 }
 
-private struct DevelopmentChatScenarioDTO: Decodable {
+private struct ChatFeatureScenarioDTO: Decodable {
     let schemaVersion: UInt32
     let scenarioId: String
     let libraryId: String
-    let initialChats: [DevelopmentChatSnapshotDTO]
-    let commands: [DevelopmentChatCommandDTO]
-    let dependencyTrace: [DevelopmentChatEventDTO]
-    let expectedState: DevelopmentChatStateDTO
+    let initialChats: [ChatScenarioSnapshotDTO]
+    let commands: [ChatScenarioCommandDTO]
+    let dependencyTrace: [ChatDependencyEventDTO]
+    let expectedState: ChatScenarioStateDTO
     let expectedProviderCalls: Int
     let expectedInvocationCalls: Int
     let expectedAdmissionCalls: Int
@@ -399,7 +399,7 @@ private struct DevelopmentChatScenarioDTO: Decodable {
     let suspendedEffect: String?
 }
 
-private struct DevelopmentChatSnapshotDTO: Decodable {
+private struct ChatScenarioSnapshotDTO: Decodable {
     let chatId: String
     let draftId: String
     let memoryId: String
@@ -408,26 +408,26 @@ private struct DevelopmentChatSnapshotDTO: Decodable {
     let createdAt: String
     let updatedAt: String
     let creationKind: String
-    let attachments: [DevelopmentChatAttachmentDTO]
+    let attachments: [ChatAttachmentDTO]
     let draftText: String
     let draftVersion: UInt64
     let messageIds: [String]
     let memoryGeneralNotes: String
-    let memorySessionSummaries: [DevelopmentChatMemorySummaryDTO]
+    let memorySessionSummaries: [ChatMemorySummaryDTO]
 }
 
-private struct DevelopmentChatAttachmentDTO: Decodable {
+private struct ChatAttachmentDTO: Decodable {
     let attachmentId: String
     let sessionId: String
     let transcriptRevisionId: String
 }
 
-private struct DevelopmentChatMemorySummaryDTO: Decodable {
+private struct ChatMemorySummaryDTO: Decodable {
     let sessionAttachmentId: String
     let notes: String
 }
 
-private struct DevelopmentChatCommandDTO: Decodable {
+private struct ChatScenarioCommandDTO: Decodable {
     let kind: String
     let libraryId: String?
     let chatId: String?
@@ -589,7 +589,7 @@ private struct DevelopmentChatCommandDTO: Decodable {
 }
 
 private func contextualizedCommand(
-    _ command: DevelopmentChatCommandDTO,
+    _ command: ChatScenarioCommandDTO,
     activeState: ChatFeatureState,
     activeContext: inout ChatCommandContext,
     generation: inout UInt64
@@ -620,22 +620,22 @@ private func contextualizedCommand(
     )
 }
 
-private struct DevelopmentChatEventDTO: Decodable {
+private struct ChatDependencyEventDTO: Decodable {
     let port: String
     let effect: String
-    let outcome: DevelopmentChatEventOutcomeDTO
-    let chat: DevelopmentChatSnapshotDTO?
+    let outcome: ChatDependencyEventOutcomeDTO
+    let chat: ChatScenarioSnapshotDTO?
     let libraryId: String?
     let chatIds: [String]?
     let reason: String?
-    let candidates: [DevelopmentChatAttachmentCandidateDTO]?
-    let resolutions: [DevelopmentChatAttachmentResolutionDTO]?
+    let candidates: [NewChatAttachmentCandidateDTO]?
+    let resolutions: [ChatAttachmentResolutionDTO]?
     let fits: Bool?
 
     var signature: String { "\(port):\(effect):\(outcome.rendered)" }
 }
 
-private struct DevelopmentChatAttachmentCandidateDTO: Decodable {
+private struct NewChatAttachmentCandidateDTO: Decodable {
     let sessionId: String
     let transcriptRevisionId: String
     let displayLabel: String
@@ -658,10 +658,10 @@ private struct DevelopmentChatAttachmentCandidateDTO: Decodable {
     }
 }
 
-private struct DevelopmentChatAttachmentResolutionDTO: Decodable {
-    let attachment: DevelopmentChatAttachmentDTO
+private struct ChatAttachmentResolutionDTO: Decodable {
+    let attachment: ChatAttachmentDTO
     let status: String
-    let candidate: DevelopmentChatAttachmentCandidateDTO?
+    let candidate: NewChatAttachmentCandidateDTO?
 
     func resolution() throws -> ResolvedChatAttachment {
         let attachment = ChatSessionAttachment(
@@ -687,7 +687,7 @@ private struct DevelopmentChatAttachmentResolutionDTO: Decodable {
     }
 }
 
-private enum DevelopmentChatEventOutcomeDTO: Decodable {
+private enum ChatDependencyEventOutcomeDTO: Decodable {
     case text(String)
     case nonnegativeWholeNumber(UInt64)
 
@@ -708,7 +708,7 @@ private enum DevelopmentChatEventOutcomeDTO: Decodable {
     }
 }
 
-private struct DevelopmentChatStateDTO: Decodable {
+private struct ChatScenarioStateDTO: Decodable {
     let allChatIds: [String]
     let visibleChatIds: [String]
     let catalogStatus: String?
@@ -731,10 +731,10 @@ private struct DevelopmentChatStateDTO: Decodable {
     let newChatSelectedAttachmentIds: [String]?
     let newChatFeasibility: String?
     let newChatIssue: String?
-    let openedAttachmentStatuses: [DevelopmentChatOpenedAttachmentStatusDTO]?
+    let openedAttachmentStatuses: [ChatOpenedAttachmentStatusDTO]?
 }
 
-private struct DevelopmentChatOpenedAttachmentStatusDTO: Decodable, Equatable {
+private struct ChatOpenedAttachmentStatusDTO: Decodable, Equatable {
     let attachmentId: String
     let status: String
 }
@@ -756,7 +756,7 @@ private actor ChatScenarioRecorder {
 
 private actor ChatScenarioStore: ChatStorePort {
     private var chats: [ChatID: ChatAggregate]
-    private var events: [DevelopmentChatEventDTO]
+    private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder
     private let suspendFirstCatalogLoad: Bool
     private var firstCatalogLoadStarted = false
@@ -764,7 +764,7 @@ private actor ChatScenarioStore: ChatStorePort {
 
     init(
         initial: [ChatAggregate],
-        events: [DevelopmentChatEventDTO],
+        events: [ChatDependencyEventDTO],
         recorder: ChatScenarioRecorder,
         suspendFirstCatalogLoad: Bool
     ) {
@@ -972,14 +972,14 @@ private actor ChatScenarioStore: ChatStorePort {
         }
     }
 
-    private func consume(effect: String) -> DevelopmentChatEventDTO? {
+    private func consume(effect: String) -> ChatDependencyEventDTO? {
         guard let index = events.firstIndex(where: { $0.effect == effect }) else {
             return nil
         }
         return events.remove(at: index)
     }
 
-    private func record(_ event: DevelopmentChatEventDTO) async {
+    private func record(_ event: ChatDependencyEventDTO) async {
         await recorder.append(
             port: event.port,
             effect: event.effect,
@@ -993,10 +993,10 @@ private actor ChatScenarioScript:
     PendingUserTurnIDGenerator, ChatResponsePositionIDGenerator,
     ProfileStatementGenerationReading
 {
-    private var events: [DevelopmentChatEventDTO]
+    private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder
 
-    init(events: [DevelopmentChatEventDTO], recorder: ChatScenarioRecorder) {
+    init(events: [ChatDependencyEventDTO], recorder: ChatScenarioRecorder) {
         self.events = events.filter {
             $0.port != "chatStore" && $0.port != "attachmentSource" &&
                 $0.port != "coachContext"
@@ -1050,14 +1050,14 @@ private actor ChatScenarioScript:
         return try! ChatResponsePositionID(event.outcome.rendered)
     }
 
-    private func consume(port: String, effect: String) -> DevelopmentChatEventDTO? {
+    private func consume(port: String, effect: String) -> ChatDependencyEventDTO? {
         guard let index = events.firstIndex(where: { $0.port == port && $0.effect == effect }) else {
             return nil
         }
         return events.remove(at: index)
     }
 
-    private func record(_ event: DevelopmentChatEventDTO) async {
+    private func record(_ event: ChatDependencyEventDTO) async {
         await recorder.append(
             port: event.port,
             effect: event.effect,
@@ -1145,10 +1145,10 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
 }
 
 private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
-    private var events: [DevelopmentChatEventDTO]
+    private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder
 
-    init(events: [DevelopmentChatEventDTO], recorder: ChatScenarioRecorder) {
+    init(events: [ChatDependencyEventDTO], recorder: ChatScenarioRecorder) {
         self.events = events
         self.recorder = recorder
     }
@@ -1208,14 +1208,14 @@ private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
         }
     }
 
-    private func consume(effect: String) -> DevelopmentChatEventDTO? {
+    private func consume(effect: String) -> ChatDependencyEventDTO? {
         guard let index = events.firstIndex(where: { $0.effect == effect }) else {
             return nil
         }
         return events.remove(at: index)
     }
 
-    private func record(_ event: DevelopmentChatEventDTO) async {
+    private func record(_ event: ChatDependencyEventDTO) async {
         await recorder.append(
             port: event.port,
             effect: event.effect,
@@ -1226,13 +1226,13 @@ private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
 
 private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
     private let mode: String
-    private var events: [DevelopmentChatEventDTO]
+    private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder
     private var pendingResolutionCount = 0
 
     init(
         mode: String,
-        events: [DevelopmentChatEventDTO],
+        events: [ChatDependencyEventDTO],
         recorder: ChatScenarioRecorder
     ) {
         self.mode = mode
@@ -1459,14 +1459,14 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
         }
     }
 
-    private func consume(effect: String) -> DevelopmentChatEventDTO? {
+    private func consume(effect: String) -> ChatDependencyEventDTO? {
         guard let index = events.firstIndex(where: { $0.effect == effect }) else {
             return nil
         }
         return events.remove(at: index)
     }
 
-    private func record(_ event: DevelopmentChatEventDTO) async {
+    private func record(_ event: ChatDependencyEventDTO) async {
         await recorder.append(
             port: event.port,
             effect: event.effect,

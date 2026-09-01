@@ -6,6 +6,72 @@ import Foundation
 import XCTest
 
 final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
+    func testChatCreateRejectsAttachmentMovedToTrashAtFinalInstallBoundary()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let revisions = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try revisions.publishAndSelectSynchronously(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            let attachment = ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-1"),
+                sessionID: receipt.sessionID,
+                transcriptRevisionID: revision.revisionID
+            )
+            let seed = try NewChatSeed(
+                library: LibraryScope(libraryID: receipt.libraryID),
+                chatID: ChatID("cht-20260830T122000000Z-7STV"),
+                draftID: ChatDraftID("drf-20260830T122000000Z-8TVW"),
+                memoryID: CoachMemoryID("mem-20260830T122000000Z-9VWX"),
+                instant: UTCInstant("2026-08-30T12:20:00.000Z"),
+                profileStatementGeneration: 0,
+                attachments: ChatAttachments(validating: [attachment])
+            )
+            let activeSession = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)",
+                isDirectory: true
+            )
+            let trashedSession = root.appendingPathComponent(
+                "trash/sessions/\(receipt.sessionID.rawValue)",
+                isDirectory: true
+            )
+            let persistence = PortableChatPersistence { point in
+                guard point == .beforeFinalInstall else { return }
+                try FileManager.default.moveItem(
+                    at: activeSession,
+                    to: trashedSession
+                )
+            }
+
+            XCTAssertThrowsError(try persistence.create(seed, at: root)) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .attachmentUnavailable
+                )
+            }
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: root.appendingPathComponent(
+                        "chats/\(seed.aggregate.chat.id.rawValue)"
+                    ).path
+                )
+            )
+            XCTAssertTrue(FileManager.default.fileExists(atPath: trashedSession.path))
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: root.appendingPathComponent("staging/publications").path
+                ),
+                []
+            )
+        }
+    }
+
     func testChatAttachmentReopensExactHistoricalRevisionAfterSelectionChanges() async throws {
         try await withRecordedSession { root, receipt in
             let first = try transcriptRevision(

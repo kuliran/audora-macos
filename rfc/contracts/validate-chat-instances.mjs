@@ -15,7 +15,7 @@ const resourcesDirectory = path.join(
 const schemasDirectory = path.join(resourcesDirectory, "Schemas");
 const examplesDirectory = path.join(
   resourcesDirectory,
-  "Examples/DevelopmentChat/v1",
+  "Examples/Chat/v1",
 );
 const coachContextExamplesDirectory = path.join(
   resourcesDirectory,
@@ -99,7 +99,7 @@ await assertExactInventory(rejectedDirectory, rejectedInventory, "rejected Chat 
 const chatManifest = await validator("ChatManifest.json");
 const coachMemory = await validator("CoachMemoryEnvelope.json");
 const pendingUserTurn = await validator("PendingUserTurn.json");
-const scenario = await validator("DevelopmentChatFeatureScenario.json");
+const chatFeatureScenario = await validator("ChatFeatureScenario.json");
 const coachContextQuote = await validator("CoachContextQuote.json");
 
 await assertExactInventory(
@@ -145,7 +145,7 @@ assertValidation(
 
 for (const name of scenarioInventory) {
   assertValidation(
-    scenario,
+    chatFeatureScenario,
     await loadJSON(path.join(scenariosDirectory, name)),
     true,
     `scenario/${name}`,
@@ -175,7 +175,7 @@ const invalidAttachmentMetadata = [
 for (const [label, mutate] of invalidAttachmentMetadata) {
   const value = structuredClone(attachmentBoundaryScenario);
   mutate(value);
-  assertValidation(scenario, value, false, `scenario/${label}`);
+  assertValidation(chatFeatureScenario, value, false, `scenario/${label}`);
 }
 
 for (const name of schemaInvalidChatFixtures) {

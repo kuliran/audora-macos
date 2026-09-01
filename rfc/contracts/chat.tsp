@@ -117,25 +117,25 @@ namespace Audora.Contracts {
     notes: string;
   }
 
-  /** Portable Chat behavior, including immutable Session attachment selection. */
+  /** Portable Chat behavior across zero or more immutable Session attachments. */
   @jsonSchema
-  @id("DevelopmentChatFeatureScenario.json")
-  model DevelopmentChatFeatureScenario {
+  @id("ChatFeatureScenario.json")
+  model ChatFeatureScenario {
     schemaVersion: 1;
     scenarioId: string;
     libraryId: LibraryId;
-    initialChats: DevelopmentChatScenarioSnapshot[];
-    commands: DevelopmentChatScenarioCommand[];
-    dependencyTrace: DevelopmentChatDependencyEvent[];
-    expectedState: DevelopmentChatScenarioState;
+    initialChats: ChatScenarioSnapshot[];
+    commands: ChatScenarioCommand[];
+    dependencyTrace: ChatDependencyEvent[];
+    expectedState: ChatScenarioState;
     expectedProviderCalls: 0;
     expectedInvocationCalls: 0;
     expectedAdmissionCalls: 0;
-    contextCapacityMode?: DevelopmentChatScenarioContextCapacityMode;
-    suspendedEffect?: DevelopmentChatScenarioSuspendedEffect;
+    contextCapacityMode?: ChatScenarioContextCapacityMode;
+    suspendedEffect?: ChatScenarioSuspendedEffect;
   }
 
-  model DevelopmentChatScenarioSnapshot {
+  model ChatScenarioSnapshot {
     chatId: ChatId;
     draftId: ChatDraftId;
     memoryId: CoachMemoryId;
@@ -156,31 +156,31 @@ namespace Audora.Contracts {
   }
 
   @oneOf
-  union DevelopmentChatScenarioCommand {
+  union ChatScenarioCommand {
     beginNewChat: BeginNewChatScenarioCommand,
     setNewChatAttachmentFilter: SetNewChatAttachmentFilterScenarioCommand,
     toggleNewChatAttachment: ToggleNewChatAttachmentScenarioCommand,
     cancelNewChat: CancelNewChatScenarioCommand,
     confirmNewChat: ConfirmNewChatScenarioCommand,
-    rename: RenameDevelopmentChatScenarioCommand,
-    setFilter: SetDevelopmentChatFilterScenarioCommand,
-    open: OpenDevelopmentChatScenarioCommand,
-    editDraft: EditDevelopmentChatDraftScenarioCommand,
-    refreshContextQuote: RefreshDevelopmentChatContextQuoteScenarioCommand,
-    sendDraft: SendDevelopmentChatDraftScenarioCommand,
+    rename: RenameChatScenarioCommand,
+    setFilter: SetChatFilterScenarioCommand,
+    open: OpenChatScenarioCommand,
+    editDraft: EditChatDraftScenarioCommand,
+    refreshContextQuote: RefreshChatContextQuoteScenarioCommand,
+    sendDraft: SendChatDraftScenarioCommand,
     retryPendingUserTurn: RetryPendingUserTurnScenarioCommand,
     createNewChatFromCapacityFailure: CreateNewChatFromCapacityFailureScenarioCommand,
     discardPendingUserTurn: DiscardPendingUserTurnScenarioCommand,
-    start: StartDevelopmentChatScenarioCommand,
+    start: StartChatScenarioCommand,
   }
 
   @oneOf
-  union DevelopmentChatDependencyEvent {
+  union ChatDependencyEvent {
     catalogLoaded: ChatStoreCatalogLoadedEvent,
     catalogFailed: ChatStoreCatalogFailedEvent,
-    attachmentCatalogLoaded: ChatAttachmentCatalogLoadedEvent,
-    attachmentCatalogReadOnly: ChatAttachmentCatalogReadOnlyEvent,
-    attachmentCatalogFailed: ChatAttachmentCatalogFailedEvent,
+    attachmentCatalogLoaded: NewChatAttachmentCatalogLoadedEvent,
+    attachmentCatalogReadOnly: NewChatAttachmentCatalogReadOnlyEvent,
+    attachmentCatalogFailed: NewChatAttachmentCatalogFailedEvent,
     newChatQuoteAvailable: NewChatQuoteAvailableEvent,
     newChatQuoteUnavailable: NewChatQuoteUnavailableEvent,
     chatAttachmentsResolved: ChatAttachmentsResolvedEvent,
@@ -205,24 +205,24 @@ namespace Audora.Contracts {
     chatResponsePositionIdGenerated: ChatResponsePositionIdGeneratedEvent,
   }
 
-  model DevelopmentChatScenarioState {
+  model ChatScenarioState {
     allChatIds: ChatId[];
     visibleChatIds: ChatId[];
-    catalogStatus?: DevelopmentChatScenarioCatalogStatus;
+    catalogStatus?: ChatScenarioCatalogStatus;
     selectedChatId?: ChatId;
     selectedTitle?: ChatTitleText;
     selectedRevision?: NonnegativeWholeNumber;
-    selectedAvailability?: DevelopmentChatScenarioSelectionAvailability;
-    selectedFrozenReason?: DevelopmentChatScenarioFrozenReason;
+    selectedAvailability?: ChatScenarioSelectionAvailability;
+    selectedFrozenReason?: ChatScenarioFrozenReason;
     selectedDraftText?: ChatDraftText;
     selectedDraftVersion?: NonnegativeWholeNumber;
-    composerStatus?: DevelopmentChatScenarioComposerStatus;
+    composerStatus?: ChatScenarioComposerStatus;
     pendingUserTurnId?: PendingUserTurnId;
     responsePositionId?: ChatResponsePositionId;
     pendingFailure?: PendingUserTurnFailure;
-    notice?: DevelopmentChatScenarioNotice;
-    newChatPickerStatus?: DevelopmentChatScenarioPickerStatus;
-    newChatFilterQuery?: DevelopmentChatAttachmentFilterText;
+    notice?: ChatScenarioNotice;
+    newChatPickerStatus?: NewChatPickerStatus;
+    newChatFilterQuery?: NewChatAttachmentFilterText;
 
     @maxItems(32768)
     newChatAllAttachmentIds?: ChatSessionAttachmentId[];
@@ -233,11 +233,11 @@ namespace Audora.Contracts {
     @maxItems(128)
     newChatSelectedAttachmentIds?: ChatSessionAttachmentId[];
 
-    newChatFeasibility?: DevelopmentChatScenarioCreationFeasibility;
-    newChatIssue?: DevelopmentChatScenarioPickerIssue;
+    newChatFeasibility?: NewChatCreationFeasibility;
+    newChatIssue?: NewChatPickerIssue;
 
     @maxItems(128)
-    openedAttachmentStatuses?: DevelopmentChatOpenedAttachmentStatus[];
+    openedAttachmentStatuses?: ChatOpenedAttachmentStatus[];
   }
 
   model BeginNewChatScenarioCommand {
@@ -246,7 +246,7 @@ namespace Audora.Contracts {
 
   model SetNewChatAttachmentFilterScenarioCommand {
     kind: "setNewChatAttachmentFilter";
-    query: DevelopmentChatAttachmentFilterText;
+    query: NewChatAttachmentFilterText;
   }
 
   model ToggleNewChatAttachmentScenarioCommand {
@@ -262,33 +262,33 @@ namespace Audora.Contracts {
     kind: "confirmNewChat";
   }
 
-  model RenameDevelopmentChatScenarioCommand {
+  model RenameChatScenarioCommand {
     kind: "rename";
     chatId: ChatId;
     title: string;
     expectedRevision: NonnegativeWholeNumber;
   }
 
-  model SetDevelopmentChatFilterScenarioCommand {
+  model SetChatFilterScenarioCommand {
     kind: "setFilter";
     query: string;
   }
 
-  model OpenDevelopmentChatScenarioCommand {
+  model OpenChatScenarioCommand {
     kind: "open";
     chatId: ChatId;
   }
 
-  model EditDevelopmentChatDraftScenarioCommand {
+  model EditChatDraftScenarioCommand {
     kind: "editDraft";
     text: ChatDraftText;
   }
 
-  model SendDevelopmentChatDraftScenarioCommand {
+  model SendChatDraftScenarioCommand {
     kind: "sendDraft";
   }
 
-  model RefreshDevelopmentChatContextQuoteScenarioCommand {
+  model RefreshChatContextQuoteScenarioCommand {
     kind: "refreshContextQuote";
   }
 
@@ -307,7 +307,7 @@ namespace Audora.Contracts {
     pendingUserTurnId: PendingUserTurnId;
   }
 
-  model StartDevelopmentChatScenarioCommand {
+  model StartChatScenarioCommand {
     kind: "start";
     libraryId: LibraryId;
   }
@@ -328,22 +328,22 @@ namespace Audora.Contracts {
     libraryId?: LibraryId;
   }
 
-  model ChatAttachmentCatalogLoadedEvent {
+  model NewChatAttachmentCatalogLoadedEvent {
     port: "attachmentSource";
     effect: "loadCandidates";
     outcome: "loaded";
 
     @maxItems(32768)
-    candidates: DevelopmentChatAttachmentCandidate[];
+    candidates: NewChatAttachmentCandidate[];
   }
 
-  model ChatAttachmentCatalogReadOnlyEvent {
+  model NewChatAttachmentCatalogReadOnlyEvent {
     port: "attachmentSource";
     effect: "loadCandidates";
     outcome: "readOnlyLibrary";
   }
 
-  model ChatAttachmentCatalogFailedEvent {
+  model NewChatAttachmentCatalogFailedEvent {
     port: "attachmentSource";
     effect: "loadCandidates";
     outcome: "failed";
@@ -359,7 +359,7 @@ namespace Audora.Contracts {
   model NewChatQuoteUnavailableEvent {
     port: "coachContext";
     effect: "quoteNewChat";
-    outcome: DevelopmentChatScenarioQuoteUnavailableReason;
+    outcome: NewChatQuoteUnavailableReason;
   }
 
   model ChatAttachmentsResolvedEvent {
@@ -368,7 +368,7 @@ namespace Audora.Contracts {
     outcome: "resolved";
 
     @maxItems(128)
-    resolutions: DevelopmentChatAttachmentResolution[];
+    resolutions: ChatAttachmentResolution[];
   }
 
   model ChatAttachmentResolutionReadOnlyEvent {
@@ -383,10 +383,10 @@ namespace Audora.Contracts {
     outcome: "failed";
   }
 
-  model DevelopmentChatAttachmentCandidate {
+  model NewChatAttachmentCandidate {
     sessionId: SessionId;
     transcriptRevisionId: TranscriptRevisionId;
-    displayLabel: DevelopmentChatAttachmentDisplayLabel;
+    displayLabel: NewChatAttachmentDisplayLabel;
 
     @minValue(1)
     @maxValue(2700000)
@@ -396,29 +396,29 @@ namespace Audora.Contracts {
     @maxValue(67108864)
     approximateTranscriptTokens: integer;
 
-    delivery: DevelopmentChatAttachmentDelivery;
+    delivery: NewChatAttachmentDelivery;
   }
 
   @oneOf
-  union DevelopmentChatAttachmentResolution {
-    available: DevelopmentChatAvailableAttachmentResolution,
-    unavailable: DevelopmentChatUnavailableAttachmentResolution,
+  union ChatAttachmentResolution {
+    available: ChatAvailableAttachmentResolution,
+    unavailable: ChatUnavailableAttachmentResolution,
   }
 
-  model DevelopmentChatAvailableAttachmentResolution {
+  model ChatAvailableAttachmentResolution {
     attachment: ChatSessionAttachment;
     status: "available";
-    candidate: DevelopmentChatAttachmentCandidate;
+    candidate: NewChatAttachmentCandidate;
   }
 
-  model DevelopmentChatUnavailableAttachmentResolution {
+  model ChatUnavailableAttachmentResolution {
     attachment: ChatSessionAttachment;
-    status: DevelopmentChatAttachmentUnavailableReason;
+    status: ChatAttachmentUnavailableReason;
   }
 
-  model DevelopmentChatOpenedAttachmentStatus {
+  model ChatOpenedAttachmentStatus {
     attachmentId: ChatSessionAttachmentId;
-    status: DevelopmentChatOpenedAttachmentAvailability;
+    status: ChatOpenedAttachmentAvailability;
   }
 
   model ChatStoreChatLoadedEvent {
@@ -431,14 +431,14 @@ namespace Audora.Contracts {
     port: "chatStore";
     effect: "load";
     outcome: "frozen";
-    reason: DevelopmentChatScenarioFrozenReason;
+    reason: ChatScenarioFrozenReason;
   }
 
   model ChatStoreChatCreatedEvent {
     port: "chatStore";
     effect: "create";
     outcome: "committed";
-    chat: DevelopmentChatScenarioSnapshot;
+    chat: ChatScenarioSnapshot;
   }
 
   model ChatStoreCreateCollisionEvent {
@@ -525,28 +525,28 @@ namespace Audora.Contracts {
     outcome: ChatResponsePositionId;
   }
 
-  union DevelopmentChatScenarioContextCapacityMode {
+  union ChatScenarioContextCapacityMode {
     alwaysFits: "alwaysFits",
     cannotFitThenFits: "cannotFitThenFits",
   }
 
-  union DevelopmentChatScenarioSuspendedEffect {
+  union ChatScenarioSuspendedEffect {
     firstCatalogLoad: "firstCatalogLoad",
   }
 
-  union DevelopmentChatScenarioCatalogStatus {
+  union ChatScenarioCatalogStatus {
     ready: "ready",
     failed: "failed",
   }
 
-  union DevelopmentChatScenarioPickerStatus {
+  union NewChatPickerStatus {
     closed: "closed",
     loading: "loading",
     ready: "ready",
     failed: "failed",
   }
 
-  union DevelopmentChatScenarioCreationFeasibility {
+  union NewChatCreationFeasibility {
     quoting: "quoting",
     fits: "fits",
     cannotFit: "cannotFit",
@@ -556,14 +556,14 @@ namespace Audora.Contracts {
     invalidContext: "invalidContext",
   }
 
-  union DevelopmentChatScenarioQuoteUnavailableReason {
+  union NewChatQuoteUnavailableReason {
     providerUnavailable: "providerUnavailable",
     sourceUnavailable: "sourceUnavailable",
     staleState: "staleState",
     invalidContext: "invalidContext",
   }
 
-  union DevelopmentChatScenarioPickerIssue {
+  union NewChatPickerIssue {
     selectionLimitReached: "selectionLimitReached",
     attachmentUnavailable: "attachmentUnavailable",
     contextCannotFit: "contextCannotFit",
@@ -573,19 +573,19 @@ namespace Audora.Contracts {
     invalidContext: "invalidContext",
   }
 
-  union DevelopmentChatAttachmentDelivery {
+  union NewChatAttachmentDelivery {
     inline: "inline",
     onDemand: "onDemand",
   }
 
-  union DevelopmentChatAttachmentUnavailableReason {
+  union ChatAttachmentUnavailableReason {
     missing: "missing",
     inTrash: "inTrash",
     corrupt: "corrupt",
     unsupportedSchema: "unsupportedSchema",
   }
 
-  union DevelopmentChatOpenedAttachmentAvailability {
+  union ChatOpenedAttachmentAvailability {
     available: "available",
     missing: "missing",
     inTrash: "inTrash",
@@ -593,23 +593,23 @@ namespace Audora.Contracts {
     unsupportedSchema: "unsupportedSchema",
   }
 
-  union DevelopmentChatScenarioSelectionAvailability {
+  union ChatScenarioSelectionAvailability {
     open: "open",
     frozen: "frozen",
   }
 
-  union DevelopmentChatScenarioComposerStatus {
+  union ChatScenarioComposerStatus {
     editable: "editable",
     locked: "locked",
   }
 
-  union DevelopmentChatScenarioFrozenReason {
+  union ChatScenarioFrozenReason {
     newerSchema: "newerSchema",
     unsupportedSchema: "unsupportedSchema",
     corrupt: "corrupt",
   }
 
-  union DevelopmentChatScenarioNotice {
+  union ChatScenarioNotice {
     invalidTitle: "invalidTitle",
     createFailed: "createFailed",
     createCollisionLimitReached: "createCollisionLimitReached",
@@ -632,9 +632,9 @@ namespace Audora.Contracts {
   @minLength(1)
   @maxLength(256)
   @pattern("^[^\\u0000-\\u001F\\u007F-\\u009F]*$")
-  scalar DevelopmentChatAttachmentDisplayLabel extends string;
+  scalar NewChatAttachmentDisplayLabel extends string;
 
   @maxLength(256)
   @pattern("^[^\\u0000-\\u001F\\u007F-\\u009F]*$")
-  scalar DevelopmentChatAttachmentFilterText extends string;
+  scalar NewChatAttachmentFilterText extends string;
 }

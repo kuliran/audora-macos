@@ -1,4 +1,4 @@
-import AudoraApplication
+@_spi(CoachContextQualification) import AudoraApplication
 import AudoraDomain
 import Darwin
 import Foundation
@@ -50,6 +50,7 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
 
 public enum PortableChatPersistenceError: Error, Equatable, Sendable {
     case collision
+    case attachmentUnavailable
     case readOnlyLibrary
     case libraryScopeMismatch
     case profileStatementGenerationChanged(UInt64)
@@ -92,7 +93,7 @@ private func frozenChatSnapshot(
     case .expectedPathIsSymlink, .invalidLayout, .rootTooLarge, .invalidJSON,
          .invalidSchemaVersion, .unknownKey:
         FrozenChatSnapshot(chatID: chatID, reason: .corrupt)
-    case .collision, .readOnlyLibrary, .libraryScopeMismatch,
+    case .collision, .attachmentUnavailable, .readOnlyLibrary, .libraryScopeMismatch,
          .profileStatementGenerationChanged, .chatMissing, .ioFailure,
          .injectedFault:
         nil
@@ -303,6 +304,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let validatedCandidateIdentity = try directoryIdentity(of: candidateDescriptor)
 
         try fault(.beforeFinalInstall)
+        guard attachmentsAreAvailable(for: seed, at: libraryRoot) else {
+            throw PortableChatPersistenceError.attachmentUnavailable
+        }
         try revalidateLibraryAuthority(
             libraryID: seed.library.libraryID,
             profileStatementGeneration: seed.aggregate.chat.profileStatementGenerationAtCreation,
@@ -865,6 +869,28 @@ public struct PortableChatPersistence: @unchecked Sendable {
             throw PortableChatPersistenceError.invalidLayout
         }
         return confirmed
+    }
+
+    private func attachmentsAreAvailable(
+        for seed: NewChatSeed,
+        at root: URL
+    ) -> Bool {
+        let observations = ChatAttachmentAvailabilityAccumulator()
+        do {
+            try PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: seed.library.libraryID
+            ).forEachResolvedChatAttachmentEvidenceSynchronously(
+                seed.aggregate.chat.attachments
+            ) { item in
+                observations.observe(item)
+            }
+        } catch {
+            return false
+        }
+        return observations.validates(
+            expectedCount: seed.aggregate.chat.attachments.values.count
+        )
     }
 
     fileprivate func reconcileCommittedRename(
@@ -1976,6 +2002,31 @@ public struct PortableChatPersistence: @unchecked Sendable {
     }
 }
 
+private final class ChatAttachmentAvailabilityAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private var allAvailable = true
+
+    func observe(_ item: ResolvedChatAttachmentEvidence) {
+        lock.lock()
+        defer { lock.unlock() }
+        count += 1
+        guard case let .available(evidence) = item.resolution,
+              evidence.revision.sessionID == item.attachment.sessionID,
+              evidence.revision.revisionID == item.attachment.transcriptRevisionID
+        else {
+            allAvailable = false
+            return
+        }
+    }
+
+    func validates(expectedCount: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return allAvailable && count == expectedCount
+    }
+}
+
 public actor PortableChatStore: ChatStorePort {
     private let persistence: PortableChatPersistence
     private let workspace: PortableLibraryWorkspace
@@ -2020,6 +2071,8 @@ public actor PortableChatStore: ChatStorePort {
                 return ChatMutationOutcome.committed(try persistence.create(seed, at: root))
             } catch PortableChatPersistenceError.collision {
                 return ChatMutationOutcome.collision
+            } catch PortableChatPersistenceError.attachmentUnavailable {
+                return ChatMutationOutcome.attachmentUnavailable
             } catch let PortableChatPersistenceError.profileStatementGenerationChanged(current) {
                 return ChatMutationOutcome.profileStatementGenerationChanged(current)
             } catch PortableChatPersistenceError.readOnlyLibrary {

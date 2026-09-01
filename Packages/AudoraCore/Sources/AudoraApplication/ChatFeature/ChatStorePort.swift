@@ -203,6 +203,7 @@ public enum ChatCatalogOutcome: Equatable, Sendable {
 public enum ChatMutationOutcome: Equatable, Sendable {
     case committed(ChatAggregate)
     case collision
+    case attachmentUnavailable
     case profileStatementGenerationChanged(UInt64)
     case stale(ChatAggregate)
     case frozen(FrozenChatSnapshot)

@@ -1,6 +1,6 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://audora.local/contracts/DevelopmentChatFeatureScenario.json",
+    "$id": "https://audora.local/contracts/ChatFeatureScenario.json",
     "type": "object",
     "properties": {
         "schemaVersion": {
@@ -16,23 +16,23 @@
         "initialChats": {
             "type": "array",
             "items": {
-                "$ref": "#/$defs/DevelopmentChatScenarioSnapshot"
+                "$ref": "#/$defs/ChatScenarioSnapshot"
             }
         },
         "commands": {
             "type": "array",
             "items": {
-                "$ref": "#/$defs/DevelopmentChatScenarioCommand"
+                "$ref": "#/$defs/ChatScenarioCommand"
             }
         },
         "dependencyTrace": {
             "type": "array",
             "items": {
-                "$ref": "#/$defs/DevelopmentChatDependencyEvent"
+                "$ref": "#/$defs/ChatDependencyEvent"
             }
         },
         "expectedState": {
-            "$ref": "#/$defs/DevelopmentChatScenarioState"
+            "$ref": "#/$defs/ChatScenarioState"
         },
         "expectedProviderCalls": {
             "type": "number",
@@ -47,10 +47,10 @@
             "const": 0
         },
         "contextCapacityMode": {
-            "$ref": "#/$defs/DevelopmentChatScenarioContextCapacityMode"
+            "$ref": "#/$defs/ChatScenarioContextCapacityMode"
         },
         "suspendedEffect": {
-            "$ref": "#/$defs/DevelopmentChatScenarioSuspendedEffect"
+            "$ref": "#/$defs/ChatScenarioSuspendedEffect"
         }
     },
     "required": [
@@ -68,13 +68,13 @@
     "unevaluatedProperties": {
         "not": {}
     },
-    "description": "Portable Chat behavior, including immutable Session attachment selection.",
+    "description": "Portable Chat behavior across zero or more immutable Session attachments.",
     "$defs": {
         "LibraryId": {
             "type": "string",
             "pattern": "^lib-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
         },
-        "DevelopmentChatScenarioSnapshot": {
+        "ChatScenarioSnapshot": {
             "type": "object",
             "properties": {
                 "chatId": {
@@ -151,7 +151,7 @@
                 "not": {}
             }
         },
-        "DevelopmentChatScenarioCommand": {
+        "ChatScenarioCommand": {
             "oneOf": [
                 {
                     "$ref": "#/$defs/BeginNewChatScenarioCommand"
@@ -169,22 +169,22 @@
                     "$ref": "#/$defs/ConfirmNewChatScenarioCommand"
                 },
                 {
-                    "$ref": "#/$defs/RenameDevelopmentChatScenarioCommand"
+                    "$ref": "#/$defs/RenameChatScenarioCommand"
                 },
                 {
-                    "$ref": "#/$defs/SetDevelopmentChatFilterScenarioCommand"
+                    "$ref": "#/$defs/SetChatFilterScenarioCommand"
                 },
                 {
-                    "$ref": "#/$defs/OpenDevelopmentChatScenarioCommand"
+                    "$ref": "#/$defs/OpenChatScenarioCommand"
                 },
                 {
-                    "$ref": "#/$defs/EditDevelopmentChatDraftScenarioCommand"
+                    "$ref": "#/$defs/EditChatDraftScenarioCommand"
                 },
                 {
-                    "$ref": "#/$defs/RefreshDevelopmentChatContextQuoteScenarioCommand"
+                    "$ref": "#/$defs/RefreshChatContextQuoteScenarioCommand"
                 },
                 {
-                    "$ref": "#/$defs/SendDevelopmentChatDraftScenarioCommand"
+                    "$ref": "#/$defs/SendChatDraftScenarioCommand"
                 },
                 {
                     "$ref": "#/$defs/RetryPendingUserTurnScenarioCommand"
@@ -196,11 +196,11 @@
                     "$ref": "#/$defs/DiscardPendingUserTurnScenarioCommand"
                 },
                 {
-                    "$ref": "#/$defs/StartDevelopmentChatScenarioCommand"
+                    "$ref": "#/$defs/StartChatScenarioCommand"
                 }
             ]
         },
-        "DevelopmentChatDependencyEvent": {
+        "ChatDependencyEvent": {
             "oneOf": [
                 {
                     "$ref": "#/$defs/ChatStoreCatalogLoadedEvent"
@@ -209,13 +209,13 @@
                     "$ref": "#/$defs/ChatStoreCatalogFailedEvent"
                 },
                 {
-                    "$ref": "#/$defs/ChatAttachmentCatalogLoadedEvent"
+                    "$ref": "#/$defs/NewChatAttachmentCatalogLoadedEvent"
                 },
                 {
-                    "$ref": "#/$defs/ChatAttachmentCatalogReadOnlyEvent"
+                    "$ref": "#/$defs/NewChatAttachmentCatalogReadOnlyEvent"
                 },
                 {
-                    "$ref": "#/$defs/ChatAttachmentCatalogFailedEvent"
+                    "$ref": "#/$defs/NewChatAttachmentCatalogFailedEvent"
                 },
                 {
                     "$ref": "#/$defs/NewChatQuoteAvailableEvent"
@@ -285,7 +285,7 @@
                 }
             ]
         },
-        "DevelopmentChatScenarioState": {
+        "ChatScenarioState": {
             "type": "object",
             "properties": {
                 "allChatIds": {
@@ -301,7 +301,7 @@
                     }
                 },
                 "catalogStatus": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioCatalogStatus"
+                    "$ref": "#/$defs/ChatScenarioCatalogStatus"
                 },
                 "selectedChatId": {
                     "$ref": "#/$defs/ChatId"
@@ -313,10 +313,10 @@
                     "$ref": "#/$defs/NonnegativeWholeNumber"
                 },
                 "selectedAvailability": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioSelectionAvailability"
+                    "$ref": "#/$defs/ChatScenarioSelectionAvailability"
                 },
                 "selectedFrozenReason": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioFrozenReason"
+                    "$ref": "#/$defs/ChatScenarioFrozenReason"
                 },
                 "selectedDraftText": {
                     "$ref": "#/$defs/ChatDraftText"
@@ -325,7 +325,7 @@
                     "$ref": "#/$defs/NonnegativeWholeNumber"
                 },
                 "composerStatus": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioComposerStatus"
+                    "$ref": "#/$defs/ChatScenarioComposerStatus"
                 },
                 "pendingUserTurnId": {
                     "$ref": "#/$defs/PendingUserTurnId"
@@ -337,13 +337,13 @@
                     "$ref": "#/$defs/PendingUserTurnFailure"
                 },
                 "notice": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioNotice"
+                    "$ref": "#/$defs/ChatScenarioNotice"
                 },
                 "newChatPickerStatus": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioPickerStatus"
+                    "$ref": "#/$defs/NewChatPickerStatus"
                 },
                 "newChatFilterQuery": {
-                    "$ref": "#/$defs/DevelopmentChatAttachmentFilterText"
+                    "$ref": "#/$defs/NewChatAttachmentFilterText"
                 },
                 "newChatAllAttachmentIds": {
                     "type": "array",
@@ -367,15 +367,15 @@
                     "maxItems": 128
                 },
                 "newChatFeasibility": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioCreationFeasibility"
+                    "$ref": "#/$defs/NewChatCreationFeasibility"
                 },
                 "newChatIssue": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioPickerIssue"
+                    "$ref": "#/$defs/NewChatPickerIssue"
                 },
                 "openedAttachmentStatuses": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/$defs/DevelopmentChatOpenedAttachmentStatus"
+                        "$ref": "#/$defs/ChatOpenedAttachmentStatus"
                     },
                     "maxItems": 128
                 }
@@ -388,7 +388,7 @@
                 "not": {}
             }
         },
-        "DevelopmentChatScenarioContextCapacityMode": {
+        "ChatScenarioContextCapacityMode": {
             "anyOf": [
                 {
                     "type": "string",
@@ -400,7 +400,7 @@
                 }
             ]
         },
-        "DevelopmentChatScenarioSuspendedEffect": {
+        "ChatScenarioSuspendedEffect": {
             "anyOf": [
                 {
                     "type": "string",
@@ -505,7 +505,7 @@
                     "const": "setNewChatAttachmentFilter"
                 },
                 "query": {
-                    "$ref": "#/$defs/DevelopmentChatAttachmentFilterText"
+                    "$ref": "#/$defs/NewChatAttachmentFilterText"
                 }
             },
             "required": [
@@ -565,7 +565,7 @@
                 "not": {}
             }
         },
-        "RenameDevelopmentChatScenarioCommand": {
+        "RenameChatScenarioCommand": {
             "type": "object",
             "properties": {
                 "kind": {
@@ -592,7 +592,7 @@
                 "not": {}
             }
         },
-        "SetDevelopmentChatFilterScenarioCommand": {
+        "SetChatFilterScenarioCommand": {
             "type": "object",
             "properties": {
                 "kind": {
@@ -611,7 +611,7 @@
                 "not": {}
             }
         },
-        "OpenDevelopmentChatScenarioCommand": {
+        "OpenChatScenarioCommand": {
             "type": "object",
             "properties": {
                 "kind": {
@@ -630,7 +630,7 @@
                 "not": {}
             }
         },
-        "EditDevelopmentChatDraftScenarioCommand": {
+        "EditChatDraftScenarioCommand": {
             "type": "object",
             "properties": {
                 "kind": {
@@ -649,7 +649,7 @@
                 "not": {}
             }
         },
-        "RefreshDevelopmentChatContextQuoteScenarioCommand": {
+        "RefreshChatContextQuoteScenarioCommand": {
             "type": "object",
             "properties": {
                 "kind": {
@@ -664,7 +664,7 @@
                 "not": {}
             }
         },
-        "SendDevelopmentChatDraftScenarioCommand": {
+        "SendChatDraftScenarioCommand": {
             "type": "object",
             "properties": {
                 "kind": {
@@ -736,7 +736,7 @@
                 "not": {}
             }
         },
-        "StartDevelopmentChatScenarioCommand": {
+        "StartChatScenarioCommand": {
             "type": "object",
             "properties": {
                 "kind": {
@@ -822,7 +822,7 @@
                 "not": {}
             }
         },
-        "ChatAttachmentCatalogLoadedEvent": {
+        "NewChatAttachmentCatalogLoadedEvent": {
             "type": "object",
             "properties": {
                 "port": {
@@ -840,7 +840,7 @@
                 "candidates": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/$defs/DevelopmentChatAttachmentCandidate"
+                        "$ref": "#/$defs/NewChatAttachmentCandidate"
                     },
                     "maxItems": 32768
                 }
@@ -855,7 +855,7 @@
                 "not": {}
             }
         },
-        "ChatAttachmentCatalogReadOnlyEvent": {
+        "NewChatAttachmentCatalogReadOnlyEvent": {
             "type": "object",
             "properties": {
                 "port": {
@@ -880,7 +880,7 @@
                 "not": {}
             }
         },
-        "ChatAttachmentCatalogFailedEvent": {
+        "NewChatAttachmentCatalogFailedEvent": {
             "type": "object",
             "properties": {
                 "port": {
@@ -946,7 +946,7 @@
                     "const": "quoteNewChat"
                 },
                 "outcome": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioQuoteUnavailableReason"
+                    "$ref": "#/$defs/NewChatQuoteUnavailableReason"
                 }
             },
             "required": [
@@ -976,7 +976,7 @@
                 "resolutions": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/$defs/DevelopmentChatAttachmentResolution"
+                        "$ref": "#/$defs/ChatAttachmentResolution"
                     },
                     "maxItems": 128
                 }
@@ -1082,7 +1082,7 @@
                     "const": "frozen"
                 },
                 "reason": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioFrozenReason"
+                    "$ref": "#/$defs/ChatScenarioFrozenReason"
                 }
             },
             "required": [
@@ -1111,7 +1111,7 @@
                     "const": "committed"
                 },
                 "chat": {
-                    "$ref": "#/$defs/DevelopmentChatScenarioSnapshot"
+                    "$ref": "#/$defs/ChatScenarioSnapshot"
                 }
             },
             "required": [
@@ -1467,7 +1467,7 @@
                 "not": {}
             }
         },
-        "DevelopmentChatScenarioCatalogStatus": {
+        "ChatScenarioCatalogStatus": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1479,7 +1479,7 @@
                 }
             ]
         },
-        "DevelopmentChatScenarioSelectionAvailability": {
+        "ChatScenarioSelectionAvailability": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1491,7 +1491,7 @@
                 }
             ]
         },
-        "DevelopmentChatScenarioFrozenReason": {
+        "ChatScenarioFrozenReason": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1507,7 +1507,7 @@
                 }
             ]
         },
-        "DevelopmentChatScenarioComposerStatus": {
+        "ChatScenarioComposerStatus": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1535,7 +1535,7 @@
                 }
             ]
         },
-        "DevelopmentChatScenarioNotice": {
+        "ChatScenarioNotice": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1607,7 +1607,7 @@
                 }
             ]
         },
-        "DevelopmentChatScenarioPickerStatus": {
+        "NewChatPickerStatus": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1627,7 +1627,7 @@
                 }
             ]
         },
-        "DevelopmentChatAttachmentFilterText": {
+        "NewChatAttachmentFilterText": {
             "type": "string",
             "maxLength": 256,
             "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
@@ -1638,7 +1638,7 @@
             "maxLength": 64,
             "pattern": "^[0-9A-Za-z_-]+$"
         },
-        "DevelopmentChatScenarioCreationFeasibility": {
+        "NewChatCreationFeasibility": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1670,7 +1670,7 @@
                 }
             ]
         },
-        "DevelopmentChatScenarioPickerIssue": {
+        "NewChatPickerIssue": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1702,14 +1702,14 @@
                 }
             ]
         },
-        "DevelopmentChatOpenedAttachmentStatus": {
+        "ChatOpenedAttachmentStatus": {
             "type": "object",
             "properties": {
                 "attachmentId": {
                     "$ref": "#/$defs/ChatSessionAttachmentId"
                 },
                 "status": {
-                    "$ref": "#/$defs/DevelopmentChatOpenedAttachmentAvailability"
+                    "$ref": "#/$defs/ChatOpenedAttachmentAvailability"
                 }
             },
             "required": [
@@ -1728,7 +1728,7 @@
             "type": "string",
             "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
         },
-        "DevelopmentChatAttachmentCandidate": {
+        "NewChatAttachmentCandidate": {
             "type": "object",
             "properties": {
                 "sessionId": {
@@ -1738,7 +1738,7 @@
                     "$ref": "#/$defs/TranscriptRevisionId"
                 },
                 "displayLabel": {
-                    "$ref": "#/$defs/DevelopmentChatAttachmentDisplayLabel"
+                    "$ref": "#/$defs/NewChatAttachmentDisplayLabel"
                 },
                 "durationMilliseconds": {
                     "type": "integer",
@@ -1751,7 +1751,7 @@
                     "maximum": 67108864
                 },
                 "delivery": {
-                    "$ref": "#/$defs/DevelopmentChatAttachmentDelivery"
+                    "$ref": "#/$defs/NewChatAttachmentDelivery"
                 }
             },
             "required": [
@@ -1766,7 +1766,7 @@
                 "not": {}
             }
         },
-        "DevelopmentChatScenarioQuoteUnavailableReason": {
+        "NewChatQuoteUnavailableReason": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1786,17 +1786,17 @@
                 }
             ]
         },
-        "DevelopmentChatAttachmentResolution": {
+        "ChatAttachmentResolution": {
             "oneOf": [
                 {
-                    "$ref": "#/$defs/DevelopmentChatAvailableAttachmentResolution"
+                    "$ref": "#/$defs/ChatAvailableAttachmentResolution"
                 },
                 {
-                    "$ref": "#/$defs/DevelopmentChatUnavailableAttachmentResolution"
+                    "$ref": "#/$defs/ChatUnavailableAttachmentResolution"
                 }
             ]
         },
-        "DevelopmentChatOpenedAttachmentAvailability": {
+        "ChatOpenedAttachmentAvailability": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1820,13 +1820,13 @@
                 }
             ]
         },
-        "DevelopmentChatAttachmentDisplayLabel": {
+        "NewChatAttachmentDisplayLabel": {
             "type": "string",
             "minLength": 1,
             "maxLength": 256,
             "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
         },
-        "DevelopmentChatAttachmentDelivery": {
+        "NewChatAttachmentDelivery": {
             "anyOf": [
                 {
                     "type": "string",
@@ -1838,7 +1838,7 @@
                 }
             ]
         },
-        "DevelopmentChatAvailableAttachmentResolution": {
+        "ChatAvailableAttachmentResolution": {
             "type": "object",
             "properties": {
                 "attachment": {
@@ -1849,7 +1849,7 @@
                     "const": "available"
                 },
                 "candidate": {
-                    "$ref": "#/$defs/DevelopmentChatAttachmentCandidate"
+                    "$ref": "#/$defs/NewChatAttachmentCandidate"
                 }
             },
             "required": [
@@ -1861,14 +1861,14 @@
                 "not": {}
             }
         },
-        "DevelopmentChatUnavailableAttachmentResolution": {
+        "ChatUnavailableAttachmentResolution": {
             "type": "object",
             "properties": {
                 "attachment": {
                     "$ref": "#/$defs/ChatSessionAttachment"
                 },
                 "status": {
-                    "$ref": "#/$defs/DevelopmentChatAttachmentUnavailableReason"
+                    "$ref": "#/$defs/ChatAttachmentUnavailableReason"
                 }
             },
             "required": [
@@ -1879,7 +1879,7 @@
                 "not": {}
             }
         },
-        "DevelopmentChatAttachmentUnavailableReason": {
+        "ChatAttachmentUnavailableReason": {
             "anyOf": [
                 {
                     "type": "string",

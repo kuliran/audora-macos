@@ -98,6 +98,10 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
         guard !admissionState.isOrderlyTerminationPending else {
             return completedReceipt()
         }
+        if case .cancelNewChat = command {
+            let chat = chat
+            return ApplicationCommandReceipt(task: Task { await chat.send(command) })
+        }
         guard !admissionState.isLibraryNavigationPending,
               !admissionState.isChatBoundaryPending
         else {
