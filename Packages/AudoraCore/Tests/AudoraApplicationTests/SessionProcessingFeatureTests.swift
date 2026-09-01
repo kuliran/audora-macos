@@ -1136,6 +1136,88 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(requestCount, 0)
     }
 
+    func testLibraryActivationKeepsEveryUnknownWorkerFenceAcrossNewerTerminalJobs()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let running = fixture.job(state: .running)
+
+        for terminalState in [
+            SessionProcessingJobState.cancelled,
+            .interrupted,
+        ] {
+            let newer = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T120700000Z-7MNP"),
+                sessionID: fixture.selection.sessionID,
+                revisionID: try TranscriptRevisionID("trv-20260830T120700000Z-7MNP"),
+                profileID: fixture.profile.profileID,
+                createdAt: try UTCInstant("2026-08-30T12:07:00.000Z"),
+                state: terminalState,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-newer-terminal"
+                )
+            )
+            let reconciliationID = try SessionProcessingReconciliationID(
+                "reconcile-unknown-worker-\(terminalState.rawValue)"
+            )
+            let jobs = JobProbe(
+                latest: newer,
+                inventoryResult: .available(
+                    SessionProcessingJobInventory(
+                        reconciliationID: reconciliationID,
+                        scope: fixture.selection.scope,
+                        jobs: [running, newer]
+                    )
+                )
+            )
+            let source = SourceProbe(.available(fixture.source))
+            let engine = EngineProbe(
+                result: .failure(.launchFailed),
+                presence: .unknown
+            )
+            let feature = DefaultSessionProcessingFeature(
+                source: source,
+                runtime: RuntimeProbe(.qualified(fixture.profile)),
+                model: ModelProbe(.ready),
+                acoustics: AcousticProbe(fixture.evidence),
+                jobs: jobs,
+                engine: engine,
+                publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+                clock: FixedProcessingClock(fixture.createdAt),
+                identifiers: FixedProcessingIdentifiers(
+                    jobID: fixture.jobID,
+                    revisionID: fixture.revisionID
+                )
+            )
+
+            await feature.send(.activateLibrary(fixture.selection.scope))
+            await feature.send(.selectSession(fixture.selection))
+
+            if case let .recoveryRequired(authority) = await feature.currentState {
+                XCTAssertEqual(authority, running)
+            } else {
+                XCTFail(
+                    "the older unknown worker must fence \(terminalState.rawValue) retry"
+                )
+            }
+
+            await feature.send(.retry)
+
+            let sourceLoads = await source.loadCount
+            let presenceQueries = await engine.presenceQueries
+            let engineRequests = await engine.requests
+            let persistedStates = await jobs.states
+            XCTAssertEqual(sourceLoads, 0, terminalState.rawValue)
+            XCTAssertEqual(
+                presenceQueries,
+                [running.executionReference],
+                terminalState.rawValue
+            )
+            XCTAssertEqual(engineRequests.count, 0, terminalState.rawValue)
+            XCTAssertEqual(persistedStates, [], terminalState.rawValue)
+        }
+    }
+
     func testLibraryActivationStaleTransitionRetainsTheExactDurableWinner()
         async throws
     {

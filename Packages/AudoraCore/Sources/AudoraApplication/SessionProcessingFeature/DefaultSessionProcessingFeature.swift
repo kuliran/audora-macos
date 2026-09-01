@@ -27,6 +27,38 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         case unconfirmed(SessionProcessingJob)
     }
 
+    private struct ActivationRecoveryLedger {
+        var exactWinner: SessionProcessingJob?
+        private var unconfirmedJobs: [TranscriptionJobID: SessionProcessingJob]
+            = [:]
+
+        var recoveryRequiredJob: SessionProcessingJob? {
+            unconfirmedJobs.values.min {
+                ($0.createdAt.rawValue, $0.jobID.rawValue) <
+                    ($1.createdAt.rawValue, $1.jobID.rawValue)
+            }
+        }
+
+        var isEmpty: Bool { exactWinner == nil && unconfirmedJobs.isEmpty }
+
+        mutating func retain(_ recovery: ActivationRecovery) {
+            switch recovery {
+            case let .exactWinner(job):
+                exactWinner = job
+            case let .unconfirmed(job):
+                unconfirmedJobs[job.jobID] = job
+            }
+        }
+
+        mutating func supersedeExactWinner() {
+            exactWinner = nil
+        }
+
+        mutating func resolveUnconfirmedJob(_ jobID: TranscriptionJobID) {
+            unconfirmedJobs.removeValue(forKey: jobID)
+        }
+    }
+
     private enum DurableMutationOutcome {
         case settled
         case stale
@@ -83,7 +115,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private var cancelledRunJobID: TranscriptionJobID?
     private var invalidCompletedJobs: [CompletedRecoveryKey: SessionProcessingJob]
         = [:]
-    private var activationRecovery: [CompletedRecoveryKey: ActivationRecovery]
+    private var activationRecovery: [CompletedRecoveryKey: ActivationRecoveryLedger]
         = [:]
     private var activeReconciliationScope: LibraryScope?
     private var suppressStateTransitions = false
@@ -213,13 +245,11 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             ($0.createdAt.rawValue, $0.jobID.rawValue) <
                 ($1.createdAt.rawValue, $1.jobID.rawValue)
         }) {
-            // A newer inventoried Job for the same Session supersedes an older
-            // launch-recovery observation. Only the newest processed authority
-            // may fence a later Session selection.
-            activationRecovery.removeValue(
-                forKey: CompletedRecoveryKey(
-                    SessionProcessingSelection(scope: scope, sessionID: job.sessionID)
-                )
+            // A newer inventoried Job supersedes only the prior exact-winner
+            // presentation. Every unresolved nonterminal Job remains fenced by
+            // exact Job identity until a later activation proves it settled.
+            supersedeExactActivationWinner(
+                for: SessionProcessingSelection(scope: scope, sessionID: job.sessionID)
             )
             await reconcileActivationJob(
                 job,
@@ -316,9 +346,6 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                         afterStaleWriteFor: job,
                         selection: selection
                     ) else { return }
-                    activationRecovery.removeValue(
-                        forKey: CompletedRecoveryKey(selection)
-                    )
                     job = winner
                     isExactWinner = true
                     continue
@@ -417,6 +444,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             retainActivationRecovery(.unconfirmed(job), for: job)
             return nil
         }
+        resolveUnconfirmedActivationRecovery(for: job)
         return winner
     }
 
@@ -436,9 +464,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             )
             return
         }
-        if case let .unconfirmed(job) = activationRecovery[
-            CompletedRecoveryKey(selection)
-        ] {
+        let recoveryKey = CompletedRecoveryKey(selection)
+        if let job = activationRecovery[recoveryKey]?.recoveryRequiredJob {
             transition(to: .recoveryRequired(job))
             return
         }
@@ -456,9 +483,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 return
             }
             selectedSource = source
-            if case let .exactWinner(winner) = activationRecovery.removeValue(
-                forKey: CompletedRecoveryKey(selection)
-            ) {
+            if let winner = takeExactActivationWinner(for: recoveryKey) {
                 await reconcile(winner, source: source)
                 return
             }
@@ -1490,11 +1515,56 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         for job: SessionProcessingJob
     ) {
         guard let scope = activeReconciliationScope else { return }
-        activationRecovery[
-            CompletedRecoveryKey(
-                SessionProcessingSelection(scope: scope, sessionID: job.sessionID)
-            )
-        ] = recovery
+        let key = CompletedRecoveryKey(
+            SessionProcessingSelection(scope: scope, sessionID: job.sessionID)
+        )
+        var ledger = activationRecovery[key] ?? ActivationRecoveryLedger()
+        ledger.retain(recovery)
+        activationRecovery[key] = ledger
+    }
+
+    private func supersedeExactActivationWinner(
+        for selection: SessionProcessingSelection
+    ) {
+        let key = CompletedRecoveryKey(selection)
+        guard var ledger = activationRecovery[key] else { return }
+        ledger.supersedeExactWinner()
+        if ledger.isEmpty {
+            activationRecovery.removeValue(forKey: key)
+        } else {
+            activationRecovery[key] = ledger
+        }
+    }
+
+    private func resolveUnconfirmedActivationRecovery(
+        for job: SessionProcessingJob
+    ) {
+        guard let scope = activeReconciliationScope else { return }
+        let key = CompletedRecoveryKey(
+            SessionProcessingSelection(scope: scope, sessionID: job.sessionID)
+        )
+        guard var ledger = activationRecovery[key] else { return }
+        ledger.resolveUnconfirmedJob(job.jobID)
+        if ledger.isEmpty {
+            activationRecovery.removeValue(forKey: key)
+        } else {
+            activationRecovery[key] = ledger
+        }
+    }
+
+    private func takeExactActivationWinner(
+        for key: CompletedRecoveryKey
+    ) -> SessionProcessingJob? {
+        guard var ledger = activationRecovery[key],
+              let winner = ledger.exactWinner
+        else { return nil }
+        ledger.supersedeExactWinner()
+        if ledger.isEmpty {
+            activationRecovery.removeValue(forKey: key)
+        } else {
+            activationRecovery[key] = ledger
+        }
+        return winner
     }
 
     private func retainSuppressedActivationRecovery(
