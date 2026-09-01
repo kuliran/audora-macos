@@ -942,11 +942,14 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     ) async {
         let failed = job.transitioning(to: .failed, failure: reason)
         let failureWrite = await jobs.transition(failed, from: expected)
-        // Cancel can enter while any terminal CAS is suspended. Once it has
-        // raised this run's fence, its exact-Job refresh owns presentation of
-        // the first durable winner; a late acknowledgement (including an
-        // ambiguous failed/stale result) must not invent jobPersistenceFailed.
-        guard cancelledRunJobID != job.jobID else { return }
+        // Cancel can enter while a running-terminal CAS is suspended. Once it
+        // raises this run's fence, its exact-Job refresh owns presentation of
+        // that first durable winner; a late acknowledgement must not invent
+        // jobPersistenceFailed. A validating publication failure is downstream
+        // of the candidate winner and must still become visible.
+        guard expected != .running || cancelledRunJobID != job.jobID else {
+            return
+        }
         guard case .written = failureWrite else {
             transition(
                 to: .failed(

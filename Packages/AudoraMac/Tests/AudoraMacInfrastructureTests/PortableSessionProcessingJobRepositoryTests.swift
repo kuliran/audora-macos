@@ -85,8 +85,9 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
                     try FileManager.default.moveItem(at: replacement, to: root)
                 }
             )
+            let queued = try makeJob(state: .queued)
 
-            let result = await repository.create(try makeJob(state: .queued))
+            let result = await repository.create(queued)
 
             XCTAssertEqual(result, .failed)
             XCTAssertEqual(
@@ -99,7 +100,216 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
                 try FileManager.default.contentsOfDirectory(
                     atPath: displaced.appendingPathComponent("jobs").path
                 ),
-                []
+                [".\(queued.jobID.rawValue).partial"]
+            )
+            var expectedBytes = try encodedJob(queued)
+            expectedBytes.append(0x0A)
+            XCTAssertEqual(
+                try Data(
+                    contentsOf: displaced.appendingPathComponent("jobs")
+                        .appendingPathComponent(".\(queued.jobID.rawValue).partial")
+                        .appendingPathComponent("job.json")
+                ),
+                expectedBytes
+            )
+        }
+    }
+
+    func testLibraryManifestSwapImmediatelyBeforeCreateCommitRejectsMutation()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let parent = root.deletingLastPathComponent()
+            let replacement = parent.appendingPathComponent(
+                "Replacement.audoralibrary",
+                isDirectory: true
+            )
+            let instant = try UTCInstant("2026-08-30T12:00:00.000Z")
+            _ = try PortableLibraryPersistence().create(
+                at: replacement,
+                seed: NewLibrarySeed(
+                    libraryID: try LibraryID("lib-20260830T120000000Z-9RST"),
+                    createdAt: instant,
+                    preferences: .defaults,
+                    profileHead: ProfileHead(
+                        generation: 0,
+                        statementGeneration: 0,
+                        selection: .null,
+                        updatedAt: instant
+                    )
+                )
+            )
+            let replacementManifest = try Data(
+                contentsOf: replacement.appendingPathComponent("library.json")
+            )
+            let targetManifest = root.appendingPathComponent("library.json")
+            let expected = try makeJob(state: .queued)
+            let partial = root.appendingPathComponent("jobs", isDirectory: true)
+                .appendingPathComponent(
+                    ".\(expected.jobID.rawValue).partial",
+                    isDirectory: true
+                )
+            let final = root.appendingPathComponent("jobs", isDirectory: true)
+                .appendingPathComponent(expected.jobID.rawValue, isDirectory: true)
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID,
+                reconciliationFault: { point in
+                    guard point == .beforeJobMutationCommit else { return }
+                    try replacementManifest.write(to: targetManifest, options: .atomic)
+                }
+            )
+
+            let result = await repository.create(expected)
+
+            XCTAssertEqual(result, .failed)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: final.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: partial.path))
+            XCTAssertEqual(try Data(contentsOf: targetManifest), replacementManifest)
+        }
+    }
+
+    func testCreateRejectsPreparedPartialDirectorySubstitutionBeforeCommit()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let expected = try makeJob(state: .queued)
+            let substitute = SessionProcessingJob(
+                jobID: expected.jobID,
+                sessionID: expected.sessionID,
+                revisionID: expected.revisionID,
+                profileID: "substituted-qualified-v1",
+                createdAt: expected.createdAt,
+                state: .queued,
+                expectedSelectedRevisionID: expected.expectedSelectedRevisionID,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-substituted-create"
+                )
+            )
+            let jobs = root.appendingPathComponent("jobs", isDirectory: true)
+            let partial = jobs.appendingPathComponent(
+                ".\(expected.jobID.rawValue).partial",
+                isDirectory: true
+            )
+            let displaced = jobs.appendingPathComponent(
+                ".\(expected.jobID.rawValue).partial.displaced",
+                isDirectory: true
+            )
+            let final = jobs.appendingPathComponent(
+                expected.jobID.rawValue,
+                isDirectory: true
+            )
+            var expectedBytes = try encodedJob(expected)
+            expectedBytes.append(0x0A)
+            let substituteBytes = try encodedJob(substitute)
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID,
+                reconciliationFault: { point in
+                    guard point == .beforeJobMutationCommit else { return }
+                    try FileManager.default.moveItem(at: partial, to: displaced)
+                    try FileManager.default.createDirectory(
+                        at: partial,
+                        withIntermediateDirectories: false
+                    )
+                    try substituteBytes.write(
+                        to: partial.appendingPathComponent("job.json")
+                    )
+                }
+            )
+
+            let result = await repository.create(expected)
+
+            XCTAssertEqual(result, .failed)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: final.path))
+            XCTAssertEqual(
+                try? Data(contentsOf: partial.appendingPathComponent("job.json")),
+                substituteBytes
+            )
+            XCTAssertEqual(
+                try? Data(contentsOf: displaced.appendingPathComponent("job.json")),
+                expectedBytes
+            )
+        }
+    }
+
+    func testCreateRejectsSameInodePreparedManifestMutationBeforeCommit()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let expected = try makeJob(state: .queued)
+            let jobs = root.appendingPathComponent("jobs", isDirectory: true)
+            let partial = jobs.appendingPathComponent(
+                ".\(expected.jobID.rawValue).partial",
+                isDirectory: true
+            )
+            let manifest = partial.appendingPathComponent("job.json")
+            let final = jobs.appendingPathComponent(
+                expected.jobID.rawValue,
+                isDirectory: true
+            )
+            var preparedMutatedBytes = try encodedJob(expected)
+            preparedMutatedBytes.append(0x0A)
+            let profile = Data("synthetic-qualified-v1".utf8)
+            let profileRange = try XCTUnwrap(
+                preparedMutatedBytes.range(of: profile)
+            )
+            preparedMutatedBytes[profileRange.lowerBound] = 120
+            let mutatedBytes = preparedMutatedBytes
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID,
+                reconciliationFault: { point in
+                    guard point == .beforeJobMutationCommit else { return }
+                    let handle = try FileHandle(forWritingTo: manifest)
+                    try handle.truncate(atOffset: 0)
+                    try handle.write(contentsOf: mutatedBytes)
+                    try handle.synchronize()
+                    try handle.close()
+                }
+            )
+
+            let result = await repository.create(expected)
+
+            XCTAssertEqual(result, .failed)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: final.path))
+            XCTAssertEqual(try Data(contentsOf: manifest), mutatedBytes)
+        }
+    }
+
+    func testCreateRejectsPreparedPartialWithUnexpectedEntryBeforeCommit()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let expected = try makeJob(state: .queued)
+            let partial = root.appendingPathComponent("jobs", isDirectory: true)
+                .appendingPathComponent(
+                    ".\(expected.jobID.rawValue).partial",
+                    isDirectory: true
+                )
+            let unexpected = partial.appendingPathComponent("unexpected")
+            let final = root.appendingPathComponent("jobs", isDirectory: true)
+                .appendingPathComponent(expected.jobID.rawValue, isDirectory: true)
+            let suspectBytes = Data("suspect".utf8)
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID,
+                reconciliationFault: { point in
+                    guard point == .beforeJobMutationCommit else { return }
+                    try suspectBytes.write(to: unexpected)
+                }
+            )
+
+            let result = await repository.create(expected)
+
+            XCTAssertEqual(result, .failed)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: final.path))
+            XCTAssertEqual(try Data(contentsOf: unexpected), suspectBytes)
+            var expectedBytes = try encodedJob(expected)
+            expectedBytes.append(0x0A)
+            XCTAssertEqual(
+                try Data(contentsOf: partial.appendingPathComponent("job.json")),
+                expectedBytes
             )
         }
     }
@@ -197,6 +407,138 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
                 for: try makeSelection(libraryID: libraryID)
             )
             XCTAssertEqual(reloaded, .loaded(running))
+        }
+    }
+
+    func testTransitionRejectsPreparedPartialFileSubstitutionBeforeCommit()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let queued = try makeJob(state: .queued)
+            let running = queued.replacing(state: .running)
+            let substitute = queued.replacing(
+                state: .failed,
+                failure: .engineFailed
+            )
+            let writer = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let createResult = await writer.create(queued)
+            XCTAssertEqual(createResult, .written(queued))
+            let directory = root.appendingPathComponent("jobs", isDirectory: true)
+                .appendingPathComponent(queued.jobID.rawValue, isDirectory: true)
+            let installed = directory.appendingPathComponent("job.json")
+            let partial = directory.appendingPathComponent("job.json.partial")
+            let displaced = directory.appendingPathComponent(
+                "job.json.partial.displaced"
+            )
+            let installedBytes = try Data(contentsOf: installed)
+            let runningBytes = try encodedJob(running)
+            let substituteBytes = try encodedJob(substitute)
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID,
+                reconciliationFault: { point in
+                    guard point == .beforeJobMutationCommit else { return }
+                    try FileManager.default.moveItem(at: partial, to: displaced)
+                    try substituteBytes.write(to: partial)
+                }
+            )
+
+            let result = await repository.transition(running, from: .queued)
+
+            XCTAssertEqual(result, .failed)
+            XCTAssertEqual(try Data(contentsOf: installed), installedBytes)
+            XCTAssertEqual(try? Data(contentsOf: partial), substituteBytes)
+            var expectedRunningBytes = runningBytes
+            expectedRunningBytes.append(0x0A)
+            XCTAssertEqual(try? Data(contentsOf: displaced), expectedRunningBytes)
+        }
+    }
+
+    func testTransitionRejectsPreparedPartialWithUnexpectedEntryBeforeCommit()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let queued = try makeJob(state: .queued)
+            let running = queued.replacing(state: .running)
+            let writer = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let createResult = await writer.create(queued)
+            XCTAssertEqual(createResult, .written(queued))
+            let directory = root.appendingPathComponent("jobs", isDirectory: true)
+                .appendingPathComponent(queued.jobID.rawValue, isDirectory: true)
+            let installed = directory.appendingPathComponent("job.json")
+            let partial = directory.appendingPathComponent("job.json.partial")
+            let unexpected = directory.appendingPathComponent("unexpected")
+            let installedBytes = try Data(contentsOf: installed)
+            var runningBytes = try encodedJob(running)
+            runningBytes.append(0x0A)
+            let suspectBytes = Data("suspect".utf8)
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID,
+                reconciliationFault: { point in
+                    guard point == .beforeJobMutationCommit else { return }
+                    try suspectBytes.write(to: unexpected)
+                }
+            )
+
+            let result = await repository.transition(running, from: .queued)
+
+            XCTAssertEqual(result, .failed)
+            XCTAssertEqual(try Data(contentsOf: installed), installedBytes)
+            XCTAssertEqual(try Data(contentsOf: partial), runningBytes)
+            XCTAssertEqual(try Data(contentsOf: unexpected), suspectBytes)
+        }
+    }
+
+    func testTransitionRejectsSameInodePreparedPartialMutationBeforeCommit()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let queued = try makeJob(state: .queued)
+            let running = queued.replacing(state: .running)
+            let writer = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let createResult = await writer.create(queued)
+            XCTAssertEqual(createResult, .written(queued))
+            let directory = root.appendingPathComponent("jobs", isDirectory: true)
+                .appendingPathComponent(queued.jobID.rawValue, isDirectory: true)
+            let installed = directory.appendingPathComponent("job.json")
+            let partial = directory.appendingPathComponent("job.json.partial")
+            let installedBytes = try Data(contentsOf: installed)
+            var preparedMutatedBytes = try encodedJob(running)
+            preparedMutatedBytes.append(0x0A)
+            let profile = Data("synthetic-qualified-v1".utf8)
+            let profileRange = try XCTUnwrap(
+                preparedMutatedBytes.range(of: profile)
+            )
+            preparedMutatedBytes[profileRange.lowerBound] = 120
+            let mutatedBytes = preparedMutatedBytes
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID,
+                reconciliationFault: { point in
+                    guard point == .beforeJobMutationCommit else { return }
+                    let handle = try FileHandle(forWritingTo: partial)
+                    try handle.truncate(atOffset: 0)
+                    try handle.write(contentsOf: mutatedBytes)
+                    try handle.synchronize()
+                    try handle.close()
+                }
+            )
+
+            let result = await repository.transition(running, from: .queued)
+
+            XCTAssertEqual(result, .failed)
+            XCTAssertEqual(try Data(contentsOf: installed), installedBytes)
+            XCTAssertEqual(try Data(contentsOf: partial), mutatedBytes)
         }
     }
 

@@ -83,6 +83,12 @@ public enum ContractResource: CaseIterable, Sendable {
     case sessionProcessingRelaunchValidationScenario
     case sessionProcessingRelaunchStaleSelectionScenario
     case sessionProcessingProgressScenario
+    case sessionProcessingRaceCandidateWinsCancelScenario
+    case sessionProcessingRaceCancelWinsCandidateScenario
+    case sessionProcessingRaceEngineFailureWinsCancelScenario
+    case sessionProcessingRaceCancelWinsEngineFailureScenario
+    case sessionProcessingRaceCandidateRejectionWinsCancelScenario
+    case sessionProcessingRaceCancelWinsCandidateRejectionScenario
 
     case portableLibraryManifestExample
     case portableLibraryPreferencesExample
@@ -309,6 +315,18 @@ public enum ContractResource: CaseIterable, Sendable {
             "relaunch-validating-stale-selection.v1.json"
         case .sessionProcessingProgressScenario:
             "progress-monotonic-eta-approximate.v1.json"
+        case .sessionProcessingRaceCandidateWinsCancelScenario:
+            "race-candidate-wins-cancel.v1.json"
+        case .sessionProcessingRaceCancelWinsCandidateScenario:
+            "race-cancel-wins-candidate.v1.json"
+        case .sessionProcessingRaceEngineFailureWinsCancelScenario:
+            "race-engine-failure-wins-cancel.v1.json"
+        case .sessionProcessingRaceCancelWinsEngineFailureScenario:
+            "race-cancel-wins-engine-failure.v1.json"
+        case .sessionProcessingRaceCandidateRejectionWinsCancelScenario:
+            "race-candidate-rejection-wins-cancel.v1.json"
+        case .sessionProcessingRaceCancelWinsCandidateRejectionScenario:
+            "race-cancel-wins-candidate-rejection.v1.json"
         case .portableLibraryManifestExample:
             "library.json"
         case .portableLibraryPreferencesExample:
@@ -474,7 +492,13 @@ public enum ContractResource: CaseIterable, Sendable {
              .sessionProcessingRelaunchInterruptedScenario,
              .sessionProcessingRelaunchValidationScenario,
              .sessionProcessingRelaunchStaleSelectionScenario,
-             .sessionProcessingProgressScenario:
+             .sessionProcessingProgressScenario,
+             .sessionProcessingRaceCandidateWinsCancelScenario,
+             .sessionProcessingRaceCancelWinsCandidateScenario,
+             .sessionProcessingRaceEngineFailureWinsCancelScenario,
+             .sessionProcessingRaceCancelWinsEngineFailureScenario,
+             .sessionProcessingRaceCandidateRejectionWinsCancelScenario,
+             .sessionProcessingRaceCancelWinsCandidateRejectionScenario:
             "Scenarios/SessionProcessing"
         case .portableLibraryManifestExample, .portableLibraryPreferencesExample,
              .portableProfileNullExample, .portableProfileSelectedExample:

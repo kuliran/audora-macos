@@ -573,6 +573,178 @@ final class ContractResourcesTests: XCTestCase {
         )
     }
 
+    func testSessionProcessingRaceContractsPreserveTheFirstDurableWinner() throws {
+        let cases: [(
+            file: String,
+            kind: String,
+            winner: String,
+            finalState: String,
+            failure: String?,
+            cancellationWon: Bool
+        )] = [
+            (
+                "race-candidate-wins-cancel.v1.json",
+                "candidateVsCancel",
+                "candidate",
+                "failed",
+                "staleSelection",
+                false
+            ),
+            (
+                "race-cancel-wins-candidate.v1.json",
+                "candidateVsCancel",
+                "cancellation",
+                "cancelled",
+                nil,
+                true
+            ),
+            (
+                "race-engine-failure-wins-cancel.v1.json",
+                "engineFailureVsCancel",
+                "engineFailure",
+                "failed",
+                "engineFailed",
+                false
+            ),
+            (
+                "race-cancel-wins-engine-failure.v1.json",
+                "engineFailureVsCancel",
+                "cancellation",
+                "cancelled",
+                nil,
+                true
+            ),
+            (
+                "race-candidate-rejection-wins-cancel.v1.json",
+                "candidateRejectionVsCancel",
+                "candidateRejection",
+                "failed",
+                "candidateRejected",
+                false
+            ),
+            (
+                "race-cancel-wins-candidate-rejection.v1.json",
+                "candidateRejectionVsCancel",
+                "cancellation",
+                "cancelled",
+                nil,
+                true
+            ),
+        ]
+        let registered = Dictionary(
+            uniqueKeysWithValues: ContractResource.allCases.map {
+                ($0.bundlePath, $0)
+            }
+        )
+
+        let feature = try jsonObject(.sessionProcessingFeatureScenarioSchema)
+        let definitions = try XCTUnwrap(feature["$defs"] as? [String: Any])
+        let raceSchema = try XCTUnwrap(
+            definitions["SessionProcessingScenarioRace"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(raceSchema["required"] as? [String] ?? []),
+            ["kind", "firstDurableWinner", "losingCompareAndSwap"]
+        )
+
+        for expected in cases {
+            let path = "Scenarios/SessionProcessing/\(expected.file)"
+            let resource = try XCTUnwrap(registered[path], path)
+            let scenario = try jsonObject(resource)
+            let race = try XCTUnwrap(scenario["race"] as? [String: Any])
+            XCTAssertEqual(race["kind"] as? String, expected.kind, path)
+            XCTAssertEqual(
+                race["firstDurableWinner"] as? String,
+                expected.winner,
+                path
+            )
+            XCTAssertEqual(race["losingCompareAndSwap"] as? String, "stale", path)
+
+            let initialJobs = try XCTUnwrap(
+                scenario["initialJobs"] as? [[String: Any]]
+            )
+            let expectedJobs = try XCTUnwrap(
+                scenario["expectedJobs"] as? [[String: Any]]
+            )
+            XCTAssertEqual(initialJobs.count, 1, path)
+            XCTAssertEqual(expectedJobs.count, 1, path)
+            XCTAssertLessThanOrEqual(initialJobs.count, 10_000, path)
+            XCTAssertLessThanOrEqual(expectedJobs.count, 10_000, path)
+            XCTAssertEqual(initialJobs[0]["state"] as? String, "running", path)
+            XCTAssertEqual(
+                initialJobs[0]["jobId"] as? String,
+                expectedJobs[0]["jobId"] as? String,
+                path
+            )
+            XCTAssertEqual(expectedJobs[0]["state"] as? String, expected.finalState, path)
+            XCTAssertEqual(expectedJobs[0]["failure"] as? String, expected.failure, path)
+
+            let state = try XCTUnwrap(scenario["expectedState"] as? [String: Any])
+            XCTAssertEqual(state["status"] as? String, expected.finalState, path)
+            XCTAssertEqual(state["reason"] as? String, expected.failure, path)
+            let trace = try XCTUnwrap(
+                scenario["dependencyTrace"] as? [[String: Any]]
+            )
+            let effects = try XCTUnwrap(
+                scenario["expectedEffects"] as? [[String: Any]]
+            )
+            let effectKinds = Set(effects.compactMap { $0["kind"] as? String })
+            XCTAssertTrue(effectKinds.contains("firstDurableWinnerPreserved"), path)
+            XCTAssertTrue(effectKinds.contains("noAutomaticRerun"), path)
+
+            if expected.cancellationWon {
+                XCTAssertTrue(
+                    trace.contains {
+                        $0["effect"] as? String == "persistCancellationRequest" &&
+                            $0["outcome"] as? String == "written-first"
+                    },
+                    path
+                )
+                XCTAssertTrue(
+                    trace.contains {
+                        guard let effect = $0["effect"] as? String else {
+                            return false
+                        }
+                        return ["transitionValidating", "transitionFailed"]
+                            .contains(effect) &&
+                            $0["outcome"] as? String == "stale-lost"
+                    },
+                    path
+                )
+                XCTAssertTrue(
+                    trace.contains {
+                        $0["effect"] as? String == "cancelAndReap" &&
+                            $0["outcome"] as? String == "reaped"
+                    },
+                    path
+                )
+                XCTAssertTrue(effectKinds.contains("workerReaped"), path)
+                XCTAssertFalse(effectKinds.contains("noWorkerCancellation"), path)
+            } else {
+                XCTAssertTrue(
+                    trace.contains {
+                        $0["effect"] as? String == "persistCancellationRequest" &&
+                            $0["outcome"] as? String == "stale-lost"
+                    },
+                    path
+                )
+                XCTAssertTrue(
+                    trace.contains {
+                        $0["effect"] as? String == "loadExact" &&
+                            $0["outcome"] as? String == "first-durable-winner"
+                    },
+                    path
+                )
+                XCTAssertFalse(
+                    trace.contains { $0["effect"] as? String == "cancelAndReap" },
+                    path
+                )
+                XCTAssertTrue(effectKinds.contains("noWorkerCancellation"), path)
+                XCTAssertEqual(state["actions"] as? [String], ["retry"], path)
+            }
+        }
+    }
+
     func testImportedSessionGoldensPreservePortableV1Fields() throws {
         let audio = try jsonObject(.importedAudioManifestExample)
         let session = try jsonObject(.importedSessionManifestExample)

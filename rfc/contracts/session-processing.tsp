@@ -100,6 +100,9 @@ namespace Audora.Contracts {
     schemaVersion: 1;
     scenarioId: SessionProcessingScenarioId;
 
+    /** Deterministic arbitration proof for a concurrent terminal race. */
+    race?: SessionProcessingScenarioRace;
+
     /** Durable Job summaries present before the first command, when relevant. */
     @minItems(1)
     @maxItems(10000)
@@ -128,6 +131,19 @@ namespace Audora.Contracts {
     revisionId: TranscriptRevisionId;
     state: TranscriptionJobState;
     failure?: SessionProcessingFailure;
+  }
+
+  model SessionProcessingScenarioRace {
+    kind:
+      | "candidateVsCancel"
+      | "engineFailureVsCancel"
+      | "candidateRejectionVsCancel";
+    firstDurableWinner:
+      | "candidate"
+      | "engineFailure"
+      | "candidateRejection"
+      | "cancellation";
+    losingCompareAndSwap: "stale";
   }
 
   enum TranscriptionJobState {
@@ -487,6 +503,7 @@ namespace Audora.Contracts {
       | "load"
       | "inventory"
       | "latest"
+      | "loadExact"
       | "resolve"
       | "prepare"
       | "verify"
@@ -538,6 +555,9 @@ namespace Audora.Contracts {
       | "startSelectionBaselinePreserved"
       | "staleSelectionRejected"
       | "progressMonotonic"
-      | "etaApproximate";
+      | "etaApproximate"
+      | "firstDurableWinnerPreserved"
+      | "noAutomaticRerun"
+      | "noWorkerCancellation";
   }
 }

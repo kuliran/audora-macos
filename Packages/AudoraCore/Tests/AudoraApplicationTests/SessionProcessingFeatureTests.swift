@@ -249,6 +249,91 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(finalPublishCount, 1)
     }
 
+    func testCandidateCASWinningCancelRaceSurfacesDurablePublicationFailure()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let candidate = VerifiedTranscriptionCandidate(
+            candidate: fixture.candidate,
+            artifactFingerprint: fixture.candidateFingerprint
+        )
+        let newerRevisionID = try TranscriptRevisionID(
+            "trv-20260830T120700000Z-7MNP"
+        )
+        let newerJob = SessionProcessingJob(
+            jobID: try TranscriptionJobID("job-20260830T120700000Z-7MNP"),
+            sessionID: fixture.selection.sessionID,
+            revisionID: newerRevisionID,
+            profileID: fixture.profile.profileID,
+            createdAt: try UTCInstant("2026-08-30T12:07:00.000Z"),
+            state: .running,
+            expectedSelectedRevisionID: nil,
+            cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                "cancel-newer-publication-race"
+            )
+        )
+        let jobs = CandidateWinsCancellationJobProbe(newerLatest: newerJob)
+        let revisions = SelectionCASRevisionProbe(
+            selectedRevisionID: newerRevisionID
+        )
+        let engine = CandidateWinsCancellationEngineProbe(candidate: candidate)
+        let feature = DefaultSessionProcessingFeature(
+            source: SourceProbe(.available(fixture.source)),
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: revisions),
+            clock: SequencedProcessingClock([
+                fixture.createdAt,
+                try UTCInstant("2026-08-30T12:08:00.000Z"),
+            ]),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.selectSession(fixture.selection))
+        let run = Task { await feature.send(.start) }
+        await engine.waitUntilTranscriptionStarts()
+        await engine.releaseTranscription()
+        await jobs.waitUntilValidatingIsDurable()
+
+        let cancellation = Task { await feature.send(.cancel) }
+        await jobs.waitUntilCancellationCASLoses()
+        await cancellation.value
+
+        guard case let .failed(failure) = await feature.currentState else {
+            return XCTFail("durable validating failure must remain visible")
+        }
+        XCTAssertEqual(failure.reason, .staleSelection)
+        XCTAssertEqual(failure.actions, [.retry])
+        XCTAssertEqual(failure.job?.state, .failed)
+        let durableState = await jobs.currentState
+        let cancellationCount = await engine.cancellationCount
+        let transcriptionCount = await engine.transcriptionCount
+        XCTAssertEqual(durableState, .failed)
+        XCTAssertEqual(cancellationCount, 0)
+        XCTAssertEqual(transcriptionCount, 1)
+
+        await jobs.releaseValidatingWrite()
+        await run.value
+
+        guard case let .failed(final) = await feature.currentState else {
+            return XCTFail("late candidate CAS response must preserve failure")
+        }
+        XCTAssertEqual(final.reason, .staleSelection)
+        XCTAssertEqual(final.actions, [.retry])
+        let expectedSelections = await revisions.expectedSelectedRevisionIDs
+        let finalCancellationCount = await engine.cancellationCount
+        let finalTranscriptionCount = await engine.transcriptionCount
+        XCTAssertEqual(expectedSelections, [nil])
+        XCTAssertEqual(finalCancellationCount, 0)
+        XCTAssertEqual(finalTranscriptionCount, 1)
+    }
+
     func testSelectionDuringCancellationAppliesOnlyAfterCancelledStateIsDurable()
         async throws
     {
@@ -3521,6 +3606,7 @@ private actor CandidateWinsCancellationEngineProbe: TranscriptionEngine {
     private var transcriptionContinuation: CheckedContinuation<Void, Never>?
     private(set) var cancellationCount = 0
     private(set) var recoveryCount = 0
+    private(set) var transcriptionCount = 0
 
     init(candidate: VerifiedTranscriptionCandidate) {
         self.candidate = candidate
@@ -3530,6 +3616,7 @@ private actor CandidateWinsCancellationEngineProbe: TranscriptionEngine {
         _ request: TranscriptionRequest,
         events: @escaping @Sendable (TranscriptionEvent) async -> Void
     ) async throws -> VerifiedTranscriptionCandidate {
+        transcriptionCount += 1
         await withCheckedContinuation { continuation in
             transcriptionContinuation = continuation
         }

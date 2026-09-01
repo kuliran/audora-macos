@@ -192,16 +192,27 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                     return errno == EEXIST ? .collision : .failed
                 }
                 var ownsPartial = true
-                defer {
-                    if ownsPartial {
-                        removePartial(named: partial, under: authority.jobsDescriptor)
-                    }
-                }
                 let partialDescriptor = try confined.openDirectory(
                     named: partial,
                     under: authority.jobsDescriptor
                 )
-                defer { Darwin.close(partialDescriptor) }
+                let partialIdentity = try identity(partialDescriptor)
+                var manifest: OpenedRegularFile?
+                var manifestData: Data?
+                defer {
+                    if ownsPartial {
+                        removePreparedCreationPartialIfUnchanged(
+                            named: partial,
+                            directoryDescriptor: partialDescriptor,
+                            directoryIdentity: partialIdentity,
+                            manifest: manifest,
+                            manifestData: manifestData,
+                            authority: authority
+                        )
+                    }
+                    if let manifest { Darwin.close(manifest.descriptor) }
+                    Darwin.close(partialDescriptor)
+                }
                 let data = try encoded(job)
                 guard data.count <= Self.maximumJobBytes else { return .failed }
                 try confined.writeExclusive(
@@ -211,7 +222,31 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                     flushBeforeClose: true
                 )
                 try confined.flush(partialDescriptor)
+                let openedManifest = try openRegularFile(
+                    named: "job.json",
+                    under: partialDescriptor
+                )
+                manifest = openedManifest
+                let writtenData = try boundedData(
+                    from: openedManifest.descriptor,
+                    maximumBytes: Self.maximumJobBytes
+                )
+                manifestData = writtenData
+                guard writtenData == data,
+                      try confined.listEntryNames(
+                        under: partialDescriptor,
+                        maximumCount: 2
+                      ) == ["job.json"]
+                else { return .failed }
                 try reconciliationFault(.beforeJobMutationCommit)
+                try revalidatePreparedCreationPartial(
+                    named: partial,
+                    directoryDescriptor: partialDescriptor,
+                    directoryIdentity: partialIdentity,
+                    manifest: openedManifest,
+                    manifestData: writtenData,
+                    under: authority.jobsDescriptor
+                )
                 try revalidate(authority)
                 try confined.renameNoReplace(
                     from: partial,
@@ -258,9 +293,13 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                     under: jobDescriptor,
                     maximumCount: 1
                 ) == ["job.json"] else { return .failed }
-                let currentData = try confined.boundedData(
+                let currentFile = try openRegularFile(
                     named: "job.json",
-                    under: jobDescriptor,
+                    under: jobDescriptor
+                )
+                defer { Darwin.close(currentFile.descriptor) }
+                let currentData = try boundedData(
+                    from: currentFile.descriptor,
                     maximumBytes: Self.maximumJobBytes
                 )
                 let current = try decode(currentData)
@@ -279,31 +318,58 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                         under: jobDescriptor
                       )
                 else { return .failed }
-                var ownsPartial = true
-                defer {
-                    if ownsPartial {
-                        _ = unlinkat(jobDescriptor, "job.json.partial", 0)
-                    }
-                }
                 try confined.writeExclusive(
                     data,
                     named: "job.json.partial",
                     under: jobDescriptor,
                     flushBeforeClose: true
                 )
-                let reread = try confined.boundedData(
-                    named: "job.json",
-                    under: jobDescriptor,
+                let partialFile = try openRegularFile(
+                    named: "job.json.partial",
+                    under: jobDescriptor
+                )
+                var ownsPartial = true
+                defer {
+                    if ownsPartial {
+                        removePreparedTransitionPartialIfUnchanged(
+                            jobName: job.jobID.rawValue,
+                            jobDescriptor: jobDescriptor,
+                            jobIdentity: jobIdentity,
+                            currentFile: currentFile,
+                            currentData: currentData,
+                            partialFile: partialFile,
+                            partialData: data,
+                            authority: authority
+                        )
+                    }
+                    Darwin.close(partialFile.descriptor)
+                }
+                let writtenData = try boundedData(
+                    from: partialFile.descriptor,
                     maximumBytes: Self.maximumJobBytes
                 )
-                guard reread == currentData else { return .stale }
+                guard writtenData == data,
+                      try boundedData(
+                        from: currentFile.descriptor,
+                        maximumBytes: Self.maximumJobBytes
+                      ) == currentData,
+                      try confined.listEntryNames(
+                        under: jobDescriptor,
+                        maximumCount: 3
+                      ) == ["job.json", "job.json.partial"]
+                else { return .stale }
                 try reconciliationFault(.beforeJobMutationCommit)
-                try revalidate(authority)
-                try revalidateJob(
-                    named: job.jobID.rawValue,
-                    identity: jobIdentity,
+                try revalidatePreparedTransitionPartial(
+                    jobName: job.jobID.rawValue,
+                    jobDescriptor: jobDescriptor,
+                    jobIdentity: jobIdentity,
+                    currentFile: currentFile,
+                    currentData: currentData,
+                    partialFile: partialFile,
+                    partialData: writtenData,
                     under: authority.jobsDescriptor
                 )
+                try revalidate(authority)
                 let renameResult = "job.json.partial".withCString { source in
                     "job.json".withCString { destination in
                         Darwin.renameat(
@@ -577,6 +643,13 @@ private extension PortableSessionProcessingJobRepository {
         guard try identity(reopenedJobs) == authority.jobsIdentity else {
             throw JobPersistenceError.integrityMismatch
         }
+        let loaded = try PortableLibraryPersistence().load(
+            from: authority.rootDescriptor,
+            reconcileAbandonedImports: false
+        )
+        guard case let .readWrite(library) = loaded,
+              library.manifest.libraryID == libraryID
+        else { throw JobPersistenceError.integrityMismatch }
     }
 
     func loadJob(under descriptor: Int32) throws -> SessionProcessingJob {
@@ -1146,19 +1219,144 @@ private extension PortableSessionProcessingJobRepository {
         return FileIdentity(device: UInt64(value.st_dev), inode: UInt64(value.st_ino))
     }
 
-    func removePartial(named name: String, under parent: Int32) {
-        let descriptor = name.withCString {
-            Darwin.openat(
-                parent,
-                $0,
-                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+    func revalidatePreparedCreationPartial(
+        named name: String,
+        directoryDescriptor: Int32,
+        directoryIdentity: FileIdentity,
+        manifest: OpenedRegularFile,
+        manifestData: Data,
+        under parent: Int32
+    ) throws {
+        guard try identity(directoryDescriptor) == directoryIdentity,
+              try boundedData(
+                from: manifest.descriptor,
+                maximumBytes: Self.maximumJobBytes
+              ) == manifestData,
+              try confined.listEntryNames(
+                under: directoryDescriptor,
+                maximumCount: 2
+              ) == ["job.json"]
+        else { throw JobPersistenceError.integrityMismatch }
+        try revalidateDirectory(
+            named: name,
+            identity: directoryIdentity,
+            under: parent
+        )
+        try revalidateRegularFile(
+            named: "job.json",
+            identity: manifest.identity,
+            under: directoryDescriptor
+        )
+    }
+
+    func removePreparedCreationPartialIfUnchanged(
+        named name: String,
+        directoryDescriptor: Int32,
+        directoryIdentity: FileIdentity,
+        manifest: OpenedRegularFile?,
+        manifestData: Data?,
+        authority: RootAuthority
+    ) {
+        guard let manifest, let manifestData else { return }
+        do {
+            try revalidate(authority)
+            try revalidatePreparedCreationPartial(
+                named: name,
+                directoryDescriptor: directoryDescriptor,
+                directoryIdentity: directoryIdentity,
+                manifest: manifest,
+                manifestData: manifestData,
+                under: authority.jobsDescriptor
             )
+            guard unlinkat(directoryDescriptor, "job.json", 0) == 0 else {
+                return
+            }
+            var metadata = stat()
+            guard fstat(manifest.descriptor, &metadata) == 0,
+                  metadata.st_nlink == 0,
+                  unlinkat(authority.jobsDescriptor, name, AT_REMOVEDIR) == 0
+            else { return }
+            try confined.flush(authority.jobsDescriptor)
+        } catch {
+            // Once ownership cannot be proved, preserve the suspect entry for
+            // bounded relaunch reconciliation instead of deleting by name.
         }
-        if descriptor >= 0 {
-            _ = unlinkat(descriptor, "job.json", 0)
-            Darwin.close(descriptor)
+    }
+
+    func revalidatePreparedTransitionPartial(
+        jobName: String,
+        jobDescriptor: Int32,
+        jobIdentity: FileIdentity,
+        currentFile: OpenedRegularFile,
+        currentData: Data,
+        partialFile: OpenedRegularFile,
+        partialData: Data,
+        under jobsDescriptor: Int32
+    ) throws {
+        guard try identity(jobDescriptor) == jobIdentity,
+              try boundedData(
+                from: currentFile.descriptor,
+                maximumBytes: Self.maximumJobBytes
+              ) == currentData,
+              try boundedData(
+                from: partialFile.descriptor,
+                maximumBytes: Self.maximumJobBytes
+              ) == partialData,
+              try confined.listEntryNames(
+                under: jobDescriptor,
+                maximumCount: 3
+              ) == ["job.json", "job.json.partial"]
+        else { throw JobPersistenceError.integrityMismatch }
+        try revalidateJob(
+            named: jobName,
+            identity: jobIdentity,
+            under: jobsDescriptor
+        )
+        try revalidateRegularFile(
+            named: "job.json",
+            identity: currentFile.identity,
+            under: jobDescriptor
+        )
+        try revalidateRegularFile(
+            named: "job.json.partial",
+            identity: partialFile.identity,
+            under: jobDescriptor
+        )
+    }
+
+    func removePreparedTransitionPartialIfUnchanged(
+        jobName: String,
+        jobDescriptor: Int32,
+        jobIdentity: FileIdentity,
+        currentFile: OpenedRegularFile,
+        currentData: Data,
+        partialFile: OpenedRegularFile,
+        partialData: Data,
+        authority: RootAuthority
+    ) {
+        do {
+            try revalidate(authority)
+            try revalidatePreparedTransitionPartial(
+                jobName: jobName,
+                jobDescriptor: jobDescriptor,
+                jobIdentity: jobIdentity,
+                currentFile: currentFile,
+                currentData: currentData,
+                partialFile: partialFile,
+                partialData: partialData,
+                under: authority.jobsDescriptor
+            )
+            guard unlinkat(jobDescriptor, "job.json.partial", 0) == 0 else {
+                return
+            }
+            var metadata = stat()
+            guard fstat(partialFile.descriptor, &metadata) == 0,
+                  metadata.st_nlink == 0
+            else { return }
+            try confined.flush(jobDescriptor)
+        } catch {
+            // Preserve any entry whose exact ownership changed after staging.
         }
-        _ = unlinkat(parent, name, AT_REMOVEDIR)
     }
 
     var confined: ConfinedPersistencePrimitives<JobPersistenceError> {

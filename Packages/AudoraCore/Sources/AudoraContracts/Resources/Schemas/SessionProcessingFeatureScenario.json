@@ -10,6 +10,10 @@
         "scenarioId": {
             "$ref": "#/$defs/SessionProcessingScenarioId"
         },
+        "race": {
+            "$ref": "#/$defs/SessionProcessingScenarioRace",
+            "description": "Deterministic arbitration proof for a concurrent terminal race."
+        },
         "initialJobs": {
             "type": "array",
             "items": {
@@ -72,6 +76,59 @@
         "SessionProcessingScenarioId": {
             "type": "string",
             "pattern": "^session-processing\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "SessionProcessingScenarioRace": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "candidateVsCancel"
+                        },
+                        {
+                            "type": "string",
+                            "const": "engineFailureVsCancel"
+                        },
+                        {
+                            "type": "string",
+                            "const": "candidateRejectionVsCancel"
+                        }
+                    ]
+                },
+                "firstDurableWinner": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "candidate"
+                        },
+                        {
+                            "type": "string",
+                            "const": "engineFailure"
+                        },
+                        {
+                            "type": "string",
+                            "const": "candidateRejection"
+                        },
+                        {
+                            "type": "string",
+                            "const": "cancellation"
+                        }
+                    ]
+                },
+                "losingCompareAndSwap": {
+                    "type": "string",
+                    "const": "stale"
+                }
+            },
+            "required": [
+                "kind",
+                "firstDurableWinner",
+                "losingCompareAndSwap"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
         },
         "SessionProcessingScenarioDurableJob": {
             "type": "object",
@@ -239,6 +296,10 @@
                         {
                             "type": "string",
                             "const": "latest"
+                        },
+                        {
+                            "type": "string",
+                            "const": "loadExact"
                         },
                         {
                             "type": "string",
@@ -437,6 +498,18 @@
                         {
                             "type": "string",
                             "const": "etaApproximate"
+                        },
+                        {
+                            "type": "string",
+                            "const": "firstDurableWinnerPreserved"
+                        },
+                        {
+                            "type": "string",
+                            "const": "noAutomaticRerun"
+                        },
+                        {
+                            "type": "string",
+                            "const": "noWorkerCancellation"
                         }
                     ]
                 }
