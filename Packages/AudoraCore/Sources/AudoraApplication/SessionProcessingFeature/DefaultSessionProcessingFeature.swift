@@ -120,6 +120,19 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         let isComplete: Bool
     }
 
+    private struct LibraryRecoveryBlock {
+        let activation: LibraryActivation
+        let reason: SessionProcessingUnavailableReason
+
+        var snapshot: SessionProcessingUnavailableSnapshot {
+            SessionProcessingUnavailableSnapshot(
+                selection: nil,
+                reason: reason,
+                actions: []
+            )
+        }
+    }
+
     private let sourcePort: any SessionTranscriptionSourcePort
     private let runtime: any TranscriptionRuntimePort
     private let model: any TranscriptionModelPort
@@ -156,6 +169,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private var libraryReconciliationFence: LibraryActivation?
     private var successfullyReconciledLibraryActivation: LibraryActivation?
     private var latestLibraryActivation: LibraryActivation?
+    private var libraryRecoveryBlock: LibraryRecoveryBlock?
     private var legacyActivationGeneration: UInt64 = 0
     private var hasObservedLibraryActivation = false
     private var activeReconciliationActivation: LibraryActivation?
@@ -335,6 +349,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         selectedSource = nil
         selectedProfile = nil
         cancelledRunJobID = nil
+        guard !projectCurrentLibraryRecoveryBlock() else { return }
         transition(
             to: .unavailable(
                 SessionProcessingUnavailableSnapshot(
@@ -364,22 +379,28 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             guard latestLibraryActivation == activation,
                   libraryReconciliationFence == activation
             else { return }
-            presentUnsupportedJobIndex(
-                version: version,
-                selection: lastSelection?.scope == scope ? lastSelection : nil
+            installLibraryRecoveryBlock(
+                .jobIndexSchemaNewer(version: version),
+                activation: activation
             )
             return
         case .unavailable:
             guard latestLibraryActivation == activation,
                   libraryReconciliationFence == activation
             else { return }
-            presentLibraryRecoveryUnavailable(.jobIndexUnavailable)
+            installLibraryRecoveryBlock(
+                .jobIndexUnavailable,
+                activation: activation
+            )
             return
         case .integrityMismatch:
             guard latestLibraryActivation == activation,
                   libraryReconciliationFence == activation
             else { return }
-            presentLibraryRecoveryUnavailable(.jobIndexIntegrityMismatch)
+            installLibraryRecoveryBlock(
+                .jobIndexIntegrityMismatch,
+                activation: activation
+            )
             return
         }
         let reconciliationID = inventory.reconciliationID
@@ -435,9 +456,14 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
               libraryReconciliationFence == activation
         else { return }
         guard classified.isComplete else {
-            presentLibraryRecoveryUnavailable(.jobIndexIncomplete)
+            installLibraryRecoveryBlock(
+                .jobIndexIncomplete,
+                activation: activation
+            )
             return
         }
+        let releasedLibraryRecoveryBlock = libraryRecoveryBlock != nil
+        libraryRecoveryBlock = nil
 
         let libraryID = scope.libraryID.rawValue
         let hasInvalidCompletedAuthority = invalidCompletedJobs.keys.contains {
@@ -472,6 +498,17 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         if let selected = lastSelection {
             if selected.scope == scope { await select(selected) }
             return
+        }
+        if releasedLibraryRecoveryBlock {
+            transition(
+                to: .unavailable(
+                    SessionProcessingUnavailableSnapshot(
+                        selection: nil,
+                        reason: .noSession,
+                        actions: []
+                    )
+                )
+            )
         }
     }
 
@@ -1009,24 +1046,48 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         )
     }
 
-    private func presentLibraryRecoveryUnavailable(
-        _ reason: SessionProcessingUnavailableReason
+    private func installLibraryRecoveryBlock(
+        _ reason: SessionProcessingUnavailableReason,
+        activation: LibraryActivation
     ) {
-        transition(
-            to: .unavailable(
-                SessionProcessingUnavailableSnapshot(
-                    selection: nil,
-                    reason: reason,
-                    actions: []
-                )
-            )
+        guard latestLibraryActivation == activation,
+              libraryReconciliationFence == activation
+        else { return }
+        let block = LibraryRecoveryBlock(
+            activation: activation,
+            reason: reason
         )
+        libraryRecoveryBlock = block
+        selectedSource = nil
+        selectedProfile = nil
+        transition(to: .unavailable(block.snapshot))
+    }
+
+    private func projectCurrentLibraryRecoveryBlock() -> Bool {
+        guard let block = currentLibraryRecoveryBlock() else { return false }
+        transition(to: .unavailable(block.snapshot))
+        return true
+    }
+
+    private func currentLibraryRecoveryBlock() -> LibraryRecoveryBlock? {
+        guard let block = libraryRecoveryBlock,
+              latestLibraryActivation == block.activation,
+              libraryReconciliationFence == block.activation
+        else { return nil }
+        return block
     }
 
     private func select(_ selection: SessionProcessingSelection) async {
-        lastSelection = selection
         selectedSource = nil
         selectedProfile = nil
+        if let block = currentLibraryRecoveryBlock() {
+            if selection.scope == block.activation.scope {
+                lastSelection = selection
+            }
+            transition(to: .unavailable(block.snapshot))
+            return
+        }
+        lastSelection = selection
         if let invalid = invalidCompletedJobs[CompletedRecoveryKey(selection)] {
             transition(
                 to: .failed(
