@@ -8,4 +8,5 @@ import "./audio-import.tsp";
 import "./audio-import-scenario.tsp";
 import "./recording.tsp";
 import "./transcript-revision.tsp";
+import "./speech-annotation-fixture.tsp";
 import "./session-processing.tsp";

@@ -3,6 +3,48 @@ import AudoraApplication
 import AudoraDomain
 import SwiftUI
 
+struct ReviewAnnotationStyleToken {
+    let underlineStyle: NSUnderlineStyle
+    let underlineColor: NSColor
+}
+
+/// Semantic presentation tokens kept separate from annotation classification.
+/// Each category also has a distinct underline pattern, so color is never the
+/// only signal.
+enum ReviewAnnotationStyleTokens {
+    static let minimumContrastRatio = 3.0
+
+    static func style(
+        for category: TextualEventCategory
+    ) -> ReviewAnnotationStyleToken {
+        switch category {
+        case .filledPause:
+            ReviewAnnotationStyleToken(
+                underlineStyle: .single,
+                underlineColor: .systemBrown
+            )
+        case .partialWord:
+            ReviewAnnotationStyleToken(
+                underlineStyle: .double,
+                underlineColor: .systemRed
+            )
+        case .repetitionCandidate:
+            ReviewAnnotationStyleToken(
+                underlineStyle: .single.union(.patternDot),
+                underlineColor: .systemPurple
+            )
+        }
+    }
+}
+
+enum ReviewActiveWordStyleTokens {
+    /// Keeps the playback cue visible without reducing any annotation
+    /// underline below the WCAG non-text contrast target.
+    static var backgroundColor: NSColor {
+        NSColor.controlAccentColor.withAlphaComponent(0.08)
+    }
+}
+
 public struct ReviewView: View {
     @ObservedObject private var model: ReviewPresentationModel
 
@@ -64,6 +106,20 @@ public struct ReviewView: View {
 
                 Spacer(minLength: 8)
 
+                Toggle(
+                    "Show annotations",
+                    isOn: Binding(
+                        get: { snapshot.annotations.isVisible },
+                        set: { model.setAnnotationsVisible($0) }
+                    )
+                )
+                .toggleStyle(.switch)
+                .accessibilityLabel("Show speech annotations")
+                .accessibilityHint(
+                    "Shows or hides local speech evidence without changing the transcript."
+                )
+                .disabled(snapshot.activity != nil)
+
                 Menu {
                     ForEach(snapshot.revisionIDs, id: \.self) { revisionID in
                         Button {
@@ -92,9 +148,7 @@ public struct ReviewView: View {
             }
 
             if let activity = snapshot.activity {
-                ProgressView(activity == .selectingRevision
-                    ? "Selecting revision…"
-                    : "Transcribing another revision…")
+                ProgressView(activityLabel(activity))
                     .controlSize(.small)
             }
             if let notice = snapshot.notice {
@@ -105,12 +159,48 @@ public struct ReviewView: View {
 
             ReviewTranscriptTextView(
                 revision: snapshot.selectedRevision,
-                activeWordID: snapshot.activeWordID
+                activeWordID: snapshot.activeWordID,
+                annotations: snapshot.annotations,
+                allowsSeeking: snapshot.activity == nil
             ) { lineID, utf8ByteOffset in
                 model.seek(lineID: lineID, utf8ByteOffset: utf8ByteOffset)
             }
             .frame(minHeight: 150, idealHeight: 210, maxHeight: 260)
             .accessibilityLabel("Immutable selected transcript")
+
+            if snapshot.annotations.isVisible,
+               !snapshot.annotations.projection.audioEvents.isEmpty
+            {
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 8) {
+                        ForEach(
+                            snapshot.annotations.projection.audioEvents.prefix(500),
+                            id: \.audioEventID
+                        ) { event in
+                            let accessibilityLabel =
+                                ReviewPresentationModel.audioEventAccessibilityLabel(
+                                    for: event
+                                )
+                            Text(accessibilityLabel)
+                                .font(.caption.monospacedDigit())
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(.quaternary, in: Capsule())
+                                .accessibilityLabel(accessibilityLabel)
+                        }
+                        let hiddenCount = max(
+                            snapshot.annotations.projection.audioEvents.count - 500,
+                            0
+                        )
+                        if hiddenCount > 0 {
+                            Text("+\(hiddenCount) more local events")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .accessibilityLabel("Local audio annotations")
+            }
         }
     }
 
@@ -126,6 +216,14 @@ public struct ReviewView: View {
 
     private func selectedRevisionNumber(_ snapshot: ReviewReadySnapshot) -> Int {
         (snapshot.revisionIDs.firstIndex(of: snapshot.selectedRevisionID) ?? 0) + 1
+    }
+
+    private func activityLabel(_ activity: ReviewActivity) -> String {
+        switch activity {
+        case .settingAnnotationVisibility: "Saving annotation preference…"
+        case .selectingRevision: "Selecting revision…"
+        case .retranscribing: "Transcribing another revision…"
+        }
     }
 
     private func format(_ milliseconds: UInt64) -> String {
@@ -160,11 +258,14 @@ public struct ReviewView: View {
         case .playbackUnavailable: "Canonical audio playback is unavailable."
         }
     }
+
 }
 
 private struct ReviewTranscriptTextView: NSViewRepresentable {
     let revision: TranscriptRevision
     let activeWordID: TranscriptWordID?
+    let annotations: ReviewAnnotations
+    let allowsSeeking: Bool
     let onSeek: (TranscriptLineID, Int) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onSeek: onSeek) }
@@ -200,13 +301,23 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         }
         scrollView.documentView = textView
         context.coordinator.textView = textView
-        context.coordinator.install(revision: revision, activeWordID: activeWordID)
+        context.coordinator.install(
+            revision: revision,
+            activeWordID: activeWordID,
+            annotations: annotations,
+            allowsSeeking: allowsSeeking
+        )
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.onSeek = onSeek
-        context.coordinator.install(revision: revision, activeWordID: activeWordID)
+        context.coordinator.install(
+            revision: revision,
+            activeWordID: activeWordID,
+            annotations: annotations,
+            allowsSeeking: allowsSeeking
+        )
     }
 
     @MainActor
@@ -221,6 +332,8 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         var onSeek: (TranscriptLineID, Int) -> Void
         private var installedRevisionID: TranscriptRevisionID?
         private var installedActiveWordID: TranscriptWordID?
+        private var installedAnnotations: ReviewAnnotations?
+        private var allowsSeeking = true
         private var linePlacements: [LinePlacement] = []
         private var wordRanges: [TranscriptWordID: NSRange] = [:]
 
@@ -230,18 +343,25 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
 
         func install(
             revision: TranscriptRevision,
-            activeWordID: TranscriptWordID?
+            activeWordID: TranscriptWordID?,
+            annotations: ReviewAnnotations,
+            allowsSeeking: Bool
         ) {
+            self.allowsSeeking = allowsSeeking
             if installedRevisionID != revision.revisionID {
                 rebuild(revision)
                 installedRevisionID = revision.revisionID
                 installedActiveWordID = nil
+                installedAnnotations = nil
             }
+            updateAnnotations(annotations)
             updateHighlight(activeWordID)
         }
 
         func seek(characterIndex: Int) {
-            guard let placement = placement(containing: characterIndex) else { return }
+            guard allowsSeeking,
+                  let placement = placement(containing: characterIndex)
+            else { return }
             let localUTF16Offset = min(
                 max(characterIndex - placement.characterRange.location, 0),
                 placement.text.utf16.count
@@ -307,12 +427,40 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
             if let activeWordID, let range = wordRanges[activeWordID] {
                 textView?.textStorage?.addAttribute(
                     .backgroundColor,
-                    value: NSColor.controlAccentColor.withAlphaComponent(0.3),
+                    value: ReviewActiveWordStyleTokens.backgroundColor,
                     range: range
                 )
                 textView?.scrollRangeToVisible(range)
             }
             installedActiveWordID = activeWordID
+        }
+
+        private func updateAnnotations(_ annotations: ReviewAnnotations) {
+            guard annotations != installedAnnotations,
+                  let storage = textView?.textStorage
+            else { return }
+            let documentRange = NSRange(location: 0, length: storage.length)
+            storage.removeAttribute(.underlineStyle, range: documentRange)
+            storage.removeAttribute(.underlineColor, range: documentRange)
+            if annotations.isVisible {
+                for overlay in annotations.projection.textualOverlays {
+                    guard let range = wordRanges[overlay.wordID] else { continue }
+                    let token = ReviewAnnotationStyleTokens.style(
+                        for: overlay.category
+                    )
+                    storage.addAttribute(
+                        .underlineStyle,
+                        value: token.underlineStyle.rawValue,
+                        range: range
+                    )
+                    storage.addAttribute(
+                        .underlineColor,
+                        value: token.underlineColor,
+                        range: range
+                    )
+                }
+            }
+            installedAnnotations = annotations
         }
 
         private func placement(containing characterIndex: Int) -> LinePlacement? {

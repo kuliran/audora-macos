@@ -1,0 +1,351 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/SpeechAnnotationFixture.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "ruleVersion": {
+            "type": "string",
+            "const": "audora-speech-annotations-v1"
+        },
+        "normalizationCases": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SpeechAnnotationFixtureNormalizationCase"
+            },
+            "minItems": 4,
+            "maxItems": 32
+        },
+        "durationMs": {
+            "$ref": "#/$defs/CanonicalDurationMilliseconds"
+        },
+        "lineText": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 131072
+        },
+        "words": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SpeechAnnotationFixtureWord"
+            },
+            "minItems": 1,
+            "maxItems": 1000000
+        },
+        "audioEvents": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SpeechAnnotationFixtureAudioEvent"
+            },
+            "maxItems": 100000
+        },
+        "evidence": {
+            "$ref": "#/$defs/SpeechAnnotationFixtureEvidence"
+        },
+        "expected": {
+            "$ref": "#/$defs/SpeechAnnotationFixtureExpected"
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "ruleVersion",
+        "normalizationCases",
+        "durationMs",
+        "lineText",
+        "words",
+        "audioEvents",
+        "evidence",
+        "expected"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "Versioned, platform-neutral golden input and expected output for the pure\ndeterministic local speech annotator. This fixture is never provider data.",
+    "$defs": {
+        "SpeechAnnotationFixtureNormalizationCase": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                },
+                "expected": {
+                    "type": "string",
+                    "maxLength": 1024
+                }
+            },
+            "required": [
+                "input",
+                "expected"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CanonicalDurationMilliseconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2700000
+        },
+        "SpeechAnnotationFixtureWord": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                },
+                "wordKind": {
+                    "$ref": "#/$defs/TranscriptWordKind"
+                },
+                "timeRange": {
+                    "$ref": "#/$defs/SpeechAnnotationFixtureRange"
+                }
+            },
+            "required": [
+                "text",
+                "wordKind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SpeechAnnotationFixtureAudioEvent": {
+            "type": "object",
+            "properties": {
+                "audioEventId": {
+                    "$ref": "#/$defs/TranscriptAudioEventId"
+                },
+                "category": {
+                    "$ref": "#/$defs/AudioEventCategory"
+                },
+                "startMs": {
+                    "$ref": "#/$defs/SpeechAnnotationFixtureOffset"
+                },
+                "endMs": {
+                    "$ref": "#/$defs/SpeechAnnotationFixtureOffset"
+                }
+            },
+            "required": [
+                "audioEventId",
+                "category",
+                "startMs",
+                "endMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SpeechAnnotationFixtureEvidence": {
+            "type": "object",
+            "properties": {
+                "observed": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SpeechAnnotationFixtureRange"
+                    },
+                    "maxItems": 100000
+                },
+                "voiced": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SpeechAnnotationFixtureRange"
+                    },
+                    "maxItems": 100000
+                },
+                "unavailable": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SpeechAnnotationFixtureUnavailable"
+                    },
+                    "maxItems": 100000
+                }
+            },
+            "required": [
+                "observed",
+                "voiced",
+                "unavailable"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SpeechAnnotationFixtureExpected": {
+            "type": "object",
+            "properties": {
+                "textual": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SpeechAnnotationFixtureExpectedTextual"
+                    },
+                    "maxItems": 100000
+                },
+                "audio": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SpeechAnnotationFixtureExpectedAudio"
+                    },
+                    "maxItems": 100000
+                }
+            },
+            "required": [
+                "textual",
+                "audio"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptWordKind": {
+            "type": "string",
+            "enum": [
+                "lexical",
+                "filledPause",
+                "partialWord"
+            ]
+        },
+        "SpeechAnnotationFixtureRange": {
+            "type": "object",
+            "properties": {
+                "startMs": {
+                    "$ref": "#/$defs/SpeechAnnotationFixtureOffset"
+                },
+                "endMs": {
+                    "$ref": "#/$defs/SpeechAnnotationFixtureOffset"
+                }
+            },
+            "required": [
+                "startMs",
+                "endMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptAudioEventId": {
+            "type": "string",
+            "pattern": "^a[0-9]{6}$"
+        },
+        "AudioEventCategory": {
+            "type": "string",
+            "enum": [
+                "nonSpeech",
+                "silentPause",
+                "untranscribedVoicedInterval",
+                "muted",
+                "captureGap"
+            ]
+        },
+        "SpeechAnnotationFixtureOffset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2700000
+        },
+        "SpeechAnnotationFixtureUnavailable": {
+            "type": "object",
+            "properties": {
+                "startMs": {
+                    "$ref": "#/$defs/SpeechAnnotationFixtureOffset"
+                },
+                "endMs": {
+                    "$ref": "#/$defs/SpeechAnnotationFixtureOffset"
+                },
+                "reasons": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/UnavailableReason"
+                    },
+                    "minItems": 1,
+                    "maxItems": 2
+                }
+            },
+            "required": [
+                "startMs",
+                "endMs",
+                "reasons"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SpeechAnnotationFixtureExpectedTextual": {
+            "type": "object",
+            "properties": {
+                "textualEventId": {
+                    "$ref": "#/$defs/SpeechTextualEventId"
+                },
+                "category": {
+                    "$ref": "#/$defs/SpeechTextualEventCategory"
+                },
+                "firstWordOrdinal": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "lastWordOrdinal": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                }
+            },
+            "required": [
+                "textualEventId",
+                "category",
+                "firstWordOrdinal",
+                "lastWordOrdinal"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SpeechAnnotationFixtureExpectedAudio": {
+            "type": "object",
+            "properties": {
+                "audioEventId": {
+                    "$ref": "#/$defs/TranscriptAudioEventId"
+                },
+                "category": {
+                    "$ref": "#/$defs/AudioEventCategory"
+                },
+                "startMs": {
+                    "$ref": "#/$defs/SpeechAnnotationFixtureOffset"
+                },
+                "endMs": {
+                    "$ref": "#/$defs/SpeechAnnotationFixtureOffset"
+                }
+            },
+            "required": [
+                "audioEventId",
+                "category",
+                "startMs",
+                "endMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "UnavailableReason": {
+            "type": "string",
+            "enum": [
+                "muted",
+                "captureGap"
+            ]
+        },
+        "SpeechTextualEventId": {
+            "type": "string",
+            "pattern": "^t[0-9]{6}$"
+        },
+        "SpeechTextualEventCategory": {
+            "type": "string",
+            "enum": [
+                "filledPause",
+                "partialWord",
+                "repetitionCandidate"
+            ]
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
+        }
+    }
+}

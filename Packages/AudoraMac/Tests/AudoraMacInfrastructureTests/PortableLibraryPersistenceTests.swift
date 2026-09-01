@@ -356,7 +356,7 @@ final class PortableLibraryPersistenceTests: XCTestCase {
         }
     }
 
-    func testSiblingPartialReplacementReopensCompleteOldOrNewRoots() throws {
+    func testSiblingPartialReplacementDistinguishesFailureFromCommitAmbiguity() throws {
         for relativeRaw in ["preferences.json", "profile/head.json"] {
             let relative = try LibraryRelativePath(relativeRaw)
             for afterInstall in [false, true] {
@@ -388,13 +388,24 @@ final class PortableLibraryPersistenceTests: XCTestCase {
                             )
                         )
                     }
-                    XCTAssertThrowsError(
-                        try persistence.atomicallyReplaceRoot(
-                            newData,
-                            relativePath: relative,
-                            under: root
+                    if afterInstall {
+                        XCTAssertEqual(
+                            try persistence.atomicallyReplaceRoot(
+                                newData,
+                                relativePath: relative,
+                                under: root
+                            ),
+                            .commitAmbiguous
                         )
-                    )
+                    } else {
+                        XCTAssertThrowsError(
+                            try persistence.atomicallyReplaceRoot(
+                                newData,
+                                relativePath: relative,
+                                under: root
+                            )
+                        )
+                    }
                     guard case let .readWrite(reopened) = try PortableLibraryPersistence().open(at: root) else {
                         return XCTFail("supported replacement became read-only")
                     }

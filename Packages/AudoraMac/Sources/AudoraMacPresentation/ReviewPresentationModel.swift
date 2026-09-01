@@ -43,6 +43,10 @@ public final class ReviewPresentationModel: ObservableObject {
         send(.pause)
     }
 
+    public func setAnnotationsVisible(_ visible: Bool) {
+        send(.setAnnotationsVisible(visible))
+    }
+
     public func seek(lineID: TranscriptLineID, utf8ByteOffset: Int) {
         send(.seek(lineID: lineID, utf8ByteOffset: utf8ByteOffset))
     }
@@ -63,7 +67,31 @@ public final class ReviewPresentationModel: ObservableObject {
         send(.retranscribe)
     }
 
+    public static func audioEventAccessibilityLabel(
+        for event: TranscriptAudioEvent
+    ) -> String {
+        let title = switch event.category {
+        case .nonSpeech: "Non-speech"
+        case .silentPause: "Pause"
+        case .untranscribedVoicedInterval: "Untranscribed voice"
+        case .muted: "Muted"
+        case .captureGap: "Capture gap"
+        }
+        return "\(title) \(formatAudioEventTime(event.timeRange.startMilliseconds))–" +
+            formatAudioEventTime(event.timeRange.endMilliseconds)
+    }
+
     private func send(_ command: ReviewCommand) {
         Task { await feature.send(command) }
+    }
+
+    private static func formatAudioEventTime(_ milliseconds: UInt64) -> String {
+        let totalSeconds = milliseconds / 1_000
+        return String(
+            format: "%02llu:%02llu.%03llu",
+            totalSeconds / 60,
+            totalSeconds % 60,
+            milliseconds % 1_000
+        )
     }
 }

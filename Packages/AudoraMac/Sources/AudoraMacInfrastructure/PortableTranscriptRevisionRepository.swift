@@ -41,6 +41,7 @@ struct PortableVerifiedReviewSession: Sendable {
     let revision: ReopenedTranscriptRevisionSnapshot
     let durationMilliseconds: UInt64
     let canonicalWAV: Data
+    let annotationEvidence: SpeechAnnotationEvidence
 }
 
 /// The one persistence boundary that turns a validated Transcript Revision into
@@ -431,7 +432,8 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                             selectedRevision: installed.revision
                         ),
                         durationMilliseconds: loaded.audio.durationMilliseconds,
-                        canonicalWAV: wav
+                        canonicalWAV: wav,
+                        annotationEvidence: annotationEvidence(for: loaded.audio)
                     )
                 )
             }
@@ -615,6 +617,7 @@ private extension PortableTranscriptRevisionRepository {
         let durationMilliseconds: UInt64
         let audioFingerprint: AudioFingerprint
         let sourceFingerprints: [TranscriptSourceFingerprint]
+        let unavailableIntervals: [SpeechUnavailableInterval]
     }
 
     struct LoadedSession {
@@ -700,7 +703,8 @@ private extension PortableTranscriptRevisionRepository {
                         audioSourceID: $0.audioSourceID,
                         fingerprint: fingerprint
                     )
-                }
+                },
+                unavailableIntervals: []
             )
         }
         return LoadedSession(
@@ -996,11 +1000,44 @@ private extension PortableTranscriptRevisionRepository {
                         audioSourceID: .microphone,
                         fingerprint: audio.fingerprint
                     ),
-                ]
+                ],
+                unavailableIntervals: try audio.unavailableIntervals.map { interval in
+                    let sampleRate = UInt64(CanonicalAudioFormat.sampleRateHz)
+                    let start = interval.range.startFrame * 1_000 / sampleRate
+                    let end = min(
+                        (interval.range.endFrame * 1_000 + sampleRate - 1) /
+                            sampleRate,
+                        duration
+                    )
+                    return SpeechUnavailableInterval(
+                        timeRange: try SessionTimeRange(
+                            startMilliseconds: start,
+                            endMilliseconds: end,
+                            sessionDurationMilliseconds: duration
+                        ),
+                        reasons: interval.reasons
+                    )
+                }
             )
         } catch {
             throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
         }
+    }
+
+    func annotationEvidence(
+        for audio: TrustedSessionAudio
+    ) -> SpeechAnnotationEvidence {
+        guard !audio.unavailableIntervals.isEmpty else { return .none }
+        return SpeechAnnotationEvidence(
+            sources: [
+                SpeechAcousticEvidence(
+                    audioSourceID: .microphone,
+                    observedRanges: [],
+                    voicedRanges: [],
+                    unavailableIntervals: audio.unavailableIntervals
+                ),
+            ]
+        )
     }
 
     func validate(

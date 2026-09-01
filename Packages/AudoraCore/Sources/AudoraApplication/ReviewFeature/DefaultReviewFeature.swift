@@ -14,9 +14,16 @@ public actor DefaultReviewFeature: ReviewFeature {
         }
     }
 
+    private struct PendingAnnotationVisibilityCommand {
+        let selection: ReviewSelection
+        let visible: Bool
+    }
+
     private let sessions: any ReviewSessionPort
     private let playback: any ReviewPlaybackPort
     private let retranscriber: any ReviewRetranscriptionPort
+    private let annotationVisibility: any ReviewAnnotationVisibilityPort
+    private let annotator = DeterministicSpeechAnnotator()
 
     private var state: ReviewFeatureState = .unavailable(
         selection: nil,
@@ -26,6 +33,7 @@ public actor DefaultReviewFeature: ReviewFeature {
     private var commandInFlight = false
     private var pendingSelectionCommand: PendingSelectionCommand?
     private var refreshPending = false
+    private var pendingAnnotationVisibility: PendingAnnotationVisibilityCommand?
     private var playbackObserver: Task<Void, Never>?
     private var stateContinuations: [UInt64: AsyncStream<ReviewFeatureState>.Continuation]
         = [:]
@@ -34,11 +42,13 @@ public actor DefaultReviewFeature: ReviewFeature {
     public init(
         sessions: any ReviewSessionPort,
         playback: any ReviewPlaybackPort,
-        retranscriber: any ReviewRetranscriptionPort
+        retranscriber: any ReviewRetranscriptionPort,
+        annotationVisibility: any ReviewAnnotationVisibilityPort
     ) {
         self.sessions = sessions
         self.playback = playback
         self.retranscriber = retranscriber
+        self.annotationVisibility = annotationVisibility
     }
 
     deinit { playbackObserver?.cancel() }
@@ -68,6 +78,11 @@ public actor DefaultReviewFeature: ReviewFeature {
             } else if refreshPending {
                 refreshPending = false
                 next = .refresh
+            } else if let pendingVisibility = pendingAnnotationVisibility {
+                pendingAnnotationVisibility = nil
+                next = readySnapshot?.selection == pendingVisibility.selection
+                    ? .setAnnotationsVisible(pendingVisibility.visible)
+                    : nil
             } else {
                 next = nil
             }
@@ -85,6 +100,12 @@ public actor DefaultReviewFeature: ReviewFeature {
             refreshPending = false
         case .refresh:
             if pendingSelectionCommand == nil { refreshPending = true }
+        case let .setAnnotationsVisible(visible):
+            guard let selection = readySnapshot?.selection else { return }
+            pendingAnnotationVisibility = PendingAnnotationVisibilityCommand(
+                selection: selection,
+                visible: visible
+            )
         case .seek, .play, .pause, .selectRevision, .retranscribe:
             break
         }
@@ -104,6 +125,8 @@ public actor DefaultReviewFeature: ReviewFeature {
             await applyPlayback(await playback.play())
         case .pause:
             await applyPlayback(await playback.pause())
+        case let .setAnnotationsVisible(visible):
+            await setAnnotationsVisible(visible)
         case let .selectRevision(revisionID, expectedSelectedRevisionID):
             await selectRevision(
                 revisionID,
@@ -115,6 +138,9 @@ public actor DefaultReviewFeature: ReviewFeature {
     }
 
     private func selectSession(_ selection: ReviewSelection) async {
+        let annotationsVisible = await annotationVisibility.annotationsVisible(
+            in: selection.scope
+        ) ?? readySnapshot?.annotations.isVisible ?? true
         let previousCapability = readySnapshot?.playback.audioCapabilityID
         resolver = nil
         transition(to: .loading(selection))
@@ -123,6 +149,7 @@ public actor DefaultReviewFeature: ReviewFeature {
             await install(
                 snapshot,
                 preserving: nil,
+                annotationsVisible: annotationsVisible,
                 notice: nil
             )
         case .unavailable:
@@ -162,11 +189,15 @@ public actor DefaultReviewFeature: ReviewFeature {
         case .loading, .unavailable(selection: nil, reason: _):
             return
         }
+        let annotationsVisible = await annotationVisibility.annotationsVisible(
+            in: selection.scope
+        ) ?? readySnapshot?.annotations.isVisible ?? true
         switch await sessions.load(selection) {
         case let .available(snapshot):
             await install(
                 snapshot,
                 preserving: readySnapshot?.playback ?? previousPlayback,
+                annotationsVisible: annotationsVisible,
                 notice: nil
             )
         case .unavailable:
@@ -196,6 +227,48 @@ public actor DefaultReviewFeature: ReviewFeature {
         await applyPlayback(await playback.seek(toMilliseconds: milliseconds))
     }
 
+    private func setAnnotationsVisible(_ visible: Bool) async {
+        guard let ready = readySnapshot,
+              ready.annotations.isVisible != visible
+        else { return }
+        transition(
+            to: .ready(
+                replacing(ready, activity: .settingAnnotationVisibility)
+            )
+        )
+        let writeResult = await annotationVisibility.setAnnotationsVisible(
+            visible,
+            in: ready.selection.scope
+        )
+        let currentVisibility: Bool? = switch writeResult {
+        case let .committed(visible),
+             let .notCommitted(visible),
+             let .commitAmbiguous(visible):
+            visible
+        case .unavailable:
+            nil
+        }
+        guard let current = readySnapshot,
+              current.selection == ready.selection,
+              current.selectedRevisionID == ready.selectedRevisionID,
+              current.playback.audioCapabilityID ==
+                ready.playback.audioCapabilityID,
+              current.playback.durationMilliseconds ==
+                ready.playback.durationMilliseconds
+        else { return }
+        transition(
+            to: .ready(
+                replacing(
+                    current,
+                    annotations: currentVisibility.map {
+                        current.annotations.settingVisibility($0)
+                    } ?? current.annotations,
+                    activity: nil
+                )
+            )
+        )
+    }
+
     private func selectRevision(
         _ revisionID: TranscriptRevisionID,
         expectedSelectedRevisionID: TranscriptRevisionID
@@ -216,6 +289,8 @@ public actor DefaultReviewFeature: ReviewFeature {
             await install(
                 snapshot,
                 preserving: readySnapshot?.playback ?? ready.playback,
+                annotationsVisible: readySnapshot?.annotations.isVisible ??
+                    ready.annotations.isVisible,
                 notice: nil
             )
         case .stale:
@@ -224,6 +299,8 @@ public actor DefaultReviewFeature: ReviewFeature {
                 await install(
                     snapshot,
                     preserving: readySnapshot?.playback ?? ready.playback,
+                    annotationsVisible: readySnapshot?.annotations.isVisible ??
+                        ready.annotations.isVisible,
                     notice: .selectionChanged
                 )
             case .unavailable:
@@ -277,6 +354,8 @@ public actor DefaultReviewFeature: ReviewFeature {
                 await install(
                     snapshot,
                     preserving: readySnapshot?.playback ?? ready.playback,
+                    annotationsVisible: readySnapshot?.annotations.isVisible ??
+                        ready.annotations.isVisible,
                     notice: .retranscribed
                 )
             case .unavailable:
@@ -309,6 +388,7 @@ public actor DefaultReviewFeature: ReviewFeature {
     private func install(
         _ snapshot: ReviewSessionSnapshot,
         preserving previousPlayback: ReviewPlaybackSnapshot?,
+        annotationsVisible: Bool,
         notice: ReviewNotice?
     ) async {
         let playbackSnapshot: ReviewPlaybackSnapshot?
@@ -338,6 +418,20 @@ public actor DefaultReviewFeature: ReviewFeature {
             canonicalAudioDurationMilliseconds:
                 snapshot.canonicalAudioDurationMilliseconds
         )
+        let annotations = ReviewAnnotations(
+            isVisible: annotationsVisible,
+            projection: annotationProjection(for: snapshot)
+        )
+        let latestPlayback: ReviewPlaybackSnapshot
+        if let current = readySnapshot?.playback,
+           current.audioCapabilityID == snapshot.audioCapabilityID,
+           current.durationMilliseconds ==
+            snapshot.canonicalAudioDurationMilliseconds
+        {
+            latestPlayback = current
+        } else {
+            latestPlayback = playbackSnapshot
+        }
         resolver = nextResolver
         transition(
             to: .ready(
@@ -345,10 +439,11 @@ public actor DefaultReviewFeature: ReviewFeature {
                     selection: snapshot.selection,
                     revisionIDs: snapshot.revisionIDs,
                     selectedRevision: snapshot.selectedRevision,
-                    playback: playbackSnapshot,
+                    playback: latestPlayback,
                     activeWordID: nextResolver.activeWord(
-                        atMilliseconds: playbackSnapshot.positionMilliseconds
+                        atMilliseconds: latestPlayback.positionMilliseconds
                     ),
+                    annotations: annotations,
                     notice: notice
                 )
             )
@@ -388,6 +483,7 @@ public actor DefaultReviewFeature: ReviewFeature {
                     activeWordID: resolver.activeWord(
                         atMilliseconds: playbackSnapshot.positionMilliseconds
                     ),
+                    annotations: ready.annotations,
                     activity: ready.activity,
                     notice: ready.notice
                 )
@@ -413,6 +509,7 @@ public actor DefaultReviewFeature: ReviewFeature {
 
     private func replacing(
         _ ready: ReviewReadySnapshot,
+        annotations: ReviewAnnotations? = nil,
         activity: ReviewActivity? = nil,
         notice: ReviewNotice? = nil
     ) -> ReviewReadySnapshot {
@@ -422,9 +519,31 @@ public actor DefaultReviewFeature: ReviewFeature {
             selectedRevision: ready.selectedRevision,
             playback: ready.playback,
             activeWordID: ready.activeWordID,
+            annotations: annotations ?? ready.annotations,
             activity: activity,
             notice: notice
         )
+    }
+
+    private func annotationProjection(
+        for snapshot: ReviewSessionSnapshot
+    ) -> TranscriptAnnotationProjection {
+        do {
+            let annotations = try annotator.annotate(
+                revision: snapshot.selectedRevision,
+                evidence: snapshot.annotationEvidence
+            )
+            return try TranscriptAnnotationProjector.project(
+                annotations,
+                over: snapshot.selectedRevision
+            )
+        } catch {
+            return TranscriptAnnotationProjection(
+                transcriptRevisionID: snapshot.selectedRevisionID,
+                textualOverlays: [],
+                audioEvents: []
+            )
+        }
     }
 
     private func transition(to next: ReviewFeatureState) {

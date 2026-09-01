@@ -40,6 +40,13 @@ public enum PortableLibraryPersistenceError: Error, Equatable, Sendable {
     case injectedFault(PortableLibraryFaultPoint)
 }
 
+public enum PortableMutableRootWriteOutcome: Equatable, Sendable {
+    /// The replacement and its containing directory were flushed.
+    case committed
+    /// The replacement was installed, but its directory flush did not finish.
+    case commitAmbiguous
+}
+
 public enum LoadedPortableLibrary: Equatable, Sendable {
     case readWrite(PortableLibraryAuthority)
     case readOnly(libraryID: LibraryID?)
@@ -209,19 +216,22 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
     /// while the caller holds active Library authority.
     func openWithoutReconcilingImports(
         at root: URL,
-        requirePackageExtension: Bool = true
+        requirePackageExtension: Bool = true,
+        expectedRootIdentity: LibraryRootIdentity? = nil
     ) throws -> LoadedPortableLibrary {
         try open(
             at: root,
             requirePackageExtension: requirePackageExtension,
-            reconcileAbandonedImports: false
+            reconcileAbandonedImports: false,
+            expectedRootIdentity: expectedRootIdentity
         )
     }
 
     private func open(
         at root: URL,
         requirePackageExtension: Bool,
-        reconcileAbandonedImports: Bool
+        reconcileAbandonedImports: Bool,
+        expectedRootIdentity: LibraryRootIdentity? = nil
     ) throws -> LoadedPortableLibrary {
         do {
             if requirePackageExtension, root.pathExtension != "audoralibrary" {
@@ -229,11 +239,32 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
             }
             let rootDescriptor = try openDirectoryDescriptor(at: root)
             defer { Darwin.close(rootDescriptor) }
+            if let expectedRootIdentity {
+                guard LibraryRootIdentity.capture(rootDescriptor) ==
+                        expectedRootIdentity,
+                      LibraryRootIdentity.capture(root) ==
+                        expectedRootIdentity
+                else {
+                    throw PortableLibraryPersistenceError
+                        .installedLibraryMismatch
+                }
+            }
             try fault(.afterRootDescriptorOpened)
-            return try load(
+            let loaded = try load(
                 from: rootDescriptor,
                 reconcileAbandonedImports: reconcileAbandonedImports
             )
+            if let expectedRootIdentity {
+                guard LibraryRootIdentity.capture(rootDescriptor) ==
+                        expectedRootIdentity,
+                      LibraryRootIdentity.capture(root) ==
+                        expectedRootIdentity
+                else {
+                    throw PortableLibraryPersistenceError
+                        .installedLibraryMismatch
+                }
+            }
+            return loaded
         } catch let error as PortableLibraryPersistenceError {
             throw error
         } catch {
@@ -241,11 +272,14 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         }
     }
 
+    @discardableResult
     public func atomicallyReplaceRoot(
         _ data: Data,
         relativePath: LibraryRelativePath,
-        under root: URL
-    ) throws {
+        under root: URL,
+        expectedRootIdentity: LibraryRootIdentity? = nil,
+        reconcileAbandonedImports: Bool = true
+    ) throws -> PortableMutableRootWriteOutcome {
         let relative = relativePath.description
         guard relative == "preferences.json" || relative == "profile/head.json" else {
             throw PortableLibraryPersistenceError.unsupportedMutableRoot
@@ -258,7 +292,19 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
 
         let rootDescriptor = try openDirectoryDescriptor(at: root)
         defer { Darwin.close(rootDescriptor) }
-        guard case .readWrite = try load(from: rootDescriptor) else {
+        if let expectedRootIdentity {
+            guard LibraryRootIdentity.capture(rootDescriptor) ==
+                    expectedRootIdentity,
+                  LibraryRootIdentity.capture(root) ==
+                    expectedRootIdentity
+            else {
+                throw PortableLibraryPersistenceError.installedLibraryMismatch
+            }
+        }
+        guard case .readWrite = try load(
+            from: rootDescriptor,
+            reconcileAbandonedImports: reconcileAbandonedImports
+        ) else {
             throw PortableLibraryPersistenceError.readOnlyLibrary
         }
 
@@ -270,19 +316,44 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         defer { Darwin.close(parentDescriptor) }
         let targetName = relativePath.components.last!
         let partialName = ".\(targetName).\(UUID().uuidString).partial"
+        var installed = false
         do {
             try writeExclusive(data, named: partialName, under: parentDescriptor)
             try fault(.beforeMutableRootInstall(relative))
+            if let expectedRootIdentity {
+                guard LibraryRootIdentity.capture(rootDescriptor) ==
+                        expectedRootIdentity,
+                      LibraryRootIdentity.capture(root) ==
+                        expectedRootIdentity
+                else {
+                    throw PortableLibraryPersistenceError
+                        .installedLibraryMismatch
+                }
+            }
             guard renameat(parentDescriptor, partialName, parentDescriptor, targetName) == 0 else {
                 throw PortableLibraryPersistenceError.ioFailure
             }
+            installed = true
             try fault(.afterMutableRootInstall(relative))
             try flushDescriptor(parentDescriptor)
+            if let expectedRootIdentity {
+                guard LibraryRootIdentity.capture(rootDescriptor) ==
+                        expectedRootIdentity,
+                      LibraryRootIdentity.capture(root) ==
+                        expectedRootIdentity
+                else {
+                    throw PortableLibraryPersistenceError
+                        .installedLibraryMismatch
+                }
+            }
+            return .committed
         } catch let error as PortableLibraryPersistenceError {
             _ = unlinkat(parentDescriptor, partialName, 0)
+            if installed { return .commitAmbiguous }
             throw error
         } catch {
             _ = unlinkat(parentDescriptor, partialName, 0)
+            if installed { return .commitAmbiguous }
             throw PortableLibraryPersistenceError.ioFailure
         }
     }

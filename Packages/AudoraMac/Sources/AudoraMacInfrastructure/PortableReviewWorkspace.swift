@@ -20,6 +20,7 @@ public actor PortableReviewWorkspace: ReviewSessionPort,
         let audioCapabilityID: ReviewAudioCapabilityID
         let durationMilliseconds: UInt64
         let canonicalWAV: Data
+        let annotationEvidence: SpeechAnnotationEvidence
     }
 
     private let scopes: any SessionProcessingLibraryScopeProviding
@@ -60,7 +61,8 @@ public actor PortableReviewWorkspace: ReviewSessionPort,
                     revisionIDs: verified.revision.revisionIDs,
                     selectedRevision: verified.revision.selectedRevision,
                     audioCapabilityID: capabilityID,
-                    canonicalAudioDurationMilliseconds: verified.durationMilliseconds
+                    canonicalAudioDurationMilliseconds: verified.durationMilliseconds,
+                    annotationEvidence: verified.annotationEvidence
                 )
                 guard await scopes.isCurrentSessionProcessingScope(active.identity)
                 else { return .unavailable }
@@ -70,7 +72,8 @@ public actor PortableReviewWorkspace: ReviewSessionPort,
                     revisions: revisions,
                     audioCapabilityID: capabilityID,
                     durationMilliseconds: verified.durationMilliseconds,
-                    canonicalWAV: verified.canonicalWAV
+                    canonicalWAV: verified.canonicalWAV,
+                    annotationEvidence: verified.annotationEvidence
                 )
                 return .available(snapshot)
             } catch {
@@ -109,7 +112,8 @@ public actor PortableReviewWorkspace: ReviewSessionPort,
                     revisionIDs: reopened.revisionIDs,
                     selectedRevision: reopened.selectedRevision,
                     audioCapabilityID: binding.audioCapabilityID,
-                    canonicalAudioDurationMilliseconds: binding.durationMilliseconds
+                    canonicalAudioDurationMilliseconds: binding.durationMilliseconds,
+                    annotationEvidence: binding.annotationEvidence
                 )
             )
         } catch let failure as TranscriptRevisionRepositoryFailure {

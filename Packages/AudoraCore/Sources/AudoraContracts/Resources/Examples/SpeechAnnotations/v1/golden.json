@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "ruleVersion": "audora-speech-annotations-v1",
+  "normalizationCases": [
+    { "input": "U.S.", "expected": "u.s" },
+    { "input": "us", "expected": "us" },
+    { "input": "-go", "expected": "go" },
+    { "input": "go", "expected": "go" },
+    { "input": "“DON’T,”", "expected": "don’t" },
+    { "input": "(state-of-the-art)!", "expected": "state-of-the-art" },
+    { "input": "go-.", "expected": "go-" }
+  ],
+  "durationMs": 2400,
+  "lineText": "Um state-of-the-art p- very very we should we should later later",
+  "words": [
+    { "text": "Um", "wordKind": "filledPause", "timeRange": { "startMs": 100, "endMs": 180 } },
+    { "text": "state-of-the-art", "wordKind": "lexical", "timeRange": { "startMs": 250, "endMs": 400 } },
+    { "text": "p-", "wordKind": "partialWord", "timeRange": { "startMs": 450, "endMs": 500 } },
+    { "text": "very", "wordKind": "lexical", "timeRange": { "startMs": 600, "endMs": 680 } },
+    { "text": "very", "wordKind": "lexical", "timeRange": { "startMs": 720, "endMs": 800 } },
+    { "text": "we", "wordKind": "lexical", "timeRange": { "startMs": 900, "endMs": 950 } },
+    { "text": "should", "wordKind": "lexical", "timeRange": { "startMs": 960, "endMs": 1030 } },
+    { "text": "we", "wordKind": "lexical", "timeRange": { "startMs": 1080, "endMs": 1130 } },
+    { "text": "should", "wordKind": "lexical", "timeRange": { "startMs": 1140, "endMs": 1210 } },
+    { "text": "later", "wordKind": "lexical", "timeRange": { "startMs": 1800, "endMs": 1880 } },
+    { "text": "later", "wordKind": "lexical" }
+  ],
+  "audioEvents": [
+    { "audioEventId": "a000000", "category": "nonSpeech", "startMs": 1500, "endMs": 1550 }
+  ],
+  "evidence": {
+    "observed": [
+      { "startMs": 1300, "endMs": 1500 },
+      { "startMs": 1550, "endMs": 1700 }
+    ],
+    "voiced": [
+      { "startMs": 1400, "endMs": 1450 },
+      { "startMs": 1600, "endMs": 1650 }
+    ],
+    "unavailable": [
+      { "startMs": 1325, "endMs": 1350, "reasons": ["muted"] },
+      { "startMs": 1575, "endMs": 1600, "reasons": ["captureGap"] }
+    ]
+  },
+  "expected": {
+    "textual": [
+      {
+        "textualEventId": "t000000",
+        "category": "filledPause",
+        "firstWordOrdinal": 0,
+        "lastWordOrdinal": 0
+      },
+      {
+        "textualEventId": "t000001",
+        "category": "partialWord",
+        "firstWordOrdinal": 2,
+        "lastWordOrdinal": 2
+      },
+      {
+        "textualEventId": "t000002",
+        "category": "repetitionCandidate",
+        "firstWordOrdinal": 3,
+        "lastWordOrdinal": 4
+      },
+      {
+        "textualEventId": "t000003",
+        "category": "repetitionCandidate",
+        "firstWordOrdinal": 5,
+        "lastWordOrdinal": 8
+      }
+    ],
+    "audio": [
+      { "audioEventId": "a000001", "category": "silentPause", "startMs": 1300, "endMs": 1325 },
+      { "audioEventId": "a000002", "category": "muted", "startMs": 1325, "endMs": 1350 },
+      { "audioEventId": "a000003", "category": "silentPause", "startMs": 1350, "endMs": 1400 },
+      { "audioEventId": "a000004", "category": "untranscribedVoicedInterval", "startMs": 1400, "endMs": 1450 },
+      { "audioEventId": "a000005", "category": "silentPause", "startMs": 1450, "endMs": 1500 },
+      { "audioEventId": "a000000", "category": "nonSpeech", "startMs": 1500, "endMs": 1550 },
+      { "audioEventId": "a000006", "category": "silentPause", "startMs": 1550, "endMs": 1575 },
+      { "audioEventId": "a000007", "category": "captureGap", "startMs": 1575, "endMs": 1600 },
+      { "audioEventId": "a000008", "category": "untranscribedVoicedInterval", "startMs": 1600, "endMs": 1650 },
+      { "audioEventId": "a000009", "category": "silentPause", "startMs": 1650, "endMs": 1700 }
+    ]
+  }
+}

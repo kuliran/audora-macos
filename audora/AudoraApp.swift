@@ -74,7 +74,8 @@ struct AudoraApp: App {
             playback: AVFoundationReviewPlaybackAdapter(resolver: reviewWorkspace),
             retranscriber: SessionProcessingReviewRetranscriber(
                 feature: sessionProcessingFeature
-            )
+            ),
+            annotationVisibility: workspace
         )
         let audioImportWorkspace = PortableAudioImportWorkspace(
             workspace: workspace,

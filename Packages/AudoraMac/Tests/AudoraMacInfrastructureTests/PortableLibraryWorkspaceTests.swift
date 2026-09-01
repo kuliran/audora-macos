@@ -60,6 +60,31 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testProcessingScopeRejectsSameIDRootReplacementBeforeAcquisition() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Root.audoralibrary")
+            let moved = parent.appendingPathComponent("Original.audoralibrary")
+            let seed = try makeSeed()
+            let authority = try PortableLibraryPersistence().create(at: root, seed: seed)
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+
+            try FileManager.default.moveItem(at: root, to: moved)
+            _ = try PortableLibraryPersistence().create(at: root, seed: seed)
+
+            let acquired = await workspace.acquireSessionProcessingScope(
+                for: LibraryScope(libraryID: authority.manifest.libraryID)
+            )
+            XCTAssertNil(acquired)
+        }
+    }
+
     func testSuccessfulSwitchAcquiresCandidateBeforeReleasingOldLease() async throws {
         try await withTwoLibraries { first, second, firstAuthority, secondAuthority in
             let access = RecordingAccessGrantor()
@@ -390,6 +415,255 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
             )
 
             XCTAssertEqual(generation, 7)
+        }
+    }
+
+    func testAnnotationVisibilityPersistsAsOneGlobalLibraryPreference() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Annotations.audoralibrary")
+            let persistence = PortableLibraryPersistence()
+            let authority = try persistence.create(at: root, seed: makeSeed())
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+
+            let initiallyVisible = await workspace.annotationsVisible(in: scope)
+            let didWrite = await workspace.setAnnotationsVisible(false, in: scope)
+            let finallyVisible = await workspace.annotationsVisible(in: scope)
+            XCTAssertEqual(initiallyVisible, true)
+            XCTAssertEqual(didWrite, .committed(visible: false))
+            XCTAssertEqual(finallyVisible, false)
+
+            guard case let .readWrite(reopened) = try persistence.open(at: root)
+            else { return XCTFail("expected a writable portable Library") }
+            XCTAssertFalse(reopened.preferences.annotationsVisible)
+            XCTAssertEqual(reopened.preferences.language, authority.preferences.language)
+            XCTAssertEqual(
+                reopened.preferences.playbackRate,
+                authority.preferences.playbackRate
+            )
+        }
+    }
+
+    func testAnnotationVisibilityRejectsSameIDRootReplacementWithoutRetargetingActiveScope() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Annotations.audoralibrary")
+            let original = parent.appendingPathComponent(
+                "OriginalAnnotations.audoralibrary"
+            )
+            let replacement = parent.appendingPathComponent(
+                "ReplacementAnnotations.audoralibrary"
+            )
+            let seed = try makeSeed()
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: seed
+            )
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+
+            try FileManager.default.moveItem(at: root, to: original)
+            _ = try PortableLibraryPersistence().create(at: root, seed: seed)
+
+            let replacedRead = await workspace.annotationsVisible(in: scope)
+            let replacedWrite = await workspace.setAnnotationsVisible(
+                false,
+                in: scope
+            )
+
+            XCTAssertNil(replacedRead)
+            XCTAssertEqual(replacedWrite, .unavailable)
+            guard case let .readWrite(replacementAuthority) =
+                try PortableLibraryPersistence().openWithoutReconcilingImports(
+                    at: root
+                )
+            else { return XCTFail("expected a writable replacement Library") }
+            XCTAssertTrue(replacementAuthority.preferences.annotationsVisible)
+
+            try FileManager.default.moveItem(at: root, to: replacement)
+            try FileManager.default.moveItem(at: original, to: root)
+            let restoredRead = await workspace.annotationsVisible(in: scope)
+            XCTAssertEqual(restoredRead, true)
+        }
+    }
+
+    func testAnnotationVisibilityPreinstallRootSwapMutatesNeitherLibraryAndKeepsOriginalAuthority() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Annotations.audoralibrary")
+            let original = parent.appendingPathComponent(
+                "OriginalAnnotations.audoralibrary"
+            )
+            let candidate = parent.appendingPathComponent(
+                "CandidateAnnotations.audoralibrary"
+            )
+            let displaced = parent.appendingPathComponent(
+                "DisplacedAnnotations.audoralibrary"
+            )
+            let seed = try makeSeed()
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: seed
+            )
+            _ = try PortableLibraryPersistence().create(at: candidate, seed: seed)
+            let persistence = PortableLibraryPersistence { reached in
+                guard reached == .beforeMutableRootInstall("preferences.json")
+                else { return }
+                try FileManager.default.moveItem(at: root, to: original)
+                try FileManager.default.moveItem(at: candidate, to: root)
+            }
+            let workspace = PortableLibraryWorkspace(
+                persistence: persistence,
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+
+            let didWrite = await workspace.setAnnotationsVisible(false, in: scope)
+
+            XCTAssertEqual(didWrite, .unavailable)
+            guard case let .readWrite(replacementAuthority) =
+                try PortableLibraryPersistence().openWithoutReconcilingImports(
+                    at: root
+                ),
+                  case let .readWrite(originalAuthority) =
+                    try PortableLibraryPersistence().openWithoutReconcilingImports(
+                        at: original
+                    )
+            else { return XCTFail("expected two writable complete Libraries") }
+            XCTAssertTrue(replacementAuthority.preferences.annotationsVisible)
+            XCTAssertTrue(originalAuthority.preferences.annotationsVisible)
+
+            try FileManager.default.moveItem(at: root, to: displaced)
+            try FileManager.default.moveItem(at: original, to: root)
+            let restoredRead = await workspace.annotationsVisible(in: scope)
+            XCTAssertEqual(restoredRead, true)
+        }
+    }
+
+    func testAnnotationVisibilityReportsPreinstallFailureWithCurrentTruth() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent(
+                "PreinstallAnnotations.audoralibrary"
+            )
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: makeSeed()
+            )
+            let faultPoint = PortableLibraryFaultPoint.beforeMutableRootInstall(
+                "preferences.json"
+            )
+            let persistence = PortableLibraryPersistence { reached in
+                if reached == faultPoint {
+                    throw PortableLibraryPersistenceError.injectedFault(reached)
+                }
+            }
+            let workspace = PortableLibraryWorkspace(
+                persistence: persistence,
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let activeImport = try makeRecognizedAbandonedAudioImportTree(in: root)
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+
+            let result = await workspace.setAnnotationsVisible(false, in: scope)
+            let visible = await workspace.annotationsVisible(in: scope)
+
+            XCTAssertEqual(result, .notCommitted(visible: true))
+            XCTAssertEqual(visible, true)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: activeImport.path))
+        }
+    }
+
+    func testAnnotationVisibilityReportsPostInstallAmbiguityWithoutReconcilingImportStaging() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent(
+                "PostinstallAnnotations.audoralibrary"
+            )
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: makeSeed()
+            )
+            let faultPoint = PortableLibraryFaultPoint.afterMutableRootInstall(
+                "preferences.json"
+            )
+            let persistence = PortableLibraryPersistence { reached in
+                if reached == faultPoint {
+                    throw PortableLibraryPersistenceError.injectedFault(reached)
+                }
+            }
+            let workspace = PortableLibraryWorkspace(
+                persistence: persistence,
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let activeImport = try makeRecognizedAbandonedAudioImportTree(in: root)
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+
+            let didWrite = await workspace.setAnnotationsVisible(false, in: scope)
+            let visible = await workspace.annotationsVisible(in: scope)
+
+            XCTAssertEqual(
+                didWrite,
+                .commitAmbiguous(visible: false)
+            )
+            XCTAssertEqual(visible, false)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: activeImport.path))
+            guard case let .readWrite(reopened) = try PortableLibraryPersistence()
+                .openWithoutReconcilingImports(at: root)
+            else { return XCTFail("expected a writable portable Library") }
+            XCTAssertFalse(reopened.preferences.annotationsVisible)
+        }
+    }
+
+    func testAnnotationVisibilityWriteNeverReconcilesActiveImportStaging() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("ActiveAnnotations.audoralibrary")
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: makeSeed()
+            )
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let activeImport = try makeRecognizedAbandonedAudioImportTree(in: root)
+
+            let didWrite = await workspace.setAnnotationsVisible(
+                false,
+                in: LibraryScope(libraryID: authority.manifest.libraryID)
+            )
+
+            XCTAssertEqual(didWrite, .committed(visible: false))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: activeImport.path))
         }
     }
 
