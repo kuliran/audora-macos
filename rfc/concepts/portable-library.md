@@ -445,6 +445,13 @@ a live failure-free Pending as an abandoned launch between resolution and
 ownership. If a terminal write remains uncertain after the lease is handed off,
 recovery first reconciles and rereads storage; only persistent I/O failure uses an
 Application-only exact Retry projection, never a fabricated durable aggregate.
+Publication reconciliation returns a typed exact-publication result. Its proof
+checks the complete intended two-message tail and canonical immutable message
+bytes, response and Profile provenance, consumed Pending, and fresh-Draft identity;
+it allows a later valid rename or higher version of that same fresh Draft without
+requiring whole-aggregate equality. After active liveness is released, the proof
+may reacquire the Invocation namespace only when it is unowned; a live owner keeps
+recovery unavailable.
 
 ## Atomicity and recovery
 
@@ -462,7 +469,9 @@ Application-only exact Retry projection, never a fabricated durable aggregate.
 - Hold a complete provider response in process memory while validating it. Stage
   its app-owned messages, optional Memory replacement, and optional Profile effect,
   then switch the Chat manifest by compare-and-swap. A crash before the switch
-  publishes none of them and becomes interruption after relaunch.
+  publishes none of them and becomes interruption after relaunch. Recovery after
+  the switch proves the exact immutable response records and fresh-Draft lineage;
+  it neither depends on whole-manifest equality nor accepts an unrelated tail.
 - Install a Profile Revision folder only after `revision.json` and its detached
   hash are flushed. Replace `head.json` last under the Profile coordinator; that
   pointer replacement is the commit point.

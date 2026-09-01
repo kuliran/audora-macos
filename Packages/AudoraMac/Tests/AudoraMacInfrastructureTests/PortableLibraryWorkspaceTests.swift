@@ -1335,6 +1335,285 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testExactPublishedRecoveryAllowsLaterRenameAndFreshDraftEdit() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let publicationFault = OneShot()
+            let reconciliationFault = OneShot()
+            let owner = PortableInvocationStore(
+                persistence: PortableChatPersistence { point in
+                    if point == .afterPublicationManifestInstall,
+                       publicationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                    if point == .beforePublicationReconciliationRead,
+                       reconciliationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                },
+                workspace: fixture.workspace
+            )
+            let editingWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await editingWorkspace.chooseLibrary()
+            let editor = PortableChatStore(workspace: editingWorkspace)
+            let acquired = await owner.acquirePendingInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(acquired, .acquired(fixture.install.authority))
+            guard case .installed = await owner.installInvocation(fixture.install) else {
+                return XCTFail("Invocation was not installed")
+            }
+            let publish = await owner.publish(fixture.publication)
+            XCTAssertEqual(publish, .failed)
+
+            guard case let .loaded(published) = await editor.load(
+                fixture.locked.chat.id,
+                in: fixture.scope
+            ) else { return XCTFail("Published Chat was not readable") }
+            let rename = try RenameChatMutation(
+                library: fixture.scope,
+                base: published,
+                title: ChatTitle("Later title"),
+                updatedAt: UTCInstant("2026-08-30T12:00:04.000Z")
+            )
+            guard case let .committed(renamed) = await editor.rename(rename) else {
+                return XCTFail("Later rename did not commit")
+            }
+            let laterDraft = try renamed.chat.draft.edited(
+                text: "A later fresh Draft edit.",
+                at: UTCInstant("2026-08-30T12:00:05.000Z")
+            )
+            guard case let .committed(evolved) = await editor.saveDraft(
+                SaveChatDraftMutation(
+                    library: fixture.scope,
+                    chatID: renamed.chat.id,
+                    replacement: laterDraft
+                )
+            ) else { return XCTFail("Later Draft edit did not commit") }
+
+            let recovery = await owner.recoverPublishedInvocation(
+                fixture.publication
+            )
+            XCTAssertEqual(recovery, .published(evolved))
+        }
+    }
+
+    func testExactPublishedRecoveryRejectsIDOnlyMessageImpostor() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let publicationFault = OneShot()
+            let reconciliationFault = OneShot()
+            let owner = PortableInvocationStore(
+                persistence: PortableChatPersistence { point in
+                    if point == .afterPublicationManifestInstall,
+                       publicationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                    if point == .beforePublicationReconciliationRead,
+                       reconciliationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                },
+                workspace: fixture.workspace
+            )
+            let readingWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await readingWorkspace.chooseLibrary()
+            let reader = PortableChatStore(workspace: readingWorkspace)
+            guard case .acquired = await owner.acquirePendingInvocation(
+                fixture.install.authority.request
+            ) else { return XCTFail("Pending authority was not acquired") }
+            guard case .installed = await owner.installInvocation(fixture.install) else {
+                return XCTFail("Invocation was not installed")
+            }
+            let publish = await owner.publish(fixture.publication)
+            XCTAssertEqual(publish, .failed)
+            guard case .loaded = await reader.load(
+                fixture.locked.chat.id,
+                in: fixture.scope
+            ) else { return XCTFail("Published Chat was not readable") }
+
+            let expected = fixture.publication.coachMessage
+            let impostor = try ChatMessage(
+                id: expected.id,
+                responsePositionID: expected.responsePositionID,
+                content: .coach(markdown: "Altered immutable response."),
+                coachProfile: expected.coachProfile,
+                createdAt: expected.createdAt
+            )
+            let messageURL = fixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(fixture.locked.chat.id.rawValue, isDirectory: true)
+                .appendingPathComponent("messages", isDirectory: true)
+                .appendingPathComponent("\(expected.id.rawValue).json")
+            try PortableChatPersistence().encodeMessage(impostor).write(to: messageURL)
+
+            let recovery = await owner.recoverPublishedInvocation(
+                fixture.publication
+            )
+            XCTAssertEqual(recovery, .notPublished)
+            _ = await owner.abortInstalledNewSend(fixture.install.invocation)
+        }
+    }
+
+    func testExactPublishedRecoveryRejectsFreshDraftChangeWithoutManifestRevision() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let publicationFault = OneShot()
+            let reconciliationFault = OneShot()
+            let owner = PortableInvocationStore(
+                persistence: PortableChatPersistence { point in
+                    if point == .afterPublicationManifestInstall,
+                       publicationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                    if point == .beforePublicationReconciliationRead,
+                       reconciliationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                },
+                workspace: fixture.workspace
+            )
+            guard case .acquired = await owner.acquirePendingInvocation(
+                fixture.install.authority.request
+            ) else { return XCTFail("Pending authority was not acquired") }
+            guard case .installed = await owner.installInvocation(fixture.install) else {
+                return XCTFail("Invocation was not installed")
+            }
+            let publish = await owner.publish(fixture.publication)
+            XCTAssertEqual(publish, .failed)
+
+            let published = fixture.publication.replacement.chat
+            let unversionedDraft = try published.draft.edited(
+                text: "This edit has no manifest lineage.",
+                at: UTCInstant("2026-08-30T12:00:05.000Z")
+            )
+            let impostor = try Chat(
+                id: published.id,
+                manifestRevision: published.manifestRevision,
+                title: published.title,
+                createdAt: published.createdAt,
+                updatedAt: unversionedDraft.updatedAt,
+                creation: published.creation,
+                profileStatementGenerationAtCreation:
+                    published.profileStatementGenerationAtCreation,
+                attachments: published.attachments,
+                draft: unversionedDraft,
+                messageIDs: published.messageIDs,
+                currentMemoryID: published.currentMemoryID
+            )
+            let chatURL = fixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(fixture.locked.chat.id.rawValue, isDirectory: true)
+                .appendingPathComponent("chat.json")
+            try PortableChatPersistence().encodeChat(impostor).write(to: chatURL)
+
+            let recovery = await owner.recoverPublishedInvocation(
+                fixture.publication
+            )
+            XCTAssertEqual(recovery, .notPublished)
+            _ = await owner.abortInstalledNewSend(fixture.install.invocation)
+        }
+    }
+
+    func testExactPublishedRecoveryReacquiresAuthorityAfterAbortReleasedLease() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let publicationFault = OneShot()
+            let firstReconciliationFault = OneShot()
+            let secondReconciliationFault = OneShot()
+            let owner = PortableInvocationStore(
+                persistence: PortableChatPersistence { point in
+                    if point == .afterPublicationManifestInstall,
+                       publicationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                    if point == .beforePublicationReconciliationRead,
+                       firstReconciliationFault.take()
+                            || secondReconciliationFault.take()
+                    {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                },
+                workspace: fixture.workspace
+            )
+            let editingWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await editingWorkspace.chooseLibrary()
+            let editor = PortableChatStore(workspace: editingWorkspace)
+            guard case .acquired = await owner.acquirePendingInvocation(
+                fixture.install.authority.request
+            ) else { return XCTFail("Pending authority was not acquired") }
+            guard case .installed = await owner.installInvocation(fixture.install) else {
+                return XCTFail("Invocation was not installed")
+            }
+            let publish = await owner.publish(fixture.publication)
+            XCTAssertEqual(publish, .failed)
+
+            guard case let .loaded(published) = await editor.load(
+                fixture.locked.chat.id,
+                in: fixture.scope
+            ) else { return XCTFail("Published Chat was not readable") }
+            let rename = try RenameChatMutation(
+                library: fixture.scope,
+                base: published,
+                title: ChatTitle("Later title"),
+                updatedAt: UTCInstant("2026-08-30T12:00:04.000Z")
+            )
+            guard case let .committed(renamed) = await editor.rename(rename) else {
+                return XCTFail("Later rename did not commit")
+            }
+            let laterDraft = try renamed.chat.draft.edited(
+                text: "A later fresh Draft edit.",
+                at: UTCInstant("2026-08-30T12:00:05.000Z")
+            )
+            guard case let .committed(evolved) = await editor.saveDraft(
+                SaveChatDraftMutation(
+                    library: fixture.scope,
+                    chatID: renamed.chat.id,
+                    replacement: laterDraft
+                )
+            ) else { return XCTFail("Later Draft edit did not commit") }
+
+            let unavailable = await owner.recoverPublishedInvocation(
+                fixture.publication
+            )
+            XCTAssertEqual(unavailable, .unavailable)
+            let abort = await owner.abortInstalledNewSend(
+                fixture.install.invocation
+            )
+            XCTAssertEqual(abort, .stale(evolved))
+
+            let recovered = await owner.recoverPublishedInvocation(
+                fixture.publication
+            )
+            XCTAssertEqual(recovered, .published(evolved))
+        }
+    }
+
     func testSameIDInvocationCannotConsumeAnotherInvocationLivenessAuthority() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)

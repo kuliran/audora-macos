@@ -256,6 +256,16 @@ one unresolved Proposal or evidence-publication operation, and removes the Pendi
 User Turn and consumed Draft. A one-sided user message or coach message is
 forbidden.
 
+Publication recovery is an Infrastructure proof rather than Application comparing
+an old whole-Chat snapshot. It verifies the intended response position, the exact
+appended message IDs and order, the immutable canonical bytes and Profile
+provenance of both message records, consumption of the Pending User Turn, and the
+identity of the fresh Draft. It permits only ordinary later title/manifest changes
+and version advances of that same fresh Draft. A later unrelated message tail,
+ID-only message replacement, or different Draft lineage is not the intended
+publication. The typed proof remains available after abort cleanup by reacquiring
+the Library Invocation namespace only when no live owner holds it.
+
 Provider output and streaming events are transient until that commit. Audora does
 not durably stage a complete response for crash resumption. On relaunch every
 unfinished Invocation becomes **interrupted**, its exact Draft stays locked, and

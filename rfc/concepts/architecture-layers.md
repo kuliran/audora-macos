@@ -64,6 +64,9 @@ The Application layer coordinates use cases and owns state transitions:
 - atomically publish the successful user/coach turn, optional complete `newMemory`,
   and exactly one classified Profile effect; only pure staged evidence proceeds to
   the separate recoverable idempotent set-union transaction;
+- consume Infrastructure's typed exact-publication recovery result after commit
+  uncertainty instead of inferring success from whole-aggregate equality; later
+  valid rename and fresh-Draft revisions therefore remain ordinary Chat changes;
 - resolve successful evidence append silently; on local failure retain its exact
   Retry/Discard state while keeping the response and Memory published;
 - assign new Profile Statement IDs and local Evidence References rather than

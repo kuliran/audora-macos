@@ -155,6 +155,12 @@ resolution, so concurrent catalog recovery cannot interrupt a live Send between
 resolution and reservation. Pending User Turn schema v2 persists the interrupted
 failure; strict v1 compatibility permits only no failure or the older context-fit
 failure and upgrades when that Pending is next written.
+If response publication commits but immediate reconciliation is interrupted,
+Infrastructure proves the exact immutable user/Coach message pair, response
+position, consumed Pending, and fresh-Draft lineage before reporting success. A
+later valid Chat rename or edit of that fresh Draft may advance the manifest
+without erasing the publication proof; an unrelated tail or message-ID impostor
+never satisfies it.
 
 Version one accepts exactly one transcribable mono source per Session. A possible
 later extension adds dual-track capture: the Speaker's microphone plus a

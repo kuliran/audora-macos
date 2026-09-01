@@ -308,6 +308,12 @@ public enum PortableChatMutationResult: Equatable, Sendable {
     case frozen(FrozenChatSnapshot)
 }
 
+fileprivate enum PortableInvocationPublicationRecoveryResult: Sendable {
+    case published(ChatAggregate)
+    case notPublished
+    case owned
+}
+
 private func frozenChatSnapshot(
     for error: PortableChatPersistenceError,
     chatID: ChatID
@@ -2899,6 +2905,30 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
     }
 
+    fileprivate func reconcileCommittedInvocationPublicationIfUnowned(
+        _ mutation: PublishCoachInvocationMutation,
+        at libraryRoot: URL,
+        in scope: LibraryScope
+    ) throws -> PortableInvocationPublicationRecoveryResult {
+        guard let lease = try acquireInvocationRecoveryLease(
+            at: libraryRoot,
+            in: scope
+        ) else { return .owned }
+        defer { lease.release() }
+        guard let authority = lease.authority() else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        if let aggregate = try reconcileCommittedInvocationPublication(
+            mutation,
+            at: libraryRoot,
+            in: scope,
+            livenessAuthority: authority
+        ) {
+            return .published(aggregate)
+        }
+        return .notPublished
+    }
+
     private func reconcileCommittedInvocationPublication(
         _ mutation: PublishCoachInvocationMutation,
         at libraryRoot: URL,
@@ -2949,7 +2979,11 @@ public struct PortableChatPersistence: @unchecked Sendable {
                   reconcileTransients: true,
                   beforeDestructiveMutation: revalidateLiveness
               ),
-              aggregate == mutation.replacement
+              try isExactPublishedInvocation(
+                  mutation,
+                  aggregate: aggregate,
+                  under: chatDescriptor
+              )
         else { return nil }
         try removeInvocationDirectoryIfPresent(
             mutation.invocation,
@@ -2957,6 +2991,58 @@ public struct PortableChatPersistence: @unchecked Sendable {
             beforeRemoving: revalidateLiveness
         )
         return aggregate
+    }
+
+    /// Proves the exact immutable publication while allowing only the Chat
+    /// fields that ordinary rename and fresh-Draft edits may subsequently
+    /// evolve. The complete message tail is fixed, so unrelated later turns and
+    /// ID-only message impostors cannot satisfy this proof.
+    private func isExactPublishedInvocation(
+        _ mutation: PublishCoachInvocationMutation,
+        aggregate: ChatAggregate,
+        under chatDescriptor: Int32
+    ) throws -> Bool {
+        let expected = mutation.replacement
+        let current = aggregate.chat
+        let published = expected.chat
+        guard aggregate.pendingUserTurn == nil,
+              aggregate.memory == expected.memory,
+              current.id == published.id,
+              current.manifestRevision >= published.manifestRevision,
+              current.createdAt == published.createdAt,
+              current.creation == published.creation,
+              current.profileStatementGenerationAtCreation ==
+              published.profileStatementGenerationAtCreation,
+              current.attachments == published.attachments,
+              current.messageIDs == published.messageIDs,
+              current.currentMemoryID == published.currentMemoryID,
+              current.draft.draftID == mutation.freshDraft.draftID,
+              current.draft.version >= mutation.freshDraft.version
+        else { return false }
+        if current.manifestRevision == published.manifestRevision,
+           current != published
+        {
+            return false
+        }
+        if current.draft.version == mutation.freshDraft.version,
+           current.draft != mutation.freshDraft
+        {
+            return false
+        }
+
+        let messagesDescriptor = try openDirectory(
+            named: "messages",
+            under: chatDescriptor
+        )
+        defer { Darwin.close(messagesDescriptor) }
+        for message in [mutation.userMessage, mutation.coachMessage] {
+            let installed = try boundedData(
+                named: "\(message.id.rawValue).json",
+                under: messagesDescriptor
+            )
+            guard installed == (try encodeMessage(message)) else { return false }
+        }
+        return true
     }
 
     fileprivate func reconcileCommittedCreate(
@@ -5939,6 +6025,55 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         case .readOnly, .unavailable: .failed
         }
         if case .committed = outcome {
+            releaseActiveLivenessLease(for: mutation.invocation)
+        }
+        return outcome
+    }
+
+    public func recoverPublishedInvocation(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome {
+        let authority = activeLivenessLeases[
+            ActiveLivenessKey(mutation.invocation)
+        ].flatMap { candidate in
+            candidate.invocation == mutation.invocation ? candidate : nil
+        }
+        let scope = LibraryScope(libraryID: mutation.invocation.libraryID)
+        let result: ActiveLibraryOperationResult<InvocationPublicationRecoveryOutcome> =
+            await workspace.performActiveReadWriteOperation(in: scope) { root in
+                do {
+                    if let authority {
+                        if let published = try persistence
+                            .reconcileCommittedInvocationPublication(
+                                mutation,
+                                at: root,
+                                in: scope,
+                                holding: authority.lease
+                            )
+                        {
+                            return .published(published)
+                        }
+                        return .notPublished
+                    }
+                    return switch try persistence
+                        .reconcileCommittedInvocationPublicationIfUnowned(
+                            mutation,
+                            at: root,
+                            in: scope
+                        ) {
+                    case let .published(aggregate): .published(aggregate)
+                    case .notPublished: .notPublished
+                    case .owned: .unavailable
+                    }
+                } catch {
+                    return .unavailable
+                }
+            }
+        let outcome: InvocationPublicationRecoveryOutcome = switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .unavailable
+        }
+        if authority != nil, case .published = outcome {
             releaseActiveLivenessLease(for: mutation.invocation)
         }
         return outcome

@@ -537,6 +537,7 @@ final class DefaultInvocationsTests: XCTestCase {
     func testCommittedPublicationSurvivesAbortFailureAndRecoveryReread() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         await fixture.persistence.commitNextPublicationButReportFailure()
+        await fixture.persistence.makeNextPublicationRecoveryUnavailable()
         await fixture.persistence.failNextAbortWithoutCommit()
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
@@ -546,10 +547,90 @@ final class DefaultInvocationsTests: XCTestCase {
         }
         let observedPublication = await fixture.persistence.lastPublication
         let publication = try XCTUnwrap(observedPublication)
-        let recoveredRequests = await fixture.persistence.recoveredRequests
         XCTAssertEqual(aggregate, publication.replacement)
         XCTAssertTrue(quote.fits)
-        XCTAssertEqual(recoveredRequests, [fixture.request])
+        let recoveryCount = await fixture.persistence.publicationRecoveryCount
+        XCTAssertEqual(recoveryCount, 2)
+    }
+
+    func testTypedPublicationRecoveryAllowsLaterRenameAndFreshDraftEdit() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence
+            .commitNextPublicationButReportFailureAndEvolveChat()
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .published(aggregate, quote) = outcome else {
+            return XCTFail("typed persistence proof must preserve the published turn")
+        }
+        XCTAssertEqual(aggregate.chat.title, try ChatTitle("Later title"))
+        XCTAssertEqual(aggregate.chat.draft.draftID, fixture.freshDraftID)
+        XCTAssertEqual(aggregate.chat.draft.version, 1)
+        XCTAssertEqual(aggregate.chat.draft.text, "A later fresh Draft edit.")
+        XCTAssertEqual(aggregate.chat.messageIDs, [
+            fixture.userMessageID,
+            fixture.coachMessageID,
+        ])
+        XCTAssertNil(aggregate.pendingUserTurn)
+        XCTAssertTrue(quote.fits)
+        let recoveryCount = await fixture.persistence.publicationRecoveryCount
+        XCTAssertEqual(recoveryCount, 1)
+    }
+
+    func testOperationalRetryUsesTypedProofForEvolvedPublishedChat() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence
+            .commitNextPublicationButReportFailureAndEvolveChat()
+        await fixture.persistence.makeNextPublicationRecoveryUnavailable()
+        await fixture.persistence.makeNextPublicationRecoveryUnavailable()
+        await fixture.persistence.failNextAbortWithoutCommit()
+        await fixture.persistence.makeInterruptionRecoveryUnavailable()
+
+        guard case let .operationallyInterrupted(
+            fallback,
+            retryRequest,
+            .persistenceUnavailable
+        ) = await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("unproven publication must retain operational Retry") }
+        XCTAssertEqual(fallback, fixture.initial)
+        XCTAssertEqual(retryRequest, fixture.request)
+
+        await fixture.persistence.makeInterruptionRecoveryAvailable()
+        let retry = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .published(aggregate, quote) = retry else {
+            return XCTFail("Retry must consume the typed exact-publication proof")
+        }
+        XCTAssertEqual(aggregate.chat.title, try ChatTitle("Later title"))
+        XCTAssertEqual(aggregate.chat.draft.draftID, fixture.freshDraftID)
+        XCTAssertEqual(aggregate.chat.draft.version, 1)
+        XCTAssertEqual(aggregate.chat.messageIDs, [
+            fixture.userMessageID,
+            fixture.coachMessageID,
+        ])
+        XCTAssertTrue(quote.fits)
+        let claimCount = await fixture.admission.claimCount
+        let recoveryCount = await fixture.persistence.publicationRecoveryCount
+        XCTAssertEqual(claimCount, 1)
+        XCTAssertEqual(recoveryCount, 3)
+    }
+
+    func testTypedPublicationRejectionOverridesShallowReplacementEquality() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence
+            .installShallowPublicationImpostorButReportFailure()
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .interrupted(aggregate, .persistenceUnavailable) = outcome else {
+            return XCTFail("an ID-only impostor must never be reported as published")
+        }
+        XCTAssertEqual(aggregate?.chat.messageIDs, [
+            fixture.userMessageID,
+            fixture.coachMessageID,
+        ])
+        let recoveryCount = await fixture.persistence.publicationRecoveryCount
+        XCTAssertEqual(recoveryCount, 1)
     }
 
     func testConcurrentDuplicateRequestUsesOneAdmissionOneLaunchAndOnePublication() async throws {
@@ -774,6 +855,10 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private var publicationConflicts = false
     private var publicationFails = false
     private var publicationCommitsButReportsFailure = false
+    private var publicationCommitEvolvesChat = false
+    private var publicationInstallsShallowImpostor = false
+    private var exactPublicationCommitted = false
+    private var unavailablePublicationRecoveryCount = 0
     private var secondResolutionIsIneligible = false
     private var interruptedMutationFailsAfterCommit = false
     private var abortFailsWithoutCommit = false
@@ -784,6 +869,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private var reservedRequest: PendingCoachInvocationRequest?
     private(set) var activeInvocation: CoachInvocation?
     private(set) var publicationCount = 0
+    private(set) var publicationRecoveryCount = 0
     private(set) var lastPublication: PublishCoachInvocationMutation?
     private(set) var recoveredRequests: [PendingCoachInvocationRequest] = []
 
@@ -800,6 +886,16 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     func failNextPublication() { publicationFails = true }
     func commitNextPublicationButReportFailure() {
         publicationCommitsButReportsFailure = true
+    }
+    func commitNextPublicationButReportFailureAndEvolveChat() {
+        publicationCommitsButReportsFailure = true
+        publicationCommitEvolvesChat = true
+    }
+    func makeNextPublicationRecoveryUnavailable() {
+        unavailablePublicationRecoveryCount += 1
+    }
+    func installShallowPublicationImpostorButReportFailure() {
+        publicationInstallsShallowImpostor = true
     }
     func makeSecondResolutionIneligible() { secondResolutionIsIneligible = true }
     func failNextInterruptedMutationAfterCommit() {
@@ -1035,10 +1131,37 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         await recorder.record("publish")
         publicationCount += 1
         guard activeInvocation == mutation.invocation else { return .stale(aggregate) }
+        if publicationInstallsShallowImpostor {
+            publicationInstallsShallowImpostor = false
+            lastPublication = mutation
+            aggregate = mutation.replacement
+            exactPublicationCommitted = false
+            return .failed
+        }
         if publicationCommitsButReportsFailure {
             publicationCommitsButReportsFailure = false
             lastPublication = mutation
             aggregate = mutation.replacement
+            exactPublicationCommitted = true
+            if publicationCommitEvolvesChat {
+                publicationCommitEvolvesChat = false
+                let renamed = try! RenameChatMutation(
+                    library: LibraryScope(
+                        libraryID: mutation.invocation.libraryID
+                    ),
+                    base: aggregate,
+                    title: ChatTitle("Later title"),
+                    updatedAt: UTCInstant("2026-08-30T12:00:01.000Z")
+                ).replacement
+                let edited = try! renamed.chat.draft.edited(
+                    text: "A later fresh Draft edit.",
+                    at: UTCInstant("2026-08-30T12:00:02.000Z")
+                )
+                aggregate = try! ChatAggregate(
+                    chat: renamed.chat.replacingDraft(with: edited),
+                    memory: renamed.memory
+                )
+            }
             return .failed
         }
         if publicationFails {
@@ -1053,7 +1176,23 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         lastPublication = mutation
         aggregate = mutation.replacement
         activeInvocation = nil
+        exactPublicationCommitted = true
         return .committed(aggregate)
+    }
+
+    func recoverPublishedInvocation(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome {
+        publicationRecoveryCount += 1
+        if unavailablePublicationRecoveryCount > 0 {
+            unavailablePublicationRecoveryCount -= 1
+            return .unavailable
+        }
+        guard exactPublicationCommitted,
+              lastPublication == mutation
+        else { return .notPublished }
+        activeInvocation = nil
+        return .published(aggregate)
     }
 }
 

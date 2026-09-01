@@ -386,6 +386,16 @@ public enum InvocationPublicationOutcome: Equatable, Sendable {
 }
 
 @_spi(InvocationInfrastructure)
+public enum InvocationPublicationRecoveryOutcome: Equatable, Sendable {
+    /// Persistence proved the exact intended publication, including its
+    /// immutable message records, while allowing valid later Chat metadata and
+    /// fresh-Draft revisions.
+    case published(ChatAggregate)
+    case notPublished
+    case unavailable
+}
+
+@_spi(InvocationInfrastructure)
 public protocol InvocationPersistencePort: Sendable {
     /// Acquires Library-wide Invocation liveness before atomically installing
     /// and binding the exact new Pending. Every non-prepared result owns no
@@ -452,6 +462,12 @@ public protocol InvocationPersistencePort: Sendable {
     func publish(
         _ mutation: PublishCoachInvocationMutation
     ) async -> InvocationPublicationOutcome
+
+    /// Proves an exact already-published response from authoritative storage.
+    /// Application must not infer publication from aggregate shape or IDs.
+    func recoverPublishedInvocation(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome
 }
 
 @_spi(InvocationInfrastructure)
@@ -459,6 +475,12 @@ public extension InvocationPersistencePort {
     func recoverPendingAfterTerminalFailure(
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationPendingResolutionOutcome {
+        .unavailable
+    }
+
+    func recoverPublishedInvocation(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome {
         .unavailable
     }
 }
@@ -911,36 +933,100 @@ public actor DefaultInvocations: Invocations {
         reason: InvocationInterruptionReason,
         publication: PublicationRecoveryIntent? = nil
     ) async -> InvocationTryOutcome {
-        switch await persistence.abortInstalledNewSend(invocation) {
+        var publicationRecovery: InvocationPublicationRecoveryOutcome?
+        if let publication {
+            let recovery = await persistence.recoverPublishedInvocation(
+                publication.mutation
+            )
+            if let published = publishedOutcome(
+                from: recovery,
+                publication: publication
+            ) { return published }
+            publicationRecovery = recovery
+        }
+        return switch await persistence.abortInstalledNewSend(invocation) {
         case let .committed(aggregate):
-            if let published = publishedOutcome(
-                ifExact: aggregate,
-                publication: publication
-            ) {
-                published
-            } else {
-                .interrupted(aggregate, reason)
-            }
+            await outcomeAfterAbort(
+                current: aggregate,
+                fallback: fallback,
+                reason: reason,
+                invocation: invocation,
+                publication: publication,
+                priorRecovery: publicationRecovery
+            )
         case let .stale(current):
-            if let published = publishedOutcome(
-                ifExact: current,
-                publication: publication
-            ) {
-                published
-            } else {
-                .interrupted(current ?? fallback, reason)
-            }
+            await outcomeAfterAbort(
+                current: current,
+                fallback: fallback,
+                reason: reason,
+                invocation: invocation,
+                publication: publication,
+                priorRecovery: publicationRecovery
+            )
         case .failed:
             await interruptionAfterTerminalFailure(
-                request: PendingCoachInvocationRequest(
-                    library: LibraryScope(libraryID: invocation.libraryID),
-                    chatID: invocation.chatID,
-                    pendingUserTurnID: invocation.pendingUserTurnID
-                ),
+                request: pendingRequest(for: invocation),
                 fallback: fallback,
                 publication: publication
             )
         }
+    }
+
+    private func outcomeAfterAbort(
+        current: ChatAggregate?,
+        fallback: ChatAggregate,
+        reason: InvocationInterruptionReason,
+        invocation: CoachInvocation,
+        publication: PublicationRecoveryIntent?,
+        priorRecovery: InvocationPublicationRecoveryOutcome?
+    ) async -> InvocationTryOutcome {
+        guard let publication else {
+            return .interrupted(current ?? fallback, reason)
+        }
+        if case .notPublished? = priorRecovery {
+            return .interrupted(current ?? fallback, reason)
+        }
+        let recovery = await persistence.recoverPublishedInvocation(
+            publication.mutation
+        )
+        if let published = publishedOutcome(
+            from: recovery,
+            publication: publication
+        ) { return published }
+        if case .notPublished = recovery {
+            return .interrupted(current ?? fallback, reason)
+        }
+        return await interruptionAfterTerminalFailure(
+            request: pendingRequest(for: invocation),
+            fallback: fallback,
+            publication: publication
+        )
+    }
+
+    private func pendingRequest(
+        for invocation: CoachInvocation
+    ) -> PendingCoachInvocationRequest {
+        PendingCoachInvocationRequest(
+            library: LibraryScope(libraryID: invocation.libraryID),
+            chatID: invocation.chatID,
+            pendingUserTurnID: invocation.pendingUserTurnID
+        )
+    }
+
+    private func publishedOutcome(
+        from recovery: InvocationPublicationRecoveryOutcome,
+        publication: PublicationRecoveryIntent
+    ) -> InvocationTryOutcome? {
+        guard case let .published(aggregate) = recovery else { return nil }
+        let request = PendingCoachInvocationRequest(
+            library: LibraryScope(
+                libraryID: publication.mutation.invocation.libraryID
+            ),
+            chatID: publication.mutation.invocation.chatID,
+            pendingUserTurnID: publication.mutation.invocation.pendingUserTurnID
+        )
+        operationalRetrySnapshots.removeValue(forKey: request)
+        return .published(aggregate, publication.quote)
     }
 
     private func interruptPending(
@@ -965,30 +1051,42 @@ public actor DefaultInvocations: Invocations {
         fallback: ChatAggregate,
         publication: PublicationRecoveryIntent? = nil
     ) async -> InvocationTryOutcome {
+        var unresolvedPublication: PublicationRecoveryIntent?
+        if let publication {
+            let recovery = await persistence.recoverPublishedInvocation(
+                publication.mutation
+            )
+            if let published = publishedOutcome(
+                from: recovery,
+                publication: publication
+            ) { return published }
+            if case .unavailable = recovery {
+                unresolvedPublication = publication
+            }
+        }
         switch await persistence.recoverPendingAfterTerminalFailure(request) {
         case let .eligible(authority):
-            if let published = publishedOutcome(
-                ifExact: authority.aggregate,
-                publication: publication
-            ) {
-                return published
-            }
             return interruptionOutcome(
                 current: authority.aggregate,
                 request: request
             )
         case let .ineligible(current):
-            if let published = publishedOutcome(
-                ifExact: current,
-                publication: publication
-            ) {
-                return published
+            if let unresolvedPublication {
+                operationalRetrySnapshots[request] = OperationalRetrySnapshot(
+                    fallback: fallback,
+                    publication: unresolvedPublication
+                )
+                return .operationallyInterrupted(
+                    fallback,
+                    request,
+                    .persistenceUnavailable
+                )
             }
             return interruptionOutcome(current: current, request: request)
         case .unavailable:
             operationalRetrySnapshots[request] = OperationalRetrySnapshot(
                 fallback: fallback,
-                publication: publication
+                publication: unresolvedPublication
             )
             return .operationallyInterrupted(
                 fallback,
@@ -996,25 +1094,6 @@ public actor DefaultInvocations: Invocations {
                 .persistenceUnavailable
             )
         }
-    }
-
-    private func publishedOutcome(
-        ifExact aggregate: ChatAggregate?,
-        publication: PublicationRecoveryIntent?
-    ) -> InvocationTryOutcome? {
-        guard let aggregate,
-              let publication,
-              aggregate == publication.mutation.replacement
-        else { return nil }
-        let request = PendingCoachInvocationRequest(
-            library: LibraryScope(
-                libraryID: publication.mutation.invocation.libraryID
-            ),
-            chatID: publication.mutation.invocation.chatID,
-            pendingUserTurnID: publication.mutation.invocation.pendingUserTurnID
-        )
-        operationalRetrySnapshots.removeValue(forKey: request)
-        return .published(aggregate, publication.quote)
     }
 
     private func interruptionOutcome(
@@ -1048,18 +1127,25 @@ public actor DefaultInvocations: Invocations {
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationTryOutcome? {
         guard let snapshot = operationalRetrySnapshots[request] else { return nil }
+        var unresolvedPublication: PublicationRecoveryIntent?
+        if let publication = snapshot.publication {
+            let recovery = await persistence.recoverPublishedInvocation(
+                publication.mutation
+            )
+            if let published = publishedOutcome(
+                from: recovery,
+                publication: publication
+            ) { return published }
+            if case .unavailable = recovery {
+                unresolvedPublication = publication
+            }
+        }
         switch await persistence.recoverPendingAfterTerminalFailure(request) {
         case let .eligible(authority):
-            if let published = publishedOutcome(
-                ifExact: authority.aggregate,
-                publication: snapshot.publication
-            ) {
-                return published
-            }
             guard authority.pendingUserTurn.failure != nil else {
                 operationalRetrySnapshots[request] = OperationalRetrySnapshot(
                     fallback: authority.aggregate,
-                    publication: snapshot.publication
+                    publication: nil
                 )
                 return .operationallyInterrupted(
                     authority.aggregate,
@@ -1070,15 +1156,24 @@ public actor DefaultInvocations: Invocations {
             operationalRetrySnapshots.removeValue(forKey: request)
             return nil
         case let .ineligible(current):
-            if let published = publishedOutcome(
-                ifExact: current,
-                publication: snapshot.publication
-            ) {
-                return published
+            if let unresolvedPublication {
+                operationalRetrySnapshots[request] = OperationalRetrySnapshot(
+                    fallback: snapshot.fallback,
+                    publication: unresolvedPublication
+                )
+                return .operationallyInterrupted(
+                    snapshot.fallback,
+                    request,
+                    .persistenceUnavailable
+                )
             }
             operationalRetrySnapshots.removeValue(forKey: request)
             return .rejected(current, .eligibilityChanged)
         case .unavailable:
+            operationalRetrySnapshots[request] = OperationalRetrySnapshot(
+                fallback: snapshot.fallback,
+                publication: unresolvedPublication
+            )
             return .operationallyInterrupted(
                 snapshot.fallback,
                 request,
