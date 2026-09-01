@@ -390,15 +390,23 @@ public struct RandomChatIdentityGenerator:
 public struct RandomInvocationIdentityGenerator: InvocationIdentityGenerating {
     public init() {}
 
-    public func generate(at instant: UTCInstant) async -> InvocationLaunchIdentity {
+    public func generateInvocationID(at instant: UTCInstant) async -> CoachInvocationID {
+        try! CoachInvocationID(
+            RandomPortableIdentifierFormatter.make(.invocation, at: instant)
+        )
+    }
+
+    public func generateAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal _: UInt8,
+        kind _: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationAttemptIdentity {
         let attemptID = try! CoachProviderAttemptID(
             RandomPortableIdentifierFormatter.make(.attempt, at: instant)
         )
         let userMessageRaw = RandomPortableIdentifierFormatter.make(.message, at: instant)
-        return InvocationLaunchIdentity(
-            invocationID: try! CoachInvocationID(
-                RandomPortableIdentifierFormatter.make(.invocation, at: instant)
-            ),
+        return InvocationAttemptIdentity(
             attemptID: attemptID,
             idempotencyValue: try! ProviderIdempotencyValue(attemptID.rawValue),
             userMessageID: try! ChatMessageID(userMessageRaw),
@@ -409,7 +417,10 @@ public struct RandomInvocationIdentityGenerator: InvocationIdentityGenerating {
             ),
             freshDraftID: try! ChatDraftID(
                 RandomPortableIdentifierFormatter.make(.draft, at: instant)
-            )
+            ),
+            transcriptHandles: (0 ..< transcriptHandleCount).map { _ in
+                try! CoachProviderTranscriptHandle(UUID().uuidString.lowercased())
+            }
         )
     }
 }

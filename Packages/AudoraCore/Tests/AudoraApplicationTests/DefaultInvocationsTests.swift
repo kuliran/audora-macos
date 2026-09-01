@@ -116,6 +116,163 @@ final class DefaultInvocationsTests: XCTestCase {
         )
     }
 
+    func testTransientProviderFailuresUseExactBoundedScheduleWithFreshAttemptAuthority() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .autoRetryableFailure,
+                .autoRetryableFailure,
+                .complete(markdown: "Fourth Attempt succeeds."),
+            ],
+            includesOnDemandAttachment: true
+        )
+
+        guard case .published = await fixture.invocations.tryInvoke(fixture.request) else {
+            return XCTFail("the fourth and final bounded Attempt must publish")
+        }
+
+        let requests = await fixture.provider.requests
+        XCTAssertEqual(requests.map(\.attempt.ordinal), [1, 2, 3, 4])
+        XCTAssertEqual(requests.map(\.attempt.kind), [
+            .standard, .standard, .standard, .standard,
+        ])
+        XCTAssertEqual(Set(requests.map(\.attempt.id)).count, 4)
+        XCTAssertEqual(Set(requests.map(\.attempt.providerIdempotencyValue)).count, 4)
+        XCTAssertEqual(Set(requests.map(\.attempt.userMessageID)).count, 4)
+        XCTAssertEqual(Set(requests.map(\.attempt.coachMessageID)).count, 4)
+        XCTAssertEqual(Set(requests.map(\.attempt.freshDraftID)).count, 4)
+        XCTAssertEqual(
+            Set(requests.compactMap { $0.transcriptAccess.handles.first }).count,
+            4
+        )
+        XCTAssertEqual(
+            requests.map { $0.exchange.request },
+            Array(repeating: requests[0].exchange.request, count: 4),
+            "automatic retry must keep the frozen semantic request bytes"
+        )
+        let delays = await fixture.sleeper.delaysMilliseconds
+        let installedOrdinals = await fixture.persistence.installedAttemptOrdinals
+        let durableBeforeLaunch = await fixture.provider.durableBeforeLaunch
+        let claimCount = await fixture.admission.claimCount
+        XCTAssertEqual(delays, [5_000, 10_000, 15_000])
+        XCTAssertEqual(installedOrdinals, [1, 2, 3, 4])
+        XCTAssertEqual(durableBeforeLaunch, [true, true, true, true])
+        XCTAssertEqual(claimCount, 1)
+    }
+
+    func testOverflowUsesOneImmediateShorterCompleteRepairWithoutChangingSemanticBytes() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .responseOverflow,
+                .complete(markdown: "A materially shorter complete answer."),
+            ]
+        )
+
+        guard case let .published(aggregate, _) = await fixture.invocations.tryInvoke(
+            fixture.request
+        ) else { return XCTFail("the single shorter repair must publish") }
+
+        let requests = await fixture.provider.requests
+        XCTAssertEqual(requests.map(\.attempt.ordinal), [1, 2])
+        XCTAssertEqual(requests.map(\.attempt.kind), [.standard, .shorterRepair])
+        XCTAssertEqual(requests[0].exchange.request, requests[1].exchange.request)
+        XCTAssertEqual(requests[0].control, .standard)
+        XCTAssertEqual(
+            requests[1].control,
+            .shorterRepair(instruction: DefaultInvocations.shorterRepairInstruction)
+        )
+        let delays = await fixture.sleeper.recordedDelays()
+        XCTAssertEqual(delays, [])
+        XCTAssertEqual(
+            aggregate.chat.messageIDs,
+            [
+                try XCTUnwrap(requests[1].attempt.userMessageID),
+                try XCTUnwrap(requests[1].attempt.coachMessageID),
+            ]
+        )
+        XCTAssertEqual(aggregate.chat.draft.draftID, requests[1].attempt.freshDraftID)
+    }
+
+    func testRepeatedOverflowIsInvalidUserRetryableWithoutPartialPublication() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [.responseOverflow, .responseOverflow]
+        )
+
+        guard case let .interrupted(aggregate, .invalidProviderResponse) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("a repeated overflow must be terminal") }
+
+        XCTAssertEqual(aggregate?.pendingUserTurn?.failure, .coachResponseInvalid)
+        XCTAssertEqual(aggregate?.chat.messageIDs, [])
+        let kinds = await fixture.provider.recordedAttemptKinds()
+        let delays = await fixture.sleeper.recordedDelays()
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(kinds, [.standard, .shorterRepair])
+        XCTAssertEqual(delays, [])
+        XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testTransientFailureAfterShorterRepairDoesNotResumeStandardRetry() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [.responseOverflow, .autoRetryableFailure]
+        )
+
+        guard case let .interrupted(aggregate, .providerFailed) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("repair failure must be user-retryable") }
+
+        XCTAssertEqual(aggregate?.pendingUserTurn?.failure, .coachProviderError)
+        XCTAssertEqual(aggregate?.chat.messageIDs, [])
+        let kinds = await fixture.provider.recordedAttemptKinds()
+        let delays = await fixture.sleeper.recordedDelays()
+        XCTAssertEqual(kinds, [.standard, .shorterRepair])
+        XCTAssertEqual(delays, [])
+    }
+
+    func testAutomaticRetryExhaustionPersistsProviderUserRetryableWithoutPartialPublication() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: Array(repeating: .autoRetryableFailure, count: 4)
+        )
+
+        guard case let .interrupted(aggregate, .providerFailed) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("four failed Attempts must exhaust the Invocation") }
+
+        XCTAssertEqual(aggregate?.pendingUserTurn?.failure, .coachProviderError)
+        XCTAssertEqual(aggregate?.chat.messageIDs, [])
+        let ordinals = await fixture.provider.recordedAttemptOrdinals()
+        let delays = await fixture.sleeper.recordedDelays()
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(ordinals, [1, 2, 3, 4])
+        XCTAssertEqual(delays, [5_000, 10_000, 15_000])
+        XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testInvalidCompleteResponseIsTerminalWithoutAutomaticRetryOrPublication() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [.complete(markdown: "")]
+        )
+
+        guard case let .interrupted(aggregate, .invalidProviderResponse) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("an invalid complete response must not be repaired") }
+
+        XCTAssertEqual(aggregate?.pendingUserTurn?.failure, .coachResponseInvalid)
+        XCTAssertEqual(aggregate?.chat.messageIDs, [])
+        let ordinals = await fixture.provider.recordedAttemptOrdinals()
+        let delays = await fixture.sleeper.recordedDelays()
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(ordinals, [1])
+        XCTAssertEqual(delays, [])
+        XCTAssertEqual(publicationCount, 0)
+    }
+
     func testContextCapacityFailureIsDurableAndConsumesNoAdmissionOrProviderLaunch() async throws {
         let fixture = try InvocationFixture(contextWindow: 8)
 
@@ -460,7 +617,7 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
         XCTAssertEqual(
             aggregate?.pendingUserTurn?.failure,
-            .coachResponseInterrupted
+            .coachProviderError
         )
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         let active = await fixture.persistence.activeInvocation
@@ -482,7 +639,7 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
         XCTAssertEqual(
             aggregate?.pendingUserTurn?.failure,
-            .coachResponseInterrupted
+            .coachResponseInvalid
         )
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         let active = await fixture.persistence.activeInvocation
@@ -721,6 +878,29 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(publication?.invocation.admittedAt, admittedAt)
     }
 
+    func testMalformedInitialTranscriptHandleAuthorityFailsBeforeAdmission() async throws {
+        for mode in MalformedInitialAttemptIdentities.Mode.allCases {
+            let fixture = try InvocationFixture(
+                contextWindow: 100_000,
+                includesOnDemandAttachment: true,
+                identityGenerator: MalformedInitialAttemptIdentities(mode: mode)
+            )
+
+            guard case .rejected(_, .persistenceUnavailable) =
+                await fixture.invocations.tryInvoke(fixture.request)
+            else { return XCTFail("\(mode) must fail closed before admission") }
+
+            let identityCheckCount = await fixture.persistence.identityCheckCount
+            let installedOrdinals = await fixture.persistence.installedAttemptOrdinals
+            let claimCount = await fixture.admission.claimCount
+            let launchCount = await fixture.provider.launchCount
+            XCTAssertEqual(identityCheckCount, 0, "\(mode)")
+            XCTAssertEqual(installedOrdinals, [], "\(mode)")
+            XCTAssertEqual(claimCount, 0, "\(mode)")
+            XCTAssertEqual(launchCount, 0, "\(mode)")
+        }
+    }
+
     func testEveryIdentityNamespaceCollisionExhaustsBeforeAdmissionAndProvider() async throws {
         for collision in InvocationLaunchIdentityCollision.allCases {
             let fixture = try InvocationFixture(contextWindow: 100_000)
@@ -765,6 +945,7 @@ private final class InvocationFixture: @unchecked Sendable {
     let persistence: MemoryInvocationPersistence
     let admission: ScriptedInvocationAdmission
     let provider: RecordingSyntheticCoachProvider
+    let sleeper: RecordingInvocationRetrySleeper
     let contextSource: InvocationContextSource
     let invocations: DefaultInvocations
 
@@ -778,7 +959,12 @@ private final class InvocationFixture: @unchecked Sendable {
         draftText: String = "Keep this exact user Draft",
         contextIsCurrent: Bool = true,
         pendingFailure: PendingUserTurnFailure? = nil,
-        clock: (any ChatClock)? = nil
+        clock: (any ChatClock)? = nil,
+        providerOutcomes: [CoachProviderAttemptOutcome] = [
+            .complete(markdown: "A concise **synthetic** answer."),
+        ],
+        includesOnDemandAttachment: Bool = false,
+        identityGenerator: (any InvocationIdentityGenerating)? = nil
     ) throws {
         let empty = try ChatAggregate.emptyDevelopmentChat(
             chatID: ChatID("cht-20260830T120000000Z-1ABC"),
@@ -813,10 +999,29 @@ private final class InvocationFixture: @unchecked Sendable {
         )
         persistence = MemoryInvocationPersistence(initial: initial)
         admission = ScriptedInvocationAdmission(decision: admissionDecision)
-        provider = RecordingSyntheticCoachProvider()
+        provider = RecordingSyntheticCoachProvider(
+            outcomes: providerOutcomes,
+            persistence: persistence
+        )
+        sleeper = RecordingInvocationRetrySleeper()
         contextSource = InvocationContextSource(
             contextWindow: contextWindow,
-            isCurrent: contextIsCurrent
+            isCurrent: contextIsCurrent,
+            includesOnDemandAttachment: includesOnDemandAttachment
+        )
+        let defaultIdentities = FixedInvocationIdentities(
+            invocationID: try CoachInvocationID(
+                "inv-20260830T120000000Z-5KMN"
+            ),
+            attemptID: try CoachProviderAttemptID(
+                "atm-20260830T120000000Z-6NPQ"
+            ),
+            idempotencyValue: try ProviderIdempotencyValue(
+                "synthetic-attempt-6NPQ"
+            ),
+            userMessageID: userMessageID,
+            coachMessageID: coachMessageID,
+            freshDraftID: freshDraftID
         )
         invocations = DefaultInvocations(
             persistence: persistence,
@@ -824,20 +1029,8 @@ private final class InvocationFixture: @unchecked Sendable {
             provider: provider,
             coachContext: DefaultCoachContextFeature(source: contextSource),
             clock: clock ?? FixedInvocationClock(instant: instant),
-            identities: FixedInvocationIdentities(
-                invocationID: try CoachInvocationID(
-                    "inv-20260830T120000000Z-5KMN"
-                ),
-                attemptID: try CoachProviderAttemptID(
-                    "atm-20260830T120000000Z-6NPQ"
-                ),
-                idempotencyValue: try ProviderIdempotencyValue(
-                    "synthetic-attempt-6NPQ"
-                ),
-                userMessageID: userMessageID,
-                coachMessageID: coachMessageID,
-                freshDraftID: freshDraftID
-            )
+            identities: identityGenerator ?? defaultIdentities,
+            retrySleeper: sleeper
         )
     }
 }
@@ -938,9 +1131,14 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private(set) var publicationRecoveryCount = 0
     private(set) var lastPublication: PublishCoachInvocationMutation?
     private(set) var recoveredRequests: [PendingCoachInvocationRequest] = []
+    private(set) var installedAttemptOrdinals: [UInt8] = []
 
     init(initial: ChatAggregate) {
         aggregate = initial
+    }
+
+    func isDurable(_ invocation: CoachInvocation) -> Bool {
+        activeInvocation == invocation
     }
 
     func openNewPendingInvocation(
@@ -1107,7 +1305,22 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         guard mutation.authority.aggregate == aggregate else { return .stale(aggregate) }
         reservedRequest = nil
         activeInvocation = mutation.invocation
+        installedAttemptOrdinals = [mutation.invocation.attempt.ordinal]
         return .installed(mutation.invocation)
+    }
+
+    func installNextAttempt(
+        _ mutation: InstallNextCoachProviderAttemptMutation
+    ) async -> InvocationNextAttemptInstallOutcome {
+        guard activeInvocation == mutation.base else { return .stale(aggregate) }
+        activeInvocation = mutation.replacement
+        installedAttemptOrdinals.append(mutation.replacement.attempt.ordinal)
+        return .installed(
+            ScriptedActiveInvocationSession(
+                persistence: self,
+                invocation: mutation.replacement
+            )
+        )
     }
 
     func cancelInvocationReservation(
@@ -1207,6 +1420,16 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     func abortInstalledNewSend(
         _ invocation: CoachInvocation
     ) async -> InvocationPendingMutationOutcome {
+        await abortInstalledNewSend(
+            invocation,
+            failure: .coachResponseInterrupted
+        )
+    }
+
+    func abortInstalledNewSend(
+        _ invocation: CoachInvocation,
+        failure: PendingUserTurnFailure
+    ) async -> InvocationPendingMutationOutcome {
         guard activeInvocation == invocation else { return .stale(aggregate) }
         switch script.aborts.next(defaultingTo: .committed) {
         case .committed:
@@ -1224,7 +1447,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
             chat: aggregate.chat,
             memory: aggregate.memory,
             pendingUserTurn: aggregate.pendingUserTurn?.replacingFailure(
-                .coachResponseInterrupted
+                failure
             )
         )
         return .committed(aggregate)
@@ -1425,10 +1648,21 @@ private actor ScriptedActiveInvocationSession: InvocationActivePersistenceSessio
         self.invocation = invocation
     }
 
-    func abort() async -> InvocationTerminalPersistenceOutcome {
+    func installNextAttempt(
+        _ mutation: InstallNextCoachProviderAttemptMutation
+    ) async -> InvocationNextAttemptInstallOutcome {
+        guard isActive, mutation.base == invocation else { return .failed }
+        let outcome = await persistence.installNextAttempt(mutation)
+        if case .installed = outcome { isActive = false }
+        return outcome
+    }
+
+    func abort(
+        failure: PendingUserTurnFailure
+    ) async -> InvocationTerminalPersistenceOutcome {
         guard isActive else { return .recovered(.unavailable) }
         isActive = false
-        switch await persistence.abortInstalledNewSend(invocation) {
+        switch await persistence.abortInstalledNewSend(invocation, failure: failure) {
         case let .committed(aggregate): return .committed(aggregate)
         case let .stale(current): return .stale(current)
         case .failed:
@@ -1498,16 +1732,28 @@ private actor ScriptedInvocationAdmission: InvocationAdmissionPort {
 
 private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
     private(set) var serializedRequests: [[UInt8]] = []
+    private(set) var requests: [SyntheticCoachProviderRequest] = []
     private(set) var launchCount = 0
-    private var shouldFail = false
-    private var shouldReturnInvalidResponse = false
+    private(set) var durableBeforeLaunch: [Bool] = []
+    private var outcomes: [CoachProviderAttemptOutcome]
+    private let persistence: MemoryInvocationPersistence
     private var shouldSuspend = false
     private var launchStarted = false
     private var launchContinuation: CheckedContinuation<Void, Never>?
 
-    func failNextLaunch() { shouldFail = true }
+    init(
+        outcomes: [CoachProviderAttemptOutcome],
+        persistence: MemoryInvocationPersistence
+    ) {
+        self.outcomes = outcomes
+        self.persistence = persistence
+    }
 
-    func returnInvalidResponseNextLaunch() { shouldReturnInvalidResponse = true }
+    func failNextLaunch() { outcomes.insert(.userRetryableFailure, at: 0) }
+
+    func returnInvalidResponseNextLaunch() {
+        outcomes.insert(.complete(markdown: ""), at: 0)
+    }
 
     func suspendNextLaunch() { shouldSuspend = true }
 
@@ -1520,31 +1766,45 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
         launchContinuation = nil
     }
 
-    func run(_ request: SyntheticCoachProviderRequest) async throws -> String {
+    func recordedAttemptKinds() -> [CoachProviderAttemptKind] {
+        requests.map(\.attempt.kind)
+    }
+
+    func recordedAttemptOrdinals() -> [UInt8] {
+        requests.map(\.attempt.ordinal)
+    }
+
+    func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome {
+        durableBeforeLaunch.append(await persistence.isDurable(request.invocation))
         launchCount += 1
+        requests.append(request)
         serializedRequests.append(Array(request.exchange.request))
         launchStarted = true
         if shouldSuspend {
             shouldSuspend = false
             await withCheckedContinuation { launchContinuation = $0 }
         }
-        if shouldFail {
-            shouldFail = false
-            throw SyntheticProviderFailure.injected
+        guard !outcomes.isEmpty else {
+            return .complete(markdown: "A concise **synthetic** answer.")
         }
-        if shouldReturnInvalidResponse {
-            shouldReturnInvalidResponse = false
-            return ""
-        }
-        return "A concise **synthetic** answer."
+        return outcomes.removeFirst()
     }
 }
 
-private enum SyntheticProviderFailure: Error { case injected }
+private actor RecordingInvocationRetrySleeper: InvocationRetrySleeping {
+    private(set) var delaysMilliseconds: [Int64] = []
+
+    func sleep(milliseconds: Int64) async throws {
+        delaysMilliseconds.append(milliseconds)
+    }
+
+    func recordedDelays() -> [Int64] { delaysMilliseconds }
+}
 
 private actor InvocationContextSource: CoachContextSnapshotPort {
     private let contextWindow: Int
     private let current: Bool
+    private let includesOnDemandAttachment: Bool
     private(set) var pendingResolutionCount = 0
     private var currentCheckCount = 0
     nonisolated let profile = CoachProfileProvenance(
@@ -1552,9 +1812,14 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
         statementGeneration: 9
     )
 
-    init(contextWindow: Int, isCurrent: Bool) {
+    init(
+        contextWindow: Int,
+        isCurrent: Bool,
+        includesOnDemandAttachment: Bool = false
+    ) {
         self.contextWindow = contextWindow
         current = isCurrent
+        self.includesOnDemandAttachment = includesOnDemandAttachment
     }
 
     func resolveNewChat(
@@ -1579,7 +1844,29 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                             "sessionSummaries": .array([]),
                         ]),
                         history: [],
-                        currentDraft: request.draft.text
+                        currentDraft: request.draft.text,
+                        attachments: includesOnDemandAttachment ? [
+                            .onDemand(
+                                requestValue: .object([
+                                    "kind": .string("onDemand"),
+                                    "sessionAttachmentId": .string("attachment-1"),
+                                    "displayLabel": .string("Fixture Session"),
+                                    "sessionTranscriptHandle": .string(
+                                        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                                    ),
+                                ]),
+                                sessionTranscriptHandle: PreparedCoachTranscriptHandle(
+                                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                                ),
+                                transcriptDisclosure: .object([
+                                    "sessionAttachmentId": .string("attachment-1"),
+                                    "transcript": .object([
+                                        "lines": .array([]),
+                                        "audioEvents": .array([]),
+                                    ]),
+                                ])
+                            ),
+                        ] : []
                     ),
                     configuration: try CoachContextConfiguration(
                         descriptor: CoachProviderDescriptor(
@@ -1648,14 +1935,96 @@ private struct FixedInvocationIdentities: InvocationIdentityGenerating {
     let coachMessageID: ChatMessageID
     let freshDraftID: ChatDraftID
 
-    func generate(at instant: UTCInstant) async -> InvocationLaunchIdentity {
-        InvocationLaunchIdentity(
-            invocationID: invocationID,
-            attemptID: attemptID,
-            idempotencyValue: idempotencyValue,
-            userMessageID: userMessageID,
-            coachMessageID: coachMessageID,
-            freshDraftID: freshDraftID
+    func generateInvocationID(at instant: UTCInstant) async -> CoachInvocationID {
+        invocationID
+    }
+
+    func generateAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationAttemptIdentity {
+        let attemptSuffixes = ["6NPQ", "7RST", "8VWX", "9YZ0"]
+        let userSuffixes = ["7RST", "A234", "D567", "G89A"]
+        let coachSuffixes = ["8VWX", "B345", "E678", "H9AB"]
+        let draftSuffixes = ["9YZ0", "C456", "F789", "JABC"]
+        let index = Int(ordinal - 1)
+        let selectedAttemptID = ordinal == 1 ? attemptID : try! CoachProviderAttemptID(
+            "atm-20260830T120000000Z-\(attemptSuffixes[index])"
+        )
+        let selectedUserID = ordinal == 1 ? userMessageID : try! ChatMessageID(
+            "msg-20260830T120000000Z-\(userSuffixes[index])"
+        )
+        let selectedCoachID = ordinal == 1 ? coachMessageID : try! ChatMessageID(
+            "msg-20260830T120000000Z-\(coachSuffixes[index])"
+        )
+        let selectedDraftID = ordinal == 1 ? freshDraftID : try! ChatDraftID(
+            "drf-20260830T120000000Z-\(draftSuffixes[index])"
+        )
+        return InvocationAttemptIdentity(
+            attemptID: selectedAttemptID,
+            idempotencyValue: ordinal == 1 ? idempotencyValue :
+                try! ProviderIdempotencyValue("synthetic-attempt-\(ordinal)"),
+            userMessageID: selectedUserID,
+            coachMessageID: selectedCoachID,
+            freshDraftID: selectedDraftID,
+            transcriptHandles: (0 ..< transcriptHandleCount).map { handleIndex in
+                try! PreparedCoachTranscriptHandle(
+                    String(
+                        format: "00000000-0000-0000-%04x-%012x",
+                        Int(ordinal),
+                        handleIndex + 1
+                    )
+                )
+            }
+        )
+    }
+}
+
+private struct MalformedInitialAttemptIdentities: InvocationIdentityGenerating {
+    enum Mode: CaseIterable {
+        case wrongCount
+        case duplicate
+    }
+
+    let mode: Mode
+
+    func generateInvocationID(at instant: UTCInstant) async -> CoachInvocationID {
+        try! CoachInvocationID("inv-20260830T120000000Z-5KMN")
+    }
+
+    func generateAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationAttemptIdentity {
+        let duplicate = try! PreparedCoachTranscriptHandle(
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        )
+        let handles: [PreparedCoachTranscriptHandle]
+        switch mode {
+        case .wrongCount: handles = []
+        case .duplicate: handles = [duplicate, duplicate]
+        }
+        return InvocationAttemptIdentity(
+            attemptID: try! CoachProviderAttemptID(
+                "atm-20260830T120000000Z-6NPQ"
+            ),
+            idempotencyValue: try! ProviderIdempotencyValue(
+                "synthetic-attempt-6NPQ"
+            ),
+            userMessageID: try! ChatMessageID(
+                "msg-20260830T120000000Z-7RST"
+            ),
+            coachMessageID: try! ChatMessageID(
+                "msg-20260830T120000000Z-8VWX"
+            ),
+            freshDraftID: try! ChatDraftID(
+                "drf-20260830T120000000Z-9YZ0"
+            ),
+            transcriptHandles: handles
         )
     }
 }

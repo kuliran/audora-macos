@@ -601,7 +601,7 @@ final class ContractResourcesTests: XCTestCase {
             pending["responsePositionId"] as? String,
             "rsp-20260830T120001000Z-6PQR"
         )
-        XCTAssertEqual((pending["schemaVersion"] as? NSNumber)?.uint32Value, 2)
+        XCTAssertEqual((pending["schemaVersion"] as? NSNumber)?.uint32Value, 3)
         XCTAssertNil(pending["failure"])
 
         let failed = try jsonObject(.pendingUserTurnCapacityFailureExample)
@@ -613,7 +613,7 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(failed["responsePositionId"] as? String,
                        pending["responsePositionId"] as? String)
         XCTAssertEqual(failed["failure"] as? String, "coachContextCannotFit")
-        XCTAssertEqual((failed["schemaVersion"] as? NSNumber)?.uint32Value, 2)
+        XCTAssertEqual((failed["schemaVersion"] as? NSNumber)?.uint32Value, 3)
 
         let interrupted = try jsonObject(.pendingUserTurnInterruptedExample)
         XCTAssertEqual(
@@ -622,7 +622,21 @@ final class ContractResourcesTests: XCTestCase {
         )
         XCTAssertEqual(
             (interrupted["schemaVersion"] as? NSNumber)?.uint32Value,
-            2
+            3
+        )
+
+        let providerFailure = try jsonObject(.pendingUserTurnProviderFailureExample)
+        XCTAssertEqual(providerFailure["failure"] as? String, "coachProviderError")
+        XCTAssertEqual(
+            (providerFailure["schemaVersion"] as? NSNumber)?.uint32Value,
+            3
+        )
+
+        let invalid = try jsonObject(.pendingUserTurnInvalidResponseExample)
+        XCTAssertEqual(invalid["failure"] as? String, "coachResponseInvalid")
+        XCTAssertEqual(
+            (invalid["schemaVersion"] as? NSNumber)?.uint32Value,
+            3
         )
 
         let legacy = try jsonObject(.pendingUserTurnLegacyV1Example)
@@ -639,6 +653,8 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(schema.contains("ChatResponsePositionId"))
         XCTAssertTrue(schema.contains("coachContextCannotFit"))
         XCTAssertTrue(schema.contains("coachResponseInterrupted"))
+        XCTAssertTrue(schema.contains("coachProviderError"))
+        XCTAssertTrue(schema.contains("coachResponseInvalid"))
         XCTAssertTrue(schema.contains("unevaluatedProperties"))
     }
 
@@ -723,7 +739,23 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(invocation["expectedManifestRevision"] as? Int, 1)
         XCTAssertEqual(user["schemaVersion"] as? Int, 2)
         XCTAssertEqual(coach["schemaVersion"] as? Int, 2)
-        XCTAssertEqual(invocation["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(invocation["schemaVersion"] as? Int, 3)
+        let attempts = try XCTUnwrap(invocation["attempts"] as? [[String: Any]])
+        XCTAssertEqual(attempts.map { $0["ordinal"] as? Int }, [1, 2])
+        XCTAssertEqual(attempts.map { $0["kind"] as? String }, [
+            "standard", "shorterRepair",
+        ])
+        XCTAssertEqual(
+            attempts.last?["userMessageId"] as? String,
+            user["messageId"] as? String
+        )
+        XCTAssertEqual(
+            attempts.last?["coachMessageId"] as? String,
+            coach["messageId"] as? String
+        )
+        XCTAssertEqual(Set(attempts.compactMap {
+            $0["providerIdempotencyValue"] as? String
+        }).count, 2)
         XCTAssertEqual(
             coach["profileRevisionId"] as? String,
             invocation["profileRevisionId"] as? String

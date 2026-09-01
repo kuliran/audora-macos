@@ -52,8 +52,9 @@ namespace Audora.Contracts {
   @jsonSchema
   @id("PendingUserTurn.json")
   union PendingUserTurn {
-    legacy: PendingUserTurnV1,
-    current: PendingUserTurnV2,
+    legacyV1: PendingUserTurnV1,
+    legacyV2: PendingUserTurnV2,
+    current: PendingUserTurnV3,
   }
 
   model PendingUserTurnV1 {
@@ -65,6 +66,12 @@ namespace Audora.Contracts {
   model PendingUserTurnV2 {
     ...PendingUserTurnFields;
     schemaVersion: 2;
+    failure?: PendingUserTurnFailureV2;
+  }
+
+  model PendingUserTurnV3 {
+    ...PendingUserTurnFields;
+    schemaVersion: 3;
     failure?: PendingUserTurnFailure;
   }
 
@@ -80,6 +87,13 @@ namespace Audora.Contracts {
   }
 
   union PendingUserTurnFailure {
+    coachContextCannotFit: "coachContextCannotFit",
+    coachResponseInterrupted: "coachResponseInterrupted",
+    coachProviderError: "coachProviderError",
+    coachResponseInvalid: "coachResponseInvalid",
+  }
+
+  union PendingUserTurnFailureV2 {
     coachContextCannotFit: "coachContextCannotFit",
     coachResponseInterrupted: "coachResponseInterrupted",
   }

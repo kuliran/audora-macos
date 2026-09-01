@@ -18,6 +18,13 @@ enum PortablePendingAcquisitionTransactionResult: Sendable {
     case rejected(InvocationPendingAcquisitionOutcome)
 }
 
+enum PortableNextAttemptInstallResult: Equatable, Sendable {
+    case installed(CoachInvocation)
+    case collision(InvocationLaunchIdentityCollision)
+    case stale(ChatAggregate?)
+    case failed
+}
+
 /// The Invocation persistence module's workflow seam. It owns Library-scoped
 /// transaction routing, commit-uncertainty reconciliation, and the mapping from
 /// confined filesystem outcomes into Invocation port outcomes. The actor above
@@ -223,6 +230,38 @@ struct PortableInvocationTransactions: Sendable {
         }
     }
 
+    func installNextAttempt(
+        _ mutation: InstallNextCoachProviderAttemptMutation,
+        holding lease: PortableInvocationLivenessLease
+    ) async -> PortableNextAttemptInstallResult {
+        let scope = LibraryScope(libraryID: mutation.base.libraryID)
+        let result: ActiveLibraryOperationResult<PortableNextAttemptInstallResult> =
+            await workspace.performActiveReadWriteOperation(in: scope) { root in
+                do {
+                    return try persistence.installNextAttempt(
+                        mutation,
+                        at: root,
+                        in: scope,
+                        holding: lease
+                    )
+                } catch {
+                    if let installed = try? persistence.reconcileInstalledNextAttempt(
+                        mutation,
+                        at: root,
+                        in: scope,
+                        holding: lease
+                    ) {
+                        return .installed(installed)
+                    }
+                    return .failed
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .failed
+        }
+    }
+
     func checkLaunchIdentity(
         _ identity: InvocationLaunchIdentity,
         for authority: InvocationPendingAuthority,
@@ -362,6 +401,7 @@ struct PortableInvocationTransactions: Sendable {
 
     func abortInstalledNewSend(
         _ invocation: CoachInvocation,
+        failure: PendingUserTurnFailure = .coachResponseInterrupted,
         holding lease: PortableInvocationLivenessLease
     ) async -> InvocationPendingMutationOutcome {
         let scope = LibraryScope(libraryID: invocation.libraryID)
@@ -370,6 +410,7 @@ struct PortableInvocationTransactions: Sendable {
                 do {
                     switch try persistence.abortInstalledNewSend(
                         invocation,
+                        failure: failure,
                         at: root,
                         in: scope,
                         holding: lease

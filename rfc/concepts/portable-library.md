@@ -109,11 +109,13 @@ Chat root cannot be migrated without changing its meaning, Audora freezes that
 Chat and instructs the user to create a new one; it does not invent replacement
 history.
 
-Pending User Turn v2 adds `coachResponseInterrupted`. The reader still accepts a
-strict v1 record only when `failure` is absent or `coachContextCannotFit`; a v1
-record that claims the v2 interruption value is corrupt. The next write of a
-valid v1 Pending upgrades it to v2, while a version newer than v2 freezes only
-its own Chat as newer-schema data.
+Pending User Turn v3 adds `coachProviderError` and `coachResponseInvalid`; v2 adds
+`coachResponseInterrupted`. The reader still accepts a strict v1 record only when
+`failure` is absent or `coachContextCannotFit`, and accepts a strict v2 record only
+with those values or `coachResponseInterrupted`. A legacy record that claims a
+newer version's failure value is corrupt. The next write of a valid v1 or v2
+Pending upgrades it to v3, while a version newer than v3 freezes only its own Chat
+as newer-schema data.
 
 ## Development Profile
 

@@ -56,6 +56,155 @@ public struct ProviderIdempotencyValue: Hashable, Sendable {
     }
 }
 
+public enum CoachProviderAttemptKind: String, Codable, Equatable, Sendable {
+    case standard
+    case shorterRepair
+}
+
+public enum CoachProviderTranscriptHandleError: Error, Equatable, Sendable {
+    case notCanonicalUUID
+}
+
+/// Opaque Attempt-local route to one on-demand Chat Session Attachment.
+public struct CoachProviderTranscriptHandle: Hashable, Sendable {
+    public static let canonicalUTF8ByteCount = 36
+    public let rawValue: String
+
+    public init(_ rawValue: String) throws {
+        guard rawValue.utf8.count == Self.canonicalUTF8ByteCount else {
+            throw CoachProviderTranscriptHandleError.notCanonicalUUID
+        }
+        let bytes = Array(rawValue.utf8)
+        guard bytes.enumerated().allSatisfy({ index, byte in
+            switch index {
+            case 8, 13, 18, 23:
+                byte == 45
+            default:
+                (48 ... 57).contains(byte) || (97 ... 102).contains(byte)
+            }
+        }) else {
+            throw CoachProviderTranscriptHandleError.notCanonicalUUID
+        }
+        self.rawValue = rawValue
+    }
+}
+
+public enum CoachProviderAttemptError: Error, Equatable, Sendable {
+    case invalidSchemaVersion
+    case invalidOrdinal
+    case repairMustFollowAnEarlierAttempt
+    case duplicateMessageID
+    case duplicateTranscriptHandle
+}
+
+/// Fresh authority for the only atomic publication an Attempt may propose.
+public struct CoachProviderAttemptPublicationAuthority: Equatable, Sendable {
+    public let userMessageID: ChatMessageID
+    public let coachMessageID: ChatMessageID
+    public let freshDraftID: ChatDraftID
+
+    public init(
+        userMessageID: ChatMessageID,
+        coachMessageID: ChatMessageID,
+        freshDraftID: ChatDraftID
+    ) throws {
+        guard userMessageID != coachMessageID else {
+            throw CoachProviderAttemptError.duplicateMessageID
+        }
+        self.userMessageID = userMessageID
+        self.coachMessageID = coachMessageID
+        self.freshDraftID = freshDraftID
+    }
+}
+
+/// One durable external launch inside an Invocation. Current records always own
+/// publication authority; legacy #22 records omit it because relaunch only
+/// retires those interrupted records and never resumes their provider work.
+public struct CoachProviderAttempt: Equatable, Sendable {
+    public static let schemaVersion: UInt32 = 1
+    public static let maximumOrdinal: UInt8 = 4
+    public static let maximumTranscriptHandles = 128
+
+    public let persistedSchemaVersion: UInt32
+    public let id: CoachProviderAttemptID
+    public let ordinal: UInt8
+    public let kind: CoachProviderAttemptKind
+    public let providerIdempotencyValue: ProviderIdempotencyValue
+    public let transcriptHandles: [CoachProviderTranscriptHandle]
+    public let publicationAuthority: CoachProviderAttemptPublicationAuthority?
+
+    public init(
+        schemaVersion: UInt32 = Self.schemaVersion,
+        id: CoachProviderAttemptID,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        providerIdempotencyValue: ProviderIdempotencyValue,
+        transcriptHandles: [CoachProviderTranscriptHandle],
+        publicationAuthority: CoachProviderAttemptPublicationAuthority
+    ) throws {
+        try Self.validate(
+            schemaVersion: schemaVersion,
+            ordinal: ordinal,
+            kind: kind,
+            transcriptHandles: transcriptHandles
+        )
+        persistedSchemaVersion = schemaVersion
+        self.id = id
+        self.ordinal = ordinal
+        self.kind = kind
+        self.providerIdempotencyValue = providerIdempotencyValue
+        self.transcriptHandles = transcriptHandles
+        self.publicationAuthority = publicationAuthority
+    }
+
+    public init(
+        legacyID: CoachProviderAttemptID,
+        providerIdempotencyValue: ProviderIdempotencyValue
+    ) {
+        persistedSchemaVersion = Self.schemaVersion
+        id = legacyID
+        ordinal = 1
+        kind = .standard
+        self.providerIdempotencyValue = providerIdempotencyValue
+        transcriptHandles = []
+        publicationAuthority = nil
+    }
+
+    public var userMessageID: ChatMessageID? {
+        publicationAuthority?.userMessageID
+    }
+
+    public var coachMessageID: ChatMessageID? {
+        publicationAuthority?.coachMessageID
+    }
+
+    public var freshDraftID: ChatDraftID? {
+        publicationAuthority?.freshDraftID
+    }
+
+    private static func validate(
+        schemaVersion: UInt32,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandles: [CoachProviderTranscriptHandle]
+    ) throws {
+        guard schemaVersion == Self.schemaVersion else {
+            throw CoachProviderAttemptError.invalidSchemaVersion
+        }
+        guard (1 ... Self.maximumOrdinal).contains(ordinal) else {
+            throw CoachProviderAttemptError.invalidOrdinal
+        }
+        guard kind != .shorterRepair || ordinal > 1 else {
+            throw CoachProviderAttemptError.repairMustFollowAnEarlierAttempt
+        }
+        guard transcriptHandles.count <= Self.maximumTranscriptHandles,
+              Set(transcriptHandles).count == transcriptHandles.count
+        else {
+            throw CoachProviderAttemptError.duplicateTranscriptHandle
+        }
+    }
+}
+
 public enum ChatMessageContent: Equatable, Sendable {
     case user(text: String)
     case coach(markdown: String)
@@ -153,16 +302,18 @@ public enum CoachInvocationError: Error, Equatable, Sendable {
     case manifestRevisionMismatch
     case failedPending
     case profileProvenanceMismatch
+    case attemptPublicationAuthorityRequired
 }
 
-/// Durable launch authority for one admitted top-level Coach operation.
+/// Durable top-level authority for one admitted Coach operation. Its identity,
+/// intent, admission, and frozen semantic context stay stable while the nested
+/// current Attempt is atomically replaced.
 public struct CoachInvocation: Equatable, Sendable {
-    public static let schemaVersion: UInt32 = 2
+    public static let schemaVersion: UInt32 = 3
 
     public let persistedSchemaVersion: UInt32
     public let id: CoachInvocationID
-    public let attemptID: CoachProviderAttemptID
-    public let providerIdempotencyValue: ProviderIdempotencyValue
+    public let attempts: [CoachProviderAttempt]
     public let libraryID: LibraryID
     public let chatID: ChatID
     public let pendingUserTurnID: PendingUserTurnID
@@ -176,8 +327,7 @@ public struct CoachInvocation: Equatable, Sendable {
     public init(
         schemaVersion: UInt32 = Self.schemaVersion,
         id: CoachInvocationID,
-        attemptID: CoachProviderAttemptID,
-        providerIdempotencyValue: ProviderIdempotencyValue,
+        attempt: CoachProviderAttempt,
         library: LibraryScope,
         chatID: ChatID,
         pendingUserTurn: PendingUserTurn,
@@ -185,18 +335,72 @@ public struct CoachInvocation: Equatable, Sendable {
         expectedManifestRevision: UInt64,
         admittedAt: UTCInstant
     ) throws {
-        switch (schemaVersion, preparedProfile) {
-        case (1, nil), (Self.schemaVersion, .some):
+        try self.init(
+            schemaVersion: schemaVersion,
+            id: id,
+            attempts: [attempt],
+            library: library,
+            chatID: chatID,
+            pendingUserTurn: pendingUserTurn,
+            preparedProfile: preparedProfile,
+            expectedManifestRevision: expectedManifestRevision,
+            admittedAt: admittedAt
+        )
+    }
+
+    public init(
+        schemaVersion: UInt32,
+        id: CoachInvocationID,
+        attempts: [CoachProviderAttempt],
+        library: LibraryScope,
+        chatID: ChatID,
+        pendingUserTurn: PendingUserTurn,
+        preparedProfile: CoachProfileProvenance?,
+        expectedManifestRevision: UInt64,
+        admittedAt: UTCInstant
+    ) throws {
+        guard let attempt = attempts.last else {
+            throw CoachInvocationError.attemptPublicationAuthorityRequired
+        }
+        guard attempts.count <= Int(CoachProviderAttempt.maximumOrdinal),
+              attempts.enumerated().allSatisfy({ index, value in
+                  value.ordinal == UInt8(index + 1) &&
+                      (value.kind == .standard || index == attempts.count - 1)
+              }),
+              Set(attempts.map(\.id)).count == attempts.count,
+              Set(attempts.map(\.providerIdempotencyValue)).count == attempts.count,
+              Set(attempts.compactMap(\.userMessageID)).count ==
+              attempts.compactMap(\.userMessageID).count,
+              Set(attempts.compactMap(\.coachMessageID)).count ==
+              attempts.compactMap(\.coachMessageID).count,
+              Set(attempts.flatMap { attempt in
+                  [attempt.userMessageID, attempt.coachMessageID].compactMap { $0 }
+              }).count == attempts.flatMap({ attempt in
+                  [attempt.userMessageID, attempt.coachMessageID].compactMap { $0 }
+              }).count,
+              Set(attempts.compactMap(\.freshDraftID)).count ==
+              attempts.compactMap(\.freshDraftID).count,
+              Set(attempts.flatMap(\.transcriptHandles)).count ==
+              attempts.flatMap(\.transcriptHandles).count
+        else { throw CoachInvocationError.attemptPublicationAuthorityRequired }
+        switch (schemaVersion, preparedProfile, attempt.publicationAuthority) {
+        case (1, nil, nil), (2, .some, nil), (Self.schemaVersion, .some, .some):
             break
-        case (1, .some), (Self.schemaVersion, nil):
+        case (1, .some, _), (2, nil, _), (Self.schemaVersion, nil, _):
             throw CoachInvocationError.profileProvenanceMismatch
+        case (Self.schemaVersion, .some, nil):
+            throw CoachInvocationError.attemptPublicationAuthorityRequired
         default:
             throw CoachInvocationError.invalidSchemaVersion
         }
+        if schemaVersion == Self.schemaVersion,
+           attempts.contains(where: { $0.publicationAuthority == nil })
+        {
+            throw CoachInvocationError.attemptPublicationAuthorityRequired
+        }
         persistedSchemaVersion = schemaVersion
         self.id = id
-        self.attemptID = attemptID
-        self.providerIdempotencyValue = providerIdempotencyValue
+        self.attempts = attempts
         libraryID = library.libraryID
         self.chatID = chatID
         pendingUserTurnID = pendingUserTurn.id
@@ -206,6 +410,69 @@ public struct CoachInvocation: Equatable, Sendable {
         self.preparedProfile = preparedProfile
         self.expectedManifestRevision = expectedManifestRevision
         self.admittedAt = admittedAt
+    }
+
+    public var attempt: CoachProviderAttempt {
+        // Every initializer rejects an empty durable sequence.
+        attempts[attempts.count - 1]
+    }
+
+    public var attemptID: CoachProviderAttemptID { attempt.id }
+
+    public var providerIdempotencyValue: ProviderIdempotencyValue {
+        attempt.providerIdempotencyValue
+    }
+
+    /// Returns the same admitted Invocation authority with one newly persisted
+    /// current Attempt. Callers still need an Infrastructure CAS against the
+    /// previous exact value before launching the provider.
+    public func installingAttempt(_ next: CoachProviderAttempt) throws -> Self {
+        guard persistedSchemaVersion == Self.schemaVersion,
+              preparedProfile != nil,
+              next.publicationAuthority != nil,
+              attempts.count < Int(CoachProviderAttempt.maximumOrdinal),
+              next.ordinal == attempt.ordinal + 1,
+              attempt.kind == .standard,
+              Set(attempts.map(\.id)).isDisjoint(with: [next.id]),
+              Set(attempts.map(\.providerIdempotencyValue)).isDisjoint(
+                  with: [next.providerIdempotencyValue]
+              ),
+              Set(attempts.compactMap(\.userMessageID)).isDisjoint(
+                  with: [next.userMessageID].compactMap { $0 }
+              ),
+              Set(attempts.compactMap(\.coachMessageID)).isDisjoint(
+                  with: [next.coachMessageID].compactMap { $0 }
+              ),
+              Set(attempts.flatMap { attempt in
+                  [attempt.userMessageID, attempt.coachMessageID].compactMap { $0 }
+              }).isDisjoint(with: [
+                  next.userMessageID,
+                  next.coachMessageID,
+              ].compactMap { $0 }),
+              Set(attempts.compactMap(\.freshDraftID)).isDisjoint(
+                  with: [next.freshDraftID].compactMap { $0 }
+              ),
+              Set(attempts.flatMap(\.transcriptHandles)).isDisjoint(
+                  with: next.transcriptHandles
+              ),
+              next.transcriptHandles.count == attempt.transcriptHandles.count
+        else { throw CoachInvocationError.attemptPublicationAuthorityRequired }
+        return try CoachInvocation(
+            schemaVersion: Self.schemaVersion,
+            id: id,
+            attempts: attempts + [next],
+            library: LibraryScope(libraryID: libraryID),
+            chatID: chatID,
+            pendingUserTurn: PendingUserTurn(
+                id: pendingUserTurnID,
+                draftID: draftID,
+                draftVersion: draftVersion,
+                responsePositionID: responsePositionID
+            ),
+            preparedProfile: preparedProfile,
+            expectedManifestRevision: expectedManifestRevision,
+            admittedAt: admittedAt
+        )
     }
 
     /// Validates the durable user intent independently of the Chat manifest CAS.
@@ -272,6 +539,10 @@ public extension ChatAggregate {
             throw InvocationPublicationError.coachMessageRequired
         }
         guard invocation.persistedSchemaVersion == CoachInvocation.schemaVersion,
+              let attemptAuthority = invocation.attempt.publicationAuthority,
+              attemptAuthority.userMessageID == userMessage.id,
+              attemptAuthority.coachMessageID == coachMessage.id,
+              attemptAuthority.freshDraftID == freshDraft.draftID,
               userMessage.persistedSchemaVersion == ChatMessage.schemaVersion,
               coachMessage.persistedSchemaVersion == ChatMessage.schemaVersion,
               let preparedProfile = invocation.preparedProfile,

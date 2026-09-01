@@ -86,6 +86,19 @@ enum ChatInvocationAdmissionPresentation {
     }
 }
 
+enum CoachResponseFailurePresentation {
+    static func text(for failure: PendingUserTurnFailure?) -> String {
+        switch failure {
+        case .coachProviderError:
+            "The Coach provider could not complete the response. Nothing was published."
+        case .coachResponseInvalid:
+            "The Coach returned an invalid complete response. Nothing was published."
+        case .coachResponseInterrupted, .none, .coachContextCannotFit:
+            "The Coach response was interrupted. Nothing was published."
+        }
+    }
+}
+
 private struct CoachInvocationControlModifier: ViewModifier {
     let disabled: Bool
     let unavailableReason: String?
@@ -397,12 +410,18 @@ public struct ChatRootView: View {
                                 .disabled(!allowsNavigationAndMutation)
                             }
                         }
-                    } else if model.snapshot.isCoachResponseInterrupted(pending) {
+                    } else if model.snapshot.isCoachResponseRetryableFailure(pending) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("The Coach response was interrupted. Nothing was published.")
+                            Text(
+                                CoachResponseFailurePresentation.text(
+                                    for: pending.failure
+                                )
+                            )
                                 .font(.callout.weight(.semibold))
                                 .accessibilityLabel(
-                                    "The Coach response was interrupted. Nothing was published."
+                                    CoachResponseFailurePresentation.text(
+                                        for: pending.failure
+                                    )
                                 )
                             HStack {
                                 Button("Retry") {

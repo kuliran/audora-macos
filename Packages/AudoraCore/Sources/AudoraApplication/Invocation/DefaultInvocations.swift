@@ -242,13 +242,72 @@ public enum InvocationPendingPreparationOutcome: Equatable, Sendable {
 }
 
 @_spi(InvocationInfrastructure)
-public struct InvocationLaunchIdentity: Equatable, Sendable {
-    public let invocationID: CoachInvocationID
+public struct InvocationAttemptIdentity: Equatable, Sendable {
     public let attemptID: CoachProviderAttemptID
     public let idempotencyValue: ProviderIdempotencyValue
     public let userMessageID: ChatMessageID
     public let coachMessageID: ChatMessageID
     public let freshDraftID: ChatDraftID
+    public let transcriptHandles: [PreparedCoachTranscriptHandle]
+
+    public init(
+        attemptID: CoachProviderAttemptID,
+        idempotencyValue: ProviderIdempotencyValue,
+        userMessageID: ChatMessageID,
+        coachMessageID: ChatMessageID,
+        freshDraftID: ChatDraftID,
+        transcriptHandles: [PreparedCoachTranscriptHandle] = []
+    ) {
+        self.attemptID = attemptID
+        self.idempotencyValue = idempotencyValue
+        self.userMessageID = userMessageID
+        self.coachMessageID = coachMessageID
+        self.freshDraftID = freshDraftID
+        self.transcriptHandles = transcriptHandles
+    }
+
+    func makeAttempt(
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind
+    ) throws -> CoachProviderAttempt {
+        try CoachProviderAttempt(
+            id: attemptID,
+            ordinal: ordinal,
+            kind: kind,
+            providerIdempotencyValue: idempotencyValue,
+            transcriptHandles: transcriptHandles,
+            publicationAuthority: try CoachProviderAttemptPublicationAuthority(
+                userMessageID: userMessageID,
+                coachMessageID: coachMessageID,
+                freshDraftID: freshDraftID
+            )
+        )
+    }
+}
+
+@_spi(InvocationInfrastructure)
+public struct InvocationLaunchIdentity: Equatable, Sendable {
+    public let invocationID: CoachInvocationID
+    public let attemptIdentity: InvocationAttemptIdentity
+
+    public var attemptID: CoachProviderAttemptID { attemptIdentity.attemptID }
+    public var idempotencyValue: ProviderIdempotencyValue {
+        attemptIdentity.idempotencyValue
+    }
+    public var userMessageID: ChatMessageID { attemptIdentity.userMessageID }
+    public var coachMessageID: ChatMessageID { attemptIdentity.coachMessageID }
+    public var freshDraftID: ChatDraftID { attemptIdentity.freshDraftID }
+    public var transcriptHandles: [PreparedCoachTranscriptHandle] {
+        attemptIdentity.transcriptHandles
+    }
+
+    public init(
+        invocationID: CoachInvocationID,
+        attemptIdentity: InvocationAttemptIdentity
+    ) {
+        self.invocationID = invocationID
+        self.attemptIdentity = attemptIdentity
+    }
 
     public init(
         invocationID: CoachInvocationID,
@@ -259,17 +318,26 @@ public struct InvocationLaunchIdentity: Equatable, Sendable {
         freshDraftID: ChatDraftID
     ) {
         self.invocationID = invocationID
-        self.attemptID = attemptID
-        self.idempotencyValue = idempotencyValue
-        self.userMessageID = userMessageID
-        self.coachMessageID = coachMessageID
-        self.freshDraftID = freshDraftID
+        attemptIdentity = InvocationAttemptIdentity(
+            attemptID: attemptID,
+            idempotencyValue: idempotencyValue,
+            userMessageID: userMessageID,
+            coachMessageID: coachMessageID,
+            freshDraftID: freshDraftID
+        )
     }
 }
 
 @_spi(InvocationInfrastructure)
 public protocol InvocationIdentityGenerating: Sendable {
-    func generate(at instant: UTCInstant) async -> InvocationLaunchIdentity
+    func generateInvocationID(at instant: UTCInstant) async -> CoachInvocationID
+
+    func generateAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationAttemptIdentity
 }
 
 public enum InvocationLaunchIdentityCollision: String, CaseIterable, Equatable, Sendable {
@@ -279,6 +347,7 @@ public enum InvocationLaunchIdentityCollision: String, CaseIterable, Equatable, 
     case userMessageID
     case coachMessageID
     case freshDraftID
+    case transcriptHandle
 }
 
 @_spi(InvocationInfrastructure)
@@ -296,15 +365,15 @@ public struct InstallCoachInvocationMutation: Equatable, Sendable {
 
     public init(
         authority: InvocationPendingAuthority,
-        identity: InvocationLaunchIdentity,
+        invocationID: CoachInvocationID,
+        attemptIdentity: InvocationAttemptIdentity,
         preparedProfile: CoachProfileProvenance,
         admittedAt: UTCInstant
     ) throws {
         self.authority = authority
         invocation = try CoachInvocation(
-            id: identity.invocationID,
-            attemptID: identity.attemptID,
-            providerIdempotencyValue: identity.idempotencyValue,
+            id: invocationID,
+            attempt: attemptIdentity.makeAttempt(ordinal: 1, kind: .standard),
             library: authority.request.library,
             chatID: authority.request.chatID,
             pendingUserTurn: authority.pendingUserTurn,
@@ -313,6 +382,21 @@ public struct InstallCoachInvocationMutation: Equatable, Sendable {
             admittedAt: admittedAt
         )
         try invocation.validate(against: authority.aggregate)
+    }
+
+    public init(
+        authority: InvocationPendingAuthority,
+        identity: InvocationLaunchIdentity,
+        preparedProfile: CoachProfileProvenance,
+        admittedAt: UTCInstant
+    ) throws {
+        try self.init(
+            authority: authority,
+            invocationID: identity.invocationID,
+            attemptIdentity: identity.attemptIdentity,
+            preparedProfile: preparedProfile,
+            admittedAt: admittedAt
+        )
     }
 }
 
@@ -332,6 +416,32 @@ public enum InvocationPendingMutationOutcome: Equatable, Sendable {
 }
 
 @_spi(InvocationInfrastructure)
+public struct InstallNextCoachProviderAttemptMutation: Equatable, Sendable {
+    public let base: CoachInvocation
+    public let replacement: CoachInvocation
+
+    public init(
+        base: CoachInvocation,
+        identity: InvocationAttemptIdentity,
+        kind: CoachProviderAttemptKind
+    ) throws {
+        self.base = base
+        let nextOrdinal = base.attempt.ordinal + 1
+        replacement = try base.installingAttempt(
+            identity.makeAttempt(ordinal: nextOrdinal, kind: kind)
+        )
+    }
+}
+
+@_spi(InvocationInfrastructure)
+public enum InvocationNextAttemptInstallOutcome: Sendable {
+    case installed(any InvocationActivePersistenceSession)
+    case collision(InvocationLaunchIdentityCollision)
+    case stale(ChatAggregate?)
+    case failed
+}
+
+@_spi(InvocationInfrastructure)
 public struct PublishCoachInvocationMutation: Equatable, Sendable {
     public let base: ChatAggregate
     public let invocation: CoachInvocation
@@ -343,27 +453,29 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
     public init(
         base: ChatAggregate,
         invocation: CoachInvocation,
-        identity: InvocationLaunchIdentity,
         coachMarkdown: String,
         completedAt: UTCInstant
     ) throws {
         self.base = base
         self.invocation = invocation
+        guard let authority = invocation.attempt.publicationAuthority else {
+            throw CoachInvocationError.attemptPublicationAuthorityRequired
+        }
         userMessage = try ChatMessage(
-            id: identity.userMessageID,
+            id: authority.userMessageID,
             responsePositionID: invocation.responsePositionID,
             content: .user(text: base.chat.draft.text),
             createdAt: completedAt
         )
         coachMessage = try ChatMessage(
-            id: identity.coachMessageID,
+            id: authority.coachMessageID,
             responsePositionID: invocation.responsePositionID,
             content: .coach(markdown: coachMarkdown),
             coachProfile: invocation.preparedProfile,
             createdAt: completedAt
         )
         freshDraft = try ChatDraft(
-            draftID: identity.freshDraftID,
+            draftID: authority.freshDraftID,
             version: 0,
             text: "",
             updatedAt: completedAt
@@ -374,6 +486,30 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
             coachMessage: coachMessage,
             freshDraft: freshDraft,
             at: completedAt
+        )
+    }
+
+    public init(
+        base: ChatAggregate,
+        invocation: CoachInvocation,
+        identity: InvocationLaunchIdentity,
+        coachMarkdown: String,
+        completedAt: UTCInstant
+    ) throws {
+        guard invocation.id == identity.invocationID,
+              invocation.attempt.id == identity.attemptID,
+              invocation.attempt.publicationAuthority ==
+              (try CoachProviderAttemptPublicationAuthority(
+                  userMessageID: identity.userMessageID,
+                  coachMessageID: identity.coachMessageID,
+                  freshDraftID: identity.freshDraftID
+              ))
+        else { throw CoachInvocationError.attemptPublicationAuthorityRequired }
+        try self.init(
+            base: base,
+            invocation: invocation,
+            coachMarkdown: coachMarkdown,
+            completedAt: completedAt
         )
     }
 }
@@ -473,8 +609,18 @@ public protocol InvocationPendingPersistenceSession: Sendable {
 public protocol InvocationActivePersistenceSession: Sendable {
     var invocation: CoachInvocation { get }
 
-    /// Releases liveness and reconciles/rereads the Pending if abort fails.
-    func abort() async -> InvocationTerminalPersistenceOutcome
+    /// Atomically replaces the exact current Attempt while this session keeps
+    /// the Library Invocation liveness lease. The returned session is the only
+    /// authority allowed to launch or publish the replacement Attempt.
+    func installNextAttempt(
+        _ mutation: InstallNextCoachProviderAttemptMutation
+    ) async -> InvocationNextAttemptInstallOutcome
+
+    /// Persists the classified UserRetryable failure while retiring this
+    /// Invocation. Every adapter must preserve this classification.
+    func abort(
+        failure: PendingUserTurnFailure
+    ) async -> InvocationTerminalPersistenceOutcome
 
     func publish(
         _ mutation: PublishCoachInvocationMutation
@@ -483,6 +629,15 @@ public protocol InvocationActivePersistenceSession: Sendable {
     func recoverPublished(
         _ mutation: PublishCoachInvocationMutation
     ) async -> InvocationPublicationRecoveryOutcome
+}
+
+@_spi(InvocationInfrastructure)
+public extension InvocationActivePersistenceSession {
+    /// Releases liveness with the generic interruption descriptor used by
+    /// stop/crash recovery when no more specific terminal reason exists.
+    func abort() async -> InvocationTerminalPersistenceOutcome {
+        await abort(failure: .coachResponseInterrupted)
+    }
 }
 
 @_spi(InvocationInfrastructure)
@@ -564,20 +719,54 @@ public extension InvocationAdmissionPort {
     }
 }
 
+struct ProviderAttemptTranscriptAccess: Equatable, Sendable {
+    let handles: [PreparedCoachTranscriptHandle]
+}
+
+enum CoachProviderAttemptControl: Equatable, Sendable {
+    case standard
+    case shorterRepair(instruction: String)
+}
+
+enum CoachProviderAttemptOutcome: Equatable, Sendable {
+    case complete(markdown: String)
+    case autoRetryableFailure
+    case userRetryableFailure
+    case responseOverflow
+}
+
 struct SyntheticCoachProviderRequest: Sendable {
     let invocation: CoachInvocation
+    let attempt: CoachProviderAttempt
     let exchange: CanonicalCoachExchange
+    let transcriptAccess: ProviderAttemptTranscriptAccess
+    let control: CoachProviderAttemptControl
 }
 
 protocol SyntheticCoachProviderPort: Sendable {
-    func run(_ request: SyntheticCoachProviderRequest) async throws -> String
+    func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome
 }
 
 struct DeterministicSyntheticCoachProvider: SyntheticCoachProviderPort {
     static let markdown = "This is a complete synthetic coaching response."
 
-    func run(_ request: SyntheticCoachProviderRequest) async throws -> String {
-        Self.markdown
+    func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome {
+        .complete(markdown: Self.markdown)
+    }
+}
+
+@_spi(InvocationInfrastructure)
+public protocol InvocationRetrySleeping: Sendable {
+    func sleep(milliseconds: Int64) async throws
+}
+
+@_spi(InvocationInfrastructure)
+public struct TaskInvocationRetrySleeper: InvocationRetrySleeping {
+    public init() {}
+
+    public func sleep(milliseconds: Int64) async throws {
+        guard milliseconds >= 0 else { throw CancellationError() }
+        try await Task.sleep(for: .milliseconds(milliseconds))
     }
 }
 
@@ -600,18 +789,30 @@ public actor DefaultInvocations: Invocations {
         case unavailable(unresolvedPublication: PublicationRecoveryIntent?)
     }
 
+    private enum NextAttemptResolution {
+        case installed(any InvocationActivePersistenceSession)
+        case terminal(InvocationTryOutcome)
+    }
+
     private struct OperationalRetrySnapshot: Sendable {
         let fallback: ChatAggregate
         let publication: PublicationRecoveryIntent?
     }
 
     static let maximumLaunchIdentityCandidates = 4
+    static let automaticRetryDelaysMilliseconds: [Int64] = [5_000, 10_000, 15_000]
+    static let shorterRepairInstruction = """
+    The previous Attempt exceeded the response limit. Return a materially shorter \
+    complete response. Preserve the direct answer, remove repetition and optional \
+    detail, and never return partial JSON.
+    """
     private let persistence: any InvocationPersistencePort
     private let admission: any InvocationAdmissionPort
     private let provider: any SyntheticCoachProviderPort
     private let coachContext: any CoachContextCoordinating
     private let clock: any ChatClock
     private let identities: any InvocationIdentityGenerating
+    private let retrySleeper: any InvocationRetrySleeping
     private var inFlightRequests: Set<PendingCoachInvocationRequest> = []
     private var preparedSessions: [
         UUID: any InvocationPendingPersistenceSession
@@ -626,7 +827,8 @@ public actor DefaultInvocations: Invocations {
         provider: any SyntheticCoachProviderPort,
         coachContext: any CoachContextCoordinating,
         clock: any ChatClock,
-        identities: any InvocationIdentityGenerating
+        identities: any InvocationIdentityGenerating,
+        retrySleeper: any InvocationRetrySleeping = TaskInvocationRetrySleeper()
     ) {
         self.persistence = persistence
         self.admission = admission
@@ -634,6 +836,7 @@ public actor DefaultInvocations: Invocations {
         self.coachContext = coachContext
         self.clock = clock
         self.identities = identities
+        self.retrySleeper = retrySleeper
     }
 
     /// Production composition seam. Exact preparation and the synthetic provider
@@ -644,7 +847,8 @@ public actor DefaultInvocations: Invocations {
         persistence: any InvocationPersistencePort,
         admission: any InvocationAdmissionPort,
         clock: any ChatClock,
-        identities: any InvocationIdentityGenerating
+        identities: any InvocationIdentityGenerating,
+        retrySleeper: any InvocationRetrySleeping = TaskInvocationRetrySleeper()
     ) {
         self.persistence = persistence
         self.admission = admission
@@ -652,6 +856,7 @@ public actor DefaultInvocations: Invocations {
         coachContext = DefaultCoachContextFeature()
         self.clock = clock
         self.identities = identities
+        self.retrySleeper = retrySleeper
     }
 
     public func prepareNewInvocation(
@@ -813,15 +1018,38 @@ public actor DefaultInvocations: Invocations {
         }
 
         let identityInstant = await clock.now()
+        var invocationID = await identities.generateInvocationID(at: identityInstant)
         var selectedIdentity: InvocationLaunchIdentity?
         var lastCollision: InvocationLaunchIdentityCollision?
         for _ in 0 ..< Self.maximumLaunchIdentityCandidates {
-            let candidate = await identities.generate(at: identityInstant)
+            let attemptIdentity = await identities.generateAttemptIdentity(
+                at: identityInstant,
+                ordinal: 1,
+                kind: .standard,
+                transcriptHandleCount: prepared.exchange.preparedTranscriptHandles.count
+            )
+            guard attemptIdentity.transcriptHandles.count ==
+                prepared.exchange.preparedTranscriptHandles.count,
+                (try? attemptIdentity.makeAttempt(ordinal: 1, kind: .standard)) != nil
+            else {
+                return await reject(
+                    session,
+                    fallback: finalAuthority,
+                    reason: .persistenceUnavailable
+                )
+            }
+            let candidate = InvocationLaunchIdentity(
+                invocationID: invocationID,
+                attemptIdentity: attemptIdentity
+            )
             switch await session.checkLaunchIdentity(candidate) {
             case .available:
                 selectedIdentity = candidate
             case let .collision(collision):
                 lastCollision = collision
+                if collision == .invocationID {
+                    invocationID = await identities.generateInvocationID(at: identityInstant)
+                }
                 continue
             case let .stale(current):
                 if let current,
@@ -896,7 +1124,7 @@ public actor DefaultInvocations: Invocations {
             )
         }
 
-        let activeSession: any InvocationActivePersistenceSession
+        var activeSession: any InvocationActivePersistenceSession
         switch await session.install(install) {
         case let .installed(installed):
             activeSession = installed
@@ -928,8 +1156,6 @@ public actor DefaultInvocations: Invocations {
                 reason: .persistenceUnavailable
             )
         }
-        let invocation = activeSession.invocation
-
         guard await coachContext.isPreparedContextCurrent(prepared) else {
             switch await activeSession.abort() {
             case let .committed(aggregate):
@@ -946,28 +1172,104 @@ public actor DefaultInvocations: Invocations {
         }
 
         let coachMarkdown: String
-        do {
-            coachMarkdown = try await provider.run(
+        providerAttempts: while true {
+            let invocation = activeSession.invocation
+            let attempt = invocation.attempt
+            let control: CoachProviderAttemptControl = switch attempt.kind {
+            case .standard:
+                .standard
+            case .shorterRepair:
+                .shorterRepair(instruction: Self.shorterRepairInstruction)
+            }
+            let outcome = await provider.run(
                 SyntheticCoachProviderRequest(
                     invocation: invocation,
-                    exchange: prepared.exchange
+                    attempt: attempt,
+                    exchange: prepared.exchange,
+                    transcriptAccess: ProviderAttemptTranscriptAccess(
+                        handles: attempt.transcriptHandles
+                    ),
+                    control: control
                 )
             )
-        } catch {
-            return await interruptAndAbort(
-                activeSession,
-                fallback: finalAuthority.aggregate,
-                reason: .providerFailed
-            )
+            switch outcome {
+            case let .complete(markdown):
+                coachMarkdown = markdown
+                break providerAttempts
+            case .userRetryableFailure:
+                return await interruptAndAbort(
+                    activeSession,
+                    fallback: finalAuthority.aggregate,
+                    reason: .providerFailed
+                )
+            case .autoRetryableFailure:
+                guard attempt.kind == .standard,
+                      attempt.ordinal < CoachProviderAttempt.maximumOrdinal
+                else {
+                    return await interruptAndAbort(
+                        activeSession,
+                        fallback: finalAuthority.aggregate,
+                        reason: .providerFailed
+                    )
+                }
+                let delayIndex = Int(attempt.ordinal - 1)
+                guard Self.automaticRetryDelaysMilliseconds.indices.contains(delayIndex)
+                else {
+                    return await interruptAndAbort(
+                        activeSession,
+                        fallback: finalAuthority.aggregate,
+                        reason: .providerFailed
+                    )
+                }
+                do {
+                    try await retrySleeper.sleep(
+                        milliseconds: Self.automaticRetryDelaysMilliseconds[delayIndex]
+                    )
+                } catch {
+                    return await interruptAndAbort(
+                        activeSession,
+                        fallback: finalAuthority.aggregate,
+                        reason: .providerFailed
+                    )
+                }
+                switch await installNextAttempt(
+                    after: activeSession,
+                    kind: .standard,
+                    prepared: prepared,
+                    fallback: finalAuthority.aggregate
+                ) {
+                case let .installed(next): activeSession = next
+                case let .terminal(outcome): return outcome
+                }
+            case .responseOverflow:
+                guard attempt.kind == .standard,
+                      attempt.ordinal < CoachProviderAttempt.maximumOrdinal
+                else {
+                    return await interruptAndAbort(
+                        activeSession,
+                        fallback: finalAuthority.aggregate,
+                        reason: .invalidProviderResponse
+                    )
+                }
+                switch await installNextAttempt(
+                    after: activeSession,
+                    kind: .shorterRepair,
+                    prepared: prepared,
+                    fallback: finalAuthority.aggregate
+                ) {
+                case let .installed(next): activeSession = next
+                case let .terminal(outcome): return outcome
+                }
+            }
         }
 
         let completedAt = await clock.now()
+        let invocation = activeSession.invocation
         let publication: PublishCoachInvocationMutation
         do {
             publication = try PublishCoachInvocationMutation(
                 base: finalAuthority.aggregate,
                 invocation: invocation,
-                identity: identity,
                 coachMarkdown: coachMarkdown,
                 completedAt: completedAt
             )
@@ -1005,6 +1307,71 @@ public actor DefaultInvocations: Invocations {
         }
     }
 
+    private func installNextAttempt(
+        after session: any InvocationActivePersistenceSession,
+        kind: CoachProviderAttemptKind,
+        prepared: PreparedCoachLaunchContext,
+        fallback: ChatAggregate
+    ) async -> NextAttemptResolution {
+        let ordinal = session.invocation.attempt.ordinal + 1
+        var lastCollision: InvocationLaunchIdentityCollision?
+        for _ in 0 ..< Self.maximumLaunchIdentityCandidates {
+            let identity = await identities.generateAttemptIdentity(
+                at: await clock.now(),
+                ordinal: ordinal,
+                kind: kind,
+                transcriptHandleCount: prepared.exchange.preparedTranscriptHandles.count
+            )
+            let mutation: InstallNextCoachProviderAttemptMutation
+            do {
+                mutation = try InstallNextCoachProviderAttemptMutation(
+                    base: session.invocation,
+                    identity: identity,
+                    kind: kind
+                )
+            } catch {
+                return .terminal(
+                    await interruptAndAbort(
+                        session,
+                        fallback: fallback,
+                        reason: .persistenceUnavailable
+                    )
+                )
+            }
+            switch await session.installNextAttempt(mutation) {
+            case let .installed(next):
+                return .installed(next)
+            case let .collision(collision):
+                lastCollision = collision
+                continue
+            case let .stale(current):
+                return .terminal(
+                    await interruptAndAbort(
+                        session,
+                        fallback: current ?? fallback,
+                        reason: .persistenceUnavailable
+                    )
+                )
+            case .failed:
+                return .terminal(
+                    await interruptAndAbort(
+                        session,
+                        fallback: fallback,
+                        reason: .persistenceUnavailable
+                    )
+                )
+            }
+        }
+        _ = lastCollision
+        return .terminal(
+            await interruptAndAbort(
+                session,
+                fallback: fallback,
+                reason: .persistenceUnavailable
+            )
+        )
+    }
+
     public func admissionAvailability(
         in library: LibraryScope
     ) async -> InvocationAdmissionAvailability {
@@ -1028,7 +1395,12 @@ public actor DefaultInvocations: Invocations {
             if case let .published(outcome) = resolution { return outcome }
             publicationRecovery = resolution
         }
-        return switch await session.abort() {
+        let terminalFailure: PendingUserTurnFailure = switch reason {
+        case .providerFailed: .coachProviderError
+        case .invalidProviderResponse: .coachResponseInvalid
+        case .publicationConflict, .persistenceUnavailable: .coachResponseInterrupted
+        }
+        return switch await session.abort(failure: terminalFailure) {
         case let .committed(aggregate):
             await outcomeAfterAbort(
                 current: aggregate,

@@ -7,6 +7,9 @@
         },
         {
             "$ref": "#/$defs/PendingUserTurnV2"
+        },
+        {
+            "$ref": "#/$defs/PendingUserTurnV3"
         }
     ],
     "$defs": {
@@ -64,6 +67,40 @@
                     "const": 2
                 },
                 "failure": {
+                    "$ref": "#/$defs/PendingUserTurnFailureV2"
+                }
+            },
+            "required": [
+                "pendingUserTurnId",
+                "draftId",
+                "draftVersion",
+                "responsePositionId",
+                "schemaVersion"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PendingUserTurnV3": {
+            "type": "object",
+            "properties": {
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                },
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "draftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 3
+                },
+                "failure": {
                     "$ref": "#/$defs/PendingUserTurnFailure"
                 }
             },
@@ -102,6 +139,18 @@
                 }
             ]
         },
+        "PendingUserTurnFailureV2": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "coachContextCannotFit"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInterrupted"
+                }
+            ]
+        },
         "PendingUserTurnFailure": {
             "anyOf": [
                 {
@@ -111,6 +160,14 @@
                 {
                     "type": "string",
                     "const": "coachResponseInterrupted"
+                },
+                {
+                    "type": "string",
+                    "const": "coachProviderError"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInvalid"
                 }
             ]
         }

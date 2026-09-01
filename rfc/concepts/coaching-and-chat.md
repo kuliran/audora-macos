@@ -44,11 +44,13 @@ Attempts, cancellation, and terminal failure creation. Chat, Proposal, and futur
 maintenance use cases submit stable entity IDs and an `InvocationIntent`; they do
 not duplicate these checks or construct provider DTOs.
 
-The current #22 vertical slice implements only `answerPendingUserTurn` with a
-bounded deterministic synthetic provider. It durably claims the rolling ledger,
-installs one portable Invocation, and atomically publishes the two-message fake
-turn. Real provider adapters, automatic Attempt retry, Stop, transcript tools,
-Reconsider, and Profile or Memory effects remain owned by their later slices.
+The current #23 vertical slice implements `answerPendingUserTurn` with a bounded
+deterministic synthetic provider. It durably claims the rolling ledger, installs
+one portable Invocation, persists each fresh Provider Attempt before launch,
+retries transient failures on the 5/10/15-second schedule, permits at most one
+shorter complete repair, and atomically publishes the two-message fake turn. Real
+provider adapters, Stop, transcript tools, Reconsider, and Profile or Memory
+effects remain owned by their later slices.
 
 ```text
 InvocationIntent
@@ -243,12 +245,16 @@ If the first Invocation preflight instead loses an eligibility, concurrency, or
 admission race, the provisional Pending User Turn is removed and the Draft is
 immediately unlocked; the fleeting notice is not a Failure Descriptor.
 
-The persisted Pending User Turn is currently schema v2. Legacy v1 may omit a
-failure or carry only `coachContextCannotFit`; v2 adds
-`coachResponseInterrupted`. If persistence cannot prove the terminal v2 write,
-Application may display Retry for the exact Pending identity as transient
-operational state, but it does not rewrite the last observed aggregate in memory
-as though that durable failure had committed.
+The persisted Pending User Turn is currently schema v3. Legacy v1 may omit a
+failure or carry only `coachContextCannotFit`; v2 additionally accepts
+`coachResponseInterrupted`. Current v3 adds `coachProviderError` when the Provider
+cannot complete the response, including an immediate Provider-declared
+UserRetryable result or exhausted bounded retries, and `coachResponseInvalid` for
+an invalid complete response or failed shorter-response repair. All four failure
+descriptors are UserRetryable and publish no partial turn. If persistence cannot
+prove the terminal v3 write, Application may display Retry for the exact Pending
+identity as transient operational state, but it does not rewrite the last
+observed aggregate in memory as though that durable failure had committed.
 
 Only a valid complete Coach Response publishes a turn. One atomic Chat commit
 appends the user and coach messages, applies optional `newMemory`, installs at most

@@ -6,6 +6,13 @@ import XCTest
 
 @MainActor
 final class ChatPresentationModelTests: XCTestCase {
+    func testProviderFailureCopyDoesNotClaimAutomaticRetriesOccurred() {
+        XCTAssertEqual(
+            CoachResponseFailurePresentation.text(for: .coachProviderError),
+            "The Coach provider could not complete the response. Nothing was published."
+        )
+    }
+
     func testInvocationControlPresentationExposesTheSameUnavailableReasonWithoutHover() throws {
         let reopensAt = try UTCInstant("2026-08-30T12:01:00.000Z")
 

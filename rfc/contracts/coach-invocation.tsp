@@ -71,26 +71,42 @@ namespace Audora.Contracts {
   @jsonSchema
   @id("CoachInvocation.json")
   union CoachInvocation {
-    legacy: CoachInvocationV1,
-    current: CoachInvocationV2,
+    legacyV1: CoachInvocationV1,
+    legacyV2: CoachInvocationV2,
+    current: CoachInvocationV3,
   }
 
   model CoachInvocationV1 {
-    ...CoachInvocationFields;
+    ...LegacyCoachInvocationFields;
     schemaVersion: 1;
   }
 
   model CoachInvocationV2 {
-    ...CoachInvocationFields;
+    ...LegacyCoachInvocationFields;
     schemaVersion: 2;
     profileRevisionId?: ProfileRevisionId;
     profileStatementGeneration: NonnegativeWholeNumber;
   }
 
-  model CoachInvocationFields {
-    invocationId: CoachInvocationId;
+  model CoachInvocationV3 {
+    ...CoachInvocationFields;
+    schemaVersion: 3;
+    profileRevisionId?: ProfileRevisionId;
+    profileStatementGeneration: NonnegativeWholeNumber;
+
+    @minItems(1)
+    @maxItems(4)
+    attempts: CoachProviderAttempt[];
+  }
+
+  model LegacyCoachInvocationFields {
+    ...CoachInvocationFields;
     attemptId: CoachProviderAttemptId;
     providerIdempotencyValue: ProviderIdempotencyValue;
+  }
+
+  model CoachInvocationFields {
+    invocationId: CoachInvocationId;
     libraryId: LibraryId;
     chatId: ChatId;
     pendingUserTurnId: PendingUserTurnId;
@@ -99,6 +115,30 @@ namespace Audora.Contracts {
     responsePositionId: ChatResponsePositionId;
     expectedManifestRevision: NonnegativeWholeNumber;
     admittedAt: UTCInstant;
+  }
+
+  model CoachProviderAttempt {
+    schemaVersion: 1;
+    attemptId: CoachProviderAttemptId;
+
+    @minValue(1)
+    @maxValue(4)
+    ordinal: integer;
+
+    kind: CoachProviderAttemptKind;
+    providerIdempotencyValue: ProviderIdempotencyValue;
+
+    @maxItems(128)
+    transcriptHandles: CoachProviderTranscriptHandle[];
+
+    userMessageId: ChatMessageId;
+    coachMessageId: ChatMessageId;
+    freshDraftId: ChatDraftId;
+  }
+
+  union CoachProviderAttemptKind {
+    standard: "standard",
+    shorterRepair: "shorterRepair",
   }
 
   @pattern("^inv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
@@ -111,6 +151,9 @@ namespace Audora.Contracts {
   @maxLength(128)
   @pattern("^[0-9A-Za-z._-]+$")
   scalar ProviderIdempotencyValue extends string;
+
+  @pattern("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+  scalar CoachProviderTranscriptHandle extends string;
 
   @jsonSchema
   @id("InvocationAdmissionLedger.json")

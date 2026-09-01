@@ -1,3 +1,4 @@
+import AudoraDomain
 import Foundation
 
 // Provider-independent production planning extracted from the qualification gate.
@@ -227,38 +228,13 @@ public struct CoachProviderEstimationPolicy: Sendable {
     }
 }
 
-@_spi(CoachContextQualification)
-public enum PreparedCoachTranscriptHandleError: Error, Equatable, Sendable {
-    case notCanonicalUUID
-}
-
 /// One bounded Attempt-scoped handle used by both the Coach Request and the
 /// conservatively reserved transcript-read exchange.
 @_spi(CoachContextQualification)
-public struct PreparedCoachTranscriptHandle: Equatable, Hashable, Sendable {
-    public static let canonicalUTF8ByteCount = 36
+public typealias PreparedCoachTranscriptHandle = CoachProviderTranscriptHandle
 
-    public let rawValue: String
-
-    public init(_ rawValue: String) throws {
-        guard rawValue.utf8.count == Self.canonicalUTF8ByteCount else {
-            throw PreparedCoachTranscriptHandleError.notCanonicalUUID
-        }
-        let bytes = Array(rawValue.utf8)
-        guard bytes.enumerated().allSatisfy({ index, byte in
-                  switch index {
-                  case 8, 13, 18, 23:
-                      byte == 45
-                  default:
-                      (48 ... 57).contains(byte) || (97 ... 102).contains(byte)
-                  }
-              })
-        else {
-            throw PreparedCoachTranscriptHandleError.notCanonicalUUID
-        }
-        self.rawValue = rawValue
-    }
-}
+@_spi(CoachContextQualification)
+public typealias PreparedCoachTranscriptHandleError = CoachProviderTranscriptHandleError
 
 @_spi(CoachContextQualification)
 public enum PreparedCoachAttachment: Equatable, Sendable {
@@ -361,19 +337,25 @@ public struct CanonicalCoachExchange: Equatable, Sendable {
     public let modelInputFrames: [Data]
     /// A byte-count/debug projection only; this is not itself a provider payload.
     public let completeModelInput: Data
+    /// Handles used while measuring the frozen semantic exchange. Provider
+    /// Attempts receive fresh routes separately and adapters rebind them at the
+    /// transport seam without rebuilding semantic context.
+    public let preparedTranscriptHandles: [PreparedCoachTranscriptHandle]
 
     public init(
         request: Data,
         transcriptReadRequest: Data?,
         transcriptReadResponse: Data?,
         modelInputFrames: [Data],
-        completeModelInput: Data
+        completeModelInput: Data,
+        preparedTranscriptHandles: [PreparedCoachTranscriptHandle] = []
     ) {
         self.request = request
         self.transcriptReadRequest = transcriptReadRequest
         self.transcriptReadResponse = transcriptReadResponse
         self.modelInputFrames = modelInputFrames
         self.completeModelInput = completeModelInput
+        self.preparedTranscriptHandles = preparedTranscriptHandles
     }
 }
 
@@ -449,7 +431,8 @@ public struct CoachContextPlanner: Sendable {
             transcriptReadRequest: prepared.transcriptReadRequest,
             transcriptReadResponse: prepared.transcriptReadResponse,
             modelInputFrames: prepared.tokenizationUnits,
-            completeModelInput: prepared.completeInput
+            completeModelInput: prepared.completeInput,
+            preparedTranscriptHandles: prepared.handles
         )
 
         var completeInputTokens = 0
@@ -628,7 +611,8 @@ public struct CoachContextPlanner: Sendable {
             transcriptReadResponse: readResponse,
             completeInput: joined(completeSegments),
             tokenizationUnits: tokenizationUnits,
-            componentData: componentData
+            componentData: componentData,
+            handles: handles
         )
     }
 
@@ -828,6 +812,7 @@ private struct PreparedSegments {
     let completeInput: Data
     let tokenizationUnits: [Data]
     let componentData: [CoachContextCostCategory: Data]
+    let handles: [PreparedCoachTranscriptHandle]
 }
 
 private func joined(_ segments: [LabeledSegment]) -> Data {

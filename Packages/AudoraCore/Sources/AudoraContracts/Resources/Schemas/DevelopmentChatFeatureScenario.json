@@ -1190,6 +1190,14 @@
                 {
                     "type": "string",
                     "const": "coachResponseInterrupted"
+                },
+                {
+                    "type": "string",
+                    "const": "coachProviderError"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInvalid"
                 }
             ]
         },

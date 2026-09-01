@@ -32,8 +32,10 @@ package resources. Application and scenario runners do not need Node or TypeSpec
 at runtime.
 
 `PendingUserTurn.json` is a versioned union: strict legacy v1 permits no failure
-or `coachContextCannotFit`, while current v2 additionally permits
-`coachResponseInterrupted`. The committed examples cover both versions.
+or `coachContextCannotFit`; legacy v2 additionally permits
+`coachResponseInterrupted`; current v3 also distinguishes retryable Provider
+failure from an invalid complete response. The committed examples cover the
+current terminal reasons and legacy v1.
 
 - [`AudioImportFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioImportFeatureScenario.json)
 - [`AudioManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json)
@@ -254,7 +256,10 @@ it declares one Invocation-gateway call and zero provider or admission calls.
 `ChatMessage.json` seals the mutually exclusive stored user-text and Coach-Markdown
 shapes. `CoachInvocation.json` is the portable launch authority bound to one
 Library, Chat, Pending User Turn, Draft version, response position, and expected
-manifest revision. `InvocationAdmissionLedger.json` is machine-local rather than
+manifest revision. Its current v3 record contains one to four durable Provider
+Attempts; each carries a fresh Attempt ID, idempotency value, transcript handles,
+and message/Draft publication authority. Legacy v1/v2 records retain their flat
+single-Attempt shape only for safe relaunch retirement. `InvocationAdmissionLedger.json` is machine-local rather than
 portable Library content; it permits at most 4,096 Library debits and stores the
 last admitted UTC instant used by the conservative rolling-window policy. The
 Application additionally enforces UTF-8 byte ceilings and exact aggregate

@@ -454,7 +454,7 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testPendingUserTurnEncoderWritesV2ForInterruptedFailure() throws {
+    func testPendingUserTurnEncoderWritesV3ForInterruptedFailure() throws {
         let pending = PendingUserTurn(
             id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
             draftID: try ChatDraftID("drf-20260830T120000000Z-3DEF"),
@@ -471,7 +471,7 @@ final class PortableChatPersistenceTests: XCTestCase {
             ) as? [String: Any]
         )
 
-        XCTAssertEqual((object["schemaVersion"] as? NSNumber)?.uint32Value, 2)
+        XCTAssertEqual((object["schemaVersion"] as? NSNumber)?.uint32Value, 3)
         XCTAssertEqual(object["failure"] as? String, "coachResponseInterrupted")
     }
 
@@ -523,9 +523,33 @@ final class PortableChatPersistenceTests: XCTestCase {
             )
             XCTAssertEqual(
                 (upgradedObject["schemaVersion"] as? NSNumber)?.uint32Value,
-                2
+                3
             )
             XCTAssertEqual(upgraded.pendingUserTurn, capacity)
+
+            try rewritePending(
+                at: pendingURL,
+                schemaVersion: 2,
+                failure: .coachResponseInterrupted
+            )
+            let legacyV2Interrupted = try ChatAggregate(
+                chat: upgraded.chat,
+                memory: upgraded.memory,
+                pendingUserTurn: pending.replacingFailure(
+                    .coachResponseInterrupted
+                )
+            )
+            XCTAssertEqual(
+                try persistence.load(original.chat.id, at: root, in: scope),
+                .readWrite(legacyV2Interrupted)
+            )
+
+            try rewritePending(
+                at: pendingURL,
+                schemaVersion: 2,
+                failure: .coachProviderError
+            )
+            try assertChatFreezesAsCorrupt(original.chat.id, at: root, in: scope)
 
             try rewritePending(
                 at: pendingURL,
@@ -546,7 +570,7 @@ final class PortableChatPersistenceTests: XCTestCase {
 
             try rewritePending(
                 at: pendingURL,
-                schemaVersion: 3,
+                schemaVersion: 4,
                 failure: .coachResponseInterrupted
             )
             XCTAssertEqual(
@@ -2013,6 +2037,12 @@ final class PortableChatPersistenceTests: XCTestCase {
                     as? [String: Any]
             )
             object["schemaVersion"] = 1
+            let attempts = try XCTUnwrap(object["attempts"] as? [[String: Any]])
+            let attempt = try XCTUnwrap(attempts.first)
+            object["attemptId"] = attempt["attemptId"]
+            object["providerIdempotencyValue"] =
+                attempt["providerIdempotencyValue"]
+            object.removeValue(forKey: "attempts")
             object.removeValue(forKey: "profileRevisionId")
             object.removeValue(forKey: "profileStatementGeneration")
             try JSONSerialization.data(
@@ -2036,7 +2066,54 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testMalformedV2InvocationWithNullProfileGenerationIsRejectedWithoutTrap() throws {
+    func testRelaunchSafelyRetiresLegacyV2InvocationWithProfileProvenance() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let url = root.appendingPathComponent(
+                "invocations/\(fixture.install.invocation.id.rawValue)/invocation.json"
+            )
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: url))
+                    as? [String: Any]
+            )
+            object["schemaVersion"] = 2
+            let attempts = try XCTUnwrap(object["attempts"] as? [[String: Any]])
+            let attempt = try XCTUnwrap(attempts.first)
+            object["attemptId"] = attempt["attemptId"]
+            object["providerIdempotencyValue"] =
+                attempt["providerIdempotencyValue"]
+            object.removeValue(forKey: "attempts")
+            try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            ).write(to: url, options: .atomic)
+
+            try persistence.reconcileInterruptedInvocations(at: root, in: scope)
+
+            guard case let .readWrite(reopened) = try persistence.load(
+                fixture.locked.chat.id,
+                at: root,
+                in: scope
+            ) else { return XCTFail("legacy recovery froze the Chat") }
+            XCTAssertEqual(
+                reopened.pendingUserTurn?.failure,
+                .coachResponseInterrupted
+            )
+            XCTAssertEqual(reopened.chat.messageIDs, [])
+            XCTAssertFalse(try persistence.hasActiveInvocation(at: root, in: scope))
+        }
+    }
+
+    func testMalformedV3InvocationWithNullProfileGenerationIsRejectedWithoutTrap() throws {
         try withCreatedLibrary { root, scope in
             let persistence = PortableChatPersistence()
             let fixture = try makeInvocationFixture(
@@ -2067,7 +2144,7 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testV2InvocationWithoutSelectedProfileOmitsRevisionInsteadOfEncodingNull() throws {
+    func testV3InvocationWithoutSelectedProfileOmitsRevisionInsteadOfEncodingNull() throws {
         try withCreatedLibrary { root, scope in
             let persistence = PortableChatPersistence()
             let fixture = try makeInvocationFixture(

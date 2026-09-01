@@ -941,6 +941,28 @@ final class ChatFeatureTests: XCTestCase {
         )
     }
 
+    func testTypedProviderFailuresRemainRetryableCoachResponseFailures() throws {
+        for failure in [
+            PendingUserTurnFailure.coachProviderError,
+            .coachResponseInvalid,
+            .coachResponseInterrupted,
+        ] {
+            let pending = PendingUserTurn(
+                id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+                draftID: try ChatDraftID("drf-20260830T120000000Z-4GHJ"),
+                draftVersion: 1,
+                responsePositionID: try ChatResponsePositionID(
+                    "rsp-20260830T120000000Z-6PQR"
+                ),
+                failure: failure
+            )
+            XCTAssertTrue(
+                ChatFeatureState().isCoachResponseRetryableFailure(pending),
+                failure.rawValue
+            )
+        }
+    }
+
     func testOperationalRetryClearsItsProjectionWhenThePendingHasVanished() async throws {
         let aggregate = try Self.aggregate(draftText: "Retry this exact Draft.")
         let store = RecordingChatStore(

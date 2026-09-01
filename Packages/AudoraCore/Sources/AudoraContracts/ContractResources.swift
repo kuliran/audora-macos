@@ -106,6 +106,8 @@ public enum ContractResource: CaseIterable, Sendable {
     case pendingUserTurnExample
     case pendingUserTurnCapacityFailureExample
     case pendingUserTurnInterruptedExample
+    case pendingUserTurnProviderFailureExample
+    case pendingUserTurnInvalidResponseExample
     case pendingUserTurnLegacyV1Example
     case coachContextQuoteExample
     case renamedDevelopmentChatExample
@@ -359,6 +361,10 @@ public enum ContractResource: CaseIterable, Sendable {
             "pending-user-turn-capacity-failure.json"
         case .pendingUserTurnInterruptedExample:
             "pending-user-turn-interrupted.json"
+        case .pendingUserTurnProviderFailureExample:
+            "pending-user-turn-provider-failure.json"
+        case .pendingUserTurnInvalidResponseExample:
+            "pending-user-turn-invalid-response.json"
         case .pendingUserTurnLegacyV1Example:
             "pending-user-turn-legacy-v1.json"
         case .coachContextQuoteExample:
@@ -510,7 +516,10 @@ public enum ContractResource: CaseIterable, Sendable {
              .developmentChatUserMessageExample, .developmentChatCoachMessageExample,
              .developmentChatCoachInvocationExample,
              .pendingUserTurnExample, .pendingUserTurnCapacityFailureExample,
-             .pendingUserTurnInterruptedExample, .pendingUserTurnLegacyV1Example,
+             .pendingUserTurnInterruptedExample,
+             .pendingUserTurnProviderFailureExample,
+             .pendingUserTurnInvalidResponseExample,
+             .pendingUserTurnLegacyV1Example,
              .renamedDevelopmentChatExample, .sessionAnalysisChatExample:
             "Examples/DevelopmentChat/v1"
         case .invocationAdmissionLedgerExample:

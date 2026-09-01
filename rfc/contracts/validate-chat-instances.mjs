@@ -35,7 +35,9 @@ const positiveInventory = [
   "memory.json",
   "pending-user-turn-capacity-failure.json",
   "pending-user-turn-interrupted.json",
+  "pending-user-turn-invalid-response.json",
   "pending-user-turn-legacy-v1.json",
+  "pending-user-turn-provider-failure.json",
   "pending-user-turn.json",
   "rejected",
   "renamed-chat.json",
@@ -169,7 +171,9 @@ for (const name of [
   "pending-user-turn.json",
   "pending-user-turn-capacity-failure.json",
   "pending-user-turn-interrupted.json",
+  "pending-user-turn-invalid-response.json",
   "pending-user-turn-legacy-v1.json",
+  "pending-user-turn-provider-failure.json",
 ]) {
   assertValidation(
     pendingUserTurn,
@@ -191,12 +195,22 @@ assertValidation(
 const unknownNewerPending = await loadJSON(
   path.join(examplesDirectory, "pending-user-turn-interrupted.json"),
 );
-unknownNewerPending.schemaVersion = 3;
+unknownNewerPending.schemaVersion = 4;
 assertValidation(
   pendingUserTurn,
   unknownNewerPending,
   false,
   "synthetic unknown-newer Pending",
+);
+const legacyV2ProviderFailure = await loadJSON(
+  path.join(examplesDirectory, "pending-user-turn-provider-failure.json"),
+);
+legacyV2ProviderFailure.schemaVersion = 2;
+assertValidation(
+  pendingUserTurn,
+  legacyV2ProviderFailure,
+  false,
+  "synthetic legacy-v2 provider failure Pending",
 );
 
 for (const name of scenarioInventory) {

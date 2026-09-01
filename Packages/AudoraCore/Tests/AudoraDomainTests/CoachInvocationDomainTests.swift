@@ -124,8 +124,7 @@ final class CoachInvocationDomainTests: XCTestCase {
         XCTAssertThrowsError(
             try CoachInvocation(
                 id: fixture.invocationID,
-                attemptID: fixture.attemptID,
-                providerIdempotencyValue: fixture.idempotency,
+                attempt: fixture.attempt(),
                 library: fixture.library,
                 chatID: fixture.aggregate.chat.id,
                 pendingUserTurn: anotherPending,
@@ -294,14 +293,28 @@ private struct Fixture {
     func invocation() throws -> CoachInvocation {
         try CoachInvocation(
             id: invocationID,
-            attemptID: attemptID,
-            providerIdempotencyValue: idempotency,
+            attempt: attempt(),
             library: library,
             chatID: aggregate.chat.id,
             pendingUserTurn: pending,
             preparedProfile: profile,
             expectedManifestRevision: aggregate.chat.manifestRevision,
             admittedAt: instant
+        )
+    }
+
+    func attempt() throws -> CoachProviderAttempt {
+        try CoachProviderAttempt(
+            id: attemptID,
+            ordinal: 1,
+            kind: .standard,
+            providerIdempotencyValue: idempotency,
+            transcriptHandles: [],
+            publicationAuthority: CoachProviderAttemptPublicationAuthority(
+                userMessageID: userMessageID,
+                coachMessageID: coachMessageID,
+                freshDraftID: freshDraftID
+            )
         )
     }
 

@@ -140,21 +140,26 @@ evidence.
 The executable Send slice crosses one Application-owned Invocation coordinator.
 It revalidates the locked Pending User Turn and exact prepared context, claims the
 machine-local Library rolling window, and durably installs one portable Invocation
-before its deterministic synthetic Provider can run. Its only successful effect is
-one atomic user/Coach message pair plus a fresh Draft; pre-commit interruption or
-CAS conflict publishes neither message and retires the installed authority. Live
-composition still fails closed because the shipping Provider descriptor is not
-qualified. Real Provider execution, automatic retries, Stop, transcript tools,
-and Profile or Memory effects remain outside this slice.
+before its deterministic synthetic Provider can run. One stable Invocation may
+install at most four durable Provider Attempts, waiting exactly 5, 10, and 15
+seconds before transient retries and requesting at most one materially shorter
+complete response after overflow. Each Attempt has fresh Provider and publication
+authority while the prepared semantic exchange remains frozen. Its only successful
+effect is one atomic user/Coach message pair plus a fresh Draft; pre-commit
+interruption, exhausted retries, an invalid complete response, or CAS conflict
+publishes neither message. Live composition still fails closed because the
+shipping Provider descriptor is not qualified. Stop, transcript tools, and Profile
+or Memory effects remain outside this slice.
 If the machine-local ledger rename succeeds but its parent-directory flush cannot
 prove durability, Audora treats the debit as possibly committed and preserves the
 exact Pending User Turn as interrupted and user-retryable; it never unlocks that
 Draft as a pre-admission rejection.
 Invocation liveness is acquired atomically with the first exact Pending
 resolution, so concurrent catalog recovery cannot interrupt a live Send between
-resolution and reservation. Pending User Turn schema v2 persists the interrupted
-failure; strict v1 compatibility permits only no failure or the older context-fit
-failure and upgrades when that Pending is next written.
+resolution and reservation. Pending User Turn schema v3 persists context-fit,
+interrupted, Provider-error, and invalid-response failures. Strict v1 compatibility
+permits only no failure or the context-fit failure; v2 additionally permits the
+interrupted failure. Legacy Pending state upgrades when it is next written.
 If response publication commits but immediate reconciliation is interrupted,
 Infrastructure proves the exact immutable user/Coach message pair, response
 position, consumed Pending, and fresh-Draft lineage before reporting success. A

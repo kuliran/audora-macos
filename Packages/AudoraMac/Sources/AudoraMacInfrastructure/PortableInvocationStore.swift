@@ -180,6 +180,42 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         return outcome
     }
 
+    func installNextAttempt(
+        _ mutation: InstallNextCoachProviderAttemptMutation
+    ) async -> InvocationNextAttemptInstallOutcome {
+        let base = mutation.base
+        let libraryID = base.libraryID
+        guard let lease = activeLease(for: base) else { return .failed }
+        let outcome = await transactions.installNextAttempt(
+            mutation,
+            holding: lease
+        )
+        guard let state = invocationLeases[libraryID],
+              case let .active(expected, installedLease) = state,
+              expected == base,
+              installedLease === lease
+        else { return .failed }
+        switch outcome {
+        case let .installed(replacement) where replacement == mutation.replacement:
+            invocationLeases[libraryID] = .active(
+                invocation: replacement,
+                lease: lease
+            )
+            return .installed(PortableActiveInvocationSession(
+                store: self,
+                invocation: replacement
+            ))
+        case .installed:
+            return .failed
+        case let .collision(collision):
+            return .collision(collision)
+        case let .stale(current):
+            return .stale(current)
+        case .failed:
+            return .failed
+        }
+    }
+
     func checkLaunchIdentity(
         _ identity: InvocationLaunchIdentity,
         for authority: InvocationPendingAuthority
@@ -242,12 +278,14 @@ public actor PortableInvocationStore: InvocationPersistencePort {
     }
 
     func abortInstalledNewSend(
-        _ invocation: CoachInvocation
+        _ invocation: CoachInvocation,
+        failure: PendingUserTurnFailure = .coachResponseInterrupted
     ) async -> InvocationPendingMutationOutcome {
         guard let lease = activeLease(for: invocation) else { return .failed }
         defer { releaseActiveLease(for: invocation) }
         return await transactions.abortInstalledNewSend(
             invocation,
+            failure: failure,
             holding: lease
         )
     }
@@ -510,10 +548,29 @@ private actor PortableActiveInvocationSession: InvocationActivePersistenceSessio
         Task { _ = await store.abortInstalledNewSend(invocation) }
     }
 
-    func abort() async -> InvocationTerminalPersistenceOutcome {
+    func installNextAttempt(
+        _ mutation: InstallNextCoachProviderAttemptMutation
+    ) async -> InvocationNextAttemptInstallOutcome {
+        guard case .active = state,
+              mutation.base == invocation
+        else { return .failed }
+        state = .transitioning
+        let outcome = await store.installNextAttempt(mutation)
+        switch outcome {
+        case .installed:
+            state = .finished
+        case .collision, .stale, .failed:
+            state = .active
+        }
+        return outcome
+    }
+
+    func abort(
+        failure: PendingUserTurnFailure
+    ) async -> InvocationTerminalPersistenceOutcome {
         guard case .active = state else { return .recovered(.unavailable) }
         state = .finished
-        switch await store.abortInstalledNewSend(invocation) {
+        switch await store.abortInstalledNewSend(invocation, failure: failure) {
         case let .committed(aggregate):
             return .committed(aggregate)
         case let .stale(current):

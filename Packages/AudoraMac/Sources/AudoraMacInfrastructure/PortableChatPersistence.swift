@@ -2354,11 +2354,18 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 under: invocationsDescriptor,
                 reconcileProofPartial: false
             ).invocation
-            if existing.attemptID == identity.attemptID {
+            if existing.attempts.contains(where: { $0.id == identity.attemptID }) {
                 recordCollision(.attemptID)
             }
-            if existing.providerIdempotencyValue == identity.idempotencyValue {
+            if existing.attempts.contains(where: {
+                $0.providerIdempotencyValue == identity.idempotencyValue
+            }) {
                 recordCollision(.providerIdempotencyValue)
+            }
+            if !Set(existing.attempts.flatMap(\.transcriptHandles)).isDisjoint(
+                with: identity.transcriptHandles
+            ) {
+                recordCollision(.transcriptHandle)
             }
         }
         if identity.userMessageID == identity.coachMessageID {
@@ -2799,6 +2806,264 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return confirmed == invocation ? confirmed : nil
     }
 
+    func installNextAttempt(
+        _ mutation: InstallNextCoachProviderAttemptMutation,
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> PortableNextAttemptInstallResult {
+        let request = PendingCoachInvocationRequest(
+            library: scope,
+            chatID: mutation.base.chatID,
+            pendingUserTurnID: mutation.base.pendingUserTurnID
+        )
+        guard mutation.base.libraryID == scope.libraryID,
+              mutation.replacement.libraryID == scope.libraryID,
+              mutation.replacement.id == mutation.base.id,
+              let livenessAuthority = lease.authority(for: request)
+        else { throw PortableChatPersistenceError.ioFailure }
+
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(named: "staging", under: rootDescriptor)
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidateLiveness = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: scope,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidateLiveness()
+
+        let invocationName = mutation.base.id.rawValue
+        guard try entryExists(named: invocationName, under: invocationsDescriptor)
+        else { return .stale(nil) }
+        let invocationIdentity = try directoryIdentity(
+            named: invocationName,
+            under: invocationsDescriptor
+        )
+        let invocationRoot = try openDirectory(
+            named: invocationName,
+            under: invocationsDescriptor
+        )
+        defer { Darwin.close(invocationRoot) }
+        guard try directoryIdentity(of: invocationRoot) == invocationIdentity else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let current = try loadInvocationDirectoryRecord(
+            expectedInvocationID: mutation.base.id,
+            expectedLibraryID: scope.libraryID,
+            under: invocationRoot,
+            reconcileProofPartial: true,
+            beforeRemoving: revalidateLiveness
+        )
+        guard current.invocation == mutation.base else { return .stale(nil) }
+        guard current.publicationProof == nil else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        if let collision = try nextAttemptIdentityCollision(
+            mutation.replacement.attempt,
+            expectedLibraryID: scope.libraryID,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor,
+            beforeDestructiveMutation: revalidateLiveness
+        ) {
+            return .collision(collision)
+        }
+
+        let partialName = ".invocation.json.\(UUID().uuidString.lowercased()).partial"
+        var partialExists = false
+        defer {
+            if partialExists {
+                _ = partialName.withCString { Darwin.unlinkat(invocationRoot, $0, 0) }
+            }
+        }
+        try writeExclusive(
+            try encodeInvocation(mutation.replacement),
+            named: partialName,
+            under: invocationRoot
+        )
+        partialExists = true
+        let partialDescriptor = try openRegularFile(
+            named: partialName,
+            under: invocationRoot
+        )
+        defer { Darwin.close(partialDescriptor) }
+        try flushDescriptor(partialDescriptor)
+        try revalidateLiveness()
+        guard try directoryIdentity(
+            named: invocationName,
+            under: invocationsDescriptor
+        ) == invocationIdentity,
+            try directoryIdentity(of: invocationRoot) == invocationIdentity
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let exactBase = try loadInvocationDirectoryRecord(
+            expectedInvocationID: mutation.base.id,
+            expectedLibraryID: scope.libraryID,
+            under: invocationRoot,
+            reconcileProofPartial: false
+        )
+        guard exactBase.invocation == mutation.base else { return .stale(nil) }
+        guard exactBase.publicationProof == nil,
+              isRegularFile(named: "invocation.json", under: invocationRoot),
+              renameat(
+                  invocationRoot,
+                  partialName,
+                  invocationRoot,
+                  "invocation.json"
+              ) == 0
+        else { throw PortableChatPersistenceError.ioFailure }
+        partialExists = false
+        try flushDescriptor(invocationRoot)
+        let installed = try decodeInvocation(
+            boundedData(named: "invocation.json", under: invocationRoot)
+        )
+        guard installed == mutation.replacement else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        return .installed(installed)
+    }
+
+    func reconcileInstalledNextAttempt(
+        _ mutation: InstallNextCoachProviderAttemptMutation,
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> CoachInvocation? {
+        let request = PendingCoachInvocationRequest(
+            library: scope,
+            chatID: mutation.base.chatID,
+            pendingUserTurnID: mutation.base.pendingUserTurnID
+        )
+        guard let livenessAuthority = lease.authority(for: request) else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(named: "staging", under: rootDescriptor)
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidateLiveness = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: scope,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidateLiveness()
+        guard try entryExists(
+            named: mutation.base.id.rawValue,
+            under: invocationsDescriptor
+        ) else { return nil }
+        let invocationRoot = try openDirectory(
+            named: mutation.base.id.rawValue,
+            under: invocationsDescriptor
+        )
+        defer { Darwin.close(invocationRoot) }
+        let record = try loadInvocationDirectoryRecord(
+            expectedInvocationID: mutation.base.id,
+            expectedLibraryID: scope.libraryID,
+            under: invocationRoot,
+            reconcileProofPartial: true,
+            beforeRemoving: revalidateLiveness
+        )
+        guard record.publicationProof == nil else { return nil }
+        if record.invocation == mutation.replacement {
+            try flushDescriptor(invocationRoot)
+            try flushDescriptor(invocationsDescriptor)
+            try revalidateLiveness()
+            return mutation.replacement
+        }
+        guard record.invocation == mutation.base else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        return nil
+    }
+
+    private func nextAttemptIdentityCollision(
+        _ candidate: CoachProviderAttempt,
+        expectedLibraryID: LibraryID,
+        under rootDescriptor: Int32,
+        invocationsDescriptor: Int32,
+        beforeDestructiveMutation: () throws -> Void
+    ) throws -> InvocationLaunchIdentityCollision? {
+        guard let authority = candidate.publicationAuthority else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        for invocationName in try invocationDirectoryNamesRemovingEmptyResidue(
+            under: invocationsDescriptor,
+            beforeRemoving: beforeDestructiveMutation
+        ) {
+            let existing = try inspectInvocationDirectory(
+                named: invocationName,
+                expectedLibraryID: expectedLibraryID,
+                under: invocationsDescriptor,
+                reconcileProofPartial: false
+            ).invocation
+            for attempt in existing.attempts {
+                if attempt.id == candidate.id { return .attemptID }
+                if attempt.providerIdempotencyValue == candidate.providerIdempotencyValue {
+                    return .providerIdempotencyValue
+                }
+                if !Set(attempt.transcriptHandles).isDisjoint(
+                    with: candidate.transcriptHandles
+                ) { return .transcriptHandle }
+                if attempt.userMessageID == authority.userMessageID ||
+                    attempt.coachMessageID == authority.userMessageID
+                { return .userMessageID }
+                if attempt.userMessageID == authority.coachMessageID ||
+                    attempt.coachMessageID == authority.coachMessageID
+                { return .coachMessageID }
+                if attempt.freshDraftID == authority.freshDraftID {
+                    return .freshDraftID
+                }
+            }
+        }
+
+        let chatsDescriptor = try openDirectory(named: "chats", under: rootDescriptor)
+        defer { Darwin.close(chatsDescriptor) }
+        for chatName in try listEntryNames(
+            under: chatsDescriptor,
+            maximumCount: Self.maximumChatCatalogEntries
+        ) {
+            guard (try? ChatID(chatName)) != nil else { continue }
+            let chatDescriptor = try openDirectory(named: chatName, under: chatsDescriptor)
+            defer { Darwin.close(chatDescriptor) }
+            let messagesDescriptor = try openDirectory(
+                named: "messages",
+                under: chatDescriptor
+            )
+            defer { Darwin.close(messagesDescriptor) }
+            if try entryExists(
+                named: "\(authority.userMessageID.rawValue).json",
+                under: messagesDescriptor
+            ) { return .userMessageID }
+            if try entryExists(
+                named: "\(authority.coachMessageID.rawValue).json",
+                under: messagesDescriptor
+            ) { return .coachMessageID }
+            let manifest = try boundedData(named: "chat.json", under: chatDescriptor)
+            if manifest.range(of: Data(authority.freshDraftID.rawValue.utf8)) != nil {
+                return .freshDraftID
+            }
+        }
+        return nil
+    }
+
     func abortInstalledNewSend(
         _ invocation: CoachInvocation,
         at libraryRoot: URL,
@@ -2806,6 +3071,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
     ) throws -> PortableChatMutationResult {
         try abortInstalledNewSend(
             invocation,
+            failure: .coachResponseInterrupted,
             at: libraryRoot,
             in: scope,
             livenessAuthority: nil
@@ -2814,6 +3080,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     func abortInstalledNewSend(
         _ invocation: CoachInvocation,
+        failure: PendingUserTurnFailure = .coachResponseInterrupted,
         at libraryRoot: URL,
         in scope: LibraryScope,
         holding lease: PortableInvocationLivenessLease
@@ -2827,6 +3094,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
         return try abortInstalledNewSend(
             invocation,
+            failure: failure,
             at: libraryRoot,
             in: scope,
             livenessAuthority: authority
@@ -2835,6 +3103,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     private func abortInstalledNewSend(
         _ invocation: CoachInvocation,
+        failure: PendingUserTurnFailure,
         at libraryRoot: URL,
         in scope: LibraryScope,
         livenessAuthority: PortableInvocationLivenessAuthority?
@@ -2961,6 +3230,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return .committed(
             try retireInvocation(
                 invocation,
+                failure: failure,
                 current: current,
                 invocationRoot: invocationRoot,
                 invocationsDescriptor: invocationsDescriptor,
@@ -3944,6 +4214,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 return .frozen(FrozenChatSnapshot(chatID: expectedID, reason: .newerSchema))
             }
             guard pendingVersion == 1 ||
+                pendingVersion == 2 ||
                 pendingVersion == UInt64(PendingUserTurn.schemaVersion)
             else {
                 throw PortableChatPersistenceError.unsupportedOlderSchema
@@ -4299,8 +4570,10 @@ public struct PortableChatPersistence: @unchecked Sendable {
         else {
             throw PortableChatPersistenceError.invalidLayout
         }
-        let interrupted = pending.replacingFailure(.coachResponseInterrupted)
-        if interrupted != pending {
+        let terminal = pending.failure == nil
+            ? pending.replacingFailure(.coachResponseInterrupted)
+            : pending
+        if terminal != pending {
             let partialName = ".pending-user-turn.json.\(UUID().uuidString.lowercased()).partial"
             var partialExists = false
             defer {
@@ -4311,7 +4584,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 }
             }
             try writeExclusive(
-                try encodePendingUserTurn(interrupted),
+                try encodePendingUserTurn(terminal),
                 named: partialName,
                 under: chatDescriptor
             )
@@ -4341,12 +4614,51 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     private func retireInvocation(
         _ invocation: CoachInvocation,
+        failure: PendingUserTurnFailure = .coachResponseInterrupted,
         current: ChatAggregate,
         invocationRoot: Int32,
         invocationsDescriptor: Int32,
         chatDescriptor: Int32,
         beforeCommitting: () throws -> Void = {}
     ) throws -> ChatAggregate {
+        guard let pending = current.pendingUserTurn else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let terminalFailure = pending.failure ?? failure
+        if pending.failure == nil, failure != .coachResponseInterrupted {
+            let replacement = pending.replacingFailure(failure)
+            let partialName = ".pending-user-turn.json.\(UUID().uuidString.lowercased()).partial"
+            var partialExists = false
+            defer {
+                if partialExists {
+                    _ = partialName.withCString {
+                        Darwin.unlinkat(chatDescriptor, $0, 0)
+                    }
+                }
+            }
+            try writeExclusive(
+                try encodePendingUserTurn(replacement),
+                named: partialName,
+                under: chatDescriptor
+            )
+            partialExists = true
+            let partialDescriptor = try openRegularFile(
+                named: partialName,
+                under: chatDescriptor
+            )
+            defer { Darwin.close(partialDescriptor) }
+            try flushDescriptor(partialDescriptor)
+            try beforeCommitting()
+            guard renameat(
+                chatDescriptor,
+                partialName,
+                chatDescriptor,
+                "pending-user-turn.json"
+            ) == 0 else { throw PortableChatPersistenceError.ioFailure }
+            partialExists = false
+            try flushDescriptor(chatDescriptor)
+            try fault(.afterInvocationAbortPendingFailureInstall)
+        }
         try beforeCommitting()
         guard (try? invocation.validateIntent(against: current)) != nil,
               try listEntryNames(under: invocationRoot, maximumCount: 4) ==
@@ -4380,11 +4692,11 @@ public struct PortableChatPersistence: @unchecked Sendable {
             expectedID: invocation.chatID,
             reconcileTransients: true,
             beforeDestructiveMutation: beforeCommitting
-        ), let pending = current.pendingUserTurn,
+        ),
             reopened == (try ChatAggregate(
                 chat: current.chat,
                 memory: current.memory,
-                pendingUserTurn: pending.replacingFailure(.coachResponseInterrupted)
+                pendingUserTurn: pending.replacingFailure(terminalFailure)
             ))
         else { throw PortableChatPersistenceError.invalidLayout }
         return reopened
@@ -4430,14 +4742,16 @@ public struct PortableChatPersistence: @unchecked Sendable {
     ) throws -> InvocationDirectoryRecord {
         var entries = try listEntryNames(under: invocationRoot, maximumCount: 4)
         let proofPartials = entries.filter(Self.isPublicationProofPartialName)
+        let attemptPartials = entries.filter(Self.isAttemptReplacementPartialName)
         guard proofPartials.count <= 1,
-              entries.count <= 3,
+              attemptPartials.count <= 1,
+              entries.count <= 4,
               Set(entries).isSubset(of: Set([
                   "invocation.json",
                   "publication-proof.json",
-              ] + proofPartials))
+              ] + proofPartials + attemptPartials))
         else { throw PortableChatPersistenceError.invalidLayout }
-        if let partial = proofPartials.first {
+        for partial in proofPartials + attemptPartials {
             guard isRegularFile(named: partial, under: invocationRoot) else {
                 throw PortableChatPersistenceError.invalidLayout
             }
@@ -4884,17 +5198,19 @@ public struct PortableChatPersistence: @unchecked Sendable {
             maximumCount: 4
         )
         let proofPartials = entries.filter(Self.isPublicationProofPartialName)
+        let attemptPartials = entries.filter(Self.isAttemptReplacementPartialName)
         guard proofPartials.count <= 1,
-              entries.count <= 3,
+              attemptPartials.count <= 1,
+              entries.count <= 4,
               Set(entries).isSubset(of: Set([
                   "invocation.json",
                   "publication-proof.json",
-              ] + proofPartials)),
+              ] + proofPartials + attemptPartials)),
               entries.contains("invocation.json")
         else { throw PortableChatPersistenceError.invalidLayout }
 
         var removed = false
-        for name in proofPartials + ["publication-proof.json"]
+        for name in proofPartials + attemptPartials + ["publication-proof.json"]
         where entries.contains(name) {
             guard isRegularFile(named: name, under: invocationRoot) else {
                 throw PortableChatPersistenceError.invalidLayout
@@ -5045,6 +5361,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     private static func isPublicationProofPartialName(_ name: String) -> Bool {
         let prefix = ".publication-proof.json."
+        let suffix = ".partial"
+        guard name.hasPrefix(prefix), name.hasSuffix(suffix) else { return false }
+        let uuid = String(name.dropFirst(prefix.count).dropLast(suffix.count))
+        return UUID(uuidString: uuid)?.uuidString.lowercased() == uuid
+    }
+
+    private static func isAttemptReplacementPartialName(_ name: String) -> Bool {
+        let prefix = ".invocation.json."
         let suffix = ".partial"
         guard name.hasPrefix(prefix), name.hasSuffix(suffix) else { return false }
         let uuid = String(name.dropFirst(prefix.count).dropLast(suffix.count))
@@ -5444,6 +5768,16 @@ public struct PortableChatPersistence: @unchecked Sendable {
             case nil: failure = nil
             case PendingUserTurnFailure.coachContextCannotFit.rawValue:
                 failure = .coachContextCannotFit
+            case .some:
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        case 2:
+            switch dto.failure {
+            case nil: failure = nil
+            case PendingUserTurnFailure.coachContextCannotFit.rawValue:
+                failure = .coachContextCannotFit
+            case PendingUserTurnFailure.coachResponseInterrupted.rawValue:
+                failure = .coachResponseInterrupted
             case .some:
                 throw PortableChatPersistenceError.invalidJSON
             }

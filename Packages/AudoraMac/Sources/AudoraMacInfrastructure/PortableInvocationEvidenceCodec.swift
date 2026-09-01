@@ -78,8 +78,16 @@ struct PortableInvocationEvidenceCodec {
         try boundedDeterministicJSON(CoachInvocationDTO(
             schemaVersion: invocation.persistedSchemaVersion,
             invocationId: invocation.id.rawValue,
-            attemptId: invocation.attemptID.rawValue,
-            providerIdempotencyValue: invocation.providerIdempotencyValue.rawValue,
+            attemptId: invocation.persistedSchemaVersion < CoachInvocation.schemaVersion
+                ? invocation.attemptID.rawValue
+                : nil,
+            providerIdempotencyValue: invocation.persistedSchemaVersion <
+                CoachInvocation.schemaVersion
+                ? invocation.providerIdempotencyValue.rawValue
+                : nil,
+            attempts: invocation.persistedSchemaVersion == CoachInvocation.schemaVersion
+                ? invocation.attempts.map(CoachProviderAttemptDTO.init)
+                : nil,
             libraryId: invocation.libraryID.rawValue,
             chatId: invocation.chatID.rawValue,
             pendingUserTurnId: invocation.pendingUserTurnID.rawValue,
@@ -100,18 +108,22 @@ struct PortableInvocationEvidenceCodec {
         let dictionary = try json.jsonDictionary(data)
         let dto = try json.decode(CoachInvocationDTO.self, from: data)
         let common: Set<String> = [
-            "schemaVersion", "invocationId", "attemptId",
-            "providerIdempotencyValue", "libraryId", "chatId",
+            "schemaVersion", "invocationId", "libraryId", "chatId",
             "pendingUserTurnId", "draftId", "draftVersion",
             "responsePositionId", "expectedManifestRevision", "admittedAt",
         ]
-        guard dto.schemaVersion == 1 ||
-            dto.schemaVersion == CoachInvocation.schemaVersion
+        guard (1 ... CoachInvocation.schemaVersion).contains(dto.schemaVersion)
         else { throw PortableChatPersistenceError.invalidSchemaVersion }
         if dto.schemaVersion == 1 {
-            try json.requireExactKeys(dictionary, common)
-        } else {
-            let v2 = common.union(["profileStatementGeneration"])
+            try json.requireExactKeys(
+                dictionary,
+                common.union(["attemptId", "providerIdempotencyValue"])
+            )
+        } else if dto.schemaVersion == 2 {
+            let v2 = common.union([
+                "attemptId", "providerIdempotencyValue",
+                "profileStatementGeneration",
+            ])
             let actualKeys = Set(dictionary.keys)
             guard actualKeys == v2 || actualKeys == v2.union(["profileRevisionId"])
             else { throw PortableChatPersistenceError.unknownKey }
@@ -119,6 +131,27 @@ struct PortableInvocationEvidenceCodec {
                dictionary["profileRevisionId"] is NSNull
             {
                 throw PortableChatPersistenceError.invalidJSON
+            }
+        } else {
+            let v3 = common.union(["attempts", "profileStatementGeneration"])
+            let actualKeys = Set(dictionary.keys)
+            guard actualKeys == v3 || actualKeys == v3.union(["profileRevisionId"])
+            else { throw PortableChatPersistenceError.unknownKey }
+            if actualKeys.contains("profileRevisionId"),
+               dictionary["profileRevisionId"] is NSNull
+            {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            guard let rawAttempts = dictionary["attempts"] as? [[String: Any]],
+                  !rawAttempts.isEmpty,
+                  rawAttempts.count <= Int(CoachProviderAttempt.maximumOrdinal)
+            else { throw PortableChatPersistenceError.invalidJSON }
+            for rawAttempt in rawAttempts {
+                try json.requireExactKeys(rawAttempt, [
+                    "schemaVersion", "attemptId", "ordinal", "kind",
+                    "providerIdempotencyValue", "transcriptHandles",
+                    "userMessageId", "coachMessageId", "freshDraftId",
+                ])
             }
         }
         return try mapPersistedDomainValidation {
@@ -143,13 +176,29 @@ struct PortableInvocationEvidenceCodec {
                     statementGeneration: statementGeneration
                 )
             }
+            let attempts: [CoachProviderAttempt]
+            if dto.schemaVersion == CoachInvocation.schemaVersion {
+                guard dto.attemptId == nil,
+                      dto.providerIdempotencyValue == nil,
+                      let attemptDTOs = dto.attempts
+                else { throw PortableChatPersistenceError.invalidJSON }
+                attempts = try attemptDTOs.map { try $0.domainValue() }
+            } else {
+                guard let attemptID = dto.attemptId,
+                      let idempotencyValue = dto.providerIdempotencyValue,
+                      dto.attempts == nil
+                else { throw PortableChatPersistenceError.invalidJSON }
+                attempts = [CoachProviderAttempt(
+                    legacyID: try CoachProviderAttemptID(attemptID),
+                    providerIdempotencyValue: try ProviderIdempotencyValue(
+                        idempotencyValue
+                    )
+                )]
+            }
             return try CoachInvocation(
                 schemaVersion: dto.schemaVersion,
-                id: CoachInvocationID(dto.invocationId),
-                attemptID: CoachProviderAttemptID(dto.attemptId),
-                providerIdempotencyValue: ProviderIdempotencyValue(
-                    dto.providerIdempotencyValue
-                ),
+                id: try CoachInvocationID(dto.invocationId),
+                attempts: attempts,
                 library: LibraryScope(libraryID: try LibraryID(dto.libraryId)),
                 chatID: ChatID(dto.chatId),
                 pendingUserTurn: pending,
@@ -270,9 +319,23 @@ struct PortableInvocationEvidenceCodec {
     ) -> Bool {
         let (publishedRevision, overflow) = invocation.expectedManifestRevision
             .addingReportingOverflow(1)
+        let hasVersionSpecificAuthority: Bool
+        switch invocation.persistedSchemaVersion {
+        case 2:
+            // The prior binary's v2 record did not persist Attempt publication
+            // authority. Its proof remains bound by the exact Chat, Pending,
+            // message hashes/order, fresh Draft, and Profile checks below.
+            hasVersionSpecificAuthority = invocation.preparedProfile != nil
+        case CoachInvocation.schemaVersion:
+            hasVersionSpecificAuthority = invocation.preparedProfile != nil &&
+                invocation.attempt.userMessageID == proof.userMessageID &&
+                invocation.attempt.coachMessageID == proof.coachMessageID &&
+                invocation.attempt.freshDraftID == proof.freshDraftID
+        default:
+            hasVersionSpecificAuthority = false
+        }
         return !overflow &&
-            invocation.persistedSchemaVersion == CoachInvocation.schemaVersion &&
-            invocation.preparedProfile != nil &&
+            hasVersionSpecificAuthority &&
             proof.invocationID == invocation.id &&
             proof.libraryID == invocation.libraryID &&
             proof.chatID == invocation.chatID &&
@@ -375,8 +438,9 @@ struct PortableInvocationEvidenceCodec {
 private struct CoachInvocationDTO: Codable {
     let schemaVersion: UInt32
     let invocationId: String
-    let attemptId: String
-    let providerIdempotencyValue: String
+    let attemptId: String?
+    let providerIdempotencyValue: String?
+    let attempts: [CoachProviderAttemptDTO]?
     let libraryId: String
     let chatId: String
     let pendingUserTurnId: String
@@ -387,6 +451,54 @@ private struct CoachInvocationDTO: Codable {
     let profileRevisionId: String?
     let profileStatementGeneration: UInt64?
     let admittedAt: String
+}
+
+private struct CoachProviderAttemptDTO: Codable {
+    let schemaVersion: UInt32
+    let attemptId: String
+    let ordinal: UInt8
+    let kind: String
+    let providerIdempotencyValue: String
+    let transcriptHandles: [String]
+    let userMessageId: String
+    let coachMessageId: String
+    let freshDraftId: String
+
+    init(_ attempt: CoachProviderAttempt) {
+        guard let authority = attempt.publicationAuthority else {
+            preconditionFailure("current Coach Attempts require publication authority")
+        }
+        schemaVersion = attempt.persistedSchemaVersion
+        attemptId = attempt.id.rawValue
+        ordinal = attempt.ordinal
+        kind = attempt.kind.rawValue
+        providerIdempotencyValue = attempt.providerIdempotencyValue.rawValue
+        transcriptHandles = attempt.transcriptHandles.map(\.rawValue)
+        userMessageId = authority.userMessageID.rawValue
+        coachMessageId = authority.coachMessageID.rawValue
+        freshDraftId = authority.freshDraftID.rawValue
+    }
+
+    func domainValue() throws -> CoachProviderAttempt {
+        guard let parsedKind = CoachProviderAttemptKind(rawValue: kind),
+              transcriptHandles.count <= CoachProviderAttempt.maximumTranscriptHandles
+        else { throw PortableChatPersistenceError.invalidJSON }
+        return try CoachProviderAttempt(
+            schemaVersion: schemaVersion,
+            id: CoachProviderAttemptID(attemptId),
+            ordinal: ordinal,
+            kind: parsedKind,
+            providerIdempotencyValue: ProviderIdempotencyValue(
+                providerIdempotencyValue
+            ),
+            transcriptHandles: transcriptHandles.map(CoachProviderTranscriptHandle.init),
+            publicationAuthority: CoachProviderAttemptPublicationAuthority(
+                userMessageID: ChatMessageID(userMessageId),
+                coachMessageID: ChatMessageID(coachMessageId),
+                freshDraftID: ChatDraftID(freshDraftId)
+            )
+        )
+    }
 }
 
 private struct InvocationPublicationProofDTO: Codable {

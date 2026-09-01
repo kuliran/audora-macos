@@ -43,11 +43,17 @@ final class MachineInvocationAdmissionTests: XCTestCase {
     }
 
     func testProductionIdentityGeneratorEmitsPortableTypedAuthorities() async throws {
-        let generated = await RandomInvocationIdentityGenerator().generate(
-            at: try UTCInstant("2026-08-30T12:00:02.000Z")
+        let generator = RandomInvocationIdentityGenerator()
+        let instant = try UTCInstant("2026-08-30T12:00:02.000Z")
+        let invocationID = await generator.generateInvocationID(at: instant)
+        let generated = await generator.generateAttemptIdentity(
+            at: instant,
+            ordinal: 1,
+            kind: .standard,
+            transcriptHandleCount: 2
         )
 
-        XCTAssertNoThrow(try CoachInvocationID(generated.invocationID.rawValue))
+        XCTAssertNoThrow(try CoachInvocationID(invocationID.rawValue))
         XCTAssertNoThrow(try CoachProviderAttemptID(generated.attemptID.rawValue))
         XCTAssertNoThrow(try ChatMessageID(generated.userMessageID.rawValue))
         XCTAssertNoThrow(try ChatMessageID(generated.coachMessageID.rawValue))
@@ -57,6 +63,8 @@ final class MachineInvocationAdmissionTests: XCTestCase {
             generated.idempotencyValue.rawValue,
             generated.attemptID.rawValue
         )
+        XCTAssertEqual(generated.transcriptHandles.count, 2)
+        XCTAssertEqual(Set(generated.transcriptHandles).count, 2)
     }
 
     func testDurableDebitRejectsAt59999MillisecondsAndAdmitsAt60Seconds() async throws {

@@ -301,10 +301,12 @@ public struct ChatDraft: Equatable, Sendable {
 public enum PendingUserTurnFailure: String, Equatable, Sendable {
     case coachContextCannotFit
     case coachResponseInterrupted
+    case coachProviderError
+    case coachResponseInvalid
 }
 
 public struct PendingUserTurn: Equatable, Sendable {
-    public static let schemaVersion: UInt32 = 2
+    public static let schemaVersion: UInt32 = 3
 
     public let id: PendingUserTurnID
     public let draftID: ChatDraftID

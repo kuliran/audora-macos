@@ -159,7 +159,16 @@ public struct ChatFeatureState: Equatable, Sendable {
     }
 
     public func isCoachResponseInterrupted(_ pending: PendingUserTurn) -> Bool {
-        if pending.failure == .coachResponseInterrupted { return true }
+        isCoachResponseRetryableFailure(pending)
+    }
+
+    public func isCoachResponseRetryableFailure(_ pending: PendingUserTurn) -> Bool {
+        if pending.failure == .coachResponseInterrupted ||
+            pending.failure == .coachProviderError ||
+            pending.failure == .coachResponseInvalid
+        {
+            return true
+        }
         guard let request = operationallyInterruptedInvocation,
               case let .open(aggregate) = selection,
               aggregate.chat.id == request.chatID,

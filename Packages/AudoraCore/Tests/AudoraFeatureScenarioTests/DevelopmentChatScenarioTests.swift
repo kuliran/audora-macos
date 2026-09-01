@@ -105,6 +105,11 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                         await invocations.waitUntilInvocationCompletes(
                             completedInvocationTarget
                         )
+                        await assertUnavailableProviderFailureIsClassified(
+                            dto,
+                            feature: feature,
+                            invocations: invocations
+                        )
                     }
                 }
             } else {
@@ -124,6 +129,11 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                         completedInvocationTarget += 1
                         await invocations.waitUntilInvocationCompletes(
                             completedInvocationTarget
+                        )
+                        await assertUnavailableProviderFailureIsClassified(
+                            dto,
+                            feature: feature,
+                            invocations: invocations
                         )
                     }
                 }
@@ -220,6 +230,27 @@ final class DevelopmentChatScenarioTests: XCTestCase {
             let actualCommittedChats = await recorder.committedChats
             XCTAssertEqual(actualCommittedChats, expectedCommittedChats, dto.scenarioId)
         }
+    }
+
+    private func assertUnavailableProviderFailureIsClassified(
+        _ scenario: DevelopmentChatScenarioDTO,
+        feature: DefaultChatFeature,
+        invocations: any ScenarioMeasuringInvocations,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let counts = await invocations.counts()
+        guard scenario.providerAvailability == "unavailable", counts.provider > 0 else {
+            return
+        }
+        let state = await feature.currentState
+        XCTAssertEqual(
+            selectedChat(state)?.pendingUserTurn?.failure,
+            .coachProviderError,
+            scenario.scenarioId,
+            file: file,
+            line: line
+        )
     }
 
     private func aggregate(_ dto: DevelopmentChatSnapshotDTO) throws -> ChatAggregate {
@@ -1125,7 +1156,8 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
     }
 
     func abortInstalledNewSend(
-        _ invocation: CoachInvocation
+        _ invocation: CoachInvocation,
+        failure: PendingUserTurnFailure
     ) async -> InvocationPendingMutationOutcome {
         guard active == invocation,
               let aggregate = await store.invocationSnapshot(invocation.chatID),
@@ -1136,7 +1168,7 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
             library: LibraryScope(libraryID: invocation.libraryID),
             chatID: invocation.chatID,
             base: pending,
-            replacement: pending.replacingFailure(.coachResponseInterrupted)
+            replacement: pending.replacingFailure(failure)
         ) else { return .failed }
         return pendingOutcome(
             await store.replacePendingUserTurn(mutation)
@@ -1288,10 +1320,21 @@ private actor ScenarioActiveInvocationSession: InvocationActivePersistenceSessio
         self.invocation = invocation
     }
 
-    func abort() async -> InvocationTerminalPersistenceOutcome {
+    func installNextAttempt(
+        _ mutation: InstallNextCoachProviderAttemptMutation
+    ) async -> InvocationNextAttemptInstallOutcome {
+        .failed
+    }
+
+    func abort(
+        failure: PendingUserTurnFailure
+    ) async -> InvocationTerminalPersistenceOutcome {
         guard isActive else { return .recovered(.unavailable) }
         isActive = false
-        switch await persistence.abortInstalledNewSend(invocation) {
+        switch await persistence.abortInstalledNewSend(
+            invocation,
+            failure: failure
+        ) {
         case let .committed(aggregate): return .committed(aggregate)
         case let .stale(current): return .stale(current)
         case .failed:
@@ -1353,15 +1396,11 @@ private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
         self.isAvailable = isAvailable
     }
 
-    func run(_ request: SyntheticCoachProviderRequest) async throws -> String {
+    func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome {
         callCount += 1
-        guard isAvailable else { throw ScenarioSyntheticProviderFailure.unavailable }
-        return "A complete **synthetic** Coach response."
+        guard isAvailable else { return .userRetryableFailure }
+        return .complete(markdown: "A complete **synthetic** Coach response.")
     }
-}
-
-private enum ScenarioSyntheticProviderFailure: Error {
-    case unavailable
 }
 
 private actor ScenarioInvocationClock: ChatClock {
@@ -1391,7 +1430,18 @@ private struct ScenarioInvocationIdentities: InvocationIdentityGenerating {
         )
     }
 
-    func generate(at instant: UTCInstant) async -> InvocationLaunchIdentity { identity }
+    func generateInvocationID(at instant: UTCInstant) async -> CoachInvocationID {
+        identity.invocationID
+    }
+
+    func generateAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationAttemptIdentity {
+        identity.attemptIdentity
+    }
 }
 
 private actor ChatScenarioScript:
