@@ -10,6 +10,52 @@ enum CoachAttachmentProjectionError: Error, Equatable, Sendable {
     case canonicalTranscriptTooLarge
 }
 
+/// A provider-facing label derived at the same boundary that replaces local
+/// Session/Revision identity with the Chat-scoped attachment identity.
+private struct CoachProviderAttachmentDisplayLabel: Equatable, Sendable {
+    private static let fallback = "Attached Session"
+    private static let edgeSeparators = CharacterSet.whitespacesAndNewlines
+        .union(CharacterSet(charactersIn: "·•|,;:/()[]{}"))
+
+    let rawValue: String
+
+    init(evidence: ChatAttachmentEvidence) {
+        let localIdentifiers = [
+            evidence.sessionID.rawValue,
+            evidence.transcriptRevisionID.rawValue,
+        ]
+        var projected = evidence.displayLabel
+        for identifier in localIdentifiers {
+            projected = projected.replacingOccurrences(
+                of: identifier,
+                with: "",
+                options: [.caseInsensitive, .literal]
+            )
+        }
+        projected = projected
+            .split(whereSeparator: \Character.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: Self.edgeSeparators)
+
+        let containsLocalIdentifier = localIdentifiers.contains { identifier in
+            projected.range(of: identifier, options: [.caseInsensitive, .literal])
+                != nil
+        }
+        guard !projected.isEmpty,
+              projected.unicodeScalars.count <=
+                ChatAttachmentCandidate.maximumDisplayLabelUnicodeScalars,
+              !projected.unicodeScalars.contains(where: {
+                  $0.value == 0 || $0.properties.generalCategory == .control
+              }),
+              !containsLocalIdentifier
+        else {
+            rawValue = Self.fallback
+            return
+        }
+        rawValue = projected
+    }
+}
+
 /// Measures the exact canonical representation before permitting its serialized
 /// byte allocation.
 /// The internal seam keeps the production 64 MiB limit fixed while allowing tests
@@ -105,7 +151,11 @@ public struct CoachAttachmentProjectionPolicy: Sendable {
         )
         return CoachAttachmentProjection(
             evidence: evidence,
+            providerDisplayLabel: CoachProviderAttachmentDisplayLabel(
+                evidence: evidence
+            ),
             canonicalTranscript: canonicalTranscript,
+            canonicalTranscriptUTF8ByteCount: canonicalBytes.count,
             approximateTranscriptTokens: approximateTranscriptTokens,
             delivery: approximateTranscriptTokens <= maximumInlineTranscriptTokens
                 ? .inline
@@ -158,18 +208,24 @@ public struct CoachAttachmentProjectionPolicy: Sendable {
 @_spi(CoachContextQualification)
 public struct CoachAttachmentProjection: Equatable, Sendable {
     public let canonicalTranscript: CanonicalJSONValue
+    public let canonicalTranscriptUTF8ByteCount: Int
     public let approximateTranscriptTokens: Int
     public let delivery: ChatAttachmentDelivery
     private let evidence: ChatAttachmentEvidence
+    private let providerDisplayLabel: CoachProviderAttachmentDisplayLabel
 
-    init(
+    fileprivate init(
         evidence: ChatAttachmentEvidence,
+        providerDisplayLabel: CoachProviderAttachmentDisplayLabel,
         canonicalTranscript: CanonicalJSONValue,
+        canonicalTranscriptUTF8ByteCount: Int,
         approximateTranscriptTokens: Int,
         delivery: ChatAttachmentDelivery
     ) {
         self.evidence = evidence
+        self.providerDisplayLabel = providerDisplayLabel
         self.canonicalTranscript = canonicalTranscript
+        self.canonicalTranscriptUTF8ByteCount = canonicalTranscriptUTF8ByteCount
         self.approximateTranscriptTokens = approximateTranscriptTokens
         self.delivery = delivery
     }
@@ -196,7 +252,7 @@ public struct CoachAttachmentProjection: Equatable, Sendable {
         }
         let sessionAttachmentID = attachment.attachmentID
         let base: [String: CanonicalJSONValue] = [
-            "displayLabel": .string(evidence.displayLabel),
+            "displayLabel": .string(providerDisplayLabel.rawValue),
             "sessionAttachmentId": .string(sessionAttachmentID.rawValue),
         ]
         switch delivery {
@@ -232,6 +288,7 @@ enum ChatAttachmentCapacityPreparationOutcome: Sendable {
     case configurationChanged
     case qualifiedConfigurationUnavailable
     case attachmentUnavailable
+    case invalidContext
     case failed
 }
 
@@ -288,14 +345,19 @@ actor ProjectedChatSessionAttachmentSource:
     private let evidenceSource: any ChatSessionAttachmentEvidenceSource
     private let configurationAuthority:
         any CoachAttachmentProjectionConfigurationAuthority
+    private let maximumAggregateCanonicalTranscriptBytes: Int
 
     init(
         evidenceSource: any ChatSessionAttachmentEvidenceSource,
         configurationAuthority:
-            any CoachAttachmentProjectionConfigurationAuthority
+            any CoachAttachmentProjectionConfigurationAuthority,
+        maximumAggregateCanonicalTranscriptBytes: Int =
+            CoachContextInputLimits.maximumAggregateCanonicalUTF8Bytes
     ) {
         self.evidenceSource = evidenceSource
         self.configurationAuthority = configurationAuthority
+        self.maximumAggregateCanonicalTranscriptBytes =
+            maximumAggregateCanonicalTranscriptBytes
     }
 
     func loadCandidates(
@@ -376,7 +438,9 @@ actor ProjectedChatSessionAttachmentSource:
         }
         let accumulator = CapacityAttachmentProjectionAccumulator(
             attachments: attachments,
-            policy: configuration.policy
+            policy: configuration.policy,
+            maximumAggregateCanonicalTranscriptBytes:
+                maximumAggregateCanonicalTranscriptBytes
         )
         switch await evidenceSource.forEachResolvedEvidence(
             attachments,
@@ -385,6 +449,9 @@ actor ProjectedChatSessionAttachmentSource:
         ) {
         case let .completedWithAuthority(evidenceAuthority):
             guard !Task.isCancelled else { return .failed }
+            guard !accumulator.exhaustedAggregateTranscriptBudget else {
+                return .invalidContext
+            }
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
                 return .configurationChanged
             }
@@ -400,6 +467,8 @@ actor ProjectedChatSessionAttachmentSource:
             // A persistence adapter that cannot bind the exact active root and
             // evidence bytes is not creation authority.
             return .failed
+        case .failed where accumulator.exhaustedAggregateTranscriptBudget:
+            return .invalidContext
         case .readOnlyLibrary, .failed:
             return .failed
         }
@@ -484,14 +553,20 @@ private final class CapacityAttachmentProjectionAccumulator:
     private let attachments: [ChatSessionAttachment]
     private let policy: CoachAttachmentProjectionPolicy
     private var values: [PreparedCoachAttachment] = []
+    private var aggregateTranscriptBudget: CoachContextAggregateBudget
     private var invalid = false
+    private var aggregateTranscriptBudgetExhausted = false
 
     init(
         attachments: ChatAttachments,
-        policy: CoachAttachmentProjectionPolicy
+        policy: CoachAttachmentProjectionPolicy,
+        maximumAggregateCanonicalTranscriptBytes: Int
     ) {
         self.attachments = attachments.values
         self.policy = policy
+        aggregateTranscriptBudget = CoachContextAggregateBudget(
+            maximumByteCount: maximumAggregateCanonicalTranscriptBytes
+        )
     }
 
     func visit(_ item: ResolvedChatAttachmentEvidence) throws {
@@ -507,6 +582,14 @@ private final class CapacityAttachmentProjectionAccumulator:
                 return
             }
             let projection = try policy.project(evidence: evidence)
+            do {
+                try aggregateTranscriptBudget.consume(
+                    projection.canonicalTranscriptUTF8ByteCount
+                )
+            } catch {
+                aggregateTranscriptBudgetExhausted = true
+                throw error
+            }
             values.append(
                 try projection.prepareAttachment(
                     attachment: item.attachment,
@@ -521,6 +604,10 @@ private final class CapacityAttachmentProjectionAccumulator:
             guard !invalid, values.count == attachments.count else { return nil }
             return values
         }
+    }
+
+    var exhaustedAggregateTranscriptBudget: Bool {
+        lock.withLock { aggregateTranscriptBudgetExhausted }
     }
 
     private func capacityHandle(index: Int) throws -> PreparedCoachTranscriptHandle {

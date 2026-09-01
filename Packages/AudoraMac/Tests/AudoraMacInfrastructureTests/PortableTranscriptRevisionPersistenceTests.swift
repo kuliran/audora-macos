@@ -403,6 +403,80 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
         }
     }
 
+    func testProductionAttachmentLabelDoesNotExposeLocalIDsToCanonicalProviderRequest()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            let evidence = try XCTUnwrap(
+                repository.loadChatAttachmentEvidenceCatalogSynchronously().first
+            )
+            let projectionPolicy = try CoachAttachmentProjectionPolicy(
+                maximumInlineTranscriptTokens: 8_192,
+                tokenEstimator: .utf8ByteUpperBound()
+            )
+            let projection = try projectionPolicy.project(evidence: evidence)
+            let prepared = try projection.prepareAttachment(
+                attachment: ChatSessionAttachment(
+                    attachmentID: try ChatSessionAttachmentID(
+                        "attachment-production-label"
+                    ),
+                    sessionID: receipt.sessionID,
+                    transcriptRevisionID: revision.revisionID
+                ),
+                transcriptHandle: try PreparedCoachTranscriptHandle(
+                    "00000000-0000-0000-0000-000000000001"
+                )
+            )
+            let descriptor = CoachProviderDescriptor(
+                displayName: "Attachment privacy fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: 100_000,
+                    responseReservedTokens: 32,
+                    safetyMarginTokens: 8
+                ),
+                coachMemoryMaxTokens: 1
+            )
+            let estimationPolicy = CoachProviderEstimationPolicy(
+                providerIdentifier: "attachment-privacy-fixture-v1",
+                responseCollectorByteCeiling: 8_192,
+                framing: CoachProviderFraming(),
+                attachmentProjectionPolicy: projectionPolicy
+            )
+            let request = try CoachContextPlanner().estimate(
+                PreparedCoachContext(
+                    profile: .object(["statements": .array([])]),
+                    memory: .object([
+                        "generalNotes": .string(""),
+                        "sessionSummaries": .array([]),
+                    ]),
+                    history: [],
+                    trigger: .object([
+                        "kind": .string("userMessage"),
+                        "text": .string("Review this Session"),
+                    ]),
+                    attachments: [prepared]
+                ),
+                descriptor: descriptor,
+                policy: estimationPolicy
+            ).exchange.request
+            let providerJSON = String(decoding: request, as: UTF8.self)
+
+            XCTAssertTrue(evidence.displayLabel.contains(receipt.sessionID.rawValue))
+            XCTAssertTrue(providerJSON.contains("Session 2026-08-30T12:00:00.000Z"))
+            XCTAssertFalse(providerJSON.contains(receipt.sessionID.rawValue))
+            XCTAssertFalse(providerJSON.contains(revision.revisionID.rawValue))
+        }
+    }
+
     func testChatAttachmentCatalogSkipsMalformedIndependentSessionEntry() async throws {
         try await withRecordedSession { root, receipt in
             let revision = try transcriptRevision(for: receipt)

@@ -351,6 +351,10 @@ final class CoachContextPlannerTests: XCTestCase {
         )
 
         XCTAssertEqual(observation.values, [canonicalTranscript])
+        XCTAssertEqual(
+            projection.canonicalTranscriptUTF8ByteCount,
+            canonicalTranscript.count
+        )
         XCTAssertEqual(candidate.approximateTranscriptTokens, canonicalTranscript.count)
         XCTAssertGreaterThan(
             candidate.approximateTranscriptTokens,
@@ -403,6 +407,59 @@ final class CoachContextPlannerTests: XCTestCase {
                 )
             }
         }
+    }
+
+    func testProviderAttachmentLabelCannotExposeLocalEvidenceIDs() throws {
+        let revision = try manyShortWordRevision(wordCount: 1)
+        let localDisplayLabel =
+            "Practice \(revision.sessionID.rawValue) · revision "
+            + revision.revisionID.rawValue
+        let evidence = ChatAttachmentEvidence(
+            displayLabel: localDisplayLabel,
+            revision: revision
+        )
+        let policy = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 8_192,
+            tokenEstimator: .utf8ByteUpperBound()
+        )
+        let projection = try policy.project(evidence: evidence)
+        let candidate = try projection.makeCandidate()
+        let prepared = try projection.prepareAttachment(
+            attachment: ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-privacy"),
+                sessionID: revision.sessionID,
+                transcriptRevisionID: revision.revisionID
+            ),
+            transcriptHandle: try PreparedCoachTranscriptHandle(
+                "00000000-0000-0000-0000-000000000001"
+            )
+        )
+        let configuration = try fixtureConfiguration(contextWindow: 100_000)
+        let request = try CoachContextPlanner().estimate(
+            PreparedCoachContext(
+                profile: .object(["statements": .array([])]),
+                memory: .object([
+                    "generalNotes": .string(""),
+                    "sessionSummaries": .array([]),
+                ]),
+                history: [],
+                trigger: .object([
+                    "kind": .string("userMessage"),
+                    "text": .string("Review this practice"),
+                ]),
+                attachments: [prepared]
+            ),
+            descriptor: configuration.descriptor,
+            policy: configuration.policy
+        ).exchange.request
+        let providerJSON = String(decoding: request, as: UTF8.self)
+
+        XCTAssertEqual(candidate.displayLabel, localDisplayLabel)
+        XCTAssertTrue(
+            providerJSON.contains(#""displayLabel":"Practice · revision""#)
+        )
+        XCTAssertFalse(providerJSON.contains(revision.sessionID.rawValue))
+        XCTAssertFalse(providerJSON.contains(revision.revisionID.rawValue))
     }
 
     func testAttachmentProjectionUsesInjectedExactCeilingAndProviderEstimator() throws {
@@ -685,6 +742,87 @@ final class CoachContextPlannerTests: XCTestCase {
         XCTAssertEqual(events[5], "release:1")
     }
 
+    func testCapacityProjectionStopsTraversalWhenRunningTranscriptBudgetIsExhausted()
+        async throws
+    {
+        let evidence = try (0 ..< 3).map { index in
+            ChatAttachmentEvidence(
+                displayLabel: "Session \(index)",
+                revision: try manyShortWordRevision(
+                    wordCount: 1,
+                    sessionID: "ses-20260830T12\(index)000000Z-3DE\(index)",
+                    revisionID: "trv-20260830T12\(index)100000Z-4FG\(index)"
+                )
+            )
+        }
+        let attachments = try ChatAttachments(
+            validating: try evidence.enumerated().map { index, item in
+                ChatSessionAttachment(
+                    attachmentID: try ChatSessionAttachmentID(
+                        "attachment-\(index + 1)"
+                    ),
+                    sessionID: item.sessionID,
+                    transcriptRevisionID: item.transcriptRevisionID
+                )
+            }
+        )
+        let traversal = AttachmentTraversalObservation()
+        let estimator = try CoachTokenEstimator(
+            identifier: "aggregate-budget-fixture-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { bytes in
+                traversal.record("project:\(bytes.count)")
+                return bytes.count
+            }
+        )
+        let policy = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: Int.max,
+            tokenEstimator: estimator
+        )
+        let exactTranscriptByteCount = try policy.project(
+            evidence: evidence[0]
+        ).canonicalTranscriptUTF8ByteCount
+        let resolved = try zip(attachments.values, evidence).map { attachment, item in
+            try ResolvedChatAttachmentEvidence(
+                attachment: attachment,
+                resolution: .available(item)
+            )
+        }
+        let source = ProjectedChatSessionAttachmentSource(
+            evidenceSource: AttachmentEvidenceSourceFixture(
+                catalog: [],
+                resolutions: resolved,
+                traversal: traversal
+            ),
+            configurationAuthority:
+                FixedAttachmentProjectionConfigurationAuthority(policy: policy),
+            maximumAggregateCanonicalTranscriptBytes:
+                exactTranscriptByteCount * 2 - 1
+        )
+        traversal.reset()
+        let library = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T120000000Z-7NPQ")
+        )
+
+        let outcome = await source.prepareCapacityAttachments(
+            attachments,
+            in: library
+        )
+
+        guard case .invalidContext = outcome else {
+            return XCTFail("aggregate transcript overflow must be invalid context")
+        }
+        let events = traversal.events
+        XCTAssertEqual(events.count, 5)
+        XCTAssertEqual(events[0], "load:0")
+        XCTAssertTrue(events[1].hasPrefix("project:"))
+        XCTAssertEqual(events[2], "release:0")
+        XCTAssertEqual(events[3], "load:1")
+        XCTAssertTrue(events[4].hasPrefix("project:"))
+        XCTAssertFalse(events.contains("load:2"))
+    }
+
     private func fixtureConfiguration(
         contextWindow: Int,
         responseReserve: Int = 32,
@@ -857,6 +995,10 @@ private final class AttachmentTraversalObservation: @unchecked Sendable {
     func record(_ event: String) {
         lock.withLock { recorded.append(event) }
     }
+
+    func reset() {
+        lock.withLock { recorded.removeAll() }
+    }
 }
 
 private struct FixedAttachmentProjectionConfigurationAuthority:
@@ -938,9 +1080,11 @@ private struct AttachmentEvidenceSourceFixture: ChatSessionAttachmentEvidenceSou
         _ visit: @escaping @Sendable (ResolvedChatAttachmentEvidence) throws -> Void
     ) async -> ChatAttachmentEvidenceTraversalOutcome {
         do {
-            for resolution in resolutions {
+            for (index, resolution) in resolutions.enumerated() {
                 try Task.checkCancellation()
+                traversal?.record("load:\(index)")
                 try visit(resolution)
+                traversal?.record("release:\(index)")
             }
             return .completedWithAuthority(
                 ChatCreationEvidenceAuthority(

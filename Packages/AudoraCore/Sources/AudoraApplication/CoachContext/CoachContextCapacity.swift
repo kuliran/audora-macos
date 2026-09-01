@@ -31,23 +31,29 @@ enum CoachContextQuoteInputError: Error, Equatable, Sendable {
 }
 
 struct CoachContextAggregateBudget {
+    private let maximumByteCount: Int
     private(set) var consumed = 0
 
+    init(
+        maximumByteCount: Int =
+            CoachContextInputLimits.maximumAggregateCanonicalUTF8Bytes
+    ) {
+        self.maximumByteCount = maximumByteCount
+    }
+
     var remaining: Int {
-        CoachContextInputLimits.maximumAggregateCanonicalUTF8Bytes - consumed
+        max(0, maximumByteCount - consumed)
     }
 
     mutating func consume(_ count: Int) throws {
-        guard count >= 0 else {
+        guard maximumByteCount >= 0, count >= 0 else {
             throw CoachContextQuoteInputError.integerOverflow
         }
         let addition = consumed.addingReportingOverflow(count)
         guard !addition.overflow else {
             throw CoachContextQuoteInputError.integerOverflow
         }
-        guard addition.partialValue <=
-            CoachContextInputLimits.maximumAggregateCanonicalUTF8Bytes
-        else {
+        guard addition.partialValue <= maximumByteCount else {
             throw CoachContextQuoteInputError.aggregateTooLarge
         }
         consumed = addition.partialValue

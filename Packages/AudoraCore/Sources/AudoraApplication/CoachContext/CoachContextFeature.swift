@@ -574,6 +574,8 @@ public struct DefaultCoachContextFeature:
             return .unavailable(.sourceUnavailable)
         case .attachmentUnavailable:
             return .unavailable(.invalidContext)
+        case .invalidContext:
+            return .unavailable(.invalidContext)
         case .failed:
             return .unavailable(.sourceUnavailable)
         }
