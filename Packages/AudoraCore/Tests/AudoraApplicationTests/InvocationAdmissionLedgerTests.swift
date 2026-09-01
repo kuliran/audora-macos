@@ -69,6 +69,29 @@ final class InvocationAdmissionLedgerTests: XCTestCase {
         )
     }
 
+    func testUnrepresentableReopeningInstantFailsClosed() throws {
+        let library = try scope("lib-20260830T120000000Z-1ABC")
+        var ledger = try RollingInvocationAdmissionLedger(
+            validating: [
+                RollingInvocationAdmissionEntry(
+                    library: library,
+                    lastAdmittedAt: try instant("9999-12-31T23:59:30.000Z")
+                ),
+            ],
+            maximumLibraries: 4
+        )
+        let lastRepresentableInstant = try instant("9999-12-31T23:59:59.999Z")
+
+        XCTAssertEqual(
+            ledger.availability(library: library, at: lastRepresentableInstant),
+            .invalidClockRange
+        )
+        XCTAssertEqual(
+            ledger.claim(library: library, at: lastRepresentableInstant),
+            .invalidClockRange
+        )
+    }
+
     func testBoundedLedgerRejectsANewLibraryWithoutEvictingDurableDebits() throws {
         var ledger = RollingInvocationAdmissionLedger(maximumLibraries: 1)
         let first = try scope("lib-20260830T120000000Z-1ABC")

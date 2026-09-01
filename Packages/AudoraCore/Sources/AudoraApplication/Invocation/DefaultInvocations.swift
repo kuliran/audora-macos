@@ -549,6 +549,13 @@ public actor DefaultInvocations: Invocations {
         case unavailable(PublicationRecoveryIntent)
     }
 
+    private enum TerminalRecoveryResolution {
+        case published(InvocationTryOutcome)
+        case eligible(InvocationPendingAuthority)
+        case ineligible(ChatAggregate?, unresolvedPublication: PublicationRecoveryIntent?)
+        case unavailable(unresolvedPublication: PublicationRecoveryIntent?)
+    }
+
     private struct OperationalRetrySnapshot: Sendable {
         let fallback: ChatAggregate
         let publication: PublicationRecoveryIntent?
@@ -1049,47 +1056,75 @@ public actor DefaultInvocations: Invocations {
         fallback: ChatAggregate,
         publication: PublicationRecoveryIntent? = nil
     ) async -> InvocationTryOutcome {
+        switch await resolveTerminalRecovery(
+            request: request,
+            publication: publication
+        ) {
+        case let .published(outcome):
+            return outcome
+        case let .eligible(authority):
+            return interruptionOutcome(
+                current: authority.aggregate,
+                request: request
+            )
+        case let .ineligible(current, unresolvedPublication):
+            if let unresolvedPublication {
+                return retainOperationalRetry(
+                    request: request,
+                    fallback: fallback,
+                    publication: unresolvedPublication
+                )
+            }
+            return interruptionOutcome(current: current, request: request)
+        case let .unavailable(unresolvedPublication):
+            return retainOperationalRetry(
+                request: request,
+                fallback: fallback,
+                publication: unresolvedPublication
+            )
+        }
+    }
+
+    private func resolveTerminalRecovery(
+        request: PendingCoachInvocationRequest,
+        publication: PublicationRecoveryIntent?
+    ) async -> TerminalRecoveryResolution {
         var unresolvedPublication: PublicationRecoveryIntent?
         if let publication {
             switch await resolvePublicationRecovery(publication) {
             case let .published(outcome):
-                return outcome
+                return .published(outcome)
             case .notPublished:
                 break
             case let .unavailable(unresolved):
                 unresolvedPublication = unresolved
             }
         }
-        switch await persistence.recoverPendingAfterTerminalFailure(request) {
+
+        return switch await persistence.recoverPendingAfterTerminalFailure(request) {
         case let .eligible(authority):
-            return interruptionOutcome(
-                current: authority.aggregate,
-                request: request
-            )
+            .eligible(authority)
         case let .ineligible(current):
-            if let unresolvedPublication {
-                operationalRetrySnapshots[request] = OperationalRetrySnapshot(
-                    fallback: fallback,
-                    publication: unresolvedPublication
-                )
-                return .operationallyInterrupted(
-                    fallback,
-                    request,
-                    .persistenceUnavailable
-                )
-            }
-            return interruptionOutcome(current: current, request: request)
+            .ineligible(current, unresolvedPublication: unresolvedPublication)
         case .unavailable:
-            operationalRetrySnapshots[request] = OperationalRetrySnapshot(
-                fallback: fallback,
-                publication: unresolvedPublication
-            )
-            return .operationallyInterrupted(
-                fallback,
-                request,
-                .persistenceUnavailable
-            )
+            .unavailable(unresolvedPublication: unresolvedPublication)
         }
+    }
+
+    private func retainOperationalRetry(
+        request: PendingCoachInvocationRequest,
+        fallback: ChatAggregate,
+        publication: PublicationRecoveryIntent?
+    ) -> InvocationTryOutcome {
+        operationalRetrySnapshots[request] = OperationalRetrySnapshot(
+            fallback: fallback,
+            publication: publication
+        )
+        return .operationallyInterrupted(
+            fallback,
+            request,
+            .persistenceUnavailable
+        )
     }
 
     private func interruptionOutcome(
@@ -1123,55 +1158,37 @@ public actor DefaultInvocations: Invocations {
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationTryOutcome? {
         guard let snapshot = operationalRetrySnapshots[request] else { return nil }
-        var unresolvedPublication: PublicationRecoveryIntent?
-        if let publication = snapshot.publication {
-            switch await resolvePublicationRecovery(publication) {
-            case let .published(outcome):
-                return outcome
-            case .notPublished:
-                break
-            case let .unavailable(unresolved):
-                unresolvedPublication = unresolved
-            }
-        }
-        switch await persistence.recoverPendingAfterTerminalFailure(request) {
+        switch await resolveTerminalRecovery(
+            request: request,
+            publication: snapshot.publication
+        ) {
+        case let .published(outcome):
+            return outcome
         case let .eligible(authority):
             guard authority.pendingUserTurn.failure != nil else {
-                operationalRetrySnapshots[request] = OperationalRetrySnapshot(
+                return retainOperationalRetry(
+                    request: request,
                     fallback: authority.aggregate,
                     publication: nil
-                )
-                return .operationallyInterrupted(
-                    authority.aggregate,
-                    request,
-                    .persistenceUnavailable
                 )
             }
             operationalRetrySnapshots.removeValue(forKey: request)
             return nil
-        case let .ineligible(current):
+        case let .ineligible(current, unresolvedPublication):
             if let unresolvedPublication {
-                operationalRetrySnapshots[request] = OperationalRetrySnapshot(
+                return retainOperationalRetry(
+                    request: request,
                     fallback: snapshot.fallback,
                     publication: unresolvedPublication
-                )
-                return .operationallyInterrupted(
-                    snapshot.fallback,
-                    request,
-                    .persistenceUnavailable
                 )
             }
             operationalRetrySnapshots.removeValue(forKey: request)
             return .rejected(current, .eligibilityChanged)
-        case .unavailable:
-            operationalRetrySnapshots[request] = OperationalRetrySnapshot(
+        case let .unavailable(unresolvedPublication):
+            return retainOperationalRetry(
+                request: request,
                 fallback: snapshot.fallback,
                 publication: unresolvedPublication
-            )
-            return .operationallyInterrupted(
-                snapshot.fallback,
-                request,
-                .persistenceUnavailable
             )
         }
     }

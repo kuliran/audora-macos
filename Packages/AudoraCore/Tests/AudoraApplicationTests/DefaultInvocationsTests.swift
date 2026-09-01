@@ -237,7 +237,9 @@ final class DefaultInvocationsTests: XCTestCase {
             contextWindow: 100_000,
             admissionDecision: .commitUncertain
         )
-        await fixture.persistence.failNextInterruptedMutationAfterCommit()
+        await fixture.persistence.scriptNextInterruptedMutation(
+            .committedButReportedFailed
+        )
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -256,8 +258,8 @@ final class DefaultInvocationsTests: XCTestCase {
     func testFailedAbortWithUnavailableRecoveryReturnsExactOperationalRetryIntent() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         await fixture.provider.failNextLaunch()
-        await fixture.persistence.failNextAbortWithoutCommit()
-        await fixture.persistence.makeInterruptionRecoveryUnavailable()
+        await fixture.persistence.scriptNextAbort(.failedWithoutCommit)
+        await fixture.persistence.scriptNextPendingRecovery(.unavailable)
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -278,13 +280,13 @@ final class DefaultInvocationsTests: XCTestCase {
     func testOperationalRetryReconcilesUnchangedPendingBeforeAtomicReacquisition() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         await fixture.provider.failNextLaunch()
-        await fixture.persistence.failNextAbortWithoutCommit()
-        await fixture.persistence.makeInterruptionRecoveryUnavailable()
+        await fixture.persistence.scriptNextAbort(.failedWithoutCommit)
+        await fixture.persistence.scriptNextPendingRecovery(.unavailable)
         guard case .operationallyInterrupted = await fixture.invocations.tryInvoke(
             fixture.request
         ) else { return XCTFail("first attempt must retain operational Retry") }
 
-        await fixture.persistence.makeInterruptionRecoveryAvailable()
+        await fixture.persistence.scriptNextPendingRecovery(.current)
         let retry = await fixture.invocations.tryInvoke(fixture.request)
 
         guard case let .published(aggregate, _) = retry else {
@@ -301,7 +303,7 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testInstallFailureAfterDurableDebitNeverLaunchesAndRetainsRetryableIntent() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence.failNextInstall()
+        await fixture.persistence.scriptNextInstall(.failed)
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -322,7 +324,7 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testInstallStaleOutcomeRetainsAStillMatchingPendingAsInterrupted() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence.staleNextInstall()
+        await fixture.persistence.scriptNextInstall(.staleWithCurrent)
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -341,7 +343,7 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testInstallActiveExistsAfterDebitRetainsPendingAsInterrupted() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence.returnActiveExistsNextInstall()
+        await fixture.persistence.scriptNextInstall(.activeExists)
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -361,7 +363,7 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testInstallStaleWithoutSnapshotStillTerminatesReservation() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence.staleWithoutSnapshotNextInstall()
+        await fixture.persistence.scriptNextInstall(.staleWithoutSnapshot)
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -383,7 +385,7 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testCASConflictAfterProviderLaunchPublishesNeitherMessageAndRetiresInvocation() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence.conflictNextPublication()
+        await fixture.persistence.scriptNextPublication(.staleWithCurrent)
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -494,7 +496,7 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testPublicationFailurePublishesNeitherSideAndRetiresInvocation() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence.failNextPublication()
+        await fixture.persistence.scriptNextPublication(.failedWithoutCommit)
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -514,7 +516,9 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testCommittedPublicationSurvivesFailedImmediateReconciliationWithExactQuote() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence.commitNextPublicationButReportFailure()
+        await fixture.persistence.scriptNextPublication(
+            .committedButReportedFailed(.unchanged)
+        )
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -536,9 +540,11 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testCommittedPublicationSurvivesAbortFailureAndRecoveryReread() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence.commitNextPublicationButReportFailure()
-        await fixture.persistence.makeNextPublicationRecoveryUnavailable()
-        await fixture.persistence.failNextAbortWithoutCommit()
+        await fixture.persistence.scriptNextPublication(
+            .committedButReportedFailed(.unchanged)
+        )
+        await fixture.persistence.scriptNextPublicationRecovery(.unavailable)
+        await fixture.persistence.scriptNextAbort(.failedWithoutCommit)
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -555,8 +561,9 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testTypedPublicationRecoveryAllowsLaterRenameAndFreshDraftEdit() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence
-            .commitNextPublicationButReportFailureAndEvolveChat()
+        await fixture.persistence.scriptNextPublication(
+            .committedButReportedFailed(.evolveChat)
+        )
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -579,12 +586,13 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testOperationalRetryUsesTypedProofForEvolvedPublishedChat() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence
-            .commitNextPublicationButReportFailureAndEvolveChat()
-        await fixture.persistence.makeNextPublicationRecoveryUnavailable()
-        await fixture.persistence.makeNextPublicationRecoveryUnavailable()
-        await fixture.persistence.failNextAbortWithoutCommit()
-        await fixture.persistence.makeInterruptionRecoveryUnavailable()
+        await fixture.persistence.scriptNextPublication(
+            .committedButReportedFailed(.evolveChat)
+        )
+        await fixture.persistence.scriptNextPublicationRecovery(.unavailable)
+        await fixture.persistence.scriptNextPublicationRecovery(.unavailable)
+        await fixture.persistence.scriptNextAbort(.failedWithoutCommit)
+        await fixture.persistence.scriptNextPendingRecovery(.unavailable)
 
         guard case let .operationallyInterrupted(
             fallback,
@@ -595,7 +603,7 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(fallback, fixture.initial)
         XCTAssertEqual(retryRequest, fixture.request)
 
-        await fixture.persistence.makeInterruptionRecoveryAvailable()
+        await fixture.persistence.scriptNextPendingRecovery(.current)
         let retry = await fixture.invocations.tryInvoke(fixture.request)
 
         guard case let .published(aggregate, quote) = retry else {
@@ -617,8 +625,9 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testTypedPublicationRejectionOverridesShallowReplacementEquality() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence
-            .installShallowPublicationImpostorButReportFailure()
+        await fixture.persistence.scriptNextPublication(
+            .shallowImpostorButReportedFailed
+        )
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -657,7 +666,7 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testSecondResolutionIneligibilityTerminatesTheExactReservation() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence.makeSecondResolutionIneligible()
+        await fixture.persistence.scriptNextRevalidation(.ineligible)
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
@@ -679,7 +688,9 @@ final class DefaultInvocationsTests: XCTestCase {
 
     func testIdentityCollisionRegeneratesBeforeAdmissionOrProviderLaunch() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
-        await fixture.persistence.collideNextIdentities([.userMessageID])
+        await fixture.persistence.scriptIdentityChecks([
+            .collision(.userMessageID)
+        ])
 
         guard case .published = await fixture.invocations.tryInvoke(fixture.request) else {
             return XCTFail("a fresh available candidate must continue through publication")
@@ -718,9 +729,9 @@ final class DefaultInvocationsTests: XCTestCase {
     func testEveryIdentityNamespaceCollisionExhaustsBeforeAdmissionAndProvider() async throws {
         for collision in InvocationLaunchIdentityCollision.allCases {
             let fixture = try InvocationFixture(contextWindow: 100_000)
-            await fixture.persistence.collideNextIdentities(
+            await fixture.persistence.scriptIdentityChecks(
                 Array(
-                    repeating: collision,
+                    repeating: .collision(collision),
                     count: DefaultInvocations.maximumLaunchIdentityCandidates
                 )
             )
@@ -846,26 +857,96 @@ private actor InvocationEventRecorder {
 }
 
 private actor MemoryInvocationPersistence: InvocationPersistencePort {
+    enum RevalidationDirective: Sendable {
+        case current
+        case ineligible
+    }
+
+    enum InstallDirective: Sendable {
+        case installed
+        case failed
+        case activeExists
+        case staleWithCurrent
+        case staleWithoutSnapshot
+    }
+
+    enum InterruptedMutationDirective: Sendable {
+        case committed
+        case committedButReportedFailed
+    }
+
+    enum PendingRecoveryDirective: Sendable {
+        case current
+        case unavailable
+    }
+
+    enum AbortDirective: Sendable {
+        case committed
+        case failedWithoutCommit
+    }
+
+    enum PublicationEvolution: Sendable {
+        case unchanged
+        case evolveChat
+    }
+
+    enum PublicationDirective: Sendable {
+        case committed
+        case failedWithoutCommit
+        case staleWithCurrent
+        case committedButReportedFailed(PublicationEvolution)
+        case shallowImpostorButReportedFailed
+    }
+
+    enum PublicationRecoveryDirective: Sendable {
+        case current
+        case unavailable
+    }
+
+    enum IdentityCheckDirective: Sendable {
+        case available
+        case collision(InvocationLaunchIdentityCollision)
+    }
+
+    private struct OperationScript<Directive: Sendable>: Sendable {
+        private var directives: [Directive] = []
+
+        mutating func append(_ directive: Directive) {
+            directives.append(directive)
+        }
+
+        mutating func append(contentsOf additions: [Directive]) {
+            directives.append(contentsOf: additions)
+        }
+
+        mutating func next(defaultingTo defaultDirective: Directive) -> Directive {
+            guard !directives.isEmpty else { return defaultDirective }
+            return directives.removeFirst()
+        }
+    }
+
+    private struct PersistenceScript: Sendable {
+        var revalidations = OperationScript<RevalidationDirective>()
+        var installs = OperationScript<InstallDirective>()
+        var interruptedMutations = OperationScript<InterruptedMutationDirective>()
+        var pendingRecoveries = OperationScript<PendingRecoveryDirective>()
+        var aborts = OperationScript<AbortDirective>()
+        var publications = OperationScript<PublicationDirective>()
+        var publicationRecoveries = OperationScript<PublicationRecoveryDirective>()
+        var identityChecks = OperationScript<IdentityCheckDirective>()
+    }
+
+    private enum PublicationProofState: Equatable {
+        case none
+        case exact
+        case impostor
+    }
+
     private var aggregate: ChatAggregate
     private let recorder: InvocationEventRecorder
-    private var installFails = false
-    private var installReturnsActiveExists = false
-    private var installStales = false
-    private var installStalesWithoutSnapshot = false
-    private var publicationConflicts = false
-    private var publicationFails = false
-    private var publicationCommitsButReportsFailure = false
-    private var publicationCommitEvolvesChat = false
-    private var publicationInstallsShallowImpostor = false
-    private var exactPublicationCommitted = false
-    private var unavailablePublicationRecoveryCount = 0
-    private var secondResolutionIsIneligible = false
-    private var interruptedMutationFailsAfterCommit = false
-    private var abortFailsWithoutCommit = false
-    private var interruptionRecoveryUnavailable = false
-    private var identityCollisions: [InvocationLaunchIdentityCollision] = []
+    private var script = PersistenceScript()
+    private var publicationProof = PublicationProofState.none
     private(set) var identityCheckCount = 0
-    private var resolutionCount = 0
     private var reservedRequest: PendingCoachInvocationRequest?
     private(set) var activeInvocation: CoachInvocation?
     private(set) var publicationCount = 0
@@ -878,39 +959,38 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         self.recorder = recorder
     }
 
-    func failNextInstall() { installFails = true }
-    func returnActiveExistsNextInstall() { installReturnsActiveExists = true }
-    func staleNextInstall() { installStales = true }
-    func staleWithoutSnapshotNextInstall() { installStalesWithoutSnapshot = true }
-    func conflictNextPublication() { publicationConflicts = true }
-    func failNextPublication() { publicationFails = true }
-    func commitNextPublicationButReportFailure() {
-        publicationCommitsButReportsFailure = true
+    func scriptNextRevalidation(_ directive: RevalidationDirective) {
+        script.revalidations.append(directive)
     }
-    func commitNextPublicationButReportFailureAndEvolveChat() {
-        publicationCommitsButReportsFailure = true
-        publicationCommitEvolvesChat = true
+
+    func scriptNextInstall(_ directive: InstallDirective) {
+        script.installs.append(directive)
     }
-    func makeNextPublicationRecoveryUnavailable() {
-        unavailablePublicationRecoveryCount += 1
+
+    func scriptNextInterruptedMutation(_ directive: InterruptedMutationDirective) {
+        script.interruptedMutations.append(directive)
     }
-    func installShallowPublicationImpostorButReportFailure() {
-        publicationInstallsShallowImpostor = true
+
+    func scriptNextPendingRecovery(_ directive: PendingRecoveryDirective) {
+        script.pendingRecoveries.append(directive)
     }
-    func makeSecondResolutionIneligible() { secondResolutionIsIneligible = true }
-    func failNextInterruptedMutationAfterCommit() {
-        interruptedMutationFailsAfterCommit = true
+
+    func scriptNextAbort(_ directive: AbortDirective) {
+        script.aborts.append(directive)
     }
-    func failNextAbortWithoutCommit() { abortFailsWithoutCommit = true }
-    func makeInterruptionRecoveryUnavailable() {
-        interruptionRecoveryUnavailable = true
+
+    func scriptNextPublication(_ directive: PublicationDirective) {
+        script.publications.append(directive)
     }
-    func makeInterruptionRecoveryAvailable() {
-        interruptionRecoveryUnavailable = false
+
+    func scriptNextPublicationRecovery(_ directive: PublicationRecoveryDirective) {
+        script.publicationRecoveries.append(directive)
     }
-    func collideNextIdentities(_ collisions: [InvocationLaunchIdentityCollision]) {
-        identityCollisions = collisions
+
+    func scriptIdentityChecks(_ directives: [IdentityCheckDirective]) {
+        script.identityChecks.append(contentsOf: directives)
     }
+
     func resetForNewSend(_ unlocked: ChatAggregate) {
         aggregate = unlocked
         reservedRequest = nil
@@ -952,7 +1032,6 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         guard activeInvocation == nil, reservedRequest == nil else {
             return .activeExists
         }
-        resolutionCount += 1
         guard request.chatID == aggregate.chat.id,
               request.pendingUserTurnID == aggregate.pendingUserTurn?.id
         else { return .ineligible(aggregate) }
@@ -968,10 +1047,11 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingResolutionOutcome {
         await recorder.record("revalidate")
-        resolutionCount += 1
         guard reservedRequest == authority.request else { return .unavailable }
-        if secondResolutionIsIneligible, resolutionCount == 2 {
-            secondResolutionIsIneligible = false
+        switch script.revalidations.next(defaultingTo: .current) {
+        case .current:
+            break
+        case .ineligible:
             reservedRequest = nil
             return .ineligible(aggregate)
         }
@@ -994,21 +1074,17 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     ) async -> InvocationInstallOutcome {
         await recorder.record("install")
         guard reservedRequest == mutation.authority.request else { return .failed }
-        if installFails {
-            installFails = false
+        switch script.installs.next(defaultingTo: .installed) {
+        case .installed:
+            break
+        case .failed:
             return .failed
-        }
-        if installReturnsActiveExists {
-            installReturnsActiveExists = false
+        case .activeExists:
             return .activeExists
-        }
-        if installStalesWithoutSnapshot {
-            installStalesWithoutSnapshot = false
-            return .stale(nil)
-        }
-        if installStales {
-            installStales = false
+        case .staleWithCurrent:
             return .stale(aggregate)
+        case .staleWithoutSnapshot:
+            return .stale(nil)
         }
         guard activeInvocation == nil else { return .activeExists }
         guard mutation.authority.aggregate == aggregate else { return .stale(aggregate) }
@@ -1031,8 +1107,12 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         guard reservedRequest == authority.request,
               aggregate == authority.aggregate
         else { return .stale(aggregate) }
-        guard !identityCollisions.isEmpty else { return .available }
-        return .collision(identityCollisions.removeFirst())
+        switch script.identityChecks.next(defaultingTo: .available) {
+        case .available:
+            return .available
+        case let .collision(collision):
+            return .collision(collision)
+        }
     }
 
     func markContextCapacityFailure(
@@ -1045,18 +1125,24 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
         let outcome = markPendingFailure(authority, failure: .coachResponseInterrupted)
-        if interruptedMutationFailsAfterCommit {
-            interruptedMutationFailsAfterCommit = false
+        switch script.interruptedMutations.next(defaultingTo: .committed) {
+        case .committed:
+            return outcome
+        case .committedButReportedFailed:
             return .failed
         }
-        return outcome
     }
 
     func recoverPendingAfterTerminalFailure(
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationPendingResolutionOutcome {
         recoveredRequests.append(request)
-        guard !interruptionRecoveryUnavailable else { return .unavailable }
+        switch script.pendingRecoveries.next(defaultingTo: .current) {
+        case .current:
+            break
+        case .unavailable:
+            return .unavailable
+        }
         guard request.chatID == aggregate.chat.id,
               request.pendingUserTurnID == aggregate.pendingUserTurn?.id
         else { return .ineligible(aggregate) }
@@ -1105,8 +1191,10 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         _ invocation: CoachInvocation
     ) async -> InvocationPendingMutationOutcome {
         guard activeInvocation == invocation else { return .stale(aggregate) }
-        if abortFailsWithoutCommit {
-            abortFailsWithoutCommit = false
+        switch script.aborts.next(defaultingTo: .committed) {
+        case .committed:
+            break
+        case .failedWithoutCommit:
             activeInvocation = nil
             return .failed
         }
@@ -1131,20 +1219,20 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         await recorder.record("publish")
         publicationCount += 1
         guard activeInvocation == mutation.invocation else { return .stale(aggregate) }
-        if publicationInstallsShallowImpostor {
-            publicationInstallsShallowImpostor = false
+        switch script.publications.next(defaultingTo: .committed) {
+        case .shallowImpostorButReportedFailed:
             lastPublication = mutation
             aggregate = mutation.replacement
-            exactPublicationCommitted = false
+            publicationProof = .impostor
             return .failed
-        }
-        if publicationCommitsButReportsFailure {
-            publicationCommitsButReportsFailure = false
+        case let .committedButReportedFailed(evolution):
             lastPublication = mutation
             aggregate = mutation.replacement
-            exactPublicationCommitted = true
-            if publicationCommitEvolvesChat {
-                publicationCommitEvolvesChat = false
+            publicationProof = .exact
+            switch evolution {
+            case .unchanged:
+                break
+            case .evolveChat:
                 let renamed = try! RenameChatMutation(
                     library: LibraryScope(
                         libraryID: mutation.invocation.libraryID
@@ -1163,20 +1251,18 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
                 )
             }
             return .failed
-        }
-        if publicationFails {
-            publicationFails = false
+        case .failedWithoutCommit:
             return .failed
-        }
-        if publicationConflicts {
-            publicationConflicts = false
+        case .staleWithCurrent:
             return .stale(aggregate)
+        case .committed:
+            break
         }
         guard mutation.base == aggregate else { return .stale(aggregate) }
         lastPublication = mutation
         aggregate = mutation.replacement
         activeInvocation = nil
-        exactPublicationCommitted = true
+        publicationProof = .exact
         return .committed(aggregate)
     }
 
@@ -1184,11 +1270,13 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         _ mutation: PublishCoachInvocationMutation
     ) async -> InvocationPublicationRecoveryOutcome {
         publicationRecoveryCount += 1
-        if unavailablePublicationRecoveryCount > 0 {
-            unavailablePublicationRecoveryCount -= 1
+        switch script.publicationRecoveries.next(defaultingTo: .current) {
+        case .current:
+            break
+        case .unavailable:
             return .unavailable
         }
-        guard exactPublicationCommitted,
+        guard publicationProof == .exact,
               lastPublication == mutation
         else { return .notPublished }
         activeInvocation = nil

@@ -1549,7 +1549,7 @@ final class PortableChatPersistenceTests: XCTestCase {
                 isDirectory: true
             )
 
-            XCTAssertThrowsError(
+            XCTAssertNoThrow(
                 try persistence.reconcileInterruptedInvocations(
                     at: root,
                     in: scope
