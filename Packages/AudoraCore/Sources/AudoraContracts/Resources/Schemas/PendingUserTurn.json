@@ -1,39 +1,83 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "$id": "https://audora.local/contracts/PendingUserTurn.json",
-    "type": "object",
-    "properties": {
-        "schemaVersion": {
-            "type": "number",
-            "const": 1
+    "anyOf": [
+        {
+            "$ref": "#/$defs/PendingUserTurnV1"
         },
-        "pendingUserTurnId": {
-            "$ref": "#/$defs/PendingUserTurnId"
-        },
-        "draftId": {
-            "$ref": "#/$defs/ChatDraftId"
-        },
-        "draftVersion": {
-            "$ref": "#/$defs/NonnegativeWholeNumber"
-        },
-        "responsePositionId": {
-            "$ref": "#/$defs/ChatResponsePositionId"
-        },
-        "failure": {
-            "$ref": "#/$defs/PendingUserTurnFailure"
+        {
+            "$ref": "#/$defs/PendingUserTurnV2"
         }
-    },
-    "required": [
-        "schemaVersion",
-        "pendingUserTurnId",
-        "draftId",
-        "draftVersion",
-        "responsePositionId"
     ],
-    "unevaluatedProperties": {
-        "not": {}
-    },
     "$defs": {
+        "PendingUserTurnV1": {
+            "type": "object",
+            "properties": {
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                },
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "draftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "failure": {
+                    "$ref": "#/$defs/PendingUserTurnFailureV1"
+                }
+            },
+            "required": [
+                "pendingUserTurnId",
+                "draftId",
+                "draftVersion",
+                "responsePositionId",
+                "schemaVersion"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PendingUserTurnV2": {
+            "type": "object",
+            "properties": {
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                },
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "draftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 2
+                },
+                "failure": {
+                    "$ref": "#/$defs/PendingUserTurnFailure"
+                }
+            },
+            "required": [
+                "pendingUserTurnId",
+                "draftId",
+                "draftVersion",
+                "responsePositionId",
+                "schemaVersion"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "PendingUserTurnId": {
             "type": "string",
             "pattern": "^ptu-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
@@ -49,6 +93,14 @@
         "ChatResponsePositionId": {
             "type": "string",
             "pattern": "^rsp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "PendingUserTurnFailureV1": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "coachContextCannotFit"
+                }
+            ]
         },
         "PendingUserTurnFailure": {
             "anyOf": [

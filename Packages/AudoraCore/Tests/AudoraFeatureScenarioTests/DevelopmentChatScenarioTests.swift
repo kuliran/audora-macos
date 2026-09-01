@@ -937,13 +937,15 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
 
 private actor ScenarioInvocationPersistence: InvocationPersistencePort {
     private let store: ChatScenarioStore
+    private var reserved: PendingCoachInvocationRequest?
     private var active: CoachInvocation?
 
     init(store: ChatScenarioStore) { self.store = store }
 
-    func resolvePending(
+    func acquirePendingInvocation(
         _ request: PendingCoachInvocationRequest
-    ) async -> InvocationPendingResolutionOutcome {
+    ) async -> InvocationPendingAcquisitionOutcome {
+        guard active == nil, reserved == nil else { return .activeExists }
         guard let aggregate = await store.invocationSnapshot(request.chatID) else {
             return .ineligible(nil)
         }
@@ -951,13 +953,27 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
             request: request,
             aggregate: aggregate
         ) else { return .ineligible(aggregate) }
-        return .eligible(authority)
+        reserved = request
+        return .acquired(authority)
     }
 
-    func reserveInvocation(
-        _ request: PendingCoachInvocationRequest
-    ) async -> InvocationActiveCheckOutcome {
-        active == nil ? .none : .exists
+    func revalidatePendingInvocation(
+        _ authority: InvocationPendingAuthority
+    ) async -> InvocationPendingResolutionOutcome {
+        guard reserved == authority.request else { return .unavailable }
+        guard let aggregate = await store.invocationSnapshot(authority.request.chatID)
+        else {
+            reserved = nil
+            return .ineligible(nil)
+        }
+        guard let current = try? InvocationPendingAuthority(
+            request: authority.request,
+            aggregate: aggregate
+        ) else {
+            reserved = nil
+            return .ineligible(aggregate)
+        }
+        return .eligible(current)
     }
 
     func installInvocation(
@@ -969,13 +985,16 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
         else {
             return .stale(await store.invocationSnapshot(mutation.invocation.chatID))
         }
+        reserved = nil
         active = mutation.invocation
         return .installed(mutation.invocation)
     }
 
     func cancelInvocationReservation(
         _ request: PendingCoachInvocationRequest
-    ) async {}
+    ) async {
+        if reserved == request { reserved = nil }
+    }
 
     func checkLaunchIdentity(
         _ identity: InvocationLaunchIdentity,
@@ -1003,6 +1022,7 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
         _ authority: InvocationPendingAuthority,
         failure: PendingUserTurnFailure
     ) async -> InvocationPendingMutationOutcome {
+        if reserved == authority.request { reserved = nil }
         let failed = authority.pendingUserTurn.replacingFailure(failure)
         guard let mutation = try? ReplacePendingUserTurnMutation(
             library: authority.request.library,
@@ -1016,7 +1036,8 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
     func rejectNewSend(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
-        pendingOutcome(
+        if reserved == authority.request { reserved = nil }
+        return pendingOutcome(
             await store.discardPendingUserTurn(
                 DiscardPendingUserTurnMutation(
                     library: authority.request.library,

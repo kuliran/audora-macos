@@ -601,6 +601,7 @@ final class ContractResourcesTests: XCTestCase {
             pending["responsePositionId"] as? String,
             "rsp-20260830T120001000Z-6PQR"
         )
+        XCTAssertEqual((pending["schemaVersion"] as? NSNumber)?.uint32Value, 2)
         XCTAssertNil(pending["failure"])
 
         let failed = try jsonObject(.pendingUserTurnCapacityFailureExample)
@@ -612,6 +613,21 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(failed["responsePositionId"] as? String,
                        pending["responsePositionId"] as? String)
         XCTAssertEqual(failed["failure"] as? String, "coachContextCannotFit")
+        XCTAssertEqual((failed["schemaVersion"] as? NSNumber)?.uint32Value, 2)
+
+        let interrupted = try jsonObject(.pendingUserTurnInterruptedExample)
+        XCTAssertEqual(
+            interrupted["failure"] as? String,
+            "coachResponseInterrupted"
+        )
+        XCTAssertEqual(
+            (interrupted["schemaVersion"] as? NSNumber)?.uint32Value,
+            2
+        )
+
+        let legacy = try jsonObject(.pendingUserTurnLegacyV1Example)
+        XCTAssertEqual((legacy["schemaVersion"] as? NSNumber)?.uint32Value, 1)
+        XCTAssertEqual(legacy["failure"] as? String, "coachContextCannotFit")
 
         let schema = try XCTUnwrap(
             String(

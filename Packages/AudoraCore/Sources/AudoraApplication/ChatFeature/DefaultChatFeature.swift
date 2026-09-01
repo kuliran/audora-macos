@@ -554,6 +554,8 @@ public actor DefaultChatFeature: ChatFeature {
                 contextAdvisory: state.contextAdvisory,
                 admissionAvailability: state.admissionAvailability,
                 createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
+                operationallyInterruptedInvocation:
+                    state.operationallyInterruptedInvocation,
                 activity: state.activity,
                 notice: state.notice
             )
@@ -573,6 +575,8 @@ public actor DefaultChatFeature: ChatFeature {
             contextAdvisory: state.contextAdvisory,
             admissionAvailability: state.admissionAvailability,
             createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
+            operationallyInterruptedInvocation:
+                state.operationallyInterruptedInvocation,
             activity: state.activity,
             notice: nil
         )
@@ -891,15 +895,19 @@ public actor DefaultChatFeature: ChatFeature {
             return
         }
 
-        let outcome = await gateway.tryInvoke(
-            PendingCoachInvocationRequest(
-                library: context.libraryScope,
-                chatID: locked.chat.id,
-                pendingUserTurnID: pending.id
-            )
+        let request = PendingCoachInvocationRequest(
+            library: context.libraryScope,
+            chatID: locked.chat.id,
+            pendingUserTurnID: pending.id
         )
+        let outcome = await gateway.tryInvoke(request)
         guard isActive(context) else { return }
         applyInvocationOutcome(outcome)
+        await refreshSelectionIfInvocationEligibilityVanished(
+            outcome,
+            request: request,
+            context: context
+        )
         await refreshAdmissionAvailability(in: context)
     }
 
@@ -943,7 +951,12 @@ public actor DefaultChatFeature: ChatFeature {
             if let current {
                 install(current, selection: .open(current), notice: notice)
             } else {
-                state = replacing(activity: nil, notice: .coachResponseInterrupted)
+                state = replacing(
+                    operationallyInterruptedInvocation: nil,
+                    replacesOperationallyInterruptedInvocation: true,
+                    activity: nil,
+                    notice: notice
+                )
                 publish()
             }
         case let .interrupted(current, _):
@@ -957,6 +970,59 @@ public actor DefaultChatFeature: ChatFeature {
                 state = replacing(activity: nil, notice: .coachResponseInterrupted)
                 publish()
             }
+        case let .operationallyInterrupted(current, request, _):
+            if let current = preferredOperationalInterruptionAggregate(
+                current,
+                request: request
+            ) {
+                install(
+                    current,
+                    selection: .open(current),
+                    notice: .coachResponseInterrupted,
+                    operationallyInterruptedInvocation: request
+                )
+            } else {
+                state = replacing(
+                    operationallyInterruptedInvocation: nil,
+                    replacesOperationallyInterruptedInvocation: true,
+                    activity: nil,
+                    notice: .coachSendUnavailable
+                )
+                publish()
+            }
+        }
+    }
+
+    private func preferredOperationalInterruptionAggregate(
+        _ observed: ChatAggregate?,
+        request: PendingCoachInvocationRequest
+    ) -> ChatAggregate? {
+        func exactFailureFreePending(_ aggregate: ChatAggregate?) -> ChatAggregate? {
+            guard let aggregate,
+                  aggregate.chat.id == request.chatID,
+                  let pending = aggregate.pendingUserTurn,
+                  pending.id == request.pendingUserTurnID,
+                  pending.failure == nil
+            else { return nil }
+            return aggregate
+        }
+
+        let selected: ChatAggregate? = {
+            guard case let .open(aggregate) = state.selection else { return nil }
+            return exactFailureFreePending(aggregate)
+        }()
+        let observed = exactFailureFreePending(observed)
+        switch (selected, observed) {
+        case let (.some(selected), .some(observed)):
+            return observed.chat.manifestRevision > selected.chat.manifestRevision
+                ? observed
+                : selected
+        case let (.some(selected), .none):
+            return selected
+        case let (.none, .some(observed)):
+            return observed
+        case (.none, .none):
+            return nil
         }
     }
 
@@ -1023,7 +1089,7 @@ public actor DefaultChatFeature: ChatFeature {
               case let .open(aggregate) = state.selection,
               let pending = aggregate.pendingUserTurn,
               pending.id == pendingUserTurnID,
-              pending.failure != nil,
+              (pending.failure != nil || state.isCoachResponseInterrupted(pending)),
               case let .locked(draft, locked) = state.composer,
               locked == pending,
               draft == aggregate.chat.draft
@@ -1036,16 +1102,31 @@ public actor DefaultChatFeature: ChatFeature {
             notice: nil
         )
         publish()
-        let outcome = await invocations.tryInvoke(
-            PendingCoachInvocationRequest(
-                library: context.libraryScope,
-                chatID: aggregate.chat.id,
-                pendingUserTurnID: pending.id
-            )
+        let request = PendingCoachInvocationRequest(
+            library: context.libraryScope,
+            chatID: aggregate.chat.id,
+            pendingUserTurnID: pending.id
         )
+        let outcome = await invocations.tryInvoke(request)
         guard isActive(context) else { return }
         applyInvocationOutcome(outcome)
+        await refreshSelectionIfInvocationEligibilityVanished(
+            outcome,
+            request: request,
+            context: context
+        )
         await refreshAdmissionAvailability(in: context)
+    }
+
+    private func refreshSelectionIfInvocationEligibilityVanished(
+        _ outcome: InvocationTryOutcome,
+        request: PendingCoachInvocationRequest,
+        context: ChatCommandContext
+    ) async {
+        guard case .rejected(nil, .eligibilityChanged) = outcome,
+              request.library == context.libraryScope
+        else { return }
+        await open(request.chatID, context: context)
     }
 
     private func createNewChatFromCapacityFailure(
@@ -1091,6 +1172,8 @@ public actor DefaultChatFeature: ChatFeature {
             contextAdvisory: state.contextAdvisory,
             admissionAvailability: availability,
             createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
+            operationallyInterruptedInvocation:
+                state.operationallyInterruptedInvocation,
             activity: state.activity,
             notice: state.notice
         )
@@ -1430,7 +1513,8 @@ public actor DefaultChatFeature: ChatFeature {
         selection: ChatFeatureState.Selection,
         notice: ChatNotice?,
         composer override: ChatComposerState? = nil,
-        activity: ChatFeatureState.Activity? = nil
+        activity: ChatFeatureState.Activity? = nil,
+        operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil
     ) {
         var rows = currentAllRows.filter { $0.chatID != aggregate.chat.id }
         rows.append(ChatRowSnapshot(aggregate: aggregate))
@@ -1440,12 +1524,25 @@ public actor DefaultChatFeature: ChatFeature {
         } else {
             installedComposer = state.composer
         }
+        let retainedOperationalInterruption =
+            operationallyInterruptedInvocation ?? state.operationallyInterruptedInvocation
+        let installedOperationalInterruption: PendingCoachInvocationRequest? = {
+            guard let request = retainedOperationalInterruption,
+                  activeContext?.libraryScope == request.library,
+                  aggregate.chat.id == request.chatID,
+                  let pending = aggregate.pendingUserTurn,
+                  pending.id == request.pendingUserTurnID,
+                  pending.failure == nil
+            else { return nil }
+            return request
+        }()
         finishInstall(
             rows: rows,
             selection: selection,
             composer: installedComposer,
             activity: activity,
-            notice: notice
+            notice: notice,
+            operationallyInterruptedInvocation: installedOperationalInterruption
         )
     }
 
@@ -1467,7 +1564,8 @@ public actor DefaultChatFeature: ChatFeature {
             selection: selection,
             composer: composer,
             activity: nil,
-            notice: notice
+            notice: notice,
+            operationallyInterruptedInvocation: nil
         )
     }
 
@@ -1476,7 +1574,8 @@ public actor DefaultChatFeature: ChatFeature {
         selection: ChatFeatureState.Selection,
         composer: ChatComposerState?,
         activity: ChatFeatureState.Activity?,
-        notice: ChatNotice?
+        notice: ChatNotice?,
+        operationallyInterruptedInvocation: PendingCoachInvocationRequest?
     ) {
         let sorted = sortedRows(rows)
         let preservesSelectedChat: Bool = {
@@ -1504,6 +1603,7 @@ public actor DefaultChatFeature: ChatFeature {
             createNewChatRecoveryIntent: preservesSelectedChat
                 ? state.createNewChatRecoveryIntent
                 : nil,
+            operationallyInterruptedInvocation: operationallyInterruptedInvocation,
             activity: activity,
             notice: notice
         )
@@ -1590,6 +1690,8 @@ public actor DefaultChatFeature: ChatFeature {
         contextAdvisory: CoachContextAdvisoryState? = nil,
         recoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
         clearsRecoveryIntent: Bool = false,
+        operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
+        replacesOperationallyInterruptedInvocation: Bool = false,
         activity: ChatFeatureState.Activity?,
         notice: ChatNotice?
     ) -> ChatFeatureState {
@@ -1603,6 +1705,10 @@ public actor DefaultChatFeature: ChatFeature {
             createNewChatRecoveryIntent: clearsRecoveryIntent
                 ? nil
                 : recoveryIntent ?? state.createNewChatRecoveryIntent,
+            operationallyInterruptedInvocation:
+                replacesOperationallyInterruptedInvocation
+                ? operationallyInterruptedInvocation
+                : state.operationallyInterruptedInvocation,
             activity: activity,
             notice: notice
         )

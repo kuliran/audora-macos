@@ -454,6 +454,113 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testPendingUserTurnEncoderWritesV2ForInterruptedFailure() throws {
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: try ChatDraftID("drf-20260830T120000000Z-3DEF"),
+            draftVersion: 1,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            ),
+            failure: .coachResponseInterrupted
+        )
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: PortableChatPersistence().encodePendingUserTurn(pending)
+            ) as? [String: Any]
+        )
+
+        XCTAssertEqual((object["schemaVersion"] as? NSNumber)?.uint32Value, 2)
+        XCTAssertEqual(object["failure"] as? String, "coachResponseInterrupted")
+    }
+
+    func testLegacyV1PendingFailuresAreStrictAndValidStateUpgradesOnWrite() throws {
+        try withCreatedChat { root, scope, original in
+            let persistence = PortableChatPersistence()
+            let pending = PendingUserTurn(
+                id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+                draftID: original.chat.draft.draftID,
+                draftVersion: original.chat.draft.version,
+                responsePositionID: try ChatResponsePositionID(
+                    "rsp-20260830T120001000Z-6PQR"
+                )
+            )
+            guard case let .committed(locked) = try persistence.lockPendingUserTurn(
+                LockPendingUserTurnMutation(
+                    library: scope,
+                    chatID: original.chat.id,
+                    pendingUserTurn: pending
+                ),
+                at: root
+            ) else { return XCTFail("Pending setup did not commit") }
+            let pendingURL = chatRoot(root, original.chat.id)
+                .appendingPathComponent("pending-user-turn.json")
+
+            try rewritePending(
+                at: pendingURL,
+                schemaVersion: 1,
+                failure: nil
+            )
+            XCTAssertEqual(
+                try persistence.load(original.chat.id, at: root, in: scope),
+                .readWrite(locked)
+            )
+
+            let capacity = pending.replacingFailure(.coachContextCannotFit)
+            guard case let .committed(upgraded) = try persistence.replacePendingUserTurn(
+                ReplacePendingUserTurnMutation(
+                    library: scope,
+                    chatID: original.chat.id,
+                    base: pending,
+                    replacement: capacity
+                ),
+                at: root
+            ) else { return XCTFail("legacy Pending did not upgrade on write") }
+            let upgradedObject = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: pendingURL))
+                    as? [String: Any]
+            )
+            XCTAssertEqual(
+                (upgradedObject["schemaVersion"] as? NSNumber)?.uint32Value,
+                2
+            )
+            XCTAssertEqual(upgraded.pendingUserTurn, capacity)
+
+            try rewritePending(
+                at: pendingURL,
+                schemaVersion: 1,
+                failure: .coachContextCannotFit
+            )
+            XCTAssertEqual(
+                try persistence.load(original.chat.id, at: root, in: scope),
+                .readWrite(upgraded)
+            )
+
+            try rewritePending(
+                at: pendingURL,
+                schemaVersion: 1,
+                failure: .coachResponseInterrupted
+            )
+            try assertChatFreezesAsCorrupt(original.chat.id, at: root, in: scope)
+
+            try rewritePending(
+                at: pendingURL,
+                schemaVersion: 3,
+                failure: .coachResponseInterrupted
+            )
+            XCTAssertEqual(
+                try persistence.load(original.chat.id, at: root, in: scope),
+                .frozen(
+                    FrozenChatSnapshot(
+                        chatID: original.chat.id,
+                        reason: .newerSchema
+                    )
+                )
+            )
+        }
+    }
+
     func testCapacityFailureReplacementReconcilesPostcommitFault() throws {
         try withCreatedChat { root, scope, original in
             let baseline = PortableChatPersistence()
@@ -2402,6 +2509,25 @@ final class PortableChatPersistenceTests: XCTestCase {
                 .appendingPathComponent("messages/\(message.id.rawValue).json"),
             options: .atomic
         )
+    }
+
+    private func rewritePending(
+        at url: URL,
+        schemaVersion: UInt32,
+        failure: PendingUserTurnFailure?
+    ) throws {
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url))
+                as? [String: Any]
+        )
+        object["schemaVersion"] = schemaVersion
+        if let failure {
+            object["failure"] = failure.rawValue
+        } else {
+            object.removeValue(forKey: "failure")
+        }
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            .write(to: url, options: .atomic)
     }
 
     private func assertChatFreezesAsCorrupt(

@@ -31,6 +31,10 @@ TypeSpec compilation emits committed JSON Schemas into the `AudoraContracts`
 package resources. Application and scenario runners do not need Node or TypeSpec
 at runtime.
 
+`PendingUserTurn.json` is a versioned union: strict legacy v1 permits no failure
+or `coachContextCannotFit`, while current v2 additionally permits
+`coachResponseInterrupted`. The committed examples cover both versions.
+
 - [`AudioImportFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioImportFeatureScenario.json)
 - [`AudioManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json)
 - [`AudioNormalizationVectors.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioNormalizationVectors.json)

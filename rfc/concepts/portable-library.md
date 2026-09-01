@@ -109,6 +109,12 @@ Chat root cannot be migrated without changing its meaning, Audora freezes that
 Chat and instructs the user to create a new one; it does not invent replacement
 history.
 
+Pending User Turn v2 adds `coachResponseInterrupted`. The reader still accepts a
+strict v1 record only when `failure` is absent or `coachContextCannotFit`; a v1
+record that claims the v2 interruption value is corrupt. The next write of a
+valid v1 Pending upgrades it to v2, while a version newer than v2 freezes only
+its own Chat as newer-schema data.
+
 ## Development Profile
 
 Each Library owns one Development Profile. `profile/head.json` selects either one
@@ -432,6 +438,13 @@ preserves the exact Pending User Turn as interrupted and user-retryable. Launch
 identity preflight checks all six bounded namespaces without requiring sibling
 Chat aggregates to decode or become writable; corrupt and newer-schema siblings
 therefore freeze only themselves.
+The Invocation gateway acquires the cross-process Library liveness lease before
+its first exact Pending read and retains that lease through its guarded reread,
+installation, and terminal mutation. Catalog recovery therefore cannot classify
+a live failure-free Pending as an abandoned launch between resolution and
+ownership. If a terminal write remains uncertain after the lease is handed off,
+recovery first reconciles and rereads storage; only persistent I/O failure uses an
+Application-only exact Retry projection, never a fabricated durable aggregate.
 
 ## Atomicity and recovery
 

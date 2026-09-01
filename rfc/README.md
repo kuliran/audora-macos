@@ -150,6 +150,11 @@ If the machine-local ledger rename succeeds but its parent-directory flush canno
 prove durability, Audora treats the debit as possibly committed and preserves the
 exact Pending User Turn as interrupted and user-retryable; it never unlocks that
 Draft as a pre-admission rejection.
+Invocation liveness is acquired atomically with the first exact Pending
+resolution, so concurrent catalog recovery cannot interrupt a live Send between
+resolution and reservation. Pending User Turn schema v2 persists the interrupted
+failure; strict v1 compatibility permits only no failure or the older context-fit
+failure and upgrades when that Pending is next written.
 
 Version one accepts exactly one transcribable mono source per Session. A possible
 later extension adds dual-track capture: the Speaker's microphone plus a

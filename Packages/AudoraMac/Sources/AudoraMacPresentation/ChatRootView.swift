@@ -397,7 +397,7 @@ public struct ChatRootView: View {
                                 .disabled(!allowsNavigationAndMutation)
                             }
                         }
-                    } else if pending.failure == .coachResponseInterrupted {
+                    } else if model.snapshot.isCoachResponseInterrupted(pending) {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("The Coach response was interrupted. Nothing was published.")
                                 .font(.callout.weight(.semibold))

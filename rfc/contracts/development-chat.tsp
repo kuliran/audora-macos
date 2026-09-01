@@ -51,13 +51,32 @@ namespace Audora.Contracts {
 
   @jsonSchema
   @id("PendingUserTurn.json")
-  model PendingUserTurn {
+  union PendingUserTurn {
+    legacy: PendingUserTurnV1,
+    current: PendingUserTurnV2,
+  }
+
+  model PendingUserTurnV1 {
+    ...PendingUserTurnFields;
     schemaVersion: 1;
+    failure?: PendingUserTurnFailureV1;
+  }
+
+  model PendingUserTurnV2 {
+    ...PendingUserTurnFields;
+    schemaVersion: 2;
+    failure?: PendingUserTurnFailure;
+  }
+
+  model PendingUserTurnFields {
     pendingUserTurnId: PendingUserTurnId;
     draftId: ChatDraftId;
     draftVersion: NonnegativeWholeNumber;
     responsePositionId: ChatResponsePositionId;
-    failure?: PendingUserTurnFailure;
+  }
+
+  union PendingUserTurnFailureV1 {
+    coachContextCannotFit: "coachContextCannotFit",
   }
 
   union PendingUserTurnFailure {

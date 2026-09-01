@@ -34,6 +34,8 @@ const positiveInventory = [
   "coach-message.json",
   "memory.json",
   "pending-user-turn-capacity-failure.json",
+  "pending-user-turn-interrupted.json",
+  "pending-user-turn-legacy-v1.json",
   "pending-user-turn.json",
   "rejected",
   "renamed-chat.json",
@@ -163,19 +165,38 @@ assertValidation(
   true,
   "coach-invocation.json",
 );
-assertValidation(
-  pendingUserTurn,
-  await loadJSON(path.join(examplesDirectory, "pending-user-turn.json")),
-  true,
+for (const name of [
   "pending-user-turn.json",
+  "pending-user-turn-capacity-failure.json",
+  "pending-user-turn-interrupted.json",
+  "pending-user-turn-legacy-v1.json",
+]) {
+  assertValidation(
+    pendingUserTurn,
+    await loadJSON(path.join(examplesDirectory, name)),
+    true,
+    name,
+  );
+}
+const legacyInterruptedPending = await loadJSON(
+  path.join(examplesDirectory, "pending-user-turn-legacy-v1.json"),
 );
+legacyInterruptedPending.failure = "coachResponseInterrupted";
 assertValidation(
   pendingUserTurn,
-  await loadJSON(
-    path.join(examplesDirectory, "pending-user-turn-capacity-failure.json"),
-  ),
-  true,
-  "pending-user-turn-capacity-failure.json",
+  legacyInterruptedPending,
+  false,
+  "synthetic legacy-v1 interrupted Pending",
+);
+const unknownNewerPending = await loadJSON(
+  path.join(examplesDirectory, "pending-user-turn-interrupted.json"),
+);
+unknownNewerPending.schemaVersion = 3;
+assertValidation(
+  pendingUserTurn,
+  unknownNewerPending,
+  false,
+  "synthetic unknown-newer Pending",
 );
 
 for (const name of scenarioInventory) {

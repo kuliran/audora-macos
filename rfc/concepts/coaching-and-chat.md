@@ -243,6 +243,13 @@ If the first Invocation preflight instead loses an eligibility, concurrency, or
 admission race, the provisional Pending User Turn is removed and the Draft is
 immediately unlocked; the fleeting notice is not a Failure Descriptor.
 
+The persisted Pending User Turn is currently schema v2. Legacy v1 may omit a
+failure or carry only `coachContextCannotFit`; v2 adds
+`coachResponseInterrupted`. If persistence cannot prove the terminal v2 write,
+Application may display Retry for the exact Pending identity as transient
+operational state, but it does not rewrite the last observed aggregate in memory
+as though that durable failure had committed.
+
 Only a valid complete Coach Response publishes a turn. One atomic Chat commit
 appends the user and coach messages, applies optional `newMemory`, installs at most
 one unresolved Proposal or evidence-publication operation, and removes the Pending

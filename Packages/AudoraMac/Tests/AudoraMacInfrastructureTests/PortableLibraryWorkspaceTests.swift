@@ -5,7 +5,127 @@ import Darwin
 import Foundation
 import XCTest
 
+private enum TestInvocationReservationOutcome: Equatable {
+    case none
+    case exists
+    case unavailable
+}
+
+private extension PortableInvocationStore {
+    func reserveInvocation(
+        _ request: PendingCoachInvocationRequest
+    ) async -> TestInvocationReservationOutcome {
+        switch await acquirePendingInvocation(request) {
+        case .acquired: .none
+        case .activeExists: .exists
+        case .ineligible, .unavailable: .unavailable
+        }
+    }
+}
+
 final class PortableLibraryWorkspaceTests: XCTestCase {
+    func testCatalogLoadCannotReconcilePendingBetweenAtomicResolutionAndOwnership() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let suspension = SuspendedInvocationAcquisition()
+            let persistence = PortableChatPersistence { point in
+                guard point == .beforeInvocationReconciliation else { return }
+                suspension.suspend()
+            }
+            let invocations = PortableInvocationStore(
+                persistence: persistence,
+                workspace: fixture.workspace
+            )
+            let catalogWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await catalogWorkspace.chooseLibrary()
+            let chats = PortableChatStore(workspace: catalogWorkspace)
+
+            async let acquisition = invocations.acquirePendingInvocation(
+                fixture.install.authority.request
+            )
+            await suspension.waitUntilSuspended()
+
+            guard case let .loaded(entries) = await chats.loadCatalog(
+                in: fixture.scope
+            ) else {
+                suspension.resume()
+                return XCTFail("catalog did not retain the live Chat")
+            }
+            let duringAcquisition = entries.compactMap { entry -> ChatAggregate? in
+                guard case let .available(aggregate) = entry,
+                      aggregate.chat.id == fixture.locked.chat.id
+                else { return nil }
+                return aggregate
+            }.first
+            guard let duringAcquisition else {
+                suspension.resume()
+                return XCTFail("catalog did not retain the live Chat")
+            }
+            XCTAssertNil(duringAcquisition.pendingUserTurn?.failure)
+
+            suspension.resume()
+            let acquired = await acquisition
+            XCTAssertEqual(
+                acquired,
+                .acquired(fixture.install.authority)
+            )
+        }
+    }
+
+    func testIneligibleAtomicAcquisitionReleasesLibraryLivenessAuthority() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            try Data("{}".utf8).write(
+                to: fixture.root
+                    .appendingPathComponent("chats", isDirectory: true)
+                    .appendingPathComponent(
+                        fixture.locked.chat.id.rawValue,
+                        isDirectory: true
+                    )
+                    .appendingPathComponent("chat.json"),
+                options: .atomic
+            )
+            let owner = PortableInvocationStore(workspace: fixture.workspace)
+            let contender = PortableInvocationStore(workspace: fixture.workspace)
+
+            let ineligible = await owner.acquirePendingInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(ineligible, .ineligible(nil))
+            let acquired = await contender.acquirePendingInvocation(
+                fixture.competingAuthority.request
+            )
+            XCTAssertEqual(acquired, .acquired(fixture.competingAuthority))
+        }
+    }
+
+    func testInterruptedTerminalMutationReleasesLibraryLivenessAuthority() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let owner = PortableInvocationStore(workspace: fixture.workspace)
+            let contender = PortableInvocationStore(workspace: fixture.workspace)
+            let acquired = await owner.acquirePendingInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(acquired, .acquired(fixture.install.authority))
+
+            guard case .committed = await owner.markInterruptedNewSend(
+                fixture.install.authority
+            ) else { return XCTFail("interruption did not persist") }
+
+            let next = await contender.acquirePendingInvocation(
+                fixture.competingAuthority.request
+            )
+            XCTAssertEqual(next, .acquired(fixture.competingAuthority))
+        }
+    }
+
     func testConcurrentInvocationStoresReserveExactlyOneLibraryLivenessAuthorityBeforeInstall() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)
@@ -578,22 +698,25 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
-    func testInvocationGatewayResolutionDoesNotMisclassifyItsLivePendingAsCrashed() async throws {
+    func testInvocationGatewayAcquisitionDoesNotMisclassifyItsLivePendingAsCrashed() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)
             let store = PortableInvocationStore(workspace: fixture.workspace)
 
-            let resolution = await store.resolvePending(
+            let resolution = await store.acquirePendingInvocation(
                 fixture.install.authority.request
             )
 
-            XCTAssertEqual(resolution, .eligible(fixture.install.authority))
+            XCTAssertEqual(resolution, .acquired(fixture.install.authority))
             guard case let .readWrite(reopened) = try PortableChatPersistence().load(
                 fixture.locked.chat.id,
                 at: fixture.root,
                 in: fixture.scope
             ) else { return XCTFail("live Pending did not reopen") }
             XCTAssertNil(reopened.pendingUserTurn?.failure)
+            await store.cancelInvocationReservation(
+                fixture.install.authority.request
+            )
         }
     }
 
@@ -2158,6 +2281,37 @@ private final class OneShot: @unchecked Sendable {
             fired = true
             return true
         }
+    }
+}
+
+private final class SuspendedInvocationAcquisition: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var isSuspended = false
+    private var isResumed = false
+
+    func suspend() {
+        condition.lock()
+        isSuspended = true
+        condition.broadcast()
+        while !isResumed { condition.wait() }
+        condition.unlock()
+    }
+
+    func waitUntilSuspended() async {
+        while !suspendedSnapshot() { await Task.yield() }
+    }
+
+    private func suspendedSnapshot() -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return isSuspended
+    }
+
+    func resume() {
+        condition.lock()
+        isResumed = true
+        condition.broadcast()
+        condition.unlock()
     }
 }
 

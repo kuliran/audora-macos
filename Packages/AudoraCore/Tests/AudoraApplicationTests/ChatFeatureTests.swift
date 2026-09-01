@@ -812,6 +812,108 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(calls, [.loadCatalog, .load, .saveDraft, .lockPendingUserTurn])
     }
 
+    func testOperationalInterruptionProjectsRetryForTheExactUnchangedPendingIntent() async throws {
+        let aggregate = try Self.aggregate(draftText: "Retry this exact Draft.")
+        let expectedPending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            )
+        )
+        let staleGatewaySnapshot = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: expectedPending
+        )
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let gateway = OperationallyInterruptedInvocationGateway(
+            fallback: staleGatewaySnapshot
+        )
+        let feature = makeFeature(store: store, invocations: gateway)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let interruptedState = await feature.currentState
+        guard case let .open(locked) = interruptedState.selection,
+              let pending = locked.pendingUserTurn
+        else { return XCTFail("the exact Pending must remain selected") }
+        let expectedRequest = PendingCoachInvocationRequest(
+            library: Self.scope,
+            chatID: aggregate.chat.id,
+            pendingUserTurnID: pending.id
+        )
+        XCTAssertNil(pending.failure, "the Application must not fake a durable write")
+        XCTAssertEqual(
+            interruptedState.operationallyInterruptedInvocation,
+            expectedRequest
+        )
+        XCTAssertTrue(interruptedState.isCoachResponseInterrupted(pending))
+
+        await feature.send(
+            .rename(
+                Self.context,
+                aggregate.chat.id,
+                title: "Renamed while Retry remains exact",
+                expectedRevision: locked.chat.manifestRevision
+            )
+        )
+        let renamedState = await feature.currentState
+        XCTAssertEqual(
+            renamedState.operationallyInterruptedInvocation,
+            expectedRequest,
+            "an unrelated authoritative rename does not resolve terminal uncertainty"
+        )
+        XCTAssertTrue(renamedState.isCoachResponseInterrupted(pending))
+
+        await feature.send(.retryPendingUserTurn(Self.context, pending.id))
+
+        let requests = await gateway.requests
+        let retryState = await feature.currentState
+        XCTAssertEqual(requests, [expectedRequest, expectedRequest])
+        XCTAssertEqual(
+            Self.openAggregate(in: retryState)?.chat.title,
+            try ChatTitle("Renamed while Retry remains exact"),
+            "an older operational fallback cannot regress newer Application state"
+        )
+    }
+
+    func testOperationalRetryClearsItsProjectionWhenThePendingHasVanished() async throws {
+        let aggregate = try Self.aggregate(draftText: "Retry this exact Draft.")
+        let store = RecordingChatStore(
+            catalog: [.available(aggregate)],
+            loadOutcomes: [.loaded(aggregate), .missing]
+        )
+        let gateway = VanishingOperationalRetryInvocationGateway()
+        let feature = makeFeature(store: store, invocations: gateway)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        guard case let .open(locked) = await feature.currentState.selection,
+              let pending = locked.pendingUserTurn
+        else { return XCTFail("the first interruption must retain the exact Pending") }
+
+        await feature.send(.retryPendingUserTurn(Self.context, pending.id))
+
+        let refreshed = await feature.currentState
+        XCTAssertNil(refreshed.operationallyInterruptedInvocation)
+        XCTAssertEqual(refreshed.selection, .none)
+        XCTAssertNil(refreshed.composer)
+        XCTAssertEqual(refreshed.notice, .chatMissing)
+
+        await feature.send(.retryPendingUserTurn(Self.context, pending.id))
+        let requests = await gateway.requests
+        XCTAssertEqual(requests.count, 2, "a vanished Pending cannot retain Retry authority")
+    }
+
     func testCanceledAutosaveReconciliationNeverClearsSendLockingActivity() async throws {
         let aggregate = try Self.aggregate()
         let store = RecordingChatStore(
@@ -1408,6 +1510,44 @@ private actor RecordingInterruptedInvocationGateway: Invocations {
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
         requests.append(request)
         return .interrupted(nil, .providerFailed)
+    }
+}
+
+private actor OperationallyInterruptedInvocationGateway: Invocations {
+    private let fallback: ChatAggregate?
+    private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    init(fallback: ChatAggregate? = nil) {
+        self.fallback = fallback
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        requests.append(request)
+        return .operationallyInterrupted(fallback, request, .persistenceUnavailable)
+    }
+}
+
+private actor VanishingOperationalRetryInvocationGateway: Invocations {
+    private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        requests.append(request)
+        if requests.count == 1 {
+            return .operationallyInterrupted(nil, request, .persistenceUnavailable)
+        }
+        return .rejected(nil, .eligibilityChanged)
     }
 }
 

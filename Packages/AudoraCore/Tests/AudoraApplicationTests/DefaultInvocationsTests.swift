@@ -38,7 +38,7 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(claimCount, 1)
         XCTAssertEqual(
             events,
-            ["resolve", "active", "resolve", "admission", "install", "provider", "publish"]
+            ["acquire", "revalidate", "admission", "install", "provider", "publish"]
         )
         let exactBytes = await fixture.provider.serializedRequests
         XCTAssertEqual(exactBytes.count, 1)
@@ -165,6 +165,73 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(launchCount, 0)
     }
 
+    func testFailedInterruptedPendingMutationRecoversAuthoritativeDurableRetrySnapshot() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            admissionDecision: .commitUncertain
+        )
+        await fixture.persistence.failNextInterruptedMutationAfterCommit()
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .interrupted(aggregate, .persistenceUnavailable) = outcome else {
+            return XCTFail("terminal uncertainty must reconcile the durable Pending")
+        }
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        let recoveredRequests = await fixture.persistence.recoveredRequests
+        XCTAssertEqual(recoveredRequests, [fixture.request])
+    }
+
+    func testFailedAbortWithUnavailableRecoveryReturnsExactOperationalRetryIntent() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.provider.failNextLaunch()
+        await fixture.persistence.failNextAbortWithoutCommit()
+        await fixture.persistence.makeInterruptionRecoveryUnavailable()
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .operationallyInterrupted(
+            aggregate,
+            retryRequest,
+            .persistenceUnavailable
+        ) = outcome else {
+            return XCTFail("unproven terminal persistence needs an operational Retry")
+        }
+        XCTAssertEqual(aggregate, fixture.initial)
+        XCTAssertNil(aggregate?.pendingUserTurn?.failure)
+        XCTAssertEqual(retryRequest, fixture.request)
+        let recoveredRequests = await fixture.persistence.recoveredRequests
+        XCTAssertEqual(recoveredRequests, [fixture.request])
+    }
+
+    func testOperationalRetryReconcilesUnchangedPendingBeforeAtomicReacquisition() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.provider.failNextLaunch()
+        await fixture.persistence.failNextAbortWithoutCommit()
+        await fixture.persistence.makeInterruptionRecoveryUnavailable()
+        guard case .operationallyInterrupted = await fixture.invocations.tryInvoke(
+            fixture.request
+        ) else { return XCTFail("first attempt must retain operational Retry") }
+
+        await fixture.persistence.makeInterruptionRecoveryAvailable()
+        let retry = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .published(aggregate, _) = retry else {
+            return XCTFail("Retry must reconcile before reacquiring the unchanged Pending")
+        }
+        XCTAssertNil(aggregate.pendingUserTurn)
+        XCTAssertEqual(
+            aggregate.chat.messageIDs,
+            [fixture.userMessageID, fixture.coachMessageID]
+        )
+        let recoveredRequests = await fixture.persistence.recoveredRequests
+        XCTAssertEqual(recoveredRequests, [fixture.request, fixture.request])
+    }
+
     func testInstallFailureAfterDurableDebitNeverLaunchesAndRetainsRetryableIntent() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         await fixture.persistence.failNextInstall()
@@ -232,10 +299,19 @@ final class DefaultInvocationsTests: XCTestCase {
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
         XCTAssertEqual(outcome, .rejected(nil, .eligibilityChanged))
-        let nextReservation = await fixture.persistence.reserveInvocation(
+        let nextReservation = await fixture.persistence.acquirePendingInvocation(
             fixture.request
         )
-        XCTAssertEqual(nextReservation, .none)
+        XCTAssertEqual(
+            nextReservation,
+            .acquired(
+                try InvocationPendingAuthority(
+                    request: fixture.request,
+                    aggregate: fixture.initial
+                )
+            )
+        )
+        await fixture.persistence.cancelInvocationReservation(fixture.request)
     }
 
     func testCASConflictAfterProviderLaunchPublishesNeitherMessageAndRetiresInvocation() async throws {
@@ -398,10 +474,19 @@ final class DefaultInvocationsTests: XCTestCase {
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
         XCTAssertEqual(outcome, .rejected(fixture.initial, .eligibilityChanged))
-        let nextReservation = await fixture.persistence.reserveInvocation(
+        let nextReservation = await fixture.persistence.acquirePendingInvocation(
             fixture.request
         )
-        XCTAssertEqual(nextReservation, .none)
+        XCTAssertEqual(
+            nextReservation,
+            .acquired(
+                try InvocationPendingAuthority(
+                    request: fixture.request,
+                    aggregate: fixture.initial
+                )
+            )
+        )
+        await fixture.persistence.cancelInvocationReservation(fixture.request)
     }
 
     func testIdentityCollisionRegeneratesBeforeAdmissionOrProviderLaunch() async throws {
@@ -581,6 +666,9 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private var publicationConflicts = false
     private var publicationFails = false
     private var secondResolutionIsIneligible = false
+    private var interruptedMutationFailsAfterCommit = false
+    private var abortFailsWithoutCommit = false
+    private var interruptionRecoveryUnavailable = false
     private var identityCollisions: [InvocationLaunchIdentityCollision] = []
     private(set) var identityCheckCount = 0
     private var resolutionCount = 0
@@ -588,6 +676,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private(set) var activeInvocation: CoachInvocation?
     private(set) var publicationCount = 0
     private(set) var lastPublication: PublishCoachInvocationMutation?
+    private(set) var recoveredRequests: [PendingCoachInvocationRequest] = []
 
     init(initial: ChatAggregate, recorder: InvocationEventRecorder) {
         aggregate = initial
@@ -601,34 +690,62 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     func conflictNextPublication() { publicationConflicts = true }
     func failNextPublication() { publicationFails = true }
     func makeSecondResolutionIneligible() { secondResolutionIsIneligible = true }
+    func failNextInterruptedMutationAfterCommit() {
+        interruptedMutationFailsAfterCommit = true
+    }
+    func failNextAbortWithoutCommit() { abortFailsWithoutCommit = true }
+    func makeInterruptionRecoveryUnavailable() {
+        interruptionRecoveryUnavailable = true
+    }
+    func makeInterruptionRecoveryAvailable() {
+        interruptionRecoveryUnavailable = false
+    }
     func collideNextIdentities(_ collisions: [InvocationLaunchIdentityCollision]) {
         identityCollisions = collisions
     }
 
-    func resolvePending(
+    func acquirePendingInvocation(
         _ request: PendingCoachInvocationRequest
-    ) async -> InvocationPendingResolutionOutcome {
-        await recorder.record("resolve")
-        resolutionCount += 1
-        if secondResolutionIsIneligible, resolutionCount == 2 {
-            secondResolutionIsIneligible = false
-            return .ineligible(aggregate)
+    ) async -> InvocationPendingAcquisitionOutcome {
+        await recorder.record("acquire")
+        guard activeInvocation == nil, reservedRequest == nil else {
+            return .activeExists
         }
+        resolutionCount += 1
         guard request.chatID == aggregate.chat.id,
               request.pendingUserTurnID == aggregate.pendingUserTurn?.id
         else { return .ineligible(aggregate) }
-        return .eligible(
-            try! InvocationPendingAuthority(request: request, aggregate: aggregate)
+        let authority = try! InvocationPendingAuthority(
+            request: request,
+            aggregate: aggregate
         )
+        reservedRequest = request
+        return .acquired(authority)
     }
 
-    func reserveInvocation(
-        _ request: PendingCoachInvocationRequest
-    ) async -> InvocationActiveCheckOutcome {
-        await recorder.record("active")
-        guard activeInvocation == nil, reservedRequest == nil else { return .exists }
-        reservedRequest = request
-        return .none
+    func revalidatePendingInvocation(
+        _ authority: InvocationPendingAuthority
+    ) async -> InvocationPendingResolutionOutcome {
+        await recorder.record("revalidate")
+        resolutionCount += 1
+        guard reservedRequest == authority.request else { return .unavailable }
+        if secondResolutionIsIneligible, resolutionCount == 2 {
+            secondResolutionIsIneligible = false
+            reservedRequest = nil
+            return .ineligible(aggregate)
+        }
+        guard authority.request.chatID == aggregate.chat.id,
+              authority.request.pendingUserTurnID == aggregate.pendingUserTurn?.id
+        else {
+            reservedRequest = nil
+            return .ineligible(aggregate)
+        }
+        return .eligible(
+            try! InvocationPendingAuthority(
+                request: authority.request,
+                aggregate: aggregate
+            )
+        )
     }
 
     func installInvocation(
@@ -686,7 +803,34 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     func markInterruptedNewSend(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
-        markPendingFailure(authority, failure: .coachResponseInterrupted)
+        let outcome = markPendingFailure(authority, failure: .coachResponseInterrupted)
+        if interruptedMutationFailsAfterCommit {
+            interruptedMutationFailsAfterCommit = false
+            return .failed
+        }
+        return outcome
+    }
+
+    func recoverPendingAfterTerminalFailure(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationPendingResolutionOutcome {
+        recoveredRequests.append(request)
+        guard !interruptionRecoveryUnavailable else { return .unavailable }
+        guard request.chatID == aggregate.chat.id,
+              request.pendingUserTurnID == aggregate.pendingUserTurn?.id
+        else { return .ineligible(aggregate) }
+        if let pending = aggregate.pendingUserTurn, pending.failure == nil {
+            aggregate = try! ChatAggregate(
+                chat: aggregate.chat,
+                memory: aggregate.memory,
+                pendingUserTurn: pending.replacingFailure(
+                    .coachResponseInterrupted
+                )
+            )
+        }
+        return .eligible(
+            try! InvocationPendingAuthority(request: request, aggregate: aggregate)
+        )
     }
 
     private func markPendingFailure(
@@ -720,6 +864,11 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         _ invocation: CoachInvocation
     ) async -> InvocationPendingMutationOutcome {
         guard activeInvocation == invocation else { return .stale(aggregate) }
+        if abortFailsWithoutCommit {
+            abortFailsWithoutCommit = false
+            activeInvocation = nil
+            return .failed
+        }
         activeInvocation = nil
         aggregate = try! ChatAggregate(
             chat: aggregate.chat,

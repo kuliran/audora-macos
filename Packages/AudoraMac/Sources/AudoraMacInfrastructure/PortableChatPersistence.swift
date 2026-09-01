@@ -3183,7 +3183,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
             if pendingVersion > UInt64(PendingUserTurn.schemaVersion) {
                 return .frozen(FrozenChatSnapshot(chatID: expectedID, reason: .newerSchema))
             }
-            guard pendingVersion == UInt64(PendingUserTurn.schemaVersion) else {
+            guard pendingVersion == 1 ||
+                pendingVersion == UInt64(PendingUserTurn.schemaVersion)
+            else {
                 throw PortableChatPersistenceError.unsupportedOlderSchema
             }
             decodedPendingUserTurn = try mapPersistedDomainValidation {
@@ -4357,15 +4359,25 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
         let dto: PendingUserTurnDTO = try decode(PendingUserTurnDTO.self, data)
         let failure: PendingUserTurnFailure?
-        if let rawFailure = dto.failure {
-            guard let parsedFailure = PendingUserTurnFailure(rawValue: rawFailure) else {
+        switch dto.schemaVersion {
+        case 1:
+            switch dto.failure {
+            case nil: failure = nil
+            case PendingUserTurnFailure.coachContextCannotFit.rawValue:
+                failure = .coachContextCannotFit
+            case .some:
                 throw PortableChatPersistenceError.invalidJSON
             }
-            failure = parsedFailure
-        } else {
-            failure = nil
-        }
-        guard dto.schemaVersion == PendingUserTurn.schemaVersion else {
+        case PendingUserTurn.schemaVersion:
+            if let rawFailure = dto.failure {
+                guard let parsed = PendingUserTurnFailure(rawValue: rawFailure) else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                failure = parsed
+            } else {
+                failure = nil
+            }
+        default:
             throw PortableChatPersistenceError.invalidSchemaVersion
         }
         return PendingUserTurn(
@@ -5145,17 +5157,92 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         chats = PortableChatStore(persistence: persistence, workspace: workspace)
     }
 
-    public func resolvePending(
+    public func acquirePendingInvocation(
         _ request: PendingCoachInvocationRequest
+    ) async -> InvocationPendingAcquisitionOutcome {
+        let library = request.library
+        guard !pendingLivenessLeases.keys.contains(where: {
+            $0.library.libraryID == library.libraryID
+        }),
+              !activeLivenessLeases.values.contains(where: {
+                  $0.libraryID == library.libraryID
+              })
+        else { return .activeExists }
+        let result: ActiveLibraryOperationResult<(
+            InvocationPendingAcquisitionOutcome,
+            PortableInvocationLivenessLease?
+        )> =
+            await workspace.performActiveReadWriteOperation(in: library) { root in
+                do {
+                    guard let lease = try persistence.acquireInvocationLivenessLease(
+                        at: root,
+                        in: library,
+                        for: request
+                    ) else {
+                        return (.activeExists, nil)
+                    }
+                    do {
+                        try persistence.reconcileInterruptedInvocations(
+                            at: root,
+                            in: library,
+                            holding: lease
+                        )
+                        guard try !persistence.hasActiveInvocation(
+                            at: root,
+                            in: library,
+                            holding: lease
+                        ) else {
+                            lease.release()
+                            return (.activeExists, nil)
+                        }
+                        switch try persistence.load(
+                            request.chatID,
+                            at: root,
+                            in: library
+                        ) {
+                        case let .readWrite(aggregate):
+                            do {
+                                let authority = try InvocationPendingAuthority(
+                                    request: request,
+                                    aggregate: aggregate
+                                )
+                                return (.acquired(authority), lease)
+                            } catch {
+                                lease.release()
+                                return (.ineligible(aggregate), nil)
+                            }
+                        case .frozen:
+                            lease.release()
+                            return (.ineligible(nil), nil)
+                        }
+                    } catch {
+                        lease.release()
+                        return (.unavailable, nil)
+                    }
+                } catch {
+                    return (.unavailable, nil)
+                }
+            }
+        switch result {
+        case let .performed((outcome, lease)):
+            if let lease {
+                pendingLivenessLeases[request] = lease
+            }
+            return outcome
+        case .readOnly, .unavailable:
+            return .unavailable
+        }
+    }
+
+    public func revalidatePendingInvocation(
+        _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingResolutionOutcome {
-        // This read belongs to a live gateway attempt immediately after the
-        // Pending lock. Library/UI loads reconcile unowned preinstall crashes;
-        // using that path here would misclassify this request before it can
-        // reserve the Invocation namespace.
+        let request = authority.request
+        guard pendingLivenessLeases[request] != nil else { return .unavailable }
         let result: ActiveLibraryOperationResult<InvocationPendingResolutionOutcome> =
             await workspace.performActiveReadWriteOperation(in: request.library) { root in
                 do {
-                    switch try self.persistence.load(
+                    switch try persistence.load(
                         request.chatID,
                         at: root,
                         in: request.library
@@ -5180,69 +5267,15 @@ public actor PortableInvocationStore: InvocationPersistencePort {
                     return .unavailable
                 }
             }
-        return switch result {
+        let outcome: InvocationPendingResolutionOutcome = switch result {
         case let .performed(outcome): outcome
         case .readOnly: .ineligible(nil)
         case .unavailable: .unavailable
         }
-    }
-
-    public func reserveInvocation(
-        _ request: PendingCoachInvocationRequest
-    ) async -> InvocationActiveCheckOutcome {
-        let library = request.library
-        guard !pendingLivenessLeases.keys.contains(where: {
-            $0.library.libraryID == library.libraryID
-        }),
-              !activeLivenessLeases.values.contains(where: {
-                  $0.libraryID == library.libraryID
-              })
-        else { return .exists }
-        let result: ActiveLibraryOperationResult<(
-            InvocationActiveCheckOutcome,
-            PortableInvocationLivenessLease?
-        )> =
-            await workspace.performActiveReadWriteOperation(in: library) { root in
-                do {
-                    guard let lease = try persistence.acquireInvocationLivenessLease(
-                        at: root,
-                        in: library,
-                        for: request
-                    ) else {
-                        return (.exists, nil)
-                    }
-                    do {
-                        try persistence.reconcileInterruptedInvocations(
-                            at: root,
-                            in: library,
-                            holding: lease
-                        )
-                        let outcome: InvocationActiveCheckOutcome =
-                            try persistence.hasActiveInvocation(
-                                at: root,
-                                in: library,
-                                holding: lease
-                            )
-                            ? .exists
-                            : .none
-                        return (outcome, outcome == .none ? lease : nil)
-                    } catch {
-                        lease.release()
-                        return (.unavailable, nil)
-                    }
-                } catch {
-                    return (.unavailable, nil)
-                }
-            }
-        switch result {
-        case let .performed((outcome, lease)):
-            if let lease {
-                pendingLivenessLeases[request] = lease
-            }
-            return outcome
-        case .readOnly, .unavailable:
-            return .unavailable
+        if case .ineligible = outcome {
+            releasePendingLivenessLease(for: request)
         }
+        return outcome
     }
 
     public func installInvocation(
@@ -5333,6 +5366,47 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
         await markPendingFailure(authority, failure: .coachResponseInterrupted)
+    }
+
+    public func recoverPendingAfterTerminalFailure(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationPendingResolutionOutcome {
+        let result: ActiveLibraryOperationResult<InvocationPendingResolutionOutcome> =
+            await workspace.performActiveReadWriteOperation(in: request.library) { root in
+                do {
+                    try persistence.reconcileInterruptedInvocationsIfUnowned(
+                        at: root,
+                        in: request.library
+                    )
+                    switch try persistence.load(
+                        request.chatID,
+                        at: root,
+                        in: request.library
+                    ) {
+                    case let .readWrite(aggregate):
+                        do {
+                            return .eligible(
+                                try InvocationPendingAuthority(
+                                    request: request,
+                                    aggregate: aggregate
+                                )
+                            )
+                        } catch {
+                            return .ineligible(aggregate)
+                        }
+                    case .frozen:
+                        return .ineligible(nil)
+                    }
+                } catch PortableChatPersistenceError.chatMissing {
+                    return .ineligible(nil)
+                } catch {
+                    return .unavailable
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .unavailable
+        }
     }
 
     private func markPendingFailure(

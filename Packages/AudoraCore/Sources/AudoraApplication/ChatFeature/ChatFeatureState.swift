@@ -128,6 +128,9 @@ public struct ChatFeatureState: Equatable, Sendable {
     public let contextAdvisory: CoachContextAdvisoryState
     public let admissionAvailability: InvocationAdmissionAvailability?
     public let createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent?
+    /// An exact retry authority held only in Application memory when
+    /// persistence could not prove its terminal interruption write.
+    public let operationallyInterruptedInvocation: PendingCoachInvocationRequest?
     public let activity: Activity?
     public let notice: ChatNotice?
 
@@ -139,6 +142,7 @@ public struct ChatFeatureState: Equatable, Sendable {
         contextAdvisory: CoachContextAdvisoryState = .notRequested,
         admissionAvailability: InvocationAdmissionAvailability? = nil,
         createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
+        operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
         activity: Activity? = nil,
         notice: ChatNotice? = nil
     ) {
@@ -149,7 +153,19 @@ public struct ChatFeatureState: Equatable, Sendable {
         self.contextAdvisory = contextAdvisory
         self.admissionAvailability = admissionAvailability
         self.createNewChatRecoveryIntent = createNewChatRecoveryIntent
+        self.operationallyInterruptedInvocation = operationallyInterruptedInvocation
         self.activity = activity
         self.notice = notice
+    }
+
+    public func isCoachResponseInterrupted(_ pending: PendingUserTurn) -> Bool {
+        if pending.failure == .coachResponseInterrupted { return true }
+        guard let request = operationallyInterruptedInvocation,
+              case let .open(aggregate) = selection,
+              aggregate.chat.id == request.chatID,
+              aggregate.pendingUserTurn == pending,
+              pending.id == request.pendingUserTurnID
+        else { return false }
+        return true
     }
 }
