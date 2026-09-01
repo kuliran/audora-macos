@@ -56,6 +56,7 @@ public protocol ApplicationCommandFeature: AnyObject, Sendable {
 @MainActor
 public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
     private nonisolated let chat: any ChatFeature
+    private nonisolated let sessionProcessing: (any SessionProcessingFeature)?
     private let library: any LibraryFeature
     public private(set) var admissionState = ApplicationCommandAdmissionState.idle
 
@@ -66,9 +67,14 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
         [Int: AsyncStream<ApplicationCommandAdmissionState>.Continuation] = [:]
     private var nextAdmissionContinuationID = 0
 
-    public init(library: any LibraryFeature, chat: any ChatFeature) {
+    public init(
+        library: any LibraryFeature,
+        chat: any ChatFeature,
+        sessionProcessing: (any SessionProcessingFeature)? = nil
+    ) {
         self.library = library
         self.chat = chat
+        self.sessionProcessing = sessionProcessing
     }
 
     public var admissionStates: AsyncStream<ApplicationCommandAdmissionState> {
@@ -122,13 +128,26 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
         let predecessor = commandTail
         let chat = chat
         let library = library
+        let sessionProcessing = sessionProcessing
         let operation = Task<Bool, Never> {
             await predecessor?.value
+            if let sessionProcessing,
+               !(await sessionProcessing.reserveLibraryNavigation())
+            {
+                finishLibraryNavigation()
+                return false
+            }
             guard await chat.flushForOrderlyTermination() else {
+                await sessionProcessing?.finishLibraryNavigation(
+                    didMutateLibrary: false
+                )
                 finishLibraryNavigation()
                 return false
             }
             await library.send(intent.command)
+            await sessionProcessing?.finishLibraryNavigation(
+                didMutateLibrary: true
+            )
             finishLibraryNavigation()
             return true
         }

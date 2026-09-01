@@ -40,6 +40,7 @@ Audora Library.audoralibrary/
 │       ├── invocation.json
 │       └── attempt.json              # the current Provider Attempt
 ├── jobs/
+│   ├── .attempts.json                # per-Session sequence/current pointer
 │   └── job-20260822T160300000Z-1ABC/
 │       ├── job.json
 │       └── candidate/
@@ -61,6 +62,16 @@ unreferenced snapshot.
 
 Manifests and entity files are authoritative. A future SQLite/FTS index is a
 rebuildable cache and cannot be required to restore a Library.
+
+`jobs/.attempts.json` is authoritative coordination state rather than a derived
+search index. Under the `jobs/` repository lock, each newly admitted Job reserves
+the next monotonic sequence for its Session, installs the Job directory, then
+commits that sequence and the exact current-Job pointer. A pending reservation is
+repaired on relaunch according to whether its exact Job directory was installed.
+Schema-v1/v2 Libraries migrate their pre-sequence Jobs as a bounded legacy set;
+the first new attempt receives sequence 1 and supersedes that set regardless of
+its ID or wall clock. IDs and `createdAt` remain unchanged and are never used to
+infer causality for new attempts.
 
 Trash is persistent Library storage, not a retention queue. Audora supports
 **Move to Trash** and **Restore** for Sessions and Chats. It provides no cleanup or
@@ -445,6 +456,10 @@ the response position no longer names their Invocation/Attempt authority.
 - Install a Profile Revision folder only after `revision.json` and its detached
   hash are flushed. Replace `head.json` last under the Profile coordinator; that
   pointer replacement is the commit point.
+- Reserve a Session processing attempt in `jobs/.attempts.json` before installing
+  its Job directory, then atomically commit the matching sequence/current pointer.
+  Relaunch either completes an installed pending reservation or drops an absent
+  one; it never reorders attempts by `createdAt`.
 - Move or restore a Session or Chat as one aggregate without rewriting references.
   Restore fails rather than overwriting an existing active target.
 - Unknown newer root schemas open read-only. A corrupt individual entity does not

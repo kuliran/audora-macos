@@ -278,6 +278,10 @@ private actor ScriptedSessionProcessingFeature: SessionProcessingFeature {
 
     func send(_ command: SessionProcessingCommand) { commands.append(command) }
 
+    func reserveLibraryNavigation() async -> Bool { false }
+
+    func finishLibraryNavigation(didMutateLibrary: Bool) async {}
+
     func recordedCommands() -> [SessionProcessingCommand] { commands }
 
     func waitForCommandCount(_ expected: Int) async {

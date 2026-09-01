@@ -368,6 +368,11 @@ Ordinary use has one native application plus transient local workers. It does no
 require Vite, Node, Convex, Clerk, JWT, a localhost web server, or an embedded
 browser.
 
+Processing Retry order is durable repository state: each Session receives a
+monotonic attempt sequence and an exact current-Job pointer under the repository
+lock. Job IDs and `createdAt` remain identity/display facts and never decide which
+attempt supersedes another, including after wall-clock rollback or relaunch.
+
 ## Portable library
 
 All authoritative portable user data lives under one directory:

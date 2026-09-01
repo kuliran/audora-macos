@@ -196,4 +196,13 @@ public protocol SessionProcessingFeature: Sendable {
     var currentState: SessionProcessingFeatureState { get async }
     var states: AsyncStream<SessionProcessingFeatureState> { get }
     func send(_ command: SessionProcessingCommand) async
+
+    /// Atomically excludes Start/Retry/Prepare while Application coordinates a
+    /// Library-selection mutation. Returns false when processing already owns
+    /// active or recovery authority.
+    func reserveLibraryNavigation() async -> Bool
+
+    /// Releases the reservation. A successful Library mutation also clears the
+    /// old Session selection before launch admission reopens.
+    func finishLibraryNavigation(didMutateLibrary: Bool) async
 }

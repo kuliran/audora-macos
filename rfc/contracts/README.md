@@ -168,6 +168,10 @@ Library-switch serialization.
 launch and binds one Job, Session, intended Revision, and qualification profile.
 State transitions remain compare-and-swap operations in Infrastructure; a worker
 cannot write this manifest or canonical Session selection.
+New schema-v3 Jobs also persist their positive per-Session `attemptSequence`.
+Schema v1/v2 remain readable for migration, but only an explicit v3 sequence and
+the locked Library Job pointer establish causality for newly admitted attempts;
+neither `createdAt` nor the timestamp-shaped Job ID does.
 
 `TranscriptionWorkerRequest` fixes version-one English verbatim input, the single
 confined relative audio path, exact engine and qualification identity, and

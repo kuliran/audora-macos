@@ -173,6 +173,65 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         XCTAssertEqual(events, ["chat.flush"])
     }
 
+    func testProcessingAuthorityRejectsLibrarySelectionBeforeChatOrRootMutation()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: true, trace: trace)
+        let library = SelectionLibraryFeature(trace: trace)
+        let job = SessionProcessingJob(
+            jobID: try TranscriptionJobID("job-20260830T120200000Z-3DEF"),
+            sessionID: try SessionID("ses-20260830T120100000Z-2CDE"),
+            revisionID: try TranscriptRevisionID("trv-20260830T120300000Z-4FGH"),
+            profileID: "synthetic-qualified-v1",
+            createdAt: try UTCInstant("2026-08-30T12:03:00.000Z"),
+            state: .running,
+            cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                "cancel-library-selection"
+            )
+        )
+        let processing = FixedSessionProcessingFeature(.recoveryRequired(job))
+        let feature = DefaultApplicationCommandFeature(
+            library: library,
+            chat: chat,
+            sessionProcessing: processing
+        )
+
+        let succeeded = await feature.enqueue(.close).value
+
+        XCTAssertFalse(succeeded)
+        let events = await trace.events
+        XCTAssertEqual(events, [])
+    }
+
+    func testReservedLibraryNavigationRejectsStartRacingSuspendedChatFlush()
+        async
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SuspendedTerminationChatFeature(flushResult: true, trace: trace)
+        let library = SelectionLibraryFeature(trace: trace)
+        let processing = NavigationReservationProcessingProbe()
+        let feature = DefaultApplicationCommandFeature(
+            library: library,
+            chat: chat,
+            sessionProcessing: processing
+        )
+
+        let navigation = feature.enqueue(LibrarySelectionIntent.close)
+        await chat.waitUntilFlushStarts()
+        await processing.send(.start)
+        await chat.resume()
+
+        let succeeded = await navigation.value
+        let acceptedStartCount = await processing.acceptedStartCount
+        let isReserved = await processing.isNavigationReserved
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(acceptedStartCount, 0)
+        XCTAssertFalse(isReserved)
+        let events = await trace.events
+        XCTAssertEqual(events, ["chat.flush", "library.close"])
+    }
+
     func testSelectionFencesLateChatIngressUntilLibrarySendCompletes() async throws {
         let trace = LibrarySelectionTrace()
         let chat = SelectionChatFeature(flushResult: true, trace: trace)
@@ -257,6 +316,63 @@ final class ApplicationCommandFeatureTests: XCTestCase {
             ChatDraftID("drf-20260830T120000000Z-3DEF"),
             text: text
         )
+    }
+}
+
+private actor FixedSessionProcessingFeature: SessionProcessingFeature {
+    nonisolated let states: AsyncStream<SessionProcessingFeatureState>
+    private let state: SessionProcessingFeatureState
+
+    init(_ state: SessionProcessingFeatureState) {
+        self.state = state
+        states = AsyncStream { continuation in
+            continuation.yield(state)
+            continuation.finish()
+        }
+    }
+
+    var currentState: SessionProcessingFeatureState { state }
+
+    func send(_ command: SessionProcessingCommand) async {}
+
+    func reserveLibraryNavigation() async -> Bool {
+        !state.ownsLibraryMutationAuthority
+    }
+
+    func finishLibraryNavigation(didMutateLibrary: Bool) async {}
+}
+
+private actor NavigationReservationProcessingProbe: SessionProcessingFeature {
+    nonisolated let states = AsyncStream<SessionProcessingFeatureState> { continuation in
+        continuation.finish()
+    }
+    private var navigationReserved = false
+    private(set) var acceptedStartCount = 0
+
+    var currentState: SessionProcessingFeatureState {
+        .unavailable(
+            SessionProcessingUnavailableSnapshot(
+                selection: nil,
+                reason: .noSession,
+                actions: []
+            )
+        )
+    }
+
+    var isNavigationReserved: Bool { navigationReserved }
+
+    func send(_ command: SessionProcessingCommand) async {
+        if command == .start, !navigationReserved { acceptedStartCount += 1 }
+    }
+
+    func reserveLibraryNavigation() async -> Bool {
+        guard !navigationReserved else { return false }
+        navigationReserved = true
+        return true
+    }
+
+    func finishLibraryNavigation(didMutateLibrary: Bool) async {
+        navigationReserved = false
     }
 }
 

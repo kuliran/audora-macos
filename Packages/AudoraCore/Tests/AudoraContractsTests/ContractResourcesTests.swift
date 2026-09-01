@@ -262,6 +262,20 @@ final class ContractResourcesTests: XCTestCase {
             controlledJob["properties"] as? [String: Any]
         )
         XCTAssertNotNil(controlledProperties["expectedSelectedRevisionId"])
+        let sequencedJob = try XCTUnwrap(
+            jobDefinitions["SequencedTranscriptionJobManifest"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(sequencedJob["required"] as? [String] ?? []),
+            [
+                "schemaVersion", "attemptSequence", "expectedSelectedRevisionId",
+                "cancellationAuthorityId",
+            ]
+        )
+        let sequencedProperties = try XCTUnwrap(
+            sequencedJob["properties"] as? [String: Any]
+        )
+        XCTAssertNotNil(sequencedProperties["attemptSequence"])
 
         let blocked = try jsonObject(.sessionProcessingQualificationBlockedScenario)
         let blockedEffects = try XCTUnwrap(

@@ -235,7 +235,8 @@ public struct LibraryRootView: View {
         LibraryInteractionPolicy.availability(
             library: model.snapshot,
             audioImport: audioImportModel.snapshot,
-            recording: recordingModel.featureState
+            recording: recordingModel.featureState,
+            sessionProcessing: sessionProcessingModel.featureState
         )
     }
 

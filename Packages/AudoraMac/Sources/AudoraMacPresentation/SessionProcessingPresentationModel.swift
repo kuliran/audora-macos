@@ -280,6 +280,7 @@ public enum SessionProcessingPresentationMapper {
 @MainActor
 public final class SessionProcessingPresentationModel: ObservableObject {
     @Published public private(set) var state: SessionProcessingPresentationState?
+    @Published public private(set) var featureState: SessionProcessingFeatureState?
 
     private let feature: any SessionProcessingFeature
     private var hasStarted = false
@@ -293,6 +294,7 @@ public final class SessionProcessingPresentationModel: ObservableObject {
         hasStarted = true
         var states = feature.states.makeAsyncIterator()
         while !Task.isCancelled, let next = await states.next() {
+            featureState = next
             state = SessionProcessingPresentationMapper.map(next)
         }
     }

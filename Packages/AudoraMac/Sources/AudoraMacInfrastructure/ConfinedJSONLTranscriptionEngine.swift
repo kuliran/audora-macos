@@ -319,20 +319,19 @@ public actor ConfinedJSONLTranscriptionEngine: TranscriptionEngine {
                     limits: limits
                 )
             )
-        } catch let failure as TranscriptionEngineFailure {
-            if cancellationWasRequested(execution) {
-                _ = await cancel(execution)
-                throw TranscriptionEngineFailure.cancelled
-            }
-            finishNormally(execution)
-            throw failure
         } catch {
-            if cancellationWasRequested(execution) {
-                _ = await cancel(execution)
+            // `start` is an authority boundary, not proof that no process was
+            // created. Always target and reap the exact bound execution before
+            // allowing a launch error to make its durable Job terminal.
+            let cancellationPrecededFailure = cancellationWasRequested(execution)
+            let outcome = await cancel(execution)
+            guard outcome == .reaped || outcome == .alreadyAbsent else {
+                throw TranscriptionEngineFailure.workerAbsenceUnconfirmed
+            }
+            if cancellationPrecededFailure {
                 throw TranscriptionEngineFailure.cancelled
             }
-            finishNormally(execution)
-            throw TranscriptionEngineFailure.launchFailed
+            throw (error as? TranscriptionEngineFailure) ?? .launchFailed
         }
         attach(started.session, to: execution)
         if cancellationWasRequested(execution) {

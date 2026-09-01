@@ -10,6 +10,7 @@ namespace Audora.Contracts {
   union TranscriptionJobManifest {
     legacyV1: LegacyTranscriptionJobManifest,
     controlledV2: ControlledTranscriptionJobManifest,
+    sequencedV3: SequencedTranscriptionJobManifest,
   }
 
   model LegacyTranscriptionJobManifest extends TranscriptionJobManifestBody {
@@ -19,6 +20,14 @@ namespace Audora.Contracts {
   model ControlledTranscriptionJobManifest
     extends TranscriptionJobManifestBody {
     schemaVersion: 2;
+    expectedSelectedRevisionId: TranscriptRevisionId | null;
+    cancellationAuthorityId: TranscriptionCancellationAuthorityId;
+    cancellationRequestedAt?: UTCInstant;
+  }
+
+  model SequencedTranscriptionJobManifest extends TranscriptionJobManifestBody {
+    schemaVersion: 3;
+    attemptSequence: SessionProcessingAttemptSequence;
     expectedSelectedRevisionId: TranscriptRevisionId | null;
     cancellationAuthorityId: TranscriptionCancellationAuthorityId;
     cancellationRequestedAt?: UTCInstant;
@@ -178,6 +187,10 @@ namespace Audora.Contracts {
   @maxLength(128)
   @pattern("^[0-9A-Za-z_-]+$")
   scalar TranscriptionCancellationAuthorityId extends string;
+
+  @minValue(1)
+  @maxValue(9007199254740991)
+  scalar SessionProcessingAttemptSequence extends integer;
 
   model CandidateSourceFingerprint {
     audioSourceId: TranscriptAudioSourceId;

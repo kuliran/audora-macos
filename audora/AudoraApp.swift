@@ -93,7 +93,8 @@ struct AudoraApp: App {
         )
         let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,
-            chat: chatFeature
+            chat: chatFeature,
+            sessionProcessing: sessionProcessingFeature
         )
         let chatDispatcher = ChatCommandDispatcher(feature: applicationCommands)
         let librarySelectionDispatcher = LibrarySelectionCommandDispatcher(

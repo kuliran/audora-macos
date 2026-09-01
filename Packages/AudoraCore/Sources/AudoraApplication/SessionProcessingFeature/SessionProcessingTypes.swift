@@ -538,15 +538,21 @@ public struct SessionProcessingJobInventory: Equatable, Sendable {
     public let reconciliationID: SessionProcessingReconciliationID
     public let scope: LibraryScope
     public let jobs: [SessionProcessingJob]
+    /// False means Infrastructure could classify these exact valid Jobs but
+    /// also encountered malformed siblings. Callers must reconcile `jobs` while
+    /// retaining the Library-wide activation fence.
+    public let isComplete: Bool
 
     public init(
         reconciliationID: SessionProcessingReconciliationID,
         scope: LibraryScope,
-        jobs: [SessionProcessingJob]
+        jobs: [SessionProcessingJob],
+        isComplete: Bool = true
     ) {
         self.reconciliationID = reconciliationID
         self.scope = scope
         self.jobs = jobs
+        self.isComplete = isComplete
     }
 }
 
@@ -776,6 +782,9 @@ public enum TranscriptionEngineFailure: String, Error, Equatable, Sendable {
     case candidateUnavailable
     case candidateIntegrityMismatch
     case launchFailed
+    /// A launch boundary may have spawned the exact worker, but bounded reap
+    /// could not prove it absent. The durable Job must remain nonterminal.
+    case workerAbsenceUnconfirmed
     case workerFailed
     case cancelled
 }

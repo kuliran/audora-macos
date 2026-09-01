@@ -408,6 +408,68 @@ final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
         XCTAssertEqual(cancelCount, 2)
     }
 
+    func testHostStartThatSpawnsThenThrowsIsReapedBeforeLaunchFailureReturns()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let host = SpawnThenThrowWorkerHostProbe(outcomes: [.reaped])
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+
+        await XCTAssertThrowsErrorAsync(
+            try await engine.transcribe(fixture.request) { _ in }
+        ) { error in
+            XCTAssertEqual(error as? TranscriptionEngineFailure, .launchFailed)
+        }
+
+        let cancellations = await host.cancelledExecutions
+        let presence = await engine.workerPresence(for: fixture.request.execution)
+        XCTAssertEqual(cancellations, [fixture.request.execution])
+        XCTAssertEqual(presence, .absent)
+    }
+
+    func testUnconfirmedSpawnThenThrowRetainsAuthorityAndNeverStartsSecondWorker()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let host = SpawnThenThrowWorkerHostProbe(
+            outcomes: [.unableToConfirm, .reaped]
+        )
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+
+        await XCTAssertThrowsErrorAsync(
+            try await engine.transcribe(fixture.request) { _ in }
+        ) { error in
+            XCTAssertEqual(
+                error as? TranscriptionEngineFailure,
+                .workerAbsenceUnconfirmed
+            )
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await engine.transcribe(fixture.request) { _ in }
+        ) { error in
+            XCTAssertEqual(error as? TranscriptionEngineFailure, .cancelled)
+        }
+
+        let startCount = await host.startCount
+        let retainedPresence = await engine.workerPresence(
+            for: fixture.request.execution
+        )
+        XCTAssertEqual(startCount, 1)
+        XCTAssertEqual(retainedPresence, .present)
+        let finalCancellation = await engine.cancel(fixture.request.execution)
+        XCTAssertEqual(finalCancellation, .reaped)
+    }
+
     func testQualificationBlockedHostProvesItsNeverLaunchedAuthorityAbsent()
         async throws
     {
@@ -763,6 +825,38 @@ private actor SequencedCancellationWorkerHostProbe:
     }
 
     func cancelCountValue() -> Int { cancelCount }
+}
+
+private actor SpawnThenThrowWorkerHostProbe: ConfinedTranscriptionWorkerHost {
+    private var outcomes: [TranscriptionCancellationOutcome]
+    private(set) var startCount = 0
+    private(set) var cancelledExecutions: [TranscriptionExecutionReference] = []
+
+    init(outcomes: [TranscriptionCancellationOutcome]) {
+        self.outcomes = outcomes
+    }
+
+    func start(
+        _ invocation: ConfinedTranscriptionWorkerInvocation
+    ) async throws -> ConfinedTranscriptionWorkerStarted {
+        startCount += 1
+        throw TranscriptionEngineFailure.launchFailed
+    }
+
+    func cancelAndReap(
+        _ execution: TranscriptionExecutionReference,
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome {
+        cancelledExecutions.append(execution)
+        guard !outcomes.isEmpty else { return .unableToConfirm }
+        return outcomes.removeFirst()
+    }
+
+    func workerPresence(
+        for execution: TranscriptionExecutionReference
+    ) async -> TranscriptionWorkerPresence {
+        .unknown
+    }
 }
 
 private actor LiveStreamingWorkerHostProbe:

@@ -7,6 +7,9 @@
         },
         {
             "$ref": "#/$defs/ControlledTranscriptionJobManifest"
+        },
+        {
+            "$ref": "#/$defs/SequencedTranscriptionJobManifest"
         }
     ],
     "description": "Minimal durable state for one Session transcription job.",
@@ -69,6 +72,48 @@
                 "not": {}
             }
         },
+        "SequencedTranscriptionJobManifest": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 3
+                },
+                "attemptSequence": {
+                    "$ref": "#/$defs/SessionProcessingAttemptSequence"
+                },
+                "expectedSelectedRevisionId": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/TranscriptRevisionId"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                },
+                "cancellationAuthorityId": {
+                    "$ref": "#/$defs/TranscriptionCancellationAuthorityId"
+                },
+                "cancellationRequestedAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "attemptSequence",
+                "expectedSelectedRevisionId",
+                "cancellationAuthorityId"
+            ],
+            "allOf": [
+                {
+                    "$ref": "#/$defs/TranscriptionJobManifestBody"
+                }
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "TranscriptionJobManifestBody": {
             "type": "object",
             "properties": {
@@ -119,6 +164,11 @@
         "UTCInstant": {
             "type": "string",
             "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        },
+        "SessionProcessingAttemptSequence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
         },
         "TranscriptionJobId": {
             "type": "string",

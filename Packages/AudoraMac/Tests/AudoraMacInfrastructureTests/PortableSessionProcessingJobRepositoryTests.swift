@@ -386,6 +386,404 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
         }
     }
 
+    func testClockRollbackKeepsTheLaterCreatedAttemptCurrentAcrossRelaunch()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let first = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T121000000Z-8NPQ"),
+                sessionID: try SessionID("ses-20260830T120100000Z-2CDE"),
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T121100000Z-9RST"
+                ),
+                profileID: "synthetic-qualified-v1",
+                createdAt: try UTCInstant("2026-08-30T12:10:00.000Z"),
+                state: .queued,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-first-causal-attempt"
+                )
+            )
+            let retryAfterClockRollback = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T110000000Z-3DEF"),
+                sessionID: first.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T110100000Z-4EFG"
+                ),
+                profileID: first.profileID,
+                createdAt: try UTCInstant("2026-08-30T11:00:00.000Z"),
+                state: .queued,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-clock-rollback-retry"
+                )
+            )
+
+            let firstWrite = await repository.create(first)
+            let retryWrite = await repository.create(retryAfterClockRollback)
+            XCTAssertEqual(firstWrite, .written(first))
+            XCTAssertEqual(retryWrite, .written(retryAfterClockRollback))
+
+            let reopened = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let selection = try makeSelection(libraryID: libraryID)
+            let latest = await reopened.latest(for: selection)
+            XCTAssertEqual(latest, .loaded(retryAfterClockRollback))
+            let inventory = await reopened.inventory(
+                for: LibraryScope(libraryID: libraryID)
+            )
+            guard case let .available(value) = inventory else {
+                return XCTFail("expected causal inventory")
+            }
+            XCTAssertEqual(value.jobs, [first, retryAfterClockRollback])
+        }
+    }
+
+    func testRelaunchRepairsACrashedAttemptReservationBeforeAcceptingTheRetry()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let first = try makeJob(state: .queued)
+            let retry = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T110000000Z-3DEF"),
+                sessionID: first.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T110100000Z-4EFG"
+                ),
+                profileID: first.profileID,
+                createdAt: try UTCInstant("2026-08-30T11:00:00.000Z"),
+                state: .queued,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-crashed-causal-retry"
+                )
+            )
+            let writer = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let firstWrite = await writer.create(first)
+            XCTAssertEqual(firstWrite, .written(first))
+            let interruptedWriter = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID,
+                reconciliationFault: { point in
+                    guard point == .afterAttemptReservationBeforeJobInstall else {
+                        return
+                    }
+                    throw CausalAttemptTestFault.injectedCrash
+                }
+            )
+
+            let interrupted = await interruptedWriter.create(retry)
+            XCTAssertEqual(interrupted, .failed)
+
+            let reopened = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let selection = try makeSelection(libraryID: libraryID)
+            let afterCrash = await reopened.latest(for: selection)
+            XCTAssertEqual(afterCrash, .loaded(first))
+            let retriedWrite = await reopened.create(retry)
+            XCTAssertEqual(retriedWrite, .written(retry))
+            let afterRetry = await reopened.latest(for: selection)
+            XCTAssertEqual(afterRetry, .loaded(retry))
+        }
+    }
+
+    func testCreateAtJobCapacityFailsBeforeDirectoryOrAttemptPointerMutation()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID,
+                creationJobCountLimit: 1
+            )
+            let first = try makeJob(state: .queued)
+            let firstWrite = await repository.create(first)
+            XCTAssertEqual(firstWrite, .written(first))
+            let jobs = root.appendingPathComponent("jobs", isDirectory: true)
+            let pointer = jobs.appendingPathComponent(".attempts.json")
+            let pointerBefore = try Data(contentsOf: pointer)
+            let retry = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T120700000Z-7MNP"),
+                sessionID: first.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T120800000Z-8NPQ"
+                ),
+                profileID: first.profileID,
+                createdAt: try UTCInstant("2026-08-30T12:06:00.000Z"),
+                state: .queued,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-capacity-retry"
+                )
+            )
+
+            let result = await repository.create(retry)
+
+            XCTAssertEqual(result, .failed)
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: jobs.appendingPathComponent(retry.jobID.rawValue).path
+                )
+            )
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: jobs.appendingPathComponent(
+                        ".\(retry.jobID.rawValue).partial"
+                    ).path
+                )
+            )
+            XCTAssertEqual(try Data(contentsOf: pointer), pointerBefore)
+            let latest = await repository.latest(
+                for: try makeSelection(libraryID: libraryID)
+            )
+            XCTAssertEqual(latest, .loaded(first))
+        }
+    }
+
+    func testMigratedLegacyCurrentYieldsToASequencedRollbackRetryCompletion()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let legacy = try makeJob(state: .queued)
+            let legacyDirectory = root.appendingPathComponent("jobs")
+                .appendingPathComponent(legacy.jobID.rawValue)
+            try FileManager.default.createDirectory(
+                at: legacyDirectory,
+                withIntermediateDirectories: false
+            )
+            try encodedJob(legacy, attemptSequence: nil).write(
+                to: legacyDirectory.appendingPathComponent("job.json")
+            )
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let selection = try makeSelection(libraryID: libraryID)
+            let migrated = await repository.latest(for: selection)
+            XCTAssertEqual(migrated, .loaded(legacy))
+
+            let retry = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T110000000Z-3DEF"),
+                sessionID: legacy.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T110100000Z-4EFG"
+                ),
+                profileID: legacy.profileID,
+                createdAt: try UTCInstant("2026-08-30T11:00:00.000Z"),
+                state: .queued,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-migrated-clock-retry"
+                )
+            )
+            let create = await repository.create(retry)
+            XCTAssertEqual(create, .written(retry))
+            let running = retry.replacing(state: .running)
+            let runningWrite = await repository.transition(running, from: .queued)
+            XCTAssertEqual(runningWrite, .written(running))
+            let hash = String(repeating: "a", count: 64)
+            let validating = running.replacing(
+                state: .validating,
+                candidateArtifactSHA256: hash
+            )
+            let validatingWrite = await repository.transition(
+                validating,
+                from: .running
+            )
+            XCTAssertEqual(validatingWrite, .written(validating))
+            let completed = validating.replacing(
+                state: .completed,
+                candidateArtifactSHA256: hash
+            )
+            let completedWrite = await repository.transition(
+                completed,
+                from: .validating
+            )
+            XCTAssertEqual(completedWrite, .written(completed))
+
+            let reopened = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let latest = await reopened.latest(for: selection)
+            XCTAssertEqual(latest, .loaded(completed))
+            let inventory = await reopened.inventory(
+                for: LibraryScope(libraryID: libraryID)
+            )
+            guard case let .available(value) = inventory else {
+                return XCTFail("expected migrated causal inventory")
+            }
+            XCTAssertEqual(value.jobs, [legacy, completed])
+        }
+    }
+
+    func testInventoryReturnsClassifiedValidJobsBesideAMalformedSibling()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let valid = try makeJob(state: .queued)
+            let validWrite = await repository.create(valid)
+            XCTAssertEqual(validWrite, .written(valid))
+            let malformedDirectory = root.appendingPathComponent("jobs")
+                .appendingPathComponent("job-20260830T120700000Z-7MNP")
+            try FileManager.default.createDirectory(
+                at: malformedDirectory,
+                withIntermediateDirectories: false
+            )
+            try Data("not-json".utf8).write(
+                to: malformedDirectory.appendingPathComponent("job.json")
+            )
+
+            let inventory = await repository.inventory(
+                for: LibraryScope(libraryID: libraryID)
+            )
+            guard case let .available(value) = inventory else {
+                return XCTFail("expected classified partial inventory")
+            }
+            XCTAssertEqual(value.jobs, [valid])
+            XCTAssertFalse(value.isComplete)
+
+            let latest = await repository.latest(
+                for: try makeSelection(libraryID: libraryID)
+            )
+            XCTAssertEqual(latest, .integrityMismatch)
+        }
+    }
+
+    func testCorruptAttemptPointerStillInventoriesAValidRunningWorker()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let queued = try makeJob(state: .queued)
+            let queuedWrite = await repository.create(queued)
+            XCTAssertEqual(queuedWrite, .written(queued))
+            let running = queued.replacing(state: .running)
+            let runningWrite = await repository.transition(running, from: .queued)
+            XCTAssertEqual(runningWrite, .written(running))
+            try Data("corrupt-pointer".utf8).write(
+                to: root.appendingPathComponent("jobs/.attempts.json")
+            )
+
+            let inventory = await repository.inventory(
+                for: LibraryScope(libraryID: libraryID)
+            )
+            guard case let .available(value) = inventory else {
+                return XCTFail("expected independently classified running Job")
+            }
+            XCTAssertEqual(value.jobs, [running])
+            XCTAssertFalse(value.isComplete)
+            let latest = await repository.latest(
+                for: try makeSelection(libraryID: libraryID)
+            )
+            XCTAssertEqual(latest, .integrityMismatch)
+        }
+    }
+
+    func testMissingAttemptPointerStillInventoriesASequencedRunningWorker()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let queued = try makeJob(state: .queued)
+            _ = await repository.create(queued)
+            let running = queued.replacing(state: .running)
+            _ = await repository.transition(running, from: .queued)
+            try FileManager.default.removeItem(
+                at: root.appendingPathComponent("jobs/.attempts.json")
+            )
+
+            let inventory = await repository.inventory(
+                for: LibraryScope(libraryID: libraryID)
+            )
+            guard case let .available(value) = inventory else {
+                return XCTFail("expected independently classified sequenced Job")
+            }
+            XCTAssertEqual(value.jobs, [running])
+            XCTAssertFalse(value.isComplete)
+            let latest = await repository.latest(
+                for: try makeSelection(libraryID: libraryID)
+            )
+            XCTAssertEqual(latest, .integrityMismatch)
+        }
+    }
+
+    func testAttemptSequenceAboveContractMaximumIsExcludedFromPartialInventory()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let valid = try makeJob(state: .queued)
+            let createResult = await repository.create(valid)
+            XCTAssertEqual(createResult, .written(valid))
+            let oversized = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T120700000Z-7MNP"),
+                sessionID: valid.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T120800000Z-8NPQ"
+                ),
+                profileID: valid.profileID,
+                createdAt: try UTCInstant("2026-08-30T12:07:00.000Z"),
+                state: .queued,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-oversized-attempt-sequence"
+                )
+            )
+            let oversizedDirectory = root.appendingPathComponent("jobs")
+                .appendingPathComponent(oversized.jobID.rawValue)
+            try FileManager.default.createDirectory(
+                at: oversizedDirectory,
+                withIntermediateDirectories: false
+            )
+            try encodedJob(
+                oversized,
+                attemptSequence: 9_007_199_254_740_992
+            ).write(to: oversizedDirectory.appendingPathComponent("job.json"))
+
+            let inventory = await repository.inventory(
+                for: LibraryScope(libraryID: libraryID)
+            )
+
+            guard case let .available(value) = inventory else {
+                return XCTFail("expected independently classified valid Job")
+            }
+            XCTAssertEqual(value.jobs, [valid])
+            XCTAssertFalse(value.isComplete)
+            let latest = await repository.latest(
+                for: try makeSelection(libraryID: libraryID)
+            )
+            XCTAssertEqual(
+                latest,
+                .integrityMismatch
+            )
+        }
+    }
+
     func testStaleTransitionCannotOverwriteCurrentState() async throws {
         try await withLibrary { root, libraryID in
             let repository = PortableSessionProcessingJobRepository(
@@ -574,7 +972,8 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
             let object = try XCTUnwrap(
                 try JSONSerialization.jsonObject(with: data) as? [String: Any]
             )
-            XCTAssertEqual(object["schemaVersion"] as? Int, 2)
+            XCTAssertEqual(object["schemaVersion"] as? Int, 3)
+            XCTAssertEqual(object["attemptSequence"] as? Int, 1)
             XCTAssertEqual(
                 object["cancellationAuthorityId"] as? String,
                 queued.cancellationAuthorityID?.rawValue
@@ -594,7 +993,7 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
         }
     }
 
-    func testV2StartSelectionBaselineIsRequiredAndDurable() async throws {
+    func testV3StartSelectionBaselineAndAttemptSequenceAreDurable() async throws {
         try await withLibrary { root, libraryID in
             let baseline = try TranscriptRevisionID(
                 "trv-20260830T120400000Z-4EFG"
@@ -1279,9 +1678,12 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
         )
     }
 
-    private func encodedJob(_ job: SessionProcessingJob) throws -> Data {
+    private func encodedJob(
+        _ job: SessionProcessingJob,
+        attemptSequence: UInt64? = 1
+    ) throws -> Data {
         var object: [String: Any] = [
-            "schemaVersion": 2,
+            "schemaVersion": attemptSequence == nil ? 2 : 3,
             "jobId": job.jobID.rawValue,
             "sessionId": job.sessionID.rawValue,
             "revisionId": job.revisionID.rawValue,
@@ -1294,6 +1696,7 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
                 job.cancellationAuthorityID
             ).rawValue,
         ]
+        if let attemptSequence { object["attemptSequence"] = attemptSequence }
         if let cancellationRequestedAt = job.cancellationRequestedAt {
             object["cancellationRequestedAt"] = cancellationRequestedAt.rawValue
         }
@@ -1305,11 +1708,16 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
     }
 }
 
+private enum CausalAttemptTestFault: Error {
+    case injectedCrash
+}
+
 private extension SessionProcessingJob {
     func replacing(
         state: SessionProcessingJobState,
         failure: SessionProcessingFailureReason? = nil,
-        cancellationRequestedAt: UTCInstant? = nil
+        cancellationRequestedAt: UTCInstant? = nil,
+        candidateArtifactSHA256: String? = nil
     ) -> SessionProcessingJob {
         SessionProcessingJob(
             jobID: jobID,
@@ -1321,7 +1729,8 @@ private extension SessionProcessingJob {
             expectedSelectedRevisionID: expectedSelectedRevisionID,
             cancellationAuthorityID: cancellationAuthorityID!,
             cancellationRequestedAt: cancellationRequestedAt,
-            candidateArtifactSHA256: candidateArtifactSHA256,
+            candidateArtifactSHA256:
+                candidateArtifactSHA256 ?? self.candidateArtifactSHA256,
             failure: failure
         )
     }
