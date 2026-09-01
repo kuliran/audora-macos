@@ -5,6 +5,84 @@ import Foundation
 import XCTest
 
 final class PortableSessionProcessingWorkspaceTests: XCTestCase {
+    func testExactJobLookupKeepsOriginalWhenNewerSameSessionJobExists()
+        async throws
+    {
+        try await withLibrary { root, libraryID in
+            let receipt = try installRecordedSession(
+                root: root,
+                libraryID: libraryID,
+                recordingID: "rec-20260830T120100000Z-1ABC",
+                sessionID: "ses-20260830T120100000Z-2CDE",
+                instant: "2026-08-30T12:01:00.000Z"
+            )
+            let selection = SessionProcessingSelection(
+                scope: LibraryScope(libraryID: libraryID),
+                sessionID: receipt.sessionID
+            )
+            let original = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T120300000Z-3DEF"),
+                sessionID: selection.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T120300000Z-4EFG"
+                ),
+                profileID: "synthetic-qualified-v1",
+                createdAt: try UTCInstant("2026-08-30T12:03:00.000Z"),
+                state: .queued,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-workspace-original"
+                )
+            )
+            let newer = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T120400000Z-5GHJ"),
+                sessionID: selection.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T120400000Z-6JKM"
+                ),
+                profileID: original.profileID,
+                createdAt: try UTCInstant("2026-08-30T12:04:00.000Z"),
+                state: .queued,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-workspace-newer"
+                )
+            )
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let originalWrite = await repository.create(original)
+            let newerWrite = await repository.create(newer)
+            XCTAssertEqual(originalWrite, .written(original))
+            XCTAssertEqual(newerWrite, .written(newer))
+            let active = ActiveLibraryProcessingScope(
+                identity: SessionProcessingScopeIdentity(
+                    libraryID: libraryID,
+                    workspaceGeneration: 1,
+                    rootIdentity: try XCTUnwrap(
+                        SessionProcessingRootIdentity.capture(root)
+                    )
+                ),
+                root: root,
+                lease: WorkspaceTestLease(url: root)
+            )
+            let workspace = PortableSessionProcessingWorkspace(
+                scopes: FixedProcessingScopeProvider(active: active)
+            )
+
+            guard case .available = await workspace.load(selection) else {
+                return XCTFail("expected sealed source binding")
+            }
+            let latest = await workspace.latest(for: selection)
+            let exact = await workspace.load(
+                jobID: original.jobID,
+                for: selection
+            )
+
+            XCTAssertEqual(latest, .loaded(newer))
+            XCTAssertEqual(exact, .loaded(original))
+        }
+    }
+
     func testSelectingValidatingJobWithMissingSourceRetainsJobAuthorityToInterrupt()
         async throws
     {

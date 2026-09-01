@@ -139,6 +139,43 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
         }
     }
 
+    func testExactLookupDoesNotFollowNewerJobForSameSession() async throws {
+        try await withLibrary { root, libraryID in
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let original = try makeJob(state: .queued)
+            let newer = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T120700000Z-7MNP"),
+                sessionID: original.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T120800000Z-8NPQ"
+                ),
+                profileID: original.profileID,
+                createdAt: try UTCInstant("2026-08-30T12:07:00.000Z"),
+                state: .queued,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-newer-job-repository"
+                )
+            )
+            let originalWrite = await repository.create(original)
+            let newerWrite = await repository.create(newer)
+            let selection = try makeSelection(libraryID: libraryID)
+            let latest = await repository.latest(for: selection)
+            let exact = await repository.load(
+                jobID: original.jobID,
+                for: selection
+            )
+
+            XCTAssertEqual(originalWrite, .written(original))
+            XCTAssertEqual(newerWrite, .written(newer))
+            XCTAssertEqual(latest, .loaded(newer))
+            XCTAssertEqual(exact, .loaded(original))
+        }
+    }
+
     func testStaleTransitionCannotOverwriteCurrentState() async throws {
         try await withLibrary { root, libraryID in
             let repository = PortableSessionProcessingJobRepository(

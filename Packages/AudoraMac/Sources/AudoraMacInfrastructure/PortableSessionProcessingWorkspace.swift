@@ -580,6 +580,52 @@ public actor PortableSessionProcessingWorkspace:
         }
     }
 
+    public func load(
+        jobID: TranscriptionJobID,
+        for selection: SessionProcessingSelection
+    ) async -> SessionProcessingJobLoadResult {
+        if let reconciliationBinding,
+           reconciliationBinding.scope == selection.scope
+        {
+            guard reconciliationBinding.jobIDs.contains(jobID) else { return .none }
+            guard await scopes.isCurrentSessionProcessingScope(
+                reconciliationBinding.active.identity
+            ) else { return .unavailable }
+            do {
+                let result = try await scopes.withCurrentSessionProcessingScope(
+                    reconciliationBinding.active.identity
+                ) {
+                    reconciliationBinding.jobs.loadSynchronously(
+                        jobID: jobID,
+                        for: selection
+                    )
+                }
+                guard await scopes.isCurrentSessionProcessingScope(
+                    reconciliationBinding.active.identity
+                ) else { return .unavailable }
+                return result
+            } catch {
+                return .unavailable
+            }
+        }
+        guard let jobBinding, jobBinding.selection == selection,
+              await scopes.isCurrentSessionProcessingScope(jobBinding.scope.identity)
+        else { return .unavailable }
+        do {
+            let result = try await scopes.withCurrentSessionProcessingScope(
+                jobBinding.scope.identity
+            ) {
+                jobBinding.jobs.loadSynchronously(jobID: jobID, for: selection)
+            }
+            guard await scopes.isCurrentSessionProcessingScope(
+                jobBinding.scope.identity
+            ) else { return .unavailable }
+            return result
+        } catch {
+            return .unavailable
+        }
+    }
+
     public func create(
         _ job: SessionProcessingJob
     ) async -> SessionProcessingJobWriteResult {

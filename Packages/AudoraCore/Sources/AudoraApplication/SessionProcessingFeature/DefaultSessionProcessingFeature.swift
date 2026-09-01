@@ -844,6 +844,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
               revision.createdAt == job.createdAt,
               let qualification = revision.engine.qualification,
               qualification.qualificationProfileID == job.profileID,
+              revision.durationMilliseconds == source.durationMilliseconds,
               revision.audioFingerprint == source.audioFingerprint,
               revision.sourceFingerprints == source.sourceFingerprints,
               revision.candidateArtifactFingerprint.sha256 ==
@@ -940,7 +941,13 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         reason: SessionProcessingFailureReason
     ) async {
         let failed = job.transitioning(to: .failed, failure: reason)
-        guard case .written = await jobs.transition(failed, from: expected) else {
+        let failureWrite = await jobs.transition(failed, from: expected)
+        // Cancel can enter while any terminal CAS is suspended. Once it has
+        // raised this run's fence, its exact-Job refresh owns presentation of
+        // the first durable winner; a late acknowledgement (including an
+        // ambiguous failed/stale result) must not invent jobPersistenceFailed.
+        guard cancelledRunJobID != job.jobID else { return }
+        guard case .written = failureWrite else {
             transition(
                 to: .failed(
                     SessionProcessingFailedSnapshot(
@@ -987,7 +994,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             // cancellation CAS was suspended. Refresh that exact Job and let
             // its already-accepted validation/publication outcome finish;
             // never send cancellation authority to a worker after losing CAS.
-            guard await resumeAcceptedCandidateAfterCancellationCASLoss(active)
+            guard await resumeDurableWinnerAfterCancellationCASLoss(active)
             else {
                 await retainRecoveryForUnconfirmedCancellation(active.job)
                 return
@@ -1052,10 +1059,11 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         await finishCancellationFinalization()
     }
 
-    private func resumeAcceptedCandidateAfterCancellationCASLoss(
+    private func resumeDurableWinnerAfterCancellationCASLoss(
         _ active: SessionProcessingActiveSnapshot
     ) async -> Bool {
-        guard case let .loaded(current) = await jobs.latest(
+        guard case let .loaded(current) = await jobs.load(
+            jobID: active.job.jobID,
             for: active.source.selection
         ),
               current.jobID == active.job.jobID,
@@ -1069,7 +1077,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                 active.job.hasCapturedSelectionBaseline,
               current.cancellationAuthorityID ==
                 active.job.cancellationAuthorityID,
-              current.state == .validating || current.state == .completed
+              current.state == .validating || current.state == .completed ||
+                current.state == .failed
         else { return false }
         await reconcile(current, source: active.source)
         return true

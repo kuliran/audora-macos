@@ -132,6 +132,38 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
         }
     }
 
+    public func load(
+        jobID: TranscriptionJobID,
+        for selection: SessionProcessingSelection
+    ) async -> SessionProcessingJobLoadResult {
+        loadSynchronously(jobID: jobID, for: selection)
+    }
+
+    func loadSynchronously(
+        jobID: TranscriptionJobID,
+        for selection: SessionProcessingSelection
+    ) -> SessionProcessingJobLoadResult {
+        guard selection.scope.libraryID == libraryID else { return .unavailable }
+        do {
+            return try withJobs(exclusive: true) { authority in
+                let jobs = try reconcileOwnedPartialsAndLoadJobs(authority)
+                guard let job = jobs.first(where: { $0.jobID == jobID }) else {
+                    try revalidate(authority)
+                    return .none
+                }
+                guard job.sessionID == selection.sessionID else {
+                    return .integrityMismatch
+                }
+                try revalidate(authority)
+                return .loaded(job)
+            }
+        } catch JobPersistenceError.unavailable {
+            return .unavailable
+        } catch {
+            return .integrityMismatch
+        }
+    }
+
     public func create(
         _ job: SessionProcessingJob
     ) async -> SessionProcessingJobWriteResult {

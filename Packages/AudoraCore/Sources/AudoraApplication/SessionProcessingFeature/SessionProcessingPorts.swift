@@ -113,6 +113,13 @@ public protocol SessionProcessingJobPort: Sendable {
     func latest(for selection: SessionProcessingSelection) async
         -> SessionProcessingJobLoadResult
 
+    /// Loads one durable Job by immutable identity. This must never substitute
+    /// a newer Job for the same Session after a compare-and-swap race.
+    func load(
+        jobID: TranscriptionJobID,
+        for selection: SessionProcessingSelection
+    ) async -> SessionProcessingJobLoadResult
+
     func create(_ job: SessionProcessingJob) async -> SessionProcessingJobWriteResult
 
     /// Durable compare-and-swap. Infrastructure must reject a different current
