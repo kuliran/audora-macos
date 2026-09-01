@@ -3,6 +3,9 @@ import AudoraDomain
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private static let maximumIdentityAttempts = 16
+    /// Bounds exact-winner rediscovery independently of inventory size. The
+    /// monotonic Job graph normally settles sooner; exhaustion fails closed.
+    private static let maximumActivationReconciliationPassCount = 8
     private static let maximumReconciledJobCount = 10_000
 
     private struct CompletedRecoveryKey: Hashable {
@@ -201,48 +204,11 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
                     SessionProcessingSelection(scope: scope, sessionID: job.sessionID)
                 )
             )
-            switch job.state {
-            case .queued, .preparing, .running:
-                await reconcileBackgroundControl(job)
-                continue
-            case .failed, .cancelled, .interrupted:
-                // These terminal outcomes remain terminal and require no
-                // canonical-audio or Revision work during activation.
-                continue
-            case .validating, .completed:
-                break
-            }
-            let selection = SessionProcessingSelection(
+            await reconcileActivationJob(
+                job,
                 scope: scope,
-                sessionID: job.sessionID
-            )
-            let sourceResult = await sourcePort.load(
-                selection,
                 reconciliationID: reconciliationID
             )
-            guard case let .available(source) = sourceResult,
-                  source.selection == selection,
-                  source.isValid
-            else {
-                // Validating work may safely become retryable interruption.
-                // Completed authority is immutable: missing/corrupt sealed
-                // source leaves it fail-closed so selecting that Session opens
-                // the canonical recovery error instead of retranscribing.
-                if job.state == .validating {
-                    await persistBackgroundTerminal(job, as: .interrupted)
-                } else {
-                    invalidCompletedJobs[CompletedRecoveryKey(selection)] = job
-                }
-                continue
-            }
-            if job.state == .completed {
-                guard await completedRevisionMatches(job, source: source) else {
-                    invalidCompletedJobs[CompletedRecoveryKey(selection)] = job
-                    continue
-                }
-                continue
-            }
-            await reconcile(job, source: source)
         }
         suppressStateTransitions = false
         activeReconciliationScope = nil
@@ -250,63 +216,164 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         await jobs.finishReconciliation(reconciliationID)
     }
 
-    private func reconcileBackgroundControl(_ job: SessionProcessingJob) async {
+    private func reconcileActivationJob(
+        _ inventoried: SessionProcessingJob,
+        scope: LibraryScope,
+        reconciliationID: SessionProcessingReconciliationID
+    ) async {
+        let selection = SessionProcessingSelection(
+            scope: scope,
+            sessionID: inventoried.sessionID
+        )
+        var job = inventoried
+        var isExactWinner = false
+        var observedJobs: [SessionProcessingJob] = []
+
+        for _ in 0..<Self.maximumActivationReconciliationPassCount {
+            guard !observedJobs.contains(job) else {
+                retainActivationRecovery(.unconfirmed(job), for: job)
+                return
+            }
+            observedJobs.append(job)
+
+            switch job.state {
+            case .queued, .preparing, .running:
+                guard let winner = await reconcileBackgroundControl(
+                    job,
+                    selection: selection
+                ) else { return }
+                job = winner
+                isExactWinner = true
+            case .failed, .cancelled, .interrupted:
+                // These terminal outcomes need no sealed source. Preserve an
+                // exact CAS winner so a later selection cannot substitute an
+                // ambient newer Job for this reconciliation decision.
+                if isExactWinner {
+                    retainActivationRecovery(.exactWinner(job), for: job)
+                }
+                return
+            case .validating, .completed:
+                let sourceResult = await sourcePort.load(
+                    selection,
+                    reconciliationID: reconciliationID
+                )
+                guard case let .available(source) = sourceResult,
+                      source.selection == selection,
+                      source.isValid
+                else {
+                    // Validating work may safely become retryable interruption.
+                    // Completed authority is immutable: missing/corrupt sealed
+                    // source leaves it fail-closed instead of retranscribing.
+                    if job.state == .validating,
+                       let winner = await persistBackgroundTerminal(
+                           job,
+                           as: .interrupted,
+                           selection: selection
+                       )
+                    {
+                        job = winner
+                        isExactWinner = true
+                    } else if job.state == .completed {
+                        invalidCompletedJobs[CompletedRecoveryKey(selection)] = job
+                        return
+                    } else {
+                        return
+                    }
+                    continue
+                }
+                if job.state == .completed {
+                    guard await completedRevisionMatches(job, source: source) else {
+                        invalidCompletedJobs[CompletedRecoveryKey(selection)] = job
+                        return
+                    }
+                    if isExactWinner {
+                        retainActivationRecovery(.exactWinner(job), for: job)
+                    }
+                    return
+                }
+                await reconcile(job, source: source)
+                return
+            }
+        }
+
+        retainActivationRecovery(.unconfirmed(job), for: job)
+    }
+
+    private func reconcileBackgroundControl(
+        _ job: SessionProcessingJob,
+        selection: SessionProcessingSelection
+    ) async -> SessionProcessingJob? {
         switch job.state {
         case .queued:
-            await persistBackgroundTerminal(job, as: .interrupted)
+            return await persistBackgroundTerminal(
+                job,
+                as: .interrupted,
+                selection: selection
+            )
         case .preparing, .running:
-            guard job.cancellationAuthorityID != nil else { return }
+            guard job.cancellationAuthorityID != nil else {
+                retainActivationRecovery(.unconfirmed(job), for: job)
+                return nil
+            }
             switch await engine.workerPresence(for: job.executionReference) {
             case .absent:
-                await persistBackgroundAbandonment(job)
+                return await persistBackgroundAbandonment(
+                    job,
+                    selection: selection
+                )
             case .present:
                 let outcome = await engine.cancel(job.executionReference)
-                guard outcome == .reaped || outcome == .alreadyAbsent else { return }
-                await persistBackgroundAbandonment(job)
+                guard outcome == .reaped || outcome == .alreadyAbsent else {
+                    retainActivationRecovery(.unconfirmed(job), for: job)
+                    return nil
+                }
+                return await persistBackgroundAbandonment(
+                    job,
+                    selection: selection
+                )
             case .unknown:
                 // Preserve the nonterminal Job as recovery-required. Absence
                 // has not been proved, so no durable terminal claim is safe.
-                return
+                retainActivationRecovery(.unconfirmed(job), for: job)
+                return nil
             }
         case .validating, .completed, .failed, .cancelled, .interrupted:
-            return
+            return nil
         }
     }
 
-    private func persistBackgroundAbandonment(_ job: SessionProcessingJob) async {
+    private func persistBackgroundAbandonment(
+        _ job: SessionProcessingJob,
+        selection: SessionProcessingSelection
+    ) async -> SessionProcessingJob? {
         await persistBackgroundTerminal(
             job,
-            as: job.cancellationRequestedAt == nil ? .interrupted : .cancelled
+            as: job.cancellationRequestedAt == nil ? .interrupted : .cancelled,
+            selection: selection
         )
     }
 
     private func persistBackgroundTerminal(
         _ job: SessionProcessingJob,
-        as state: SessionProcessingJobState
-    ) async {
+        as state: SessionProcessingJobState,
+        selection: SessionProcessingSelection
+    ) async -> SessionProcessingJob? {
         let terminal = job.transitioning(to: state)
         switch await jobs.transition(terminal, from: job.state) {
         case .written:
-            return
+            return nil
         case .stale:
-            guard let scope = activeReconciliationScope else {
-                retainActivationRecovery(.unconfirmed(job), for: job)
-                return
-            }
-            let selection = SessionProcessingSelection(
-                scope: scope,
-                sessionID: job.sessionID
-            )
             let winnerResult = await jobs.load(jobID: job.jobID, for: selection)
             guard case let .loaded(winner) = winnerResult,
                   winner.hasSameReconciliationIdentity(as: job)
             else {
                 retainActivationRecovery(.unconfirmed(job), for: job)
-                return
+                return nil
             }
-            retainActivationRecovery(.exactWinner(winner), for: winner)
+            return winner
         case .collision, .failed:
             retainActivationRecovery(.unconfirmed(job), for: job)
+            return nil
         }
     }
 
