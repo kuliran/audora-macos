@@ -405,6 +405,171 @@ final class CoachContextPlannerTests: XCTestCase {
         )
     }
 
+    func testAttachmentProjectionPreflightsCanonicalLimitBeforeSerializationOrEstimation()
+        throws
+    {
+        let encodingObservation = AttachmentEncodingObservation()
+        let estimatorObservation = AttachmentEstimatorObservation()
+        let encoder = BoundedCanonicalTranscriptEncoder(
+            measure: { _, maximumByteCount in
+                encodingObservation.recordMeasurement(maximumByteCount)
+                return maximumByteCount + 1
+            },
+            serialize: { _ in
+                encodingObservation.recordSerialization()
+                return Data("must-not-serialize".utf8)
+            }
+        )
+        let estimator = try CoachTokenEstimator(
+            identifier: "preflight-fixture-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { bytes in
+                estimatorObservation.record(bytes)
+                return bytes.count
+            }
+        )
+        let policy = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 8,
+            tokenEstimator: estimator,
+            canonicalTranscriptEncoder: encoder
+        )
+        let evidence = ChatAttachmentEvidence(
+            displayLabel: "Over canonical limit",
+            revision: try manyShortWordRevision(wordCount: 1)
+        )
+
+        XCTAssertThrowsError(try policy.project(evidence: evidence)) { error in
+            XCTAssertEqual(
+                error as? CoachAttachmentProjectionError,
+                .canonicalTranscriptTooLarge
+            )
+        }
+        XCTAssertEqual(
+            encodingObservation.measuredMaximums,
+            [CoachContextInputLimits.maximumCanonicalValueUTF8Bytes]
+        )
+        XCTAssertEqual(encodingObservation.serializationCount, 0)
+        XCTAssertEqual(estimatorObservation.values, [])
+    }
+
+    func testAttachmentCatalogIsolatesUnprojectableEvidenceButExactPinsFail()
+        async throws
+    {
+        let oversized = ChatAttachmentEvidence(
+            displayLabel: "Oversized Session",
+            revision: try manyShortWordRevision(
+                wordCount: 2,
+                sessionID: "ses-20260830T120000000Z-3DEF",
+                revisionID: "trv-20260830T121000000Z-4FGH"
+            )
+        )
+        let healthy = ChatAttachmentEvidence(
+            displayLabel: "Healthy Session",
+            revision: try manyShortWordRevision(
+                wordCount: 1,
+                sessionID: "ses-20260830T112000000Z-7STV",
+                revisionID: "trv-20260830T113000000Z-8WXY"
+            )
+        )
+        let oversizedAttachment = ChatSessionAttachment(
+            attachmentID: try ChatSessionAttachmentID("attachment-oversized"),
+            sessionID: oversized.sessionID,
+            transcriptRevisionID: oversized.transcriptRevisionID
+        )
+        let estimator = try CoachTokenEstimator(
+            identifier: "selective-oversized-fixture-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { bytes in
+                bytes.range(of: Data(#""text":"w1""#.utf8)) == nil
+                    ? 17
+                    : ChatAttachmentCandidate.maximumApproximateTranscriptTokens + 1
+            }
+        )
+        let policy = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 8,
+            tokenEstimator: estimator
+        )
+        let mixedSource = ProjectedChatSessionAttachmentSource(
+            evidenceSource: AttachmentEvidenceSourceFixture(
+                catalog: [oversized, healthy],
+                resolutions: [
+                    try ResolvedChatAttachmentEvidence(
+                        attachment: oversizedAttachment,
+                        resolution: .available(oversized)
+                    ),
+                ]
+            ),
+            projectionPolicy: policy
+        )
+        let oversizedOnlySource = ProjectedChatSessionAttachmentSource(
+            evidenceSource: AttachmentEvidenceSourceFixture(
+                catalog: [oversized],
+                resolutions: []
+            ),
+            projectionPolicy: policy
+        )
+        let library = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T120000000Z-7NPQ")
+        )
+
+        guard case let .loaded(candidates) = await mixedSource.loadCandidates(
+            in: library
+        ) else {
+            return XCTFail("one unprojectable Session must not fail the catalog")
+        }
+        XCTAssertEqual(candidates.count, 1)
+        XCTAssertEqual(candidates[0].sessionID, healthy.sessionID)
+        XCTAssertEqual(candidates[0].transcriptRevisionID, healthy.transcriptRevisionID)
+        XCTAssertEqual(candidates[0].approximateTranscriptTokens, 17)
+        let emptyCatalog = await oversizedOnlySource.loadCandidates(in: library)
+        XCTAssertEqual(
+            emptyCatalog,
+            .loaded([]),
+            "an empty projected catalog must preserve the zero-selection path"
+        )
+        let pinnedResolution = await mixedSource.resolve(
+            try ChatAttachments(validating: [oversizedAttachment]),
+            in: library
+        )
+        XCTAssertEqual(
+            pinnedResolution,
+            .failed,
+            "an exact pinned attachment must never be silently dropped"
+        )
+    }
+
+    func testAttachmentCatalogFailsWhenQualifiedEstimatorMalfunctions() async throws {
+        let evidence = ChatAttachmentEvidence(
+            displayLabel: "Healthy Session",
+            revision: try manyShortWordRevision(wordCount: 1)
+        )
+        let estimator = try CoachTokenEstimator(
+            identifier: "malfunctioning-fixture-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { _ in -1 }
+        )
+        let source = ProjectedChatSessionAttachmentSource(
+            evidenceSource: AttachmentEvidenceSourceFixture(
+                catalog: [evidence],
+                resolutions: []
+            ),
+            projectionPolicy: try CoachAttachmentProjectionPolicy(
+                maximumInlineTranscriptTokens: 8,
+                tokenEstimator: estimator
+            )
+        )
+        let library = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T120000000Z-7NPQ")
+        )
+
+        let outcome = await source.loadCandidates(in: library)
+
+        XCTAssertEqual(outcome, .failed)
+    }
+
     private func fixtureConfiguration(
         contextWindow: Int,
         responseReserve: Int = 32,
@@ -442,7 +607,11 @@ final class CoachContextPlannerTests: XCTestCase {
         )
     }
 
-    private func manyShortWordRevision(wordCount: Int) throws -> TranscriptRevision {
+    private func manyShortWordRevision(
+        wordCount: Int,
+        sessionID: String = "ses-20260830T120000000Z-3DEF",
+        revisionID: String = "trv-20260830T121000000Z-4FGH"
+    ) throws -> TranscriptRevision {
         let tokens = (0..<wordCount).map { "w\($0)" }
         let lineText = tokens.joined(separator: " ")
         var cursor = 0
@@ -481,8 +650,8 @@ final class CoachContextPlannerTests: XCTestCase {
             licenseSHA256: String(repeating: "b", count: 64)
         )
         return try TranscriptRevision(
-            revisionID: try TranscriptRevisionID("trv-20260830T121000000Z-4FGH"),
-            sessionID: try SessionID("ses-20260830T120000000Z-3DEF"),
+            revisionID: try TranscriptRevisionID(revisionID),
+            sessionID: try SessionID(sessionID),
             jobID: try TranscriptionJobID("job-20260830T120500000Z-5GHJ"),
             createdAt: try UTCInstant("2026-08-30T12:10:00.000Z"),
             durationMilliseconds: 1_000,
@@ -537,5 +706,45 @@ private final class AttachmentEstimatorObservation: @unchecked Sendable {
 
     func record(_ value: Data) {
         lock.withLock { recorded.append(value) }
+    }
+}
+
+private final class AttachmentEncodingObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var maximums: [Int] = []
+    private var serializations = 0
+
+    var measuredMaximums: [Int] {
+        lock.withLock { maximums }
+    }
+
+    var serializationCount: Int {
+        lock.withLock { serializations }
+    }
+
+    func recordMeasurement(_ maximum: Int) {
+        lock.withLock { maximums.append(maximum) }
+    }
+
+    func recordSerialization() {
+        lock.withLock { serializations += 1 }
+    }
+}
+
+private struct AttachmentEvidenceSourceFixture: ChatSessionAttachmentEvidenceSource {
+    let catalog: [ChatAttachmentEvidence]
+    let resolutions: [ResolvedChatAttachmentEvidence]
+
+    func loadEvidence(
+        in library: LibraryScope
+    ) async -> ChatAttachmentEvidenceCatalogOutcome {
+        .loaded(catalog)
+    }
+
+    func resolveEvidence(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentEvidenceResolutionOutcome {
+        .resolved(resolutions)
     }
 }

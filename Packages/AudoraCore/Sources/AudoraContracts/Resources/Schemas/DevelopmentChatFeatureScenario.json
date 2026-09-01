@@ -1748,7 +1748,7 @@
                 "approximateTranscriptTokens": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 16777216
+                    "maximum": 67108864
                 },
                 "delivery": {
                     "$ref": "#/$defs/DevelopmentChatAttachmentDelivery"

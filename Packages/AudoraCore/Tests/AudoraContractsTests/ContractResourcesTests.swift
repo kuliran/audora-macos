@@ -755,7 +755,7 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(
             (candidate["approximateTranscriptTokens"] as? [String: Any])?["maximum"]
                 as? Int,
-            16_777_216
+            67_108_864
         )
 
         let expectedState = try schemaProperties(

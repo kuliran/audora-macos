@@ -23,7 +23,8 @@ public enum ChatAttachmentCatalogError: Error, Equatable, Sendable {
 public struct ChatAttachmentCandidate: Equatable, Sendable {
     public static let maximumCatalogCount = 32_768
     public static let maximumDisplayLabelUnicodeScalars = 256
-    public static let maximumApproximateTranscriptTokens = 16 * 1_024 * 1_024
+    public static let maximumApproximateTranscriptTokens =
+        CoachContextInputLimits.maximumCanonicalValueUTF8Bytes
     public let sessionID: SessionID
     public let transcriptRevisionID: TranscriptRevisionID
     public let displayLabel: String

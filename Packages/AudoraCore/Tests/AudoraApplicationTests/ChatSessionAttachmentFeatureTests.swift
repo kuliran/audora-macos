@@ -5,6 +5,43 @@ import XCTest
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 final class ChatSessionAttachmentFeatureTests: XCTestCase {
+    func testCandidateTokenCostRepresentsMaximumSupportedCanonicalEvidence()
+        throws
+    {
+        let sessionID = try SessionID("ses-20260830T110000000Z-5JKM")
+        let revisionID = try TranscriptRevisionID("trv-20260830T113000000Z-6NPQ")
+
+        XCTAssertEqual(
+            ChatAttachmentCandidate.maximumApproximateTranscriptTokens,
+            67_108_864
+        )
+        XCTAssertNoThrow(
+            try ChatAttachmentCandidate(
+                sessionID: sessionID,
+                transcriptRevisionID: revisionID,
+                displayLabel: "Maximum canonical evidence",
+                durationMilliseconds: 1,
+                approximateTranscriptTokens: 67_108_864,
+                delivery: .onDemand
+            )
+        )
+        XCTAssertThrowsError(
+            try ChatAttachmentCandidate(
+                sessionID: sessionID,
+                transcriptRevisionID: revisionID,
+                displayLabel: "Beyond canonical evidence",
+                durationMilliseconds: 1,
+                approximateTranscriptTokens: 67_108_865,
+                delivery: .onDemand
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ChatAttachmentCandidateError,
+                .invalidTranscriptCost
+            )
+        }
+    }
+
     func testAttachmentMetadataUsesBoundedUnicodeScalarsAndRejectsControls() throws {
         let boundary = String(repeating: "😀", count: 256)
         let sessionID = try SessionID("ses-20260830T110000000Z-5JKM")

@@ -6,6 +6,52 @@ public enum CoachAttachmentProjectionPolicyError: Error, Equatable, Sendable {
     case invalidMaximumInlineTranscriptTokens
 }
 
+enum CoachAttachmentProjectionError: Error, Equatable, Sendable {
+    case canonicalTranscriptTooLarge
+}
+
+/// Measures the exact canonical representation before permitting its serialized
+/// byte allocation.
+/// The internal seam keeps the production 64 MiB limit fixed while allowing tests
+/// to prove that serialization and token estimation never run after a failed bound.
+struct BoundedCanonicalTranscriptEncoder: Sendable {
+    private let measure:
+        @Sendable (CanonicalJSONValue, Int) throws -> Int
+    private let serialize: @Sendable (CanonicalJSONValue) -> Data
+
+    init(
+        measure: @escaping @Sendable (CanonicalJSONValue, Int) throws -> Int,
+        serialize: @escaping @Sendable (CanonicalJSONValue) -> Data
+    ) {
+        self.measure = measure
+        self.serialize = serialize
+    }
+
+    func encode(
+        _ value: CanonicalJSONValue,
+        maximumByteCount: Int
+    ) throws -> Data {
+        let measuredByteCount = try measure(value, maximumByteCount)
+        guard measuredByteCount >= 0 else {
+            throw CanonicalJSONMeasurementError.integerOverflow
+        }
+        guard measuredByteCount <= maximumByteCount else {
+            throw CanonicalJSONMeasurementError.byteLimitExceeded
+        }
+        return serialize(value)
+    }
+
+    static let canonicalJSON = BoundedCanonicalTranscriptEncoder(
+        measure: { value, maximumByteCount in
+            try CanonicalJSON.byteCount(
+                of: value,
+                maximumByteCount: maximumByteCount
+            )
+        },
+        serialize: CanonicalJSON.serialize
+    )
+}
+
 /// The qualified provider/model policy shared by picker estimates and final
 /// context preparation. It measures one complete canonical `SessionTranscript`
 /// value, preserving tokenizer boundaries and JSON overhead.
@@ -13,10 +59,23 @@ public enum CoachAttachmentProjectionPolicyError: Error, Equatable, Sendable {
 public struct CoachAttachmentProjectionPolicy: Sendable {
     public let maximumInlineTranscriptTokens: Int
     public let tokenEstimator: CoachTokenEstimator
+    private let canonicalTranscriptEncoder: BoundedCanonicalTranscriptEncoder
 
     public init(
         maximumInlineTranscriptTokens: Int,
         tokenEstimator: CoachTokenEstimator
+    ) throws {
+        try self.init(
+            maximumInlineTranscriptTokens: maximumInlineTranscriptTokens,
+            tokenEstimator: tokenEstimator,
+            canonicalTranscriptEncoder: .canonicalJSON
+        )
+    }
+
+    init(
+        maximumInlineTranscriptTokens: Int,
+        tokenEstimator: CoachTokenEstimator,
+        canonicalTranscriptEncoder: BoundedCanonicalTranscriptEncoder
     ) throws {
         guard maximumInlineTranscriptTokens > 0 else {
             throw CoachAttachmentProjectionPolicyError
@@ -24,14 +83,25 @@ public struct CoachAttachmentProjectionPolicy: Sendable {
         }
         self.maximumInlineTranscriptTokens = maximumInlineTranscriptTokens
         self.tokenEstimator = tokenEstimator
+        self.canonicalTranscriptEncoder = canonicalTranscriptEncoder
     }
 
     public func project(
         evidence: ChatAttachmentEvidence
     ) throws -> CoachAttachmentProjection {
         let canonicalTranscript = Self.canonicalTranscript(evidence.revision)
+        let canonicalBytes: Data
+        do {
+            canonicalBytes = try canonicalTranscriptEncoder.encode(
+                canonicalTranscript,
+                maximumByteCount:
+                    CoachContextInputLimits.maximumCanonicalValueUTF8Bytes
+            )
+        } catch CanonicalJSONMeasurementError.byteLimitExceeded {
+            throw CoachAttachmentProjectionError.canonicalTranscriptTooLarge
+        }
         let approximateTranscriptTokens = try tokenEstimator.tokenCount(
-            forUTF8: CanonicalJSON.serialize(canonicalTranscript)
+            forUTF8: canonicalBytes
         )
         return CoachAttachmentProjection(
             evidence: evidence,
@@ -167,13 +237,24 @@ public actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
     ) async -> ChatAttachmentCatalogOutcome {
         switch await evidenceSource.loadEvidence(in: library) {
         case let .loaded(evidence):
-            do {
-                return .loaded(try evidence.map { item in
-                    try projectionPolicy.project(evidence: item).makeCandidate()
-                })
-            } catch {
-                return .failed
+            var candidates: [ChatAttachmentCandidate] = []
+            candidates.reserveCapacity(evidence.count)
+            for item in evidence {
+                do {
+                    candidates.append(
+                        try projectionPolicy
+                            .project(evidence: item)
+                            .makeCandidate()
+                    )
+                } catch is ChatAttachmentCandidateError {
+                    continue
+                } catch CoachAttachmentProjectionError.canonicalTranscriptTooLarge {
+                    continue
+                } catch {
+                    return .failed
+                }
             }
+            return .loaded(candidates)
         case .readOnlyLibrary:
             return .readOnlyLibrary
         case .failed:

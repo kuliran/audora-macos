@@ -393,7 +393,7 @@ namespace Audora.Contracts {
     durationMilliseconds: integer;
 
     @minValue(0)
-    @maxValue(16777216)
+    @maxValue(67108864)
     approximateTranscriptTokens: integer;
 
     delivery: DevelopmentChatAttachmentDelivery;
