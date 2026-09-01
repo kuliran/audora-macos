@@ -68,7 +68,7 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         XCTAssertEqual(feature.admissionState, .idle)
     }
 
-    func testNewChatCancelBypassesSuspendedPickerWorkInApplicationFIFO() async throws {
+    func testNewChatCancelBypassesSuspendedConfirmationInApplicationFIFO() async throws {
         let trace = LibrarySelectionTrace()
         let chat = SuspendedNewChatPickerApplicationChatFeature()
         let library = SelectionLibraryFeature(trace: trace)
@@ -80,22 +80,24 @@ final class ApplicationCommandFeatureTests: XCTestCase {
             generation: 1
         )
 
-        let begin = feature.enqueue(.beginNewChat(context))
-        await chat.waitUntilBeginStarts()
+        let confirmation = feature.enqueue(.confirmNewChat(context))
+        XCTAssertTrue(feature.admissionState.isChatBoundaryPending)
+        await chat.waitUntilConfirmationStarts()
         let cancel = feature.enqueue(.cancelNewChat(context))
         for _ in 0..<100 { await Task.yield() }
-        let deliveredWhileBeginWasSuspended = await chat.cancelReceived
-        if !deliveredWhileBeginWasSuspended {
-            await chat.forceResumeBegin()
+        let deliveredWhileConfirmationWasSuspended = await chat.cancelReceived
+        if !deliveredWhileConfirmationWasSuspended {
+            await chat.forceResumeConfirmation()
         }
         await cancel.value
-        await begin.value
+        await confirmation.value
 
-        XCTAssertTrue(deliveredWhileBeginWasSuspended)
+        XCTAssertTrue(deliveredWhileConfirmationWasSuspended)
+        XCTAssertFalse(feature.admissionState.isChatBoundaryPending)
         let commands = await chat.commands
         XCTAssertEqual(
             commands,
-            [.beginNewChat(context), .cancelNewChat(context)]
+            [.confirmNewChat(context), .cancelNewChat(context)]
         )
     }
 
@@ -391,8 +393,8 @@ private actor SuspendedNewChatPickerApplicationChatFeature: ChatFeature {
         continuation.finish()
     }
 
-    private var beginStarted = false
-    private var beginContinuation: CheckedContinuation<Void, Never>?
+    private var confirmationStarted = false
+    private var confirmationContinuation: CheckedContinuation<Void, Never>?
     private(set) var cancelReceived = false
     private(set) var commands: [ChatCommand] = []
 
@@ -403,13 +405,13 @@ private actor SuspendedNewChatPickerApplicationChatFeature: ChatFeature {
     func send(_ command: ChatCommand) async {
         commands.append(command)
         switch command {
-        case .beginNewChat:
-            beginStarted = true
-            await withCheckedContinuation { beginContinuation = $0 }
+        case .confirmNewChat:
+            confirmationStarted = true
+            await withCheckedContinuation { confirmationContinuation = $0 }
         case .cancelNewChat:
             cancelReceived = true
-            beginContinuation?.resume()
-            beginContinuation = nil
+            confirmationContinuation?.resume()
+            confirmationContinuation = nil
         default:
             break
         }
@@ -417,13 +419,13 @@ private actor SuspendedNewChatPickerApplicationChatFeature: ChatFeature {
 
     func flushForOrderlyTermination() async -> Bool { true }
 
-    func waitUntilBeginStarts() async {
-        while !beginStarted { await Task.yield() }
+    func waitUntilConfirmationStarts() async {
+        while !confirmationStarted { await Task.yield() }
     }
 
-    func forceResumeBegin() {
-        beginContinuation?.resume()
-        beginContinuation = nil
+    func forceResumeConfirmation() {
+        confirmationContinuation?.resume()
+        confirmationContinuation = nil
     }
 }
 

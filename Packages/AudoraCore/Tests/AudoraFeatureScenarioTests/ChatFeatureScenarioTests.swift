@@ -21,6 +21,9 @@ final class ChatFeatureScenarioTests: XCTestCase {
             .collisionChatScenario,
             .providerUnavailableNewChatScenario,
             .invalidContextNewChatScenario,
+            .attachmentDisappearsDuringCreateChatScenario,
+            .cancelDuringNewChatQuoteScenario,
+            .cancelDuringAttachmentResolutionScenario,
             .suspendedLibrarySwitchChatScenario,
         ]
 
@@ -47,12 +50,13 @@ final class ChatFeatureScenarioTests: XCTestCase {
                 events: dto.dependencyTrace.filter { $0.port == "attachmentSource" },
                 recorder: recorder
             )
+            let coachContextSource = ScenarioCoachContextSnapshotPort(
+                mode: dto.contextCapacityMode ?? "alwaysFits",
+                events: dto.dependencyTrace.filter { $0.port == "coachContext" },
+                recorder: recorder
+            )
             let baseCoachContext = DefaultCoachContextFeature(
-                source: ScenarioCoachContextSnapshotPort(
-                    mode: dto.contextCapacityMode ?? "alwaysFits",
-                    events: dto.dependencyTrace.filter { $0.port == "coachContext" },
-                    recorder: recorder
-                )
+                source: coachContextSource
             )
             let feature = DefaultChatFeature(
                 store: store,
@@ -65,7 +69,10 @@ final class ChatFeatureScenarioTests: XCTestCase {
                 responsePositionIDGenerator: scripted,
                 coachContext: ScenarioBoundCoachContext(
                     attachmentSource: attachmentSource,
-                    base: baseCoachContext
+                    base: baseCoachContext,
+                    rejectsCreationLease:
+                        dto.suspendedEffect ==
+                            "newChatQuoteAfterAttachmentResolution"
                 )
             )
             let scope = LibraryScope(libraryID: try LibraryID(dto.libraryId))
@@ -93,6 +100,60 @@ final class ChatFeatureScenarioTests: XCTestCase {
                 await store.resumeFirstCatalogLoad()
                 await firstStart.value
                 for command in dto.commands.dropFirst() {
+                    let activeState = await feature.currentState
+                    let applicationCommand = try contextualizedCommand(
+                        command,
+                        activeState: activeState,
+                        activeContext: &commandContext,
+                        generation: &commandGeneration
+                    )
+                    await feature.send(applicationCommand)
+                }
+            } else if dto.suspendedEffect == "firstAttachmentResolution" ||
+                        dto.suspendedEffect ==
+                            "newChatQuoteAfterAttachmentResolution"
+            {
+                await feature.send(.start(commandContext))
+                guard let confirmationIndex = dto.commands.firstIndex(where: {
+                    $0.kind == "confirmNewChat"
+                }), confirmationIndex + 1 < dto.commands.count,
+                      dto.commands[confirmationIndex + 1].kind == "cancelNewChat"
+                else {
+                    throw ScenarioFailure.script
+                }
+                for command in dto.commands[..<confirmationIndex] {
+                    let activeState = await feature.currentState
+                    let applicationCommand = try contextualizedCommand(
+                        command,
+                        activeState: activeState,
+                        activeContext: &commandContext,
+                        generation: &commandGeneration
+                    )
+                    await feature.send(applicationCommand)
+                }
+                let confirmationState = await feature.currentState
+                let confirmation = try contextualizedCommand(
+                    dto.commands[confirmationIndex],
+                    activeState: confirmationState,
+                    activeContext: &commandContext,
+                    generation: &commandGeneration
+                )
+                async let suspendedConfirmation: Void = feature.send(confirmation)
+                if dto.suspendedEffect == "firstAttachmentResolution" {
+                    await attachmentSource.waitUntilCancelledResolutionStarts()
+                } else {
+                    await coachContextSource.waitUntilCancelledNewChatQuoteStarts()
+                }
+                let cancellationState = await feature.currentState
+                let cancellation = try contextualizedCommand(
+                    dto.commands[confirmationIndex + 1],
+                    activeState: cancellationState,
+                    activeContext: &commandContext,
+                    generation: &commandGeneration
+                )
+                await feature.send(cancellation)
+                await suspendedConfirmation
+                for command in dto.commands.dropFirst(confirmationIndex + 2) {
                     let activeState = await feature.currentState
                     let applicationCommand = try contextualizedCommand(
                         command,
@@ -741,6 +802,12 @@ private struct ChatOpenedAttachmentStatusDTO: Decodable, Equatable {
 
 private enum ScenarioFailure: Error { case command, script }
 
+private func suspendUntilTaskCancellation() async {
+    do {
+        try await Task.sleep(nanoseconds: .max)
+    } catch {}
+}
+
 private actor ChatScenarioRecorder {
     private(set) var events: [String] = []
     private(set) var committedChats: [ChatAggregate] = []
@@ -828,6 +895,8 @@ private actor ChatScenarioStore: ChatStorePort {
             return .committed(seed.aggregate)
         case "collision":
             return .collision
+        case "attachmentUnavailable":
+            return .attachmentUnavailable
         case "readOnlyLibrary":
             return .readOnlyLibrary
         default:
@@ -1074,6 +1143,7 @@ private let developmentScenarioConfigurationStamp = CoachContextConfigurationSta
 private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
     let attachmentSource: any ChatSessionAttachmentSource
     let base: any CoachContextCoordinating
+    let rejectsCreationLease: Bool
 
     func loadAttachmentCandidates(
         in library: LibraryScope
@@ -1122,6 +1192,7 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
         guard authority.configuration == developmentScenarioConfigurationStamp else {
             return .stale
         }
+        guard !rejectsCreationLease else { return .stale }
         return .acquired(CoachContextAuthorityLease())
     }
 
@@ -1147,6 +1218,7 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
 private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
     private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder
+    private var cancelledResolutionStarted = false
 
     init(events: [ChatDependencyEventDTO], recorder: ChatScenarioRecorder) {
         self.events = events
@@ -1187,6 +1259,12 @@ private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
             XCTFail("missing scripted attachment resolution event")
             return .failed
         }
+        if event.outcome.rendered == "cancelled" {
+            cancelledResolutionStarted = true
+            await suspendUntilTaskCancellation()
+            await record(event)
+            return .failed
+        }
         await record(event)
         switch event.outcome.rendered {
         case "resolved":
@@ -1206,6 +1284,10 @@ private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
         default:
             return .failed
         }
+    }
+
+    func waitUntilCancelledResolutionStarts() async {
+        while !cancelledResolutionStarted { await Task.yield() }
     }
 
     private func consume(effect: String) -> ChatDependencyEventDTO? {
@@ -1229,6 +1311,7 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
     private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder
     private var pendingResolutionCount = 0
+    private var cancelledNewChatQuoteStarted = false
 
     init(
         mode: String,
@@ -1245,6 +1328,12 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
     ) async -> CoachContextSnapshotOutcome {
         guard let event = consume(effect: "quoteNewChat") else {
             XCTFail("missing scripted New Chat quote event")
+            return .sourceUnavailable
+        }
+        if event.outcome.rendered == "cancelled" {
+            cancelledNewChatQuoteStarted = true
+            await suspendUntilTaskCancellation()
+            await record(event)
             return .sourceUnavailable
         }
         await record(event)
@@ -1267,6 +1356,10 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
             XCTFail("unsupported scripted New Chat quote outcome: \(event.outcome.rendered)")
             return .sourceUnavailable
         }
+    }
+
+    func waitUntilCancelledNewChatQuoteStarts() async {
+        while !cancelledNewChatQuoteStarted { await Task.yield() }
     }
 
     func resolveChat(

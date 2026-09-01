@@ -34,6 +34,9 @@ const positiveInventory = [
   "session-analysis-chat.json",
 ];
 const scenarioInventory = [
+  "attachment-disappears-during-create.v1.json",
+  "cancel-during-attachment-resolution.v1.json",
+  "cancel-during-new-chat-quote.v1.json",
   "corrupt-chat-freezes.v1.json",
   "context-capacity-recovery.v1.json",
   "create-collision-limit.v1.json",

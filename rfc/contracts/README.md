@@ -238,8 +238,10 @@ The empty `chat.json` remains the Development Chat golden, while
 
 `ChatFeatureScenario` describes portable Chat behavior across both zero-attachment
 and attached Chats, including the New Chat attachment picker. Checked-in fixtures
-cover create, rename, filter, relaunch, stale rename, and the Draft
-lock-and-discard lifecycle in
+cover create, rename, filter, relaunch, stale rename, final attachment disappearance
+with an atomic no-Chat result and retained selection, immediate cancellation of
+exact attachment resolution, cancellation of the post-resolution precommit quote,
+and the Draft lock-and-discard lifecycle in
 [`draft-send-discard.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/Chat/draft-send-discard.v1.json).
 Each scenario declares zero provider, Invocation, and admission calls. Rejected
 examples cover ambiguous creation shapes, unknown keys, missing attachments,

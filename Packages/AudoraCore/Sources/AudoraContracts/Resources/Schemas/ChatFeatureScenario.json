@@ -224,6 +224,9 @@
                     "$ref": "#/$defs/NewChatQuoteUnavailableEvent"
                 },
                 {
+                    "$ref": "#/$defs/NewChatQuoteCancelledEvent"
+                },
+                {
                     "$ref": "#/$defs/ChatAttachmentsResolvedEvent"
                 },
                 {
@@ -231,6 +234,9 @@
                 },
                 {
                     "$ref": "#/$defs/ChatAttachmentResolutionFailedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatAttachmentResolutionCancelledEvent"
                 },
                 {
                     "$ref": "#/$defs/ChatStoreChatLoadedEvent"
@@ -243,6 +249,9 @@
                 },
                 {
                     "$ref": "#/$defs/ChatStoreCreateCollisionEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatStoreCreateAttachmentUnavailableEvent"
                 },
                 {
                     "$ref": "#/$defs/ChatStoreChatRenamedEvent"
@@ -405,6 +414,14 @@
                 {
                     "type": "string",
                     "const": "firstCatalogLoad"
+                },
+                {
+                    "type": "string",
+                    "const": "newChatQuoteAfterAttachmentResolution"
+                },
+                {
+                    "type": "string",
+                    "const": "firstAttachmentResolution"
                 }
             ]
         },
@@ -958,6 +975,31 @@
                 "not": {}
             }
         },
+        "NewChatQuoteCancelledEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "coachContext"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "quoteNewChat"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "cancelled"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "ChatAttachmentsResolvedEvent": {
             "type": "object",
             "properties": {
@@ -1030,6 +1072,31 @@
                 "outcome": {
                     "type": "string",
                     "const": "failed"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatAttachmentResolutionCancelledEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "attachmentSource"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "resolveAttachments"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "cancelled"
                 }
             },
             "required": [
@@ -1138,6 +1205,31 @@
                 "outcome": {
                     "type": "string",
                     "const": "collision"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatStoreCreateAttachmentUnavailableEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "chatStore"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "create"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "attachmentUnavailable"
                 }
             },
             "required": [

@@ -10,6 +10,7 @@ struct ChatRenameEditorTaskID: Hashable {
 
 struct NewChatSheetInteractionPresentation: Equatable, Sendable {
     let allowsControlInteraction: Bool
+    let allowsCancellation: Bool
     let preventsInteractiveDismissal: Bool
     let busyAccessibilityLabel: String?
 
@@ -22,11 +23,22 @@ struct NewChatSheetInteractionPresentation: Equatable, Sendable {
             !admissionState.isChatBoundaryPending &&
             !admissionState.isOrderlyTerminationPending &&
             ChatInteractionPolicy.allowsNavigationAndMutation(in: chatState)
+        let isCreating = chatState.activity == .creating
         allowsControlInteraction = allowsNavigationAndMutation
-        preventsInteractiveDismissal = !allowsNavigationAndMutation
-        busyAccessibilityLabel = allowsNavigationAndMutation
-            ? nil
-            : "New Chat is busy. Search, Session selection, Cancel, and Create Chat are temporarily unavailable."
+        allowsCancellation = !admissionState.isOrderlyTerminationPending && !isCreating
+        preventsInteractiveDismissal = !allowsCancellation
+        if allowsNavigationAndMutation {
+            busyAccessibilityLabel = nil
+        } else if allowsCancellation {
+            busyAccessibilityLabel =
+                "New Chat is busy. Search, Session selection, and Create Chat are temporarily unavailable. Cancel remains available."
+        } else if isCreating {
+            busyAccessibilityLabel =
+                "New Chat is being created. Search, Session selection, Cancel, and Create Chat are unavailable."
+        } else {
+            busyAccessibilityLabel =
+                "New Chat is busy. Search, Session selection, Cancel, and Create Chat are temporarily unavailable."
+        }
     }
 }
 
@@ -418,6 +430,7 @@ public struct ChatRootView: View {
             )
             .textFieldStyle(.roundedBorder)
             .accessibilityLabel("Search Sessions for New Chat")
+            .disabled(!newChatSheetInteractionPresentation.allowsControlInteraction)
 
             switch model.snapshot.newChatPicker {
             case .closed:
@@ -430,6 +443,7 @@ public struct ChatRootView: View {
                         Spacer()
                         Button("Cancel") { model.cancelNewChat() }
                             .keyboardShortcut(.cancelAction)
+                            .disabled(!newChatSheetInteractionPresentation.allowsCancellation)
                     }
                 }
             case .failed:
@@ -442,6 +456,7 @@ public struct ChatRootView: View {
                         Spacer()
                         Button("Cancel") { model.cancelNewChat() }
                             .keyboardShortcut(.cancelAction)
+                            .disabled(!newChatSheetInteractionPresentation.allowsCancellation)
                     }
                 }
             case let .ready(picker):
@@ -482,6 +497,7 @@ public struct ChatRootView: View {
                             "\(picker.selectedAttachmentIDs.contains(row.id) ? "Selected" : "Not selected"), \(row.displayLabel), \(Self.durationText(row.durationMilliseconds)), approximately \(row.approximateTranscriptTokens) transcript tokens, \(row.delivery == .inline ? "inline" : "on demand")"
                         )
                     }
+                    .disabled(!newChatSheetInteractionPresentation.allowsControlInteraction)
                 }
 
                 creationQuote(picker)
@@ -509,18 +525,21 @@ public struct ChatRootView: View {
                         model.performNewChatAttachmentPickerAction(.cancelAction)
                     }
                         .keyboardShortcut(.cancelAction)
+                        .disabled(!newChatSheetInteractionPresentation.allowsCancellation)
                     Button("Create Chat") {
                         model.performNewChatAttachmentPickerAction(.defaultAction)
                     }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(!picker.permitsConfirmation)
+                        .disabled(
+                            !newChatSheetInteractionPresentation.allowsControlInteraction ||
+                                !picker.permitsConfirmation
+                        )
                         .accessibilityHint("Creates a Chat without sending a message")
                 }
             }
         }
         .padding(24)
         .frame(minWidth: 620, minHeight: 520)
-        .disabled(!newChatSheetInteractionPresentation.allowsControlInteraction)
         .overlay(alignment: .bottomLeading) {
             if let busyAccessibilityLabel =
                 newChatSheetInteractionPresentation.busyAccessibilityLabel

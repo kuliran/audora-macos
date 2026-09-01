@@ -99,7 +99,7 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
-    func testNewChatSheetProjectionTracksGlobalInteractionAuthorityAcrossAdmissionClosure() {
+    func testNewChatSheetProjectionKeepsCancellationAvailableUntilDurableCreation() {
         let readyState = ChatFeatureState(
             catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
         )
@@ -109,26 +109,60 @@ final class ChatPresentationModelTests: XCTestCase {
         )
 
         XCTAssertTrue(open.allowsControlInteraction)
+        XCTAssertTrue(open.allowsCancellation)
         XCTAssertFalse(open.preventsInteractiveDismissal)
         XCTAssertNil(open.busyAccessibilityLabel)
 
-        let closedAdmissions = [
-            ApplicationCommandAdmissionState(isChatBoundaryPending: true),
-            ApplicationCommandAdmissionState(isLibraryNavigationPending: true),
-            ApplicationCommandAdmissionState(isOrderlyTerminationPending: true),
-        ]
-        for admissionState in closedAdmissions {
-            let closed = NewChatSheetInteractionPresentation(
-                admissionState: admissionState,
-                chatState: readyState
+        let resolvingOrQuoting = NewChatSheetInteractionPresentation(
+            admissionState: ApplicationCommandAdmissionState(
+                isChatBoundaryPending: true
+            ),
+            chatState: readyState
+        )
+        XCTAssertFalse(resolvingOrQuoting.allowsControlInteraction)
+        XCTAssertTrue(resolvingOrQuoting.allowsCancellation)
+        XCTAssertFalse(resolvingOrQuoting.preventsInteractiveDismissal)
+        XCTAssertEqual(
+            resolvingOrQuoting.busyAccessibilityLabel,
+            "New Chat is busy. Search, Session selection, and Create Chat are temporarily unavailable. Cancel remains available."
+        )
+
+        let libraryNavigation = NewChatSheetInteractionPresentation(
+            admissionState: ApplicationCommandAdmissionState(
+                isLibraryNavigationPending: true
+            ),
+            chatState: readyState
+        )
+        XCTAssertFalse(libraryNavigation.allowsControlInteraction)
+        XCTAssertTrue(libraryNavigation.allowsCancellation)
+        XCTAssertFalse(libraryNavigation.preventsInteractiveDismissal)
+
+        let orderlyTermination = NewChatSheetInteractionPresentation(
+            admissionState: ApplicationCommandAdmissionState(
+                isOrderlyTerminationPending: true
+            ),
+            chatState: readyState
+        )
+        XCTAssertFalse(orderlyTermination.allowsControlInteraction)
+        XCTAssertFalse(orderlyTermination.allowsCancellation)
+        XCTAssertTrue(orderlyTermination.preventsInteractiveDismissal)
+
+        let creating = NewChatSheetInteractionPresentation(
+            admissionState: ApplicationCommandAdmissionState(
+                isChatBoundaryPending: true
+            ),
+            chatState: ChatFeatureState(
+                catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])),
+                activity: .creating
             )
-            XCTAssertFalse(closed.allowsControlInteraction)
-            XCTAssertTrue(closed.preventsInteractiveDismissal)
-            XCTAssertEqual(
-                closed.busyAccessibilityLabel,
-                "New Chat is busy. Search, Session selection, Cancel, and Create Chat are temporarily unavailable."
-            )
-        }
+        )
+        XCTAssertFalse(creating.allowsControlInteraction)
+        XCTAssertFalse(creating.allowsCancellation)
+        XCTAssertTrue(creating.preventsInteractiveDismissal)
+        XCTAssertEqual(
+            creating.busyAccessibilityLabel,
+            "New Chat is being created. Search, Session selection, Cancel, and Create Chat are unavailable."
+        )
     }
 
     func testUserActionsCaptureTheCurrentLibraryCommandContext() async throws {

@@ -183,13 +183,16 @@ namespace Audora.Contracts {
     attachmentCatalogFailed: NewChatAttachmentCatalogFailedEvent,
     newChatQuoteAvailable: NewChatQuoteAvailableEvent,
     newChatQuoteUnavailable: NewChatQuoteUnavailableEvent,
+    newChatQuoteCancelled: NewChatQuoteCancelledEvent,
     chatAttachmentsResolved: ChatAttachmentsResolvedEvent,
     chatAttachmentResolutionReadOnly: ChatAttachmentResolutionReadOnlyEvent,
     chatAttachmentResolutionFailed: ChatAttachmentResolutionFailedEvent,
+    chatAttachmentResolutionCancelled: ChatAttachmentResolutionCancelledEvent,
     chatLoaded: ChatStoreChatLoadedEvent,
     chatFrozen: ChatStoreChatFrozenEvent,
     chatCreated: ChatStoreChatCreatedEvent,
     createCollision: ChatStoreCreateCollisionEvent,
+    createAttachmentUnavailable: ChatStoreCreateAttachmentUnavailableEvent,
     chatRenamed: ChatStoreChatRenamedEvent,
     renameStale: ChatStoreRenameStaleEvent,
     draftSaved: ChatStoreDraftSavedEvent,
@@ -362,6 +365,12 @@ namespace Audora.Contracts {
     outcome: NewChatQuoteUnavailableReason;
   }
 
+  model NewChatQuoteCancelledEvent {
+    port: "coachContext";
+    effect: "quoteNewChat";
+    outcome: "cancelled";
+  }
+
   model ChatAttachmentsResolvedEvent {
     port: "attachmentSource";
     effect: "resolveAttachments";
@@ -381,6 +390,12 @@ namespace Audora.Contracts {
     port: "attachmentSource";
     effect: "resolveAttachments";
     outcome: "failed";
+  }
+
+  model ChatAttachmentResolutionCancelledEvent {
+    port: "attachmentSource";
+    effect: "resolveAttachments";
+    outcome: "cancelled";
   }
 
   model NewChatAttachmentCandidate {
@@ -445,6 +460,12 @@ namespace Audora.Contracts {
     port: "chatStore";
     effect: "create";
     outcome: "collision";
+  }
+
+  model ChatStoreCreateAttachmentUnavailableEvent {
+    port: "chatStore";
+    effect: "create";
+    outcome: "attachmentUnavailable";
   }
 
   model ChatStoreChatRenamedEvent {
@@ -532,6 +553,8 @@ namespace Audora.Contracts {
 
   union ChatScenarioSuspendedEffect {
     firstCatalogLoad: "firstCatalogLoad",
+    newChatQuoteAfterAttachmentResolution: "newChatQuoteAfterAttachmentResolution",
+    firstAttachmentResolution: "firstAttachmentResolution",
   }
 
   union ChatScenarioCatalogStatus {

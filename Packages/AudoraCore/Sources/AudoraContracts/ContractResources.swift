@@ -49,6 +49,9 @@ public enum ContractResource: CaseIterable, Sendable {
     case collisionChatScenario
     case providerUnavailableNewChatScenario
     case invalidContextNewChatScenario
+    case attachmentDisappearsDuringCreateChatScenario
+    case cancelDuringNewChatQuoteScenario
+    case cancelDuringAttachmentResolutionScenario
     case suspendedLibrarySwitchChatScenario
     case libraryLaunchNoSelectionScenario
     case libraryCreateScenario
@@ -240,6 +243,12 @@ public enum ContractResource: CaseIterable, Sendable {
             "provider-unavailable-creates-locally.v1.json"
         case .invalidContextNewChatScenario:
             "invalid-context-blocks-new-chat.v1.json"
+        case .attachmentDisappearsDuringCreateChatScenario:
+            "attachment-disappears-during-create.v1.json"
+        case .cancelDuringNewChatQuoteScenario:
+            "cancel-during-new-chat-quote.v1.json"
+        case .cancelDuringAttachmentResolutionScenario:
+            "cancel-during-attachment-resolution.v1.json"
         case .suspendedLibrarySwitchChatScenario:
             "library-switch-during-suspended-load.v1.json"
         case .libraryLaunchNoSelectionScenario:
@@ -444,6 +453,9 @@ public enum ContractResource: CaseIterable, Sendable {
              .corruptChatScenario, .newerChatScenario, .collisionChatScenario,
              .providerUnavailableNewChatScenario,
              .invalidContextNewChatScenario,
+             .attachmentDisappearsDuringCreateChatScenario,
+             .cancelDuringNewChatQuoteScenario,
+             .cancelDuringAttachmentResolutionScenario,
              .suspendedLibrarySwitchChatScenario:
             "Scenarios/Chat"
         case .libraryLaunchNoSelectionScenario:

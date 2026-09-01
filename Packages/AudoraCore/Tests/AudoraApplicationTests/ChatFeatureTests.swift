@@ -287,6 +287,34 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(currentGeneration, 2)
     }
 
+    func testCancelCannotClosePickerAfterDurableCreationStarts() async {
+        let store = SuspendedCreateStore(result: .committed)
+        let feature = makeFeature(store: store)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+
+        async let confirmation: Void = feature.send(.confirmNewChat(Self.context))
+        await store.waitUntilCreateStarts()
+        let creatingState = await feature.currentState
+        XCTAssertEqual(creatingState.activity, .creating)
+
+        await feature.send(.cancelNewChat(Self.context))
+
+        let stateAfterCancel = await feature.currentState
+        XCTAssertEqual(stateAfterCancel.activity, .creating)
+        guard case .ready = stateAfterCancel.newChatPicker else {
+            await store.resumeCreate()
+            await confirmation
+            return XCTFail("durable creation must keep the picker until it resolves")
+        }
+        await store.resumeCreate()
+        await confirmation
+
+        let committedState = await feature.currentState
+        XCTAssertNotNil(Self.openAggregate(in: committedState))
+        XCTAssertEqual(committedState.newChatPicker, .closed)
+    }
+
     func testCancelInterruptsSuspendedAttachmentCatalogAndClosesPicker() async {
         let coordinator = ScriptedNewChatCoachContext(suspendCatalog: true)
         let feature = makeFeature(
@@ -307,19 +335,66 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertTrue(observedCancellation)
     }
 
-    func testCancelInterruptsSuspendedCreationQuoteAndClosesPicker() async {
-        let coordinator = ScriptedNewChatCoachContext(suspendQuote: true)
+    func testCancelInterruptsSuspendedPostResolutionCreationQuoteAndClosesPicker()
+        async throws
+    {
+        let candidate = try Self.attachmentCandidate()
+        let coordinator = ScriptedNewChatCoachContext(
+            candidates: [candidate],
+            suspendedQuoteNumber: 3,
+            rejectsCreationLease: true
+        )
         let feature = makeFeature(
             store: RecordingChatStore(),
             coachContext: coordinator
         )
         await feature.send(.start(Self.context))
-        let context = Self.context
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(picker) = await feature.currentState.newChatPicker,
+              let attachmentID = picker.allRows.first?.id
+        else {
+            return XCTFail("expected one projected attachment")
+        }
+        await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
 
-        let quoting = Task { await feature.send(.beginNewChat(context)) }
+        async let quoting: Void = feature.send(.confirmNewChat(Self.context))
         await coordinator.waitUntilQuoteStarts()
-        await feature.send(.cancelNewChat(context))
-        await quoting.value
+        await feature.send(.cancelNewChat(Self.context))
+        await quoting
+
+        let state = await feature.currentState
+        let observedCancellation = await coordinator.observedCancellation
+        let resolutionCount = await coordinator.resolutionCount
+        XCTAssertEqual(state.newChatPicker, .closed)
+        XCTAssertTrue(observedCancellation)
+        XCTAssertEqual(resolutionCount, 1)
+    }
+
+    func testCancelInterruptsSuspendedAttachmentResolutionAndClosesPicker()
+        async throws
+    {
+        let candidate = try Self.attachmentCandidate()
+        let coordinator = ScriptedNewChatCoachContext(
+            candidates: [candidate],
+            suspendResolution: true
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(),
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(picker) = await feature.currentState.newChatPicker,
+              let attachmentID = picker.allRows.first?.id
+        else {
+            return XCTFail("expected one projected attachment")
+        }
+        await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
+
+        async let resolving: Void = feature.send(.confirmNewChat(Self.context))
+        await coordinator.waitUntilResolutionStarts()
+        await feature.send(.cancelNewChat(Self.context))
+        await resolving
 
         let state = await feature.currentState
         let observedCancellation = await coordinator.observedCancellation
@@ -1687,22 +1762,30 @@ private struct ChatFeatureBoundCoachContextFixture: ChatCoachContextCoordinating
 private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
     private let candidates: [ChatAttachmentCandidate]
     private let suspendCatalog: Bool
-    private let suspendQuote: Bool
+    private let suspendResolution: Bool
+    private let suspendedQuoteNumber: Int?
+    private let rejectsCreationLease: Bool
     private var resolutionOutcomes: [ChatAttachmentResolutionOutcome]
     private var catalogStarted = false
+    private var resolutionStarted = false
     private var quoteStarted = false
+    private var quoteCount = 0
     private(set) var observedCancellation = false
     private(set) var resolutionCount = 0
 
     init(
         candidates: [ChatAttachmentCandidate] = [],
         suspendCatalog: Bool = false,
-        suspendQuote: Bool = false,
+        suspendResolution: Bool = false,
+        suspendedQuoteNumber: Int? = nil,
+        rejectsCreationLease: Bool = false,
         resolutionOutcomes: [ChatAttachmentResolutionOutcome] = []
     ) {
         self.candidates = candidates
         self.suspendCatalog = suspendCatalog
-        self.suspendQuote = suspendQuote
+        self.suspendResolution = suspendResolution
+        self.suspendedQuoteNumber = suspendedQuoteNumber
+        self.rejectsCreationLease = rejectsCreationLease
         self.resolutionOutcomes = resolutionOutcomes
     }
 
@@ -1721,6 +1804,10 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
         in library: LibraryScope
     ) async -> ChatAttachmentResolutionOutcome {
         resolutionCount += 1
+        if suspendResolution {
+            resolutionStarted = true
+            await suspendUntilCancelled()
+        }
         if !resolutionOutcomes.isEmpty {
             return resolutionOutcomes.removeFirst()
         }
@@ -1742,7 +1829,8 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
     func quoteNewChatBoundToConfiguration(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> ConfigurationBoundChatCreationQuoteOutcome {
-        if suspendQuote {
+        quoteCount += 1
+        if quoteCount == suspendedQuoteNumber {
             quoteStarted = true
             await suspendUntilCancelled()
         }
@@ -1765,6 +1853,7 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
         guard authority.configuration == chatFeatureConfigurationStamp else {
             return .stale
         }
+        guard !rejectsCreationLease else { return .stale }
         return .acquired(CoachContextAuthorityLease())
     }
 
@@ -1792,6 +1881,10 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
 
     func waitUntilQuoteStarts() async {
         while !quoteStarted { await Task.yield() }
+    }
+
+    func waitUntilResolutionStarts() async {
+        while !resolutionStarted { await Task.yield() }
     }
 
     private func suspendUntilCancelled() async {

@@ -641,6 +641,9 @@ final class ContractResourcesTests: XCTestCase {
             .collisionChatScenario,
             .providerUnavailableNewChatScenario,
             .invalidContextNewChatScenario,
+            .attachmentDisappearsDuringCreateChatScenario,
+            .cancelDuringNewChatQuoteScenario,
+            .cancelDuringAttachmentResolutionScenario,
             .suspendedLibrarySwitchChatScenario,
         ]
         for resource in resources {
@@ -783,6 +786,31 @@ final class ContractResourcesTests: XCTestCase {
             Set(dependencyEffects).isSuperset(of: [
                 "loadCandidates", "quoteNewChat", "resolveAttachments",
             ])
+        )
+
+        for (name, outcome) in [
+            ("NewChatQuoteCancelledEvent", "cancelled"),
+            ("ChatAttachmentResolutionCancelledEvent", "cancelled"),
+            ("ChatStoreCreateAttachmentUnavailableEvent", "attachmentUnavailable"),
+        ] {
+            let properties = try schemaProperties(name, in: definitions)
+            XCTAssertEqual(
+                literalValues(in: properties["outcome"]),
+                [outcome],
+                name
+            )
+        }
+
+        let suspendedEffect = try XCTUnwrap(
+            definitions["ChatScenarioSuspendedEffect"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(try XCTUnwrap(suspendedEffect["anyOf"] as? [[String: Any]])
+                .compactMap { $0["const"] as? String }),
+            [
+                "firstCatalogLoad", "firstAttachmentResolution",
+                "newChatQuoteAfterAttachmentResolution",
+            ]
         )
     }
 }
