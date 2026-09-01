@@ -101,6 +101,38 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         )
     }
 
+    func testTerminationBeginsChatLifecycleBeforeDrainingApplicationFIFO()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SuspendedNewChatPickerApplicationChatFeature()
+        let library = SelectionLibraryFeature(trace: trace)
+        let feature = DefaultApplicationCommandFeature(library: library, chat: chat)
+        let context = ChatCommandContext(
+            libraryScope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+
+        let confirmation = feature.enqueue(.confirmNewChat(context))
+        await chat.waitUntilConfirmationStarts()
+
+        let termination = feature.flushForOrderlyTermination()
+        for _ in 0..<100 { await Task.yield() }
+        let terminationBegan = await chat.orderlyTerminationBegan
+        if !terminationBegan {
+            await chat.forceResumeConfirmation()
+        }
+
+        let terminationSucceeded = await termination.value
+        await confirmation.value
+        let flushCallCount = await chat.flushCallCount
+        XCTAssertTrue(terminationSucceeded)
+        XCTAssertTrue(terminationBegan)
+        XCTAssertEqual(flushCallCount, 1)
+    }
+
     func testOneApplicationFIFOOrdersDraftSendDeferredStartAndTermination() async throws {
         let firstScope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
@@ -396,6 +428,8 @@ private actor SuspendedNewChatPickerApplicationChatFeature: ChatFeature {
     private var confirmationStarted = false
     private var confirmationContinuation: CheckedContinuation<Void, Never>?
     private(set) var cancelReceived = false
+    private(set) var orderlyTerminationBegan = false
+    private(set) var flushCallCount = 0
     private(set) var commands: [ChatCommand] = []
 
     var currentState: ChatFeatureState { ChatFeatureState() }
@@ -417,7 +451,16 @@ private actor SuspendedNewChatPickerApplicationChatFeature: ChatFeature {
         }
     }
 
-    func flushForOrderlyTermination() async -> Bool { true }
+    func beginOrderlyTermination() async {
+        orderlyTerminationBegan = true
+        confirmationContinuation?.resume()
+        confirmationContinuation = nil
+    }
+
+    func flushForOrderlyTermination() async -> Bool {
+        flushCallCount += 1
+        return true
+    }
 
     func waitUntilConfirmationStarts() async {
         while !confirmationStarted { await Task.yield() }

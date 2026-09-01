@@ -57,6 +57,7 @@ public actor DefaultChatFeature: ChatFeature {
     private var newChatCreationQuoteAuthority: ChatCreationQuoteAuthority?
     private var newChatPickerWork: NewChatPickerWork?
     private var nextNewChatPickerWorkID: UInt64 = 0
+    private var isOrderlyTerminationPending = false
     private var state = ChatFeatureState()
     private var operationInFlight = false
     private var operationIdleWaiters: [CheckedContinuation<Void, Never>] = []
@@ -157,6 +158,11 @@ public actor DefaultChatFeature: ChatFeature {
     }
 
     public func send(_ command: ChatCommand) async {
+        if isOrderlyTerminationPending,
+           command.isTransientNewChatCommand
+        {
+            return
+        }
         if case let .start(context) = command {
             if let newest = requestedContext ?? activeContext,
                context.generation <= newest.generation {
@@ -1330,17 +1336,41 @@ public actor DefaultChatFeature: ChatFeature {
     }
 
     public func flushForOrderlyTermination() async -> Bool {
+        await beginOrderlyTermination()
         while operationInFlight {
             await withCheckedContinuation { operationIdleWaiters.append($0) }
         }
         operationInFlight = true
-        defer { finishOperation() }
+        defer {
+            isOrderlyTerminationPending = false
+            finishOperation()
+        }
         while true {
             await drainWork()
             guard let activeContext else { return true }
             guard await flushSelectedDraft(in: activeContext) else { return false }
             if queuedActions.isEmpty, pendingStart == nil { return true }
         }
+    }
+
+    public func beginOrderlyTermination() async {
+        isOrderlyTerminationPending = true
+        queuedActions.removeAll { action in
+            guard case let .command(command) = action else { return false }
+            return command.isTransientNewChatCommand
+        }
+        guard state.activity != .creating else { return }
+        invalidateNewChatPickerWork()
+        newChatAttachmentFilterQuery = .empty
+        newChatAttachmentConfigurationStamp = nil
+        newChatCreationQuoteAuthority = nil
+        guard state.newChatPicker != .closed else { return }
+        state = replacing(
+            newChatPicker: .closed,
+            activity: state.activity,
+            notice: nil
+        )
+        publish()
     }
 
     private func refreshContextAdvisory(
@@ -2336,6 +2366,18 @@ public actor DefaultChatFeature: ChatFeature {
 }
 
 private extension ChatCommand {
+    var isTransientNewChatCommand: Bool {
+        switch self {
+        case .beginNewChat, .setNewChatAttachmentFilter,
+             .toggleNewChatAttachment, .cancelNewChat, .confirmNewChat:
+            true
+        case .start, .rename, .setFilter, .open, .editDraft,
+             .refreshContextQuote, .sendDraft, .retryPendingUserTurn,
+             .createNewChatFromCapacityFailure, .discardPendingUserTurn:
+            false
+        }
+    }
+
     var context: ChatCommandContext {
         switch self {
         case let .start(context), let .beginNewChat(context),

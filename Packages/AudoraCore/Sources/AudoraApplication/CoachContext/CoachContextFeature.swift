@@ -715,56 +715,33 @@ public struct DefaultCoachContextFeature:
 
 /// Live fail-closed source used until a provider/model configuration is qualified.
 struct UnavailableCoachContextSnapshotPort: CoachContextSnapshotPort {
-    /// The locally qualified conservative projection remains usable while no
-    /// provider transport is installed. Quote requests still report
-    /// `providerUnavailable`; absence of this policy would fail the picker.
-    private static let attachmentProjectionPolicy =
-        try! CoachAttachmentProjectionPolicy(
-            maximumInlineTranscriptTokens: 8_192,
-            tokenEstimator: .utf8ByteUpperBound()
-        )
-
     init() {}
 
     func resolveNewChat(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> CoachContextSnapshotOutcome {
-        .providerUnavailable
+        .sourceUnavailable
     }
 
     func resolveChat(
         _ request: CoachContextChatQuoteRequest
     ) async -> CoachContextSnapshotOutcome {
-        .providerUnavailable
+        .sourceUnavailable
     }
 
     func resolvePendingUserTurn(
         _ request: CoachContextPendingTurnRequest
     ) async -> CoachContextSnapshotOutcome {
-        .providerUnavailable
+        .sourceUnavailable
     }
 
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         false
     }
 
-    func currentAttachmentProjectionPolicy()
-        async -> CoachAttachmentProjectionPolicyOutcome
-    {
-        .knownQualified(
-            policy: Self.attachmentProjectionPolicy,
-            configurationGeneration: 1
-        )
-    }
-
-    func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool {
-        configurationGeneration == 1
-    }
-
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        guard authority == .configuration(generation: 1) else { return .stale }
-        return .acquired(CoachContextAuthorityLease())
+        .stale
     }
 }

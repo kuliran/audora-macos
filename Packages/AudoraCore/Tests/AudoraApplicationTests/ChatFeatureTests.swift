@@ -335,6 +335,46 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertTrue(observedCancellation)
     }
 
+    func testOrderlyTerminationCancelsSuspendedAttachmentCatalogAndFlushesDirtyDraft()
+        async throws
+    {
+        let aggregate = try Self.aggregate()
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let scheduler = ControlledChatAutosaveScheduler()
+        let coordinator = ScriptedNewChatCoachContext(suspendCatalog: true)
+        let feature = makeFeature(
+            store: store,
+            autosaveScheduler: scheduler,
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Flush after cancelling the Session catalog."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+
+        async let loading: Void = feature.send(.beginNewChat(Self.context))
+        await coordinator.waitUntilCatalogStarts()
+        async let mayTerminate: Bool = feature.flushForOrderlyTermination()
+
+        await loading
+        let terminationSucceeded = await mayTerminate
+        let savedDrafts = await store.savedDrafts
+        let state = await feature.currentState
+        XCTAssertTrue(terminationSucceeded)
+        XCTAssertEqual(
+            savedDrafts.map(\.replacement.text),
+            ["Flush after cancelling the Session catalog."]
+        )
+        XCTAssertEqual(state.newChatPicker, .closed)
+    }
+
     func testCancelInterruptsSuspendedPostResolutionCreationQuoteAndClosesPicker()
         async throws
     {
@@ -370,6 +410,46 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(resolutionCount, 1)
     }
 
+    func testOrderlyTerminationCancelsSuspendedNewChatQuoteAndFlushesDirtyDraft()
+        async throws
+    {
+        let aggregate = try Self.aggregate()
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let scheduler = ControlledChatAutosaveScheduler()
+        let coordinator = ScriptedNewChatCoachContext(suspendedQuoteNumber: 1)
+        let feature = makeFeature(
+            store: store,
+            autosaveScheduler: scheduler,
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Flush after cancelling the creation quote."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+
+        async let quoting: Void = feature.send(.beginNewChat(Self.context))
+        await coordinator.waitUntilQuoteStarts()
+        async let mayTerminate: Bool = feature.flushForOrderlyTermination()
+
+        await quoting
+        let terminationSucceeded = await mayTerminate
+        let savedDrafts = await store.savedDrafts
+        let state = await feature.currentState
+        XCTAssertTrue(terminationSucceeded)
+        XCTAssertEqual(
+            savedDrafts.map(\.replacement.text),
+            ["Flush after cancelling the creation quote."]
+        )
+        XCTAssertEqual(state.newChatPicker, .closed)
+    }
+
     func testCancelInterruptsSuspendedAttachmentResolutionAndClosesPicker()
         async throws
     {
@@ -400,6 +480,57 @@ final class ChatFeatureTests: XCTestCase {
         let observedCancellation = await coordinator.observedCancellation
         XCTAssertEqual(state.newChatPicker, .closed)
         XCTAssertTrue(observedCancellation)
+    }
+
+    func testOrderlyTerminationCancelsSuspendedExactAttachmentResolutionAndFlushesDirtyDraft()
+        async throws
+    {
+        let aggregate = try Self.aggregate()
+        let candidate = try Self.attachmentCandidate()
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let scheduler = ControlledChatAutosaveScheduler()
+        let coordinator = ScriptedNewChatCoachContext(
+            candidates: [candidate],
+            suspendResolution: true
+        )
+        let feature = makeFeature(
+            store: store,
+            autosaveScheduler: scheduler,
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Flush after cancelling exact attachment resolution."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(picker) = await feature.currentState.newChatPicker,
+              let attachmentID = picker.allRows.first?.id
+        else {
+            return XCTFail("expected one projected attachment")
+        }
+        await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
+
+        async let resolving: Void = feature.send(.confirmNewChat(Self.context))
+        await coordinator.waitUntilResolutionStarts()
+        async let mayTerminate: Bool = feature.flushForOrderlyTermination()
+
+        await resolving
+        let terminationSucceeded = await mayTerminate
+        let savedDrafts = await store.savedDrafts
+        let state = await feature.currentState
+        XCTAssertTrue(terminationSucceeded)
+        XCTAssertEqual(
+            savedDrafts.map(\.replacement.text),
+            ["Flush after cancelling exact attachment resolution."]
+        )
+        XCTAssertEqual(state.newChatPicker, .closed)
     }
 
     func testOpenRetriesOneConfigurationRaceWithoutMutatingPinnedAttachments()
@@ -1804,7 +1935,7 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
         in library: LibraryScope
     ) async -> ChatAttachmentResolutionOutcome {
         resolutionCount += 1
-        if suspendResolution {
+        if suspendResolution, !attachments.values.isEmpty {
             resolutionStarted = true
             await suspendUntilCancelled()
         }

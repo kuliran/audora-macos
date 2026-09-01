@@ -148,6 +148,7 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
         updateAdmissionState(isOrderlyTerminationPending: true)
         let chat = chat
         let operation = Task<Bool, Never> {
+            await chat.beginOrderlyTermination()
             await drainAcceptedCommands()
             let succeeded = await chat.flushForOrderlyTermination()
             if !succeeded {

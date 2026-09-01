@@ -105,6 +105,27 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         )
     }
 
+    func testLiveEvidenceCompositionFailsClosedWithoutQualifiedConfiguration()
+        async throws
+    {
+        let feature = DefaultCoachContextFeature(
+            attachmentEvidenceSource: AttachmentEvidenceSourceForFeature(
+                evidence: try attachmentEvidence()
+            )
+        )
+        let request = try CoachContextNewChatQuoteRequest(
+            library: Self.scope,
+            attachments: .empty,
+            creationKind: .newChat
+        )
+
+        let catalog = await feature.loadAttachmentCandidates(in: Self.scope)
+        let quote = await feature.quoteNewChat(request)
+
+        XCTAssertEqual(catalog, .failed)
+        XCTAssertEqual(quote, .unavailable(.sourceUnavailable))
+    }
+
     func testCatalogAndCandidateMetadataAreBoundedBeforePresentation() async throws {
         XCTAssertThrowsError(
             try ChatAttachmentCandidate(
@@ -561,7 +582,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         )
         let coordinator = MismatchedAttachmentAuthorityFixture(
             attachmentSource: AttachmentSourceFixture(candidates: [candidate]),
-            base: DefaultCoachContextFeature()
+            base: previouslyQualifiedProviderUnavailableCoachContextFixture()
         )
         let store = AttachmentChatStoreFixture()
         let feature = makeFeature(
@@ -591,7 +612,8 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
     private func makeFeature(
         source: any ChatSessionAttachmentSource,
         store: AttachmentChatStoreFixture = AttachmentChatStoreFixture(),
-        coachContext: any CoachContextCoordinating = DefaultCoachContextFeature()
+        coachContext: any CoachContextCoordinating =
+            previouslyQualifiedProviderUnavailableCoachContextFixture()
     ) -> DefaultChatFeature {
         DefaultChatFeature(
             store: store,

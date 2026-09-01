@@ -45,5 +45,16 @@ public protocol ChatFeature: Sendable {
 
     func currentState(in scope: LibraryScope) async -> ChatFeatureState?
     func send(_ command: ChatCommand) async
+    /// Begins the lifecycle fence used by orderly termination. Idempotently
+    /// rejects queued or later transient work and requests cancellation of any
+    /// transient work already running before it returns; durable mutations
+    /// remain ordered.
+    func beginOrderlyTermination() async
     func flushForOrderlyTermination() async -> Bool
+}
+
+@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+public extension ChatFeature {
+    /// Default for adapters that own no transient work or local admission state.
+    func beginOrderlyTermination() async {}
 }

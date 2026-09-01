@@ -71,7 +71,7 @@ final class CoachContextFeatureTests: XCTestCase {
         XCTAssertEqual(triggers, [.chatCreation(request.creation)])
     }
 
-    func testProviderUnavailableExceptionRequiresKnownCurrentConfiguration()
+    func testProviderUnavailableExceptionRequiresExplicitKnownCurrentConfiguration()
         async throws
     {
         let request = try CoachContextNewChatQuoteRequest(
@@ -79,9 +79,10 @@ final class CoachContextFeatureTests: XCTestCase {
             attachments: .empty,
             creationKind: .newChat
         )
+        let knownFeature =
+            previouslyQualifiedProviderUnavailableCoachContextFixture()
 
-        let knownConfiguration = await DefaultCoachContextFeature()
-            .quoteNewChat(request)
+        let knownConfiguration = await knownFeature.quoteNewChat(request)
         let missingConfiguration = await DefaultCoachContextFeature(
             source: UnconfiguredProviderUnavailableSnapshotPort()
         ).quoteNewChat(request)
@@ -94,6 +95,57 @@ final class CoachContextFeatureTests: XCTestCase {
             missingConfiguration,
             .unavailable(.sourceUnavailable)
         )
+
+        guard case let .providerUnavailable(authority) =
+            await knownFeature.quoteNewChatBoundToConfiguration(request)
+        else {
+            return XCTFail("expected the explicit known configuration authority")
+        }
+        guard case let .acquired(lease) =
+            await knownFeature.acquireNewChatCreationLease(authority)
+        else {
+            return XCTFail("expected the known configuration to remain leasable")
+        }
+        await lease.release()
+    }
+
+    func testLiveCompositionReportsSourceUnavailableWithoutQualifiedContext()
+        async throws
+    {
+        let aggregate = try fixtureAggregate()
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            )
+        )
+        let feature = DefaultCoachContextFeature()
+        let newChatRequest = try CoachContextNewChatQuoteRequest(
+            library: Self.scope,
+            attachments: .empty,
+            creationKind: .newChat
+        )
+        let chatRequest = CoachContextChatQuoteRequest(
+            library: Self.scope,
+            chatID: aggregate.chat.id,
+            draft: aggregate.chat.draft
+        )
+        let pendingRequest = try CoachContextPendingTurnRequest(
+            library: Self.scope,
+            chatID: aggregate.chat.id,
+            draft: aggregate.chat.draft,
+            pendingUserTurn: pending
+        )
+
+        let newChat = await feature.quoteNewChat(newChatRequest)
+        let chat = await feature.quoteChat(chatRequest)
+        let preparation = await feature.preparePendingUserTurn(pendingRequest)
+
+        XCTAssertEqual(newChat, .unavailable(.sourceUnavailable))
+        XCTAssertEqual(chat, .unavailable(.sourceUnavailable))
+        XCTAssertEqual(preparation, .unavailable(.sourceUnavailable))
     }
 
     func testOversizedPendingDraftShortCircuitsBeforeEvenFailClosedResolution() async throws {
