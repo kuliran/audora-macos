@@ -73,6 +73,15 @@ the first new attempt receives sequence 1 and supersedes that set regardless of
 its ID or wall clock. IDs and `createdAt` remain unchanged and are never used to
 infer causality for new attempts.
 
+The attempt index is an independently versioned portable root. If either the
+installed `jobs/.attempts.json` or its recoverable `.partial` declares a schema
+newer than this app supports, the app does not fall back to enumerating a partial
+writable Job inventory. The Library remains readable, but all processing reads
+that could recover state and all processing mutations fail closed: no partial is
+installed or removed, no pending reservation is repaired, no Job is created or
+transitioned, and no worker authority is reconciled. Its bytes remain untouched
+until an implementation that understands that schema opens it.
+
 Trash is persistent Library storage, not a retention queue. Audora supports
 **Move to Trash** and **Restore** for Sessions and Chats. It provides no cleanup or
 expiry mechanism; those remain backlog.
@@ -462,8 +471,11 @@ the response position no longer names their Invocation/Attempt authority.
   one; it never reorders attempts by `createdAt`.
 - Move or restore a Session or Chat as one aggregate without rewriting references.
   Restore fails rather than overwriting an existing active target.
-- Unknown newer root schemas open read-only. A corrupt individual entity does not
-  prevent healthy independent entities from loading.
+- Unknown newer root schemas open read-only. An unknown newer attempt index keeps
+  non-processing Library content readable while freezing the entire processing
+  repository; it is never collapsed into a writable inventory of older Job
+  manifests. A corrupt individual entity does not prevent healthy independent
+  entities from loading.
 
 Durable transcription candidates remain untrusted until Application validation
 promotes them. Raw provider responses are not durable candidates. A validated but

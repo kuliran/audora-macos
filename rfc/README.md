@@ -373,6 +373,22 @@ monotonic attempt sequence and an exact current-Job pointer under the repository
 lock. Job IDs and `createdAt` remain identity/display facts and never decide which
 attempt supersedes another, including after wall-clock rollback or relaunch.
 
+Every successful writable Library selection emits a process-local
+`LibraryActivation` with a strictly increasing generation. Even reopening the
+same Library ID installs a new global processing fence before inventory begins;
+only a complete reconciliation for that exact activation may clear it. A newer
+activation supersedes suspended work from an older generation, so stale results
+cannot authorize processing against a replacement root. This generation is an
+in-process ordering token, not portable Library metadata.
+
+Infrastructure independently binds each processing capability to the active
+Library ID, the workspace replacement generation, the root directory's filesystem
+identity, and a retained access lease. It verifies that tuple around every
+source, Job, and publication boundary. A close, switch, or same-ID root replacement
+therefore fails closed rather than allowing one operation to mix authorities.
+Unknown newer `jobs/.attempts.json` roots keep the Library readable but leave this
+processing fence installed and are never recovered or mutated by the older app.
+
 ## Portable library
 
 All authoritative portable user data lives under one directory:

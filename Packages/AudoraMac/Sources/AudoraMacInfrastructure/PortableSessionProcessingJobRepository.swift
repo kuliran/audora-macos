@@ -116,6 +116,8 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                     jobs: state.orderedJobs
                 )
             )
+        } catch let JobPersistenceError.unsupportedSchema(version) {
+            return .unsupportedSchema(version: version)
         } catch JobPersistenceError.unavailable {
             return .unavailable
         } catch {
@@ -156,6 +158,8 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                 try revalidate(authority)
                 return latest.map(SessionProcessingJobLoadResult.loaded) ?? .none
             }
+        } catch let JobPersistenceError.unsupportedSchema(version) {
+            return .unsupportedSchema(version: version)
         } catch JobPersistenceError.unavailable {
             return .unavailable
         } catch {
@@ -188,6 +192,8 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                 try revalidate(authority)
                 return .loaded(job)
             }
+        } catch let JobPersistenceError.unsupportedSchema(version) {
+            return .unsupportedSchema(version: version)
         } catch JobPersistenceError.unavailable {
             return .unavailable
         } catch {
@@ -321,6 +327,10 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
         guard isValid(job) else { return .failed }
         do {
             return try withJobs(exclusive: false) { authority in
+                // Transition does not load the aggregate repository state, so
+                // it must independently fence the causal attempt root before
+                // entering or mutating an otherwise readable Job directory.
+                try requireSupportedAttemptIndexes(authority)
                 let jobDescriptor = try confined.openDirectory(
                     named: job.jobID.rawValue,
                     under: authority.jobsDescriptor
@@ -346,7 +356,7 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                 let current = try decode(currentData)
                 let currentAttemptSequence = try attemptSequence(in: currentData)
                 guard current.state == expected,
-                      sameIdentity(current, job)
+                      current.reconciliationIdentity == job.reconciliationIdentity
                 else { return .stale }
                 guard isAllowedTransition(from: current, to: job),
                       preservesCandidateIntegrity(from: current, to: job),
@@ -982,6 +992,11 @@ private extension PortableSessionProcessingJobRepository {
     }
 
     func loadRepositoryState(_ authority: RootAuthority) throws -> RepositoryState {
+        // The attempt index is the causal authority for every job mutation.
+        // Classify both its installed and crash-staged roots before reconciling
+        // any repository-owned partial, otherwise a newer index could be
+        // collapsed into a writable compatibility inventory.
+        try requireSupportedAttemptIndexes(authority)
         let jobs = try reconcileOwnedPartialsAndLoadJobs(authority)
         let jobsByID = Dictionary(uniqueKeysWithValues: jobs.map { ($0.jobID, $0) })
         let sequencesByID = try loadAttemptSequences(
@@ -1063,6 +1078,7 @@ private extension PortableSessionProcessingJobRepository {
     func loadClassifiedInventoryJobs(
         _ authority: RootAuthority
     ) throws -> [SessionProcessingJob] {
+        try requireNoUnknownNewerAttemptIndexes(authority)
         let names = try confined.listEntryNames(
             under: authority.jobsDescriptor,
             maximumCount: Self.maximumJobCount + 2
@@ -1347,6 +1363,67 @@ private extension PortableSessionProcessingJobRepository {
         } catch {
             throw JobPersistenceError.integrityMismatch
         }
+    }
+
+    /// Partial inventory may classify independently valid Jobs beside a corrupt
+    /// causal root, but it must never reinterpret a root that proves it belongs
+    /// to a newer writer.
+    func requireNoUnknownNewerAttemptIndexes(
+        _ authority: RootAuthority
+    ) throws {
+        for name in [Self.attemptIndexName, Self.attemptIndexPartialName] {
+            guard try confined.entryExists(
+                named: name,
+                under: authority.jobsDescriptor
+            ) else { continue }
+            let data = try confined.boundedData(
+                named: name,
+                under: authority.jobsDescriptor,
+                maximumBytes: Self.maximumAttemptIndexBytes
+            )
+            if let version = declaredAttemptIndexSchemaVersion(in: data),
+               version > 1
+            {
+                throw JobPersistenceError.unsupportedSchema(version)
+            }
+        }
+    }
+
+    /// Mutation and read-write recovery require a fully decodable supported
+    /// causal root. This is intentionally stricter than partial inventory.
+    func requireSupportedAttemptIndexes(_ authority: RootAuthority) throws {
+        for name in [Self.attemptIndexName, Self.attemptIndexPartialName] {
+            guard try confined.entryExists(
+                named: name,
+                under: authority.jobsDescriptor
+            ) else { continue }
+            let data = try confined.boundedData(
+                named: name,
+                under: authority.jobsDescriptor,
+                maximumBytes: Self.maximumAttemptIndexBytes
+            )
+            guard let version = declaredAttemptIndexSchemaVersion(in: data) else {
+                throw JobPersistenceError.integrityMismatch
+            }
+            guard version == 1 else {
+                if version > 1 {
+                    throw JobPersistenceError.unsupportedSchema(version)
+                }
+                throw JobPersistenceError.integrityMismatch
+            }
+            _ = try decodeAttemptIndex(data)
+        }
+    }
+
+    func declaredAttemptIndexSchemaVersion(in data: Data) -> UInt32? {
+        guard let object = try? confined.jsonDictionary(data),
+              let number = object["schemaVersion"] as? NSNumber,
+              String(cString: number.objCType) != "c",
+              number.doubleValue.isFinite,
+              number.doubleValue.rounded(.towardZero) == number.doubleValue,
+              number.uint64Value <= UInt64(UInt32.max)
+        else { return nil }
+        return UInt32(number.uint64Value)
     }
 
     func replaceAttemptIndex(
@@ -1688,7 +1765,7 @@ private extension PortableSessionProcessingJobRepository {
             guard replacement.jobID == expectedJobID,
                   try attemptSequence(in: partialData) ==
                     attemptSequence(in: currentData),
-                  sameIdentity(current, replacement),
+                  current.reconciliationIdentity == replacement.reconciliationIdentity,
                   isAllowedTransition(from: current, to: replacement),
                   preservesCandidateIntegrity(from: current, to: replacement),
                   preservesControlIntegrity(from: current, to: replacement)
@@ -2020,15 +2097,6 @@ private extension PortableSessionProcessingJobRepository {
         }
     }
 
-    func sameIdentity(_ left: SessionProcessingJob, _ right: SessionProcessingJob) -> Bool {
-        left.jobID == right.jobID && left.sessionID == right.sessionID &&
-            left.revisionID == right.revisionID && left.profileID == right.profileID &&
-            left.createdAt == right.createdAt &&
-            left.hasCapturedSelectionBaseline == right.hasCapturedSelectionBaseline &&
-            left.expectedSelectedRevisionID == right.expectedSelectedRevisionID &&
-            left.cancellationAuthorityID == right.cancellationAuthorityID
-    }
-
     func preservesCandidateIntegrity(
         from current: SessionProcessingJob,
         to next: SessionProcessingJob
@@ -2251,6 +2319,7 @@ private extension PortableSessionProcessingJobRepository {
 
 private enum JobPersistenceError: Error {
     case unavailable
+    case unsupportedSchema(UInt32)
     case integrityMismatch
     case collision
     case io

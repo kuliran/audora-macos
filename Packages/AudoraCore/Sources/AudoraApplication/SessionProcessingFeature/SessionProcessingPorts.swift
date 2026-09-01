@@ -91,12 +91,19 @@ public enum SessionProcessingJobWriteResult: Equatable, Sendable {
 public enum SessionProcessingJobLoadResult: Equatable, Sendable {
     case none
     case loaded(SessionProcessingJob)
+    /// The authoritative attempt index was written by a newer Audora. Durable
+    /// Jobs remain untouched and processing stays frozen until a compatible app
+    /// opens the Library.
+    case unsupportedSchema(version: UInt32)
     case unavailable
     case integrityMismatch
 }
 
 public enum SessionProcessingJobInventoryResult: Equatable, Sendable {
     case available(SessionProcessingJobInventory)
+    /// Distinct from corruption: callers must not reconcile independently
+    /// readable Jobs when their newer causal index cannot be interpreted.
+    case unsupportedSchema(version: UInt32)
     case unavailable
     case integrityMismatch
 }

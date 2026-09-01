@@ -1,4 +1,5 @@
 import AudoraApplication
+import AudoraContracts
 import AudoraDomain
 @testable import AudoraMacInfrastructure
 import Foundation
@@ -445,6 +446,34 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
         }
     }
 
+    func testCreatedAttemptIndexUsesThePackagedContractExampleShape() async throws {
+        try await withLibrary { root, libraryID in
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let queued = try makeJob(state: .queued)
+            let write = await repository.create(queued)
+            XCTAssertEqual(write, .written(queued))
+
+            let emitted = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: Data(
+                        contentsOf: root.appendingPathComponent("jobs/.attempts.json")
+                    )
+                ) as? NSDictionary
+            )
+            let example = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: ContractResources.data(
+                        for: .sessionProcessingAttemptIndexExample
+                    )
+                ) as? NSDictionary
+            )
+            XCTAssertEqual(emitted, example)
+        }
+    }
+
     func testRelaunchRepairsACrashedAttemptReservationBeforeAcceptingTheRetry()
         async throws
     {
@@ -495,6 +524,101 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
             XCTAssertEqual(retriedWrite, .written(retry))
             let afterRetry = await reopened.latest(for: selection)
             XCTAssertEqual(afterRetry, .loaded(retry))
+        }
+    }
+
+    func testNewerAttemptIndexFreezesEveryRepositoryOperationWithoutRecovery()
+        async throws
+    {
+        for indexName in [".attempts.json", ".attempts.json.partial"] {
+            try await assertNewerAttemptIndexFreezesEveryRepositoryOperation(
+                indexName: indexName
+            )
+        }
+    }
+
+    private func assertNewerAttemptIndexFreezesEveryRepositoryOperation(
+        indexName: String
+    ) async throws {
+        try await withLibrary { root, libraryID in
+            let jobs = root.appendingPathComponent("jobs", isDirectory: true)
+            let existing = try makeJob(state: .queued)
+            let existingDirectory = jobs.appendingPathComponent(
+                existing.jobID.rawValue,
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: existingDirectory,
+                withIntermediateDirectories: false
+            )
+            let existingBytes = try encodedJob(existing)
+            try existingBytes.write(
+                to: existingDirectory.appendingPathComponent("job.json")
+            )
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: existingDirectory.appendingPathComponent(
+                        "job.json.partial"
+                    ).path
+                )
+            )
+
+            let newerIndex = try ContractResources.data(
+                for: .rejectedNewerSessionProcessingAttemptIndex
+            )
+            let index = jobs.appendingPathComponent(indexName)
+            try newerIndex.write(to: index)
+            let pendingCreate = jobs.appendingPathComponent(
+                ".job-20260830T120700000Z-7MNP.partial",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: pendingCreate,
+                withIntermediateDirectories: false
+            )
+            let sentinel = Data("newer-writer-owned".utf8)
+            try sentinel.write(to: pendingCreate.appendingPathComponent("sentinel"))
+
+            let before = try snapshotTree(at: jobs)
+            let repository = PortableSessionProcessingJobRepository(
+                root: root,
+                libraryID: libraryID
+            )
+            let scope = LibraryScope(libraryID: libraryID)
+            let selection = try makeSelection(libraryID: libraryID)
+            let replacement = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T120800000Z-8NPQ"),
+                sessionID: existing.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T120900000Z-9RST"
+                ),
+                profileID: existing.profileID,
+                createdAt: try UTCInstant("2026-08-30T12:08:00.000Z"),
+                state: .queued,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-newer-index-frozen"
+                )
+            )
+
+            let inventory = await repository.inventory(for: scope)
+            let latest = await repository.latest(for: selection)
+            let exact = await repository.load(
+                jobID: existing.jobID,
+                for: selection
+            )
+            let create = await repository.create(replacement)
+            let transition = await repository.transition(
+                existing.replacing(state: .running),
+                from: .queued
+            )
+
+            XCTAssertEqual(inventory, .unsupportedSchema(version: 2))
+            XCTAssertEqual(latest, .unsupportedSchema(version: 2))
+            XCTAssertEqual(exact, .unsupportedSchema(version: 2))
+            XCTAssertEqual(create, .failed)
+            XCTAssertEqual(transition, .failed)
+            XCTAssertEqual(try snapshotTree(at: jobs), before)
         }
     }
 
@@ -665,9 +789,27 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
         }
     }
 
-    func testCorruptAttemptPointerStillInventoriesAValidRunningWorker()
+    func testCorruptAttemptRootStillInventoriesAValidRunningWorkerWithoutMutation()
         async throws
     {
+        let corruptRoots = [
+            Data("corrupt-pointer".utf8),
+            Data(#"{"schemaVersion":1,"sessions":"corrupt"}"#.utf8),
+        ]
+        for indexName in [".attempts.json", ".attempts.json.partial"] {
+            for corruptRoot in corruptRoots {
+                try await assertCorruptAttemptRootStillInventoriesAValidRunningWorker(
+                    indexName: indexName,
+                    corruptRoot: corruptRoot
+                )
+            }
+        }
+    }
+
+    private func assertCorruptAttemptRootStillInventoriesAValidRunningWorker(
+        indexName: String,
+        corruptRoot: Data
+    ) async throws {
         try await withLibrary { root, libraryID in
             let repository = PortableSessionProcessingJobRepository(
                 root: root,
@@ -679,9 +821,34 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
             let running = queued.replacing(state: .running)
             let runningWrite = await repository.transition(running, from: .queued)
             XCTAssertEqual(runningWrite, .written(running))
-            try Data("corrupt-pointer".utf8).write(
-                to: root.appendingPathComponent("jobs/.attempts.json")
+            try corruptRoot.write(
+                to: root.appendingPathComponent("jobs/\(indexName)")
             )
+            let jobs = root.appendingPathComponent("jobs", isDirectory: true)
+            let before = try snapshotTree(at: jobs)
+            let replacement = SessionProcessingJob(
+                jobID: try TranscriptionJobID("job-20260830T120800000Z-8NPQ"),
+                sessionID: running.sessionID,
+                revisionID: try TranscriptRevisionID(
+                    "trv-20260830T120900000Z-9RST"
+                ),
+                profileID: running.profileID,
+                createdAt: try UTCInstant("2026-08-30T12:08:00.000Z"),
+                state: .queued,
+                expectedSelectedRevisionID: nil,
+                cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                    "cancel-corrupt-index"
+                )
+            )
+
+            let create = await repository.create(replacement)
+            let transition = await repository.transition(
+                running.replacing(state: .validating),
+                from: .running
+            )
+            XCTAssertEqual(create, .failed)
+            XCTAssertEqual(transition, .failed)
+            XCTAssertEqual(try snapshotTree(at: jobs), before)
 
             let inventory = await repository.inventory(
                 for: LibraryScope(libraryID: libraryID)
@@ -695,6 +862,7 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
                 for: try makeSelection(libraryID: libraryID)
             )
             XCTAssertEqual(latest, .integrityMismatch)
+            XCTAssertEqual(try snapshotTree(at: jobs), before)
         }
     }
 
@@ -1705,6 +1873,24 @@ final class PortableSessionProcessingJobRepositoryTests: XCTestCase {
         }
         if let failure = job.failure { object["failure"] = failure.rawValue }
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    private func snapshotTree(at root: URL) throws -> [String: Data?] {
+        let enumerator = try XCTUnwrap(
+            FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: []
+            )
+        )
+        var snapshot: [String: Data?] = [:]
+        while let entry = enumerator.nextObject() as? URL {
+            let relative = String(entry.path.dropFirst(root.path.count + 1))
+            let isDirectory = try entry.resourceValues(forKeys: [.isDirectoryKey])
+                .isDirectory == true
+            snapshot[relative] = isDirectory ? nil : try Data(contentsOf: entry)
+        }
+        return snapshot
     }
 }
 

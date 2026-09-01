@@ -21,6 +21,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case recordingStagingIdentityManifestSchema
     case recordingStagingManifestSchema
     case sessionManifestSchema
+    case sessionProcessingAttemptIndexSchema
     case sessionProcessingFeatureScenarioSchema
     case transcriptRevisionSchema
     case transcriptionCandidateArtifactSchema
@@ -89,6 +90,11 @@ public enum ContractResource: CaseIterable, Sendable {
     case sessionProcessingRaceCancelWinsEngineFailureScenario
     case sessionProcessingRaceCandidateRejectionWinsCancelScenario
     case sessionProcessingRaceCancelWinsCandidateRejectionScenario
+
+    case sessionProcessingAttemptIndexExample
+    case rejectedNewerSessionProcessingAttemptIndex
+    case rejectedZeroSessionProcessingAttemptSequence
+    case rejectedUnknownSessionProcessingAttemptIndexKey
 
     case portableLibraryManifestExample
     case portableLibraryPreferencesExample
@@ -193,6 +199,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "RecordingStagingManifest.json"
         case .sessionManifestSchema:
             "SessionManifest.json"
+        case .sessionProcessingAttemptIndexSchema:
+            "SessionProcessingAttemptIndex.json"
         case .sessionProcessingFeatureScenarioSchema:
             "SessionProcessingFeatureScenario.json"
         case .transcriptRevisionSchema:
@@ -327,6 +335,14 @@ public enum ContractResource: CaseIterable, Sendable {
             "race-candidate-rejection-wins-cancel.v1.json"
         case .sessionProcessingRaceCancelWinsCandidateRejectionScenario:
             "race-cancel-wins-candidate-rejection.v1.json"
+        case .sessionProcessingAttemptIndexExample:
+            "attempts.json"
+        case .rejectedNewerSessionProcessingAttemptIndex:
+            "attempts-newer-schema.json"
+        case .rejectedZeroSessionProcessingAttemptSequence:
+            "attempts-zero-sequence.json"
+        case .rejectedUnknownSessionProcessingAttemptIndexKey:
+            "attempts-unknown-key.json"
         case .portableLibraryManifestExample:
             "library.json"
         case .portableLibraryPreferencesExample:
@@ -448,6 +464,7 @@ public enum ContractResource: CaseIterable, Sendable {
              .readSessionTranscriptsRequestSchema, .readSessionTranscriptsResponseSchema,
              .recordingFeatureScenarioSchema, .recordingStagingIdentityManifestSchema,
              .recordingStagingManifestSchema, .sessionManifestSchema,
+             .sessionProcessingAttemptIndexSchema,
              .sessionProcessingFeatureScenarioSchema, .transcriptRevisionSchema,
              .transcriptionCandidateArtifactSchema, .transcriptionJobManifestSchema,
              .transcriptionWorkerMessageSchema, .transcriptionWorkerRequestSchema:
@@ -500,6 +517,12 @@ public enum ContractResource: CaseIterable, Sendable {
              .sessionProcessingRaceCandidateRejectionWinsCancelScenario,
              .sessionProcessingRaceCancelWinsCandidateRejectionScenario:
             "Scenarios/SessionProcessing"
+        case .sessionProcessingAttemptIndexExample:
+            "Examples/SessionProcessing/v1"
+        case .rejectedNewerSessionProcessingAttemptIndex,
+             .rejectedZeroSessionProcessingAttemptSequence,
+             .rejectedUnknownSessionProcessingAttemptIndexKey:
+            "Examples/SessionProcessing/v1/rejected"
         case .portableLibraryManifestExample, .portableLibraryPreferencesExample,
              .portableProfileNullExample, .portableProfileSelectedExample:
             "Examples/PortableLibrary/v1"

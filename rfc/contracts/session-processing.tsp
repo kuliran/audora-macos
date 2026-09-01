@@ -4,6 +4,34 @@ import "@typespec/json-schema";
 using TypeSpec.JsonSchema;
 
 namespace Audora.Contracts {
+  /** Authoritative per-Session attempt order and exact current-Job pointer. */
+  @jsonSchema
+  @id("SessionProcessingAttemptIndex.json")
+  model SessionProcessingAttemptIndex {
+    schemaVersion: 1;
+
+    @maxItems(10000)
+    sessions: SessionProcessingSessionAttempts[];
+  }
+
+  model SessionProcessingSessionAttempts {
+    sessionId: SessionId;
+
+    @maxItems(10000)
+    legacyJobIds: TranscriptionJobId[];
+
+    @maxItems(10000)
+    attempts: SessionProcessingAttemptPointer[];
+
+    currentJobId: TranscriptionJobId | null;
+    pendingAttempt: SessionProcessingAttemptPointer | null;
+  }
+
+  model SessionProcessingAttemptPointer {
+    sequence: SessionProcessingAttemptSequence;
+    jobId: TranscriptionJobId;
+  }
+
   /** Minimal durable state for one Session transcription job. */
   @jsonSchema
   @id("TranscriptionJobManifest.json")

@@ -364,6 +364,40 @@ public enum SessionProcessingFailureReason: String, Error, Equatable, Sendable {
     case staleSelection
 }
 
+/// Immutable durable root used to prove that a loaded or written Job is the
+/// same processing authority. Mutable state and recovery payloads deliberately
+/// do not participate.
+public struct SessionProcessingJobReconciliationIdentity: Hashable, Sendable {
+    public let jobID: TranscriptionJobID
+    public let sessionID: SessionID
+    public let revisionID: TranscriptRevisionID
+    public let profileID: String
+    public let createdAt: UTCInstant
+    public let expectedSelectedRevisionID: TranscriptRevisionID?
+    public let hasCapturedSelectionBaseline: Bool
+    public let cancellationAuthorityID: TranscriptionCancellationAuthorityID?
+
+    public init(
+        jobID: TranscriptionJobID,
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID,
+        profileID: String,
+        createdAt: UTCInstant,
+        expectedSelectedRevisionID: TranscriptRevisionID?,
+        hasCapturedSelectionBaseline: Bool,
+        cancellationAuthorityID: TranscriptionCancellationAuthorityID?
+    ) {
+        self.jobID = jobID
+        self.sessionID = sessionID
+        self.revisionID = revisionID
+        self.profileID = profileID
+        self.createdAt = createdAt
+        self.expectedSelectedRevisionID = expectedSelectedRevisionID
+        self.hasCapturedSelectionBaseline = hasCapturedSelectionBaseline
+        self.cancellationAuthorityID = cancellationAuthorityID
+    }
+}
+
 public struct SessionProcessingJob: Equatable, Sendable {
     public let jobID: TranscriptionJobID
     public let sessionID: SessionID
@@ -462,6 +496,19 @@ public struct SessionProcessingJob: Equatable, Sendable {
     public var executionReference: TranscriptionExecutionReference {
         TranscriptionExecutionReference(
             jobID: jobID,
+            cancellationAuthorityID: cancellationAuthorityID
+        )
+    }
+
+    public var reconciliationIdentity: SessionProcessingJobReconciliationIdentity {
+        SessionProcessingJobReconciliationIdentity(
+            jobID: jobID,
+            sessionID: sessionID,
+            revisionID: revisionID,
+            profileID: profileID,
+            createdAt: createdAt,
+            expectedSelectedRevisionID: expectedSelectedRevisionID,
+            hasCapturedSelectionBaseline: hasCapturedSelectionBaseline,
             cancellationAuthorityID: cancellationAuthorityID
         )
     }

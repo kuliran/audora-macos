@@ -42,6 +42,10 @@ const sessionProcessingScenariosDirectory = path.join(
   resourcesDirectory,
   "Scenarios/SessionProcessing",
 );
+const sessionProcessingExamplesDirectory = path.join(
+  resourcesDirectory,
+  "Examples/SessionProcessing/v1",
+);
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 
@@ -126,6 +130,9 @@ await registerSchema("RecordingStagingIdentityManifest.json");
 const recordingStagingManifest = await validator("RecordingStagingManifest.json");
 const recordingScenario = await validator("RecordingFeatureScenario.json");
 const transcriptRevision = await validator("TranscriptRevision.json");
+const sessionProcessingAttemptIndex = await validator(
+  "SessionProcessingAttemptIndex.json",
+);
 const sessionProcessingScenario = await validator(
   "SessionProcessingFeatureScenario.json",
 );
@@ -302,6 +309,36 @@ const expectedSessionProcessingScenarios = [
   "relaunch-validating-stale-selection.v1.json",
   "relaunch-validating-resumes-idempotently.v1.json",
 ];
+
+assertValidation(
+  sessionProcessingAttemptIndex,
+  await loadJSON(path.join(sessionProcessingExamplesDirectory, "attempts.json")),
+  true,
+  "session-processing/attempts.json",
+);
+const sessionProcessingAttemptIndexRejectedDirectory = path.join(
+  sessionProcessingExamplesDirectory,
+  "rejected",
+);
+const rejectedSessionProcessingAttemptIndexes = [
+  "attempts-newer-schema.json",
+  "attempts-unknown-key.json",
+  "attempts-zero-sequence.json",
+];
+await assertInventory(
+  sessionProcessingAttemptIndexRejectedDirectory,
+  rejectedSessionProcessingAttemptIndexes,
+  "rejected session-processing attempt-index fixture",
+);
+for (const name of rejectedSessionProcessingAttemptIndexes) {
+  assertValidation(
+    sessionProcessingAttemptIndex,
+    await loadJSON(path.join(sessionProcessingAttemptIndexRejectedDirectory, name)),
+    false,
+    `session-processing/attempt-index/rejected/${name}`,
+  );
+}
+
 await assertInventory(
   sessionProcessingScenariosDirectory,
   expectedSessionProcessingScenarios,

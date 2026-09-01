@@ -51,6 +51,7 @@ at runtime.
 - [`RecordingStagingIdentityManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingIdentityManifest.json)
 - [`RecordingStagingManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingStagingManifest.json)
 - [`SessionManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionManifest.json)
+- [`SessionProcessingAttemptIndex.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionProcessingAttemptIndex.json)
 - [`SessionProcessingFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/SessionProcessingFeatureScenario.json)
 - [`TranscriptRevision.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptRevision.json)
 - [`TranscriptionCandidateArtifact.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/TranscriptionCandidateArtifact.json)
@@ -79,6 +80,7 @@ at runtime.
 | `RecordingStagingIdentityManifest` | Recording staging storage | No |
 | `RecordingStagingManifest` | Recording staging storage | No |
 | `SessionManifest` | Imported or recorded Session storage | No |
+| `SessionProcessingAttemptIndex` | Portable Library processing coordination | No |
 | `SessionProcessingFeatureScenario` | Portable cross-implementation behavior | No |
 | `TranscriptRevision` | Immutable canonical Session transcription storage | No |
 | `TranscriptionCandidateArtifact` | Confined worker -> Application staging | No |
@@ -163,6 +165,23 @@ stop races, cancellation, recovery, repeated takes, late-event fencing, and
 Library-switch serialization.
 
 ## Session processing contracts
+
+`SessionProcessingAttemptIndex` is the authoritative closed contract for
+`jobs/.attempts.json`, not a derived-index DTO. It bounds the Session inventory,
+legacy Job set, sequenced attempt pointers, and nullable current/pending pointers;
+sequence values are positive and all objects reject unknown keys. The checked-in
+[`attempts.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/SessionProcessing/v1/attempts.json)
+is accepted by the generated schema and matches the root emitted by the portable
+repository. Rejected fixtures cover an
+[`unknown newer schema`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/SessionProcessing/v1/rejected/attempts-newer-schema.json),
+[`zero sequence`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/SessionProcessing/v1/rejected/attempts-zero-sequence.json),
+and an
+[`unknown key`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/SessionProcessing/v1/rejected/attempts-unknown-key.json).
+Runtime validation additionally enforces sorted unique Session entries, unique
+Job pointers, monotonic per-Session ordering, and consistent current/pending
+causality. An unknown newer installed or partial root is classified separately
+from corruption and freezes every processing recovery and mutation without
+rewriting either file.
 
 `TranscriptionJobManifest` persists the minimal single-run state before worker
 launch and binds one Job, Session, intended Revision, and qualification profile.

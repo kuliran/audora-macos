@@ -3,6 +3,30 @@ import AudoraDomain
 import XCTest
 
 final class SessionProcessingFeatureTests: XCTestCase {
+    func testJobReconciliationIdentityIsStableAcrossDurableStateTransitions()
+        throws
+    {
+        let fixture = try ProcessingFixture()
+        let queued = fixture.job(state: .queued)
+        let running = fixture.job(state: .running)
+        let distinctRevision = SessionProcessingJob(
+            jobID: queued.jobID,
+            sessionID: queued.sessionID,
+            revisionID: try TranscriptRevisionID("trv-20260830T125900000Z-9RST"),
+            profileID: queued.profileID,
+            createdAt: queued.createdAt,
+            state: .queued,
+            expectedSelectedRevisionID: queued.expectedSelectedRevisionID,
+            cancellationAuthorityID: try XCTUnwrap(queued.cancellationAuthorityID)
+        )
+
+        XCTAssertEqual(queued.reconciliationIdentity, running.reconciliationIdentity)
+        XCTAssertNotEqual(
+            queued.reconciliationIdentity,
+            distinctRevision.reconciliationIdentity
+        )
+    }
+
     func testQualifiedOfflineRunPublishesOnlyThroughTranscriptPublisher() async throws {
         let fixture = try ProcessingFixture()
         let runtime = RuntimeProbe(.qualified(fixture.profile))
@@ -1910,6 +1934,48 @@ final class SessionProcessingFeatureTests: XCTestCase {
         await feature.send(.start)
         let requestsAfterRecovery = await engine.requestCount()
         XCTAssertEqual(requestsAfterRecovery, 1)
+    }
+
+    func testUnsupportedAttemptIndexKeepsSourceReadableAndProcessingFrozen()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let source = SourceProbe(.available(fixture.source))
+        let jobs = JobProbe(
+            latestResult: .unsupportedSchema(version: 2),
+            inventoryResult: .unsupportedSchema(version: 2)
+        )
+        let engine = EngineProbe(result: .failure(.launchFailed))
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: jobs,
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        await feature.send(.activateLibrary(fixture.selection.scope))
+        await feature.send(.selectSession(fixture.selection))
+        await feature.send(.start)
+        await feature.send(.retry)
+
+        let sourceLoads = await source.loadCount
+        let writes = await jobs.snapshots
+        let requests = await engine.requestCount()
+        XCTAssertEqual(sourceLoads, 2)
+        XCTAssertEqual(writes, [])
+        XCTAssertEqual(requests, 0)
+        guard case let .failed(snapshot) = await feature.currentState else {
+            return XCTFail("newer attempt coordination must remain visibly frozen")
+        }
+        XCTAssertEqual(snapshot.reason, .jobPersistenceFailed)
     }
 
     func testSameLibraryRootRefreshReinstallsFenceBeforeInventoryResolution()

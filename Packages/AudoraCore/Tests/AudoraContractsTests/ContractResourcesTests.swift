@@ -587,6 +587,63 @@ final class ContractResourcesTests: XCTestCase {
         )
     }
 
+    func testSessionProcessingAttemptIndexContractMatchesItsAuthoritativeRoot()
+        throws
+    {
+        let schema = try jsonObject(.sessionProcessingAttemptIndexSchema)
+        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        XCTAssertEqual(
+            (properties["schemaVersion"] as? [String: Any])?["const"] as? Int,
+            1
+        )
+        XCTAssertEqual(
+            (properties["sessions"] as? [String: Any])?["maxItems"] as? Int,
+            10_000
+        )
+
+        let definitions = try XCTUnwrap(schema["$defs"] as? [String: Any])
+        let session = try XCTUnwrap(
+            definitions["SessionProcessingSessionAttempts"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(session["required"] as? [String] ?? []),
+            [
+                "sessionId", "legacyJobIds", "attempts", "currentJobId",
+                "pendingAttempt",
+            ]
+        )
+        XCTAssertNotNil(session["unevaluatedProperties"])
+        let pointer = try XCTUnwrap(
+            definitions["SessionProcessingAttemptPointer"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(pointer["required"] as? [String] ?? []),
+            ["sequence", "jobId"]
+        )
+        XCTAssertNotNil(pointer["unevaluatedProperties"])
+
+        let accepted = try jsonObject(.sessionProcessingAttemptIndexExample)
+        XCTAssertEqual(accepted["schemaVersion"] as? Int, 1)
+        XCTAssertEqual((accepted["sessions"] as? [[String: Any]])?.count, 1)
+        XCTAssertEqual(
+            try jsonObject(.rejectedNewerSessionProcessingAttemptIndex)[
+                "schemaVersion"
+            ] as? Int,
+            2
+        )
+        XCTAssertEqual(
+            try jsonObject(.rejectedZeroSessionProcessingAttemptSequence)[
+                "schemaVersion"
+            ] as? Int,
+            1
+        )
+        XCTAssertNotNil(
+            try jsonObject(.rejectedUnknownSessionProcessingAttemptIndexKey)[
+                "futureCoordination"
+            ]
+        )
+    }
+
     func testSessionProcessingRaceContractsPreserveTheFirstDurableWinner() throws {
         let cases: [(
             file: String,
