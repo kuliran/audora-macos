@@ -40,6 +40,7 @@ const scenarioInventory = [
   "create-empty-development-chat.v1.json",
   "draft-send-discard.v1.json",
   "filter-is-pure.v1.json",
+  "invalid-context-blocks-new-chat.v1.json",
   "library-switch-during-suspended-load.v1.json",
   "newer-chat-freezes.v1.json",
   "provider-unavailable-creates-locally.v1.json",
@@ -149,6 +150,32 @@ for (const name of scenarioInventory) {
     true,
     `scenario/${name}`,
   );
+}
+
+const attachmentBoundaryScenario = await loadJSON(
+  path.join(scenariosDirectory, "invalid-context-blocks-new-chat.v1.json"),
+);
+const invalidAttachmentMetadata = [
+  ["empty display label", (value) => {
+    value.dependencyTrace[1].candidates[0].displayLabel = "";
+  }],
+  ["257-scalar display label", (value) => {
+    value.dependencyTrace[1].candidates[0].displayLabel = "😀".repeat(257);
+  }],
+  ["control display label", (value) => {
+    value.dependencyTrace[1].candidates[0].displayLabel = "label\u0000";
+  }],
+  ["257-scalar filter", (value) => {
+    value.commands[1].query = "😀".repeat(257);
+  }],
+  ["control filter", (value) => {
+    value.commands[1].query = "query\u009f";
+  }],
+];
+for (const [label, mutate] of invalidAttachmentMetadata) {
+  const value = structuredClone(attachmentBoundaryScenario);
+  mutate(value);
+  assertValidation(scenario, value, false, `scenario/${label}`);
 }
 
 for (const name of schemaInvalidChatFixtures) {

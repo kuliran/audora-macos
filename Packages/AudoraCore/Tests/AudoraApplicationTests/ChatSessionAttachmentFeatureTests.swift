@@ -1,9 +1,61 @@
 @testable @_spi(CoachContextQualification) import AudoraApplication
 import AudoraDomain
+import Foundation
 import XCTest
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 final class ChatSessionAttachmentFeatureTests: XCTestCase {
+    func testAttachmentMetadataUsesBoundedUnicodeScalarsAndRejectsControls() throws {
+        let boundary = String(repeating: "😀", count: 256)
+        let sessionID = try SessionID("ses-20260830T110000000Z-5JKM")
+        let revisionID = try TranscriptRevisionID("trv-20260830T113000000Z-6NPQ")
+
+        XCTAssertNoThrow(
+            try ChatAttachmentCandidate(
+                sessionID: sessionID,
+                transcriptRevisionID: revisionID,
+                displayLabel: boundary,
+                durationMilliseconds: 1,
+                approximateTranscriptTokens: 0,
+                delivery: .inline
+            )
+        )
+        XCTAssertNoThrow(try ChatAttachmentFilterQuery(boundary))
+
+        let overLimit = boundary + "😀"
+        XCTAssertThrowsError(
+            try ChatAttachmentCandidate(
+                sessionID: sessionID,
+                transcriptRevisionID: revisionID,
+                displayLabel: overLimit,
+                durationMilliseconds: 1,
+                approximateTranscriptTokens: 0,
+                delivery: .inline
+            )
+        ) { error in
+            XCTAssertEqual(error as? ChatAttachmentCandidateError, .invalidDisplayLabel)
+        }
+        XCTAssertThrowsError(try ChatAttachmentFilterQuery(overLimit)) { error in
+            XCTAssertEqual(error as? ChatAttachmentFilterQueryError, .tooLong)
+        }
+
+        for rejected in ["", "nul\u{0}", "control\u{1F}", "delete\u{7F}", "c1\u{9F}"] {
+            XCTAssertThrowsError(
+                try ChatAttachmentCandidate(
+                    sessionID: sessionID,
+                    transcriptRevisionID: revisionID,
+                    displayLabel: rejected,
+                    durationMilliseconds: 1,
+                    approximateTranscriptTokens: 0,
+                    delivery: .inline
+                )
+            )
+            if !rejected.isEmpty {
+                XCTAssertThrowsError(try ChatAttachmentFilterQuery(rejected))
+            }
+        }
+    }
+
     func testOnlyProviderUnavailabilityPermitsCreationWithoutAQuote() {
         XCTAssertTrue(
             ChatCreationFeasibility.unavailable(.providerUnavailable).permitsCreation
@@ -86,6 +138,50 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         XCTAssertEqual(picker.visibleRows.map(\.displayLabel), ["Café rehearsal"])
         XCTAssertEqual(picker.selectedAttachmentIDs, [])
         XCTAssertEqual(picker.selectionCount, 0)
+    }
+
+    func testSelectionLimitIsPickerLocalAndKeepsTheValidSelectionConfirmable() async throws {
+        let candidates = try (0...ChatAttachments.maximumCount).map { index in
+            try candidate(
+                session: String(
+                    format: "ses-20260830T110000%03dZ-5KMN",
+                    index
+                ),
+                revision: String(
+                    format: "trv-20260830T111000%03dZ-6PQR",
+                    index
+                ),
+                label: String(format: "Session %03d", index)
+            )
+        }
+        let feature = makeFeature(source: AttachmentSourceFixture(candidates: candidates))
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initial) = await feature.currentState.newChatPicker else {
+            return XCTFail("Expected ready picker")
+        }
+        for row in initial.allRows.prefix(ChatAttachments.maximumCount) {
+            await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+        }
+
+        await feature.send(
+            .toggleNewChatAttachment(
+                Self.context,
+                initial.allRows[ChatAttachments.maximumCount].id
+            )
+        )
+
+        let state = await feature.currentState
+        guard case let .ready(picker) = state.newChatPicker else {
+            return XCTFail("Expected ready picker")
+        }
+        XCTAssertEqual(picker.selectionCount, ChatAttachments.maximumCount)
+        XCTAssertEqual(
+            picker.issue,
+            .selectionLimitReached(maximum: ChatAttachments.maximumCount)
+        )
+        XCTAssertTrue(picker.permitsConfirmation)
+        XCTAssertNil(state.notice)
     }
 
     func testZeroSelectionsCreateAnOrdinaryChatWithNoPins() async {
@@ -303,10 +399,25 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         let rejectedSeed = await store.createdSeed
         let rejectedState = await feature.currentState
         XCTAssertNil(rejectedSeed)
-        XCTAssertEqual(rejectedState.notice, .attachmentUnavailable)
-        guard case .ready = rejectedState.newChatPicker else {
+        XCTAssertNil(rejectedState.notice)
+        guard case let .ready(rejectedPicker) = rejectedState.newChatPicker else {
             return XCTFail("Rejected selection must remain open")
         }
+        XCTAssertEqual(rejectedPicker.issue, .attachmentUnavailable)
+        XCTAssertFalse(rejectedPicker.permitsConfirmation)
+
+        await feature.send(.confirmNewChat(Self.context))
+
+        let resolvedRequests = await source.resolvedRequests
+        XCTAssertEqual(resolvedRequests.count, 1)
+
+        await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+
+        guard case let .ready(recoveredPicker) = await feature.currentState.newChatPicker else {
+            return XCTFail("Expected selection change to keep the picker open")
+        }
+        XCTAssertNil(recoveredPicker.issue)
+        XCTAssertTrue(recoveredPicker.permitsConfirmation)
     }
 
     func testConfirmRejectsAuthoritativeOverCapacityQuote() async throws {
@@ -318,14 +429,15 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
             )]
         )
         let store = AttachmentChatStoreFixture()
+        let capacity = AttachmentCapacitySource(
+            contextWindows: [20_000, 20_000, 400],
+            transcriptBytes: 1_000
+        )
         let feature = makeFeature(
             source: source,
             store: store,
             coachContext: DefaultCoachContextFeature(
-                source: AttachmentCapacitySource(
-                    contextWindow: 400,
-                    transcriptBytes: 1_000
-                )
+                source: capacity
             )
         )
         await feature.send(.start(Self.context))
@@ -340,7 +452,17 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         let rejectedSeed = await store.createdSeed
         let rejectedState = await feature.currentState
         XCTAssertNil(rejectedSeed)
-        XCTAssertEqual(rejectedState.notice, .chatContextCannotFit)
+        XCTAssertNil(rejectedState.notice)
+        guard case let .ready(rejectedPicker) = rejectedState.newChatPicker else {
+            return XCTFail("Rejected selection must remain open")
+        }
+        XCTAssertEqual(rejectedPicker.issue, .contextCannotFit)
+        XCTAssertFalse(rejectedPicker.permitsConfirmation)
+
+        await feature.send(.confirmNewChat(Self.context))
+
+        let quoteCount = await capacity.newChatResolutionCount
+        XCTAssertEqual(quoteCount, 3)
     }
 
     private func makeFeature(
@@ -556,17 +678,28 @@ private struct AttachmentAutosaveFixture: ChatAutosaveScheduling {
 }
 
 private actor AttachmentCapacitySource: CoachContextSnapshotPort {
-    private let contextWindow: Int
+    private let contextWindows: [Int]
     private let transcriptBytes: Int
+    private(set) var newChatResolutionCount = 0
 
     init(contextWindow: Int, transcriptBytes: Int = 32) {
-        self.contextWindow = contextWindow
+        contextWindows = [contextWindow]
+        self.transcriptBytes = transcriptBytes
+    }
+
+    init(contextWindows: [Int], transcriptBytes: Int = 32) {
+        precondition(!contextWindows.isEmpty)
+        self.contextWindows = contextWindows
         self.transcriptBytes = transcriptBytes
     }
 
     func resolveNewChat(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> CoachContextSnapshotOutcome {
+        let contextWindow = contextWindows[
+            min(newChatResolutionCount, contextWindows.count - 1)
+        ]
+        newChatResolutionCount += 1
         do {
             let prepared = request.attachments.values.map { attachment in
                 PreparedCoachAttachment.inline(

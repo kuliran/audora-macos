@@ -4,7 +4,7 @@ import XCTest
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 final class ChatFeatureTests: XCTestCase {
-    func testDelayedCreateFromPreviousLibraryContextIsRejectedAfterSwitch() async {
+    func testDelayedConfirmFromPreviousLibraryContextIsRejectedAfterSwitch() async {
         let store = RecordingChatStore()
         let feature = makeFeature(store: store)
         let firstContext = ChatCommandContext(
@@ -18,7 +18,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(firstContext))
         await feature.send(.start(secondContext))
 
-        await feature.send(.createDevelopmentChat(firstContext))
+        await feature.send(.confirmNewChat(firstContext))
 
         let calls = await store.calls
         XCTAssertEqual(calls, [.loadCatalog, .loadCatalog])
@@ -41,12 +41,13 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(loadedScopes, [Self.secondScope])
     }
 
-    func testCreateCommitsCanonicalEmptyDevelopmentChatBeforeSelectingIt() async throws {
+    func testConfirmedZeroSelectionCommitsCanonicalEmptyChatBeforeSelectingIt() async throws {
         let store = RecordingChatStore()
         let feature = makeFeature(store: store)
         await feature.send(.start(Self.context))
 
-        await feature.send(.createDevelopmentChat(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        await feature.send(.confirmNewChat(Self.context))
 
         let seeds = await store.createSeeds
         let seed = try XCTUnwrap(seeds.first)
@@ -65,7 +66,8 @@ final class ChatFeatureTests: XCTestCase {
         let feature = makeFeature(store: store)
         await feature.send(.start(Self.context))
 
-        await feature.send(.createDevelopmentChat(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        await feature.send(.confirmNewChat(Self.context))
 
         let seedCount = await store.createSeeds.count
         let state = await feature.currentState
@@ -80,7 +82,8 @@ final class ChatFeatureTests: XCTestCase {
         let feature = makeFeature(store: store)
         await feature.send(.start(Self.context))
 
-        await feature.send(.createDevelopmentChat(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        await feature.send(.confirmNewChat(Self.context))
 
         let generations = await store.createSeeds.map(
             \.aggregate.chat.profileStatementGenerationAtCreation
@@ -102,7 +105,8 @@ final class ChatFeatureTests: XCTestCase {
         let feature = makeFeature(store: store)
         await feature.send(.start(Self.context))
 
-        await feature.send(.createDevelopmentChat(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        await feature.send(.confirmNewChat(Self.context))
 
         let seeds = await store.createSeeds
         XCTAssertEqual(seeds.count, 5)
@@ -126,7 +130,8 @@ final class ChatFeatureTests: XCTestCase {
         let feature = makeFeature(store: store)
         await feature.send(.start(Self.context))
 
-        await feature.send(.createDevelopmentChat(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        await feature.send(.confirmNewChat(Self.context))
 
         let state = await feature.currentState
         XCTAssertEqual(state.notice, .createFailed)
@@ -1215,7 +1220,8 @@ final class ChatFeatureTests: XCTestCase {
             autosaveScheduler: autosaveScheduler,
             coachContext: DefaultCoachContextFeature(
                 source: AlwaysFitCoachContextSnapshotPort()
-            )
+            ),
+            attachmentSource: EmptyChatAttachmentSource()
         )
     }
 
@@ -1305,6 +1311,21 @@ final class ChatFeatureTests: XCTestCase {
     }
 }
 
+private struct EmptyChatAttachmentSource: ChatSessionAttachmentSource {
+    func loadCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        .loaded([])
+    }
+
+    func resolve(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        .resolved([])
+    }
+}
+
 private actor SuspendedCatalogChatStore: ChatStorePort {
     private let catalog: [ChatCatalogEntry]
     private var loadStarted = false
@@ -1384,7 +1405,33 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
     func resolveNewChat(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> CoachContextSnapshotOutcome {
-        .sourceUnavailable
+        do {
+            return .resolved(
+                try CoachContextResolvedSnapshot(
+                    input: CoachContextQuoteInput(
+                        profile: .object(["statements": .array([])]),
+                        memory: .object([
+                            "generalNotes": .string(""),
+                            "sessionSummaries": .array([]),
+                        ]),
+                        creation: request.creation,
+                        attachments: []
+                    ),
+                    configuration: configuration(),
+                    authority: CoachContextSnapshotAuthority(
+                        binding: .newChat(
+                            library: request.library,
+                            attachments: request.attachments,
+                            creation: request.creation
+                        ),
+                        contextGeneration: 1,
+                        configurationGeneration: 1
+                    )
+                )
+            )
+        } catch {
+            return .sourceUnavailable
+        }
     }
 
     func resolveChat(
@@ -1437,23 +1484,7 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
                         history: [],
                         currentDraft: draft.text
                     ),
-                    configuration: try CoachContextConfiguration(
-                        descriptor: CoachProviderDescriptor(
-                            displayName: "Synthetic ChatFeature fixture",
-                            contextBudget: CoachContextBudget(
-                                contextWindowTokens: 100_000,
-                                responseReservedTokens: 32,
-                                safetyMarginTokens: 8
-                            ),
-                            coachMemoryMaxTokens: 1
-                        ),
-                        policy: CoachProviderEstimationPolicy(
-                            providerIdentifier: "synthetic-chat-feature-v1",
-                            responseCollectorByteCeiling: 8_192,
-                            framing: CoachProviderFraming(),
-                            tokenEstimator: .utf8ByteUpperBound()
-                        )
-                    ),
+                    configuration: configuration(),
                     authority: CoachContextSnapshotAuthority(
                         binding: binding,
                         contextGeneration: 1,
@@ -1464,6 +1495,26 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
         } catch {
             return .sourceUnavailable
         }
+    }
+
+    private func configuration() throws -> CoachContextConfiguration {
+        try CoachContextConfiguration(
+            descriptor: CoachProviderDescriptor(
+                displayName: "Synthetic ChatFeature fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: 100_000,
+                    responseReservedTokens: 32,
+                    safetyMarginTokens: 8
+                ),
+                coachMemoryMaxTokens: 1
+            ),
+            policy: CoachProviderEstimationPolicy(
+                providerIdentifier: "synthetic-chat-feature-v1",
+                responseCollectorByteCeiling: 8_192,
+                framing: CoachProviderFraming(),
+                tokenEstimator: .utf8ByteUpperBound()
+            )
+        )
     }
 }
 

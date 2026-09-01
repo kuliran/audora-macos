@@ -259,8 +259,6 @@ public actor DefaultChatFeature: ChatFeature {
             cancelNewChat(context: context)
         case let .confirmNewChat(context):
             await confirmNewChat(context: context)
-        case let .createDevelopmentChat(context):
-            await createDevelopmentChat(context: context)
         case let .rename(context, chatID, title, expectedRevision):
             await rename(
                 chatID,
@@ -351,7 +349,8 @@ public actor DefaultChatFeature: ChatFeature {
             visibleRows: filtered(snapshot.allRows, by: query),
             selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
             filterQuery: query,
-            feasibility: snapshot.feasibility
+            feasibility: snapshot.feasibility,
+            issue: snapshot.issue
         )
         state = replacing(
             newChatPicker: .ready(replacement),
@@ -373,7 +372,21 @@ public actor DefaultChatFeature: ChatFeature {
             selected.remove(attachmentID)
         } else {
             guard selected.count < ChatAttachments.maximumCount else {
-                state = replacing(activity: state.activity, notice: .chatContextCannotFit)
+                let replacement = ChatAttachmentPickerSnapshot(
+                    allRows: snapshot.allRows,
+                    visibleRows: snapshot.visibleRows,
+                    selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
+                    filterQuery: snapshot.filterQuery,
+                    feasibility: snapshot.feasibility,
+                    issue: .selectionLimitReached(
+                        maximum: ChatAttachments.maximumCount
+                    )
+                )
+                state = replacing(
+                    newChatPicker: .ready(replacement),
+                    activity: state.activity,
+                    notice: nil
+                )
                 publish()
                 return
             }
@@ -384,7 +397,8 @@ public actor DefaultChatFeature: ChatFeature {
             visibleRows: snapshot.visibleRows,
             selectedAttachmentIDs: selected,
             filterQuery: snapshot.filterQuery,
-            feasibility: .quoting
+            feasibility: .quoting,
+            issue: nil
         )
         state = replacing(
             newChatPicker: .ready(replacement),
@@ -408,7 +422,7 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func confirmNewChat(context: ChatCommandContext) async {
         guard isActive(context), case let .ready(snapshot) = state.newChatPicker,
-              snapshot.feasibility != .quoting,
+              snapshot.permitsConfirmation,
               let attachments = try? selectedAttachments(in: snapshot)
         else { return }
         let resolution = await attachmentSource.resolve(
@@ -425,8 +439,7 @@ public actor DefaultChatFeature: ChatFeature {
                   }()
               })
         else {
-            state = replacing(activity: nil, notice: .attachmentUnavailable)
-            publish()
+            updatePickerIssue(.attachmentUnavailable)
             return
         }
 
@@ -437,12 +450,18 @@ public actor DefaultChatFeature: ChatFeature {
         guard isCurrent(context) else { return }
         switch quote {
         case let .available(value) where !value.context.fits:
-            updatePickerFeasibility(.available(value), notice: .chatContextCannotFit)
+            updatePickerFeasibility(
+                .available(value),
+                issue: .contextCannotFit
+            )
             return
         case .unavailable(.providerUnavailable):
             break
         case let .unavailable(reason):
-            updatePickerFeasibility(.unavailable(reason), notice: .coachContextUnavailable)
+            updatePickerFeasibility(
+                .unavailable(reason),
+                issue: .contextUnavailable(reason)
+            )
             return
         case .available:
             break
@@ -455,7 +474,10 @@ public actor DefaultChatFeature: ChatFeature {
         context: ChatCommandContext
     ) async {
         guard let attachments = try? selectedAttachments(in: expected) else {
-            updatePickerFeasibility(.unavailable(.invalidContext), notice: nil)
+            updatePickerFeasibility(
+                .unavailable(.invalidContext),
+                issue: .contextUnavailable(.invalidContext)
+            )
             return
         }
         let outcome = await authoritativeCreationQuote(
@@ -467,9 +489,17 @@ public actor DefaultChatFeature: ChatFeature {
         else { return }
         switch outcome {
         case let .available(quote):
-            updatePickerFeasibility(.available(quote), notice: nil)
+            updatePickerFeasibility(
+                .available(quote),
+                issue: quote.context.fits ? nil : .contextCannotFit
+            )
+        case .unavailable(.providerUnavailable):
+            updatePickerFeasibility(.unavailable(.providerUnavailable), issue: nil)
         case let .unavailable(reason):
-            updatePickerFeasibility(.unavailable(reason), notice: nil)
+            updatePickerFeasibility(
+                .unavailable(reason),
+                issue: .contextUnavailable(reason)
+            )
         }
     }
 
@@ -492,7 +522,7 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func updatePickerFeasibility(
         _ feasibility: ChatCreationFeasibility,
-        notice: ChatNotice?
+        issue: ChatAttachmentPickerIssue?
     ) {
         guard case let .ready(snapshot) = state.newChatPicker else { return }
         let replacement = ChatAttachmentPickerSnapshot(
@@ -500,12 +530,31 @@ public actor DefaultChatFeature: ChatFeature {
             visibleRows: snapshot.visibleRows,
             selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
             filterQuery: snapshot.filterQuery,
-            feasibility: feasibility
+            feasibility: feasibility,
+            issue: issue
         )
         state = replacing(
             newChatPicker: .ready(replacement),
             activity: state.activity,
-            notice: notice
+            notice: nil
+        )
+        publish()
+    }
+
+    private func updatePickerIssue(_ issue: ChatAttachmentPickerIssue) {
+        guard case let .ready(snapshot) = state.newChatPicker else { return }
+        let replacement = ChatAttachmentPickerSnapshot(
+            allRows: snapshot.allRows,
+            visibleRows: snapshot.visibleRows,
+            selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
+            filterQuery: snapshot.filterQuery,
+            feasibility: snapshot.feasibility,
+            issue: issue
+        )
+        state = replacing(
+            newChatPicker: .ready(replacement),
+            activity: state.activity,
+            notice: nil
         )
         publish()
     }
@@ -621,7 +670,7 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func createDevelopmentChat(
         context: ChatCommandContext,
-        attachments: ChatAttachments = .empty
+        attachments: ChatAttachments
     ) async {
         guard isActive(context), case .ready = state.catalog else { return }
         guard await flushSelectedDraft(in: context) else { return }
@@ -1927,8 +1976,8 @@ public actor DefaultChatFeature: ChatFeature {
 private extension ChatCommand {
     var context: ChatCommandContext {
         switch self {
-        case let .start(context), let .createDevelopmentChat(context),
-             let .beginNewChat(context), let .cancelNewChat(context),
+        case let .start(context), let .beginNewChat(context),
+             let .cancelNewChat(context),
              let .confirmNewChat(context):
             context
         case let .setNewChatAttachmentFilter(context, _),

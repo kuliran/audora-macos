@@ -22,7 +22,7 @@ public enum ChatAttachmentCatalogError: Error, Equatable, Sendable {
 /// advisory and is reloaded without changing that pair when an existing Chat opens.
 public struct ChatAttachmentCandidate: Equatable, Sendable {
     public static let maximumCatalogCount = 32_768
-    public static let maximumDisplayLabelUTF8Bytes = 256
+    public static let maximumDisplayLabelUnicodeScalars = 256
     public static let maximumApproximateTranscriptTokens = 16 * 1_024 * 1_024
     public let sessionID: SessionID
     public let transcriptRevisionID: TranscriptRevisionID
@@ -40,7 +40,8 @@ public struct ChatAttachmentCandidate: Equatable, Sendable {
         delivery: ChatAttachmentDelivery
     ) throws {
         guard !displayLabel.isEmpty,
-              displayLabel.utf8.count <= Self.maximumDisplayLabelUTF8Bytes,
+              displayLabel.unicodeScalars.count <=
+                Self.maximumDisplayLabelUnicodeScalars,
               !displayLabel.unicodeScalars.contains(where: {
                   $0.value == 0 || $0.properties.generalCategory == .control
               })
@@ -71,11 +72,12 @@ public enum ChatAttachmentFilterQueryError: Error, Equatable, Sendable {
 
 public struct ChatAttachmentFilterQuery: Hashable, Sendable {
     public static let empty = try! ChatAttachmentFilterQuery("")
+    public static let maximumUnicodeScalars = 256
 
     public let rawValue: String
 
     public init(_ rawValue: String) throws {
-        guard rawValue.utf8.count <= 256 else {
+        guard rawValue.unicodeScalars.count <= Self.maximumUnicodeScalars else {
             throw ChatAttachmentFilterQueryError.tooLong
         }
         guard !rawValue.unicodeScalars.contains(where: {
@@ -124,27 +126,49 @@ public enum ChatCreationFeasibility: Equatable, Sendable {
     }
 }
 
+public enum ChatAttachmentPickerIssue: Equatable, Sendable {
+    case selectionLimitReached(maximum: Int)
+    case attachmentUnavailable
+    case contextCannotFit
+    case contextUnavailable(CoachContextUnavailableReason)
+
+    public var blocksConfirmation: Bool {
+        switch self {
+        case .selectionLimitReached:
+            false
+        case .attachmentUnavailable, .contextCannotFit, .contextUnavailable:
+            true
+        }
+    }
+}
+
 public struct ChatAttachmentPickerSnapshot: Equatable, Sendable {
     public let allRows: [ChatAttachmentPickerRow]
     public let visibleRows: [ChatAttachmentPickerRow]
     public let selectedAttachmentIDs: Set<ChatSessionAttachmentID>
     public let filterQuery: ChatAttachmentFilterQuery
     public let feasibility: ChatCreationFeasibility
+    public let issue: ChatAttachmentPickerIssue?
 
     public var selectionCount: Int { selectedAttachmentIDs.count }
+    public var permitsConfirmation: Bool {
+        feasibility.permitsCreation && issue?.blocksConfirmation != true
+    }
 
-    init(
+    public init(
         allRows: [ChatAttachmentPickerRow],
         visibleRows: [ChatAttachmentPickerRow],
         selectedAttachmentIDs: Set<ChatSessionAttachmentID>,
         filterQuery: ChatAttachmentFilterQuery,
-        feasibility: ChatCreationFeasibility
+        feasibility: ChatCreationFeasibility,
+        issue: ChatAttachmentPickerIssue? = nil
     ) {
         self.allRows = allRows
         self.visibleRows = visibleRows
         self.selectedAttachmentIDs = selectedAttachmentIDs
         self.filterQuery = filterQuery
         self.feasibility = feasibility
+        self.issue = issue
     }
 }
 

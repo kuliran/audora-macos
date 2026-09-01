@@ -123,32 +123,29 @@ final class ChatPresentationModelTests: XCTestCase {
         let startCommands = await feature.commands
         let context = try XCTUnwrap(startContexts(in: startCommands).first)
 
-        model.createDevelopmentChat()
-        await waitForCommandCount(2, in: feature)
         model.open(chatID)
-        await waitForCommandCount(3, in: feature)
+        await waitForCommandCount(2, in: feature)
         model.rename(chatID, title: "Focused Practice", expectedRevision: 4)
-        await waitForCommandCount(4, in: feature)
+        await waitForCommandCount(3, in: feature)
         model.updateDraft("A synthetic coaching Draft")
-        await waitForCommandCount(5, in: feature)
+        await waitForCommandCount(4, in: feature)
         model.refreshContextQuote()
-        await waitForCommandCount(6, in: feature)
+        await waitForCommandCount(5, in: feature)
         model.sendDraft()
-        await waitForCommandCount(7, in: feature)
+        await waitForCommandCount(6, in: feature)
         let pendingID = try PendingUserTurnID("ptu-20260830T120000000Z-5KMN")
         model.retryPendingUserTurn(pendingID)
-        await waitForCommandCount(8, in: feature)
+        await waitForCommandCount(7, in: feature)
         model.createNewChatFromCapacityFailure(pendingID)
-        await waitForCommandCount(9, in: feature)
+        await waitForCommandCount(8, in: feature)
         model.discardPendingUserTurn(pendingID)
-        await waitForCommandCount(10, in: feature)
+        await waitForCommandCount(9, in: feature)
 
         let commands = await feature.commands
         XCTAssertEqual(
             commands,
             [
                 .start(context),
-                .createDevelopmentChat(context),
                 .open(context, chatID),
                 .rename(context, chatID, title: "Focused Practice", expectedRevision: 4),
                 .editDraft(
@@ -198,8 +195,6 @@ final class ChatPresentationModelTests: XCTestCase {
             .coachContextUnavailable,
             .messageMustBeShortened,
             .attachmentCatalogFailed,
-            .attachmentUnavailable,
-            .chatContextCannotFit,
         ]
 
         for notice in notices {
@@ -210,6 +205,107 @@ final class ChatPresentationModelTests: XCTestCase {
                 notice.rawValue
             )
         }
+    }
+
+    func testNewChatPickerIssuesHaveDistinctActionableRecoveryText() {
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.recoveryText(
+                for: .selectionLimitReached(maximum: 128)
+            ),
+            "You can attach up to 128 Sessions. Deselect a Session before adding another."
+        )
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.recoveryText(
+                for: .attachmentUnavailable
+            ),
+            "A selected Session changed or is no longer available. Change the selection and try again."
+        )
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.recoveryText(
+                for: .contextCannotFit
+            ),
+            "These Sessions cannot fit together in this coach's context. Remove a Session."
+        )
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.recoveryText(
+                for: .contextUnavailable(.sourceUnavailable)
+            ),
+            "Current Coach context could not be verified. Change the selection or reopen New Chat to try again."
+        )
+    }
+
+    func testNewChatPickerIssueIsAnnouncedOnceAcrossStateReconciliation() async throws {
+        let issue = ChatAttachmentPickerIssue.attachmentUnavailable
+        let state = ChatFeatureState(
+            catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])),
+            newChatPicker: .ready(
+                ChatAttachmentPickerSnapshot(
+                    allRows: [],
+                    visibleRows: [],
+                    selectedAttachmentIDs: [],
+                    filterQuery: .empty,
+                    feasibility: .unavailable(.sourceUnavailable),
+                    issue: issue
+                )
+            )
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let announcements = ChatAnnouncementRecorder()
+        let model = makeChatPresentationModel(
+            feature: feature,
+            announcements: announcements
+        )
+        await model.start(
+            in: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            )
+        )
+
+        XCTAssertEqual(
+            announcements.values,
+            [NewChatAttachmentPickerPresentation.accessibilityAnnouncement(for: issue)]
+        )
+    }
+
+    func testNewChatPickerIssueIsAnnouncedAgainAfterCloseAndReopen() async throws {
+        let issue = ChatAttachmentPickerIssue.contextCannotFit
+        let catalog = ChatCatalogSnapshot(allRows: [], visibleRows: [])
+        let issueState = ChatFeatureState(
+            catalog: .ready(catalog),
+            newChatPicker: .ready(
+                ChatAttachmentPickerSnapshot(
+                    allRows: [],
+                    visibleRows: [],
+                    selectedAttachmentIDs: [],
+                    filterQuery: .empty,
+                    feasibility: .unavailable(.sourceUnavailable),
+                    issue: issue
+                )
+            )
+        )
+        let closedState = ChatFeatureState(
+            catalog: .ready(catalog),
+            newChatPicker: .closed
+        )
+        let feature = PickerLifecyclePresentationChatFeature(
+            states: [issueState, closedState, issueState]
+        )
+        let announcements = ChatAnnouncementRecorder()
+        let model = makeChatPresentationModel(
+            feature: feature,
+            announcements: announcements
+        )
+
+        await model.start(
+            in: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            )
+        )
+
+        let announcement = NewChatAttachmentPickerPresentation.accessibilityAnnouncement(
+            for: issue
+        )
+        XCTAssertEqual(announcements.values, [announcement, announcement])
     }
 
     func testCoachContextPresentationExplainsAllNineNonadditiveCategories() {
@@ -452,15 +548,26 @@ final class ChatPresentationModelTests: XCTestCase {
 
 @MainActor
 private func makeChatPresentationModel(
-    feature: any ChatFeature
+    feature: any ChatFeature,
+    announcements: (any AccessibilityAnnouncementPosting)? = nil
 ) -> ChatPresentationModel {
     let application = DefaultApplicationCommandFeature(
         library: PassivePresentationLibraryFeature(),
         chat: feature
     )
     return ChatPresentationModel(
-        dispatcher: ChatCommandDispatcher(feature: application)
+        dispatcher: ChatCommandDispatcher(feature: application),
+        announcements: announcements
     )
+}
+
+@MainActor
+private final class ChatAnnouncementRecorder: AccessibilityAnnouncementPosting {
+    private(set) var values: [String] = []
+
+    func post(_ announcement: String) {
+        values.append(announcement)
+    }
 }
 
 private actor PassivePresentationLibraryFeature: LibraryFeature {
@@ -516,8 +623,7 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
                 )
             }
             filterIsComplete = true
-        case .createDevelopmentChat, .beginNewChat,
-             .setNewChatAttachmentFilter, .toggleNewChatAttachment,
+        case .beginNewChat, .setNewChatAttachmentFilter, .toggleNewChatAttachment,
              .cancelNewChat, .confirmNewChat,
              .rename, .open, .editDraft,
              .refreshContextQuote, .sendDraft,
@@ -568,6 +674,59 @@ private actor RecordingPresentationChatFeature: ChatFeature {
             activeScope = context.libraryScope
             streams.publishStart()
         }
+    }
+}
+
+private actor PickerLifecyclePresentationChatFeature: ChatFeature {
+    nonisolated var states: AsyncStream<ChatFeatureState> { streams.makeStream() }
+
+    private nonisolated let streams: PickerLifecyclePresentationStateStreams
+    private let snapshots: [ChatFeatureState]
+    private let finalState: ChatFeatureState
+    private var activeScope: LibraryScope?
+
+    init(states snapshots: [ChatFeatureState]) {
+        self.snapshots = snapshots
+        finalState = snapshots.last ?? ChatFeatureState()
+        streams = PickerLifecyclePresentationStateStreams()
+    }
+
+    var currentState: ChatFeatureState { finalState }
+
+    func currentState(in scope: LibraryScope) -> ChatFeatureState? {
+        activeScope == scope ? finalState : nil
+    }
+
+    func flushForOrderlyTermination() async -> Bool { true }
+
+    func send(_ command: ChatCommand) {
+        if case let .start(context) = command {
+            activeScope = context.libraryScope
+            streams.publish(snapshots)
+        }
+    }
+}
+
+private final class PickerLifecyclePresentationStateStreams: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: AsyncStream<ChatFeatureState>.Continuation?
+
+    func makeStream() -> AsyncStream<ChatFeatureState> {
+        AsyncStream { continuation in
+            lock.withLock { self.continuation = continuation }
+        }
+    }
+
+    func publish(_ states: [ChatFeatureState]) {
+        let continuation = lock.withLock {
+            () -> AsyncStream<ChatFeatureState>.Continuation? in
+            defer { self.continuation = nil }
+            return self.continuation
+        }
+        for state in states {
+            continuation?.yield(state)
+        }
+        continuation?.finish()
     }
 }
 

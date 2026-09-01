@@ -73,8 +73,6 @@ public enum ChatNotice: String, Equatable, Sendable {
     case coachContextUnavailable
     case messageMustBeShortened
     case attachmentCatalogFailed
-    case attachmentUnavailable
-    case chatContextCannotFit
 }
 
 public enum CoachContextAdvisoryState: Equatable, Sendable {

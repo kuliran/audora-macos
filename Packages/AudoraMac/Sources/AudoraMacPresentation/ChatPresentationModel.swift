@@ -18,14 +18,20 @@ public final class ChatPresentationModel: ObservableObject {
 
     private let feature: any ApplicationCommandFeature
     private let dispatcher: ChatCommandDispatcher
+    private let announcements: any AccessibilityAnnouncementPosting
     private var startedLibrary: LibraryID?
     private var commandContext: ChatCommandContext?
     private var projectedStateContext: ChatCommandContext?
     private var stateConsumer: Task<Void, Never>?
+    private var lastAnnouncedPickerIssue: ChatAttachmentPickerIssue?
 
-    public init(dispatcher: ChatCommandDispatcher) {
+    public init(
+        dispatcher: ChatCommandDispatcher,
+        announcements: (any AccessibilityAnnouncementPosting)? = nil
+    ) {
         feature = dispatcher.feature
         self.dispatcher = dispatcher
+        self.announcements = announcements ?? SystemAccessibilityAnnouncementPoster()
     }
 
     public func start(in scope: LibraryScope) async {
@@ -36,10 +42,13 @@ public final class ChatPresentationModel: ObservableObject {
         commandContext = context
 
         stateConsumer?.cancel()
-        snapshot = ChatFeatureState(
-            catalog: .loading,
-            filterQuery: .empty,
-            selection: .none
+        lastAnnouncedPickerIssue = nil
+        installSnapshot(
+            ChatFeatureState(
+                catalog: .loading,
+                filterQuery: .empty,
+                selection: .none
+            )
         )
         filterText = ""
 
@@ -54,7 +63,7 @@ public final class ChatPresentationModel: ObservableObject {
                     guard context == commandContext, !Task.isCancelled else { return }
                     projectedStateContext = context
                 }
-                snapshot = next
+                installSnapshot(next)
             }
         }
         stateConsumer = consumer
@@ -71,7 +80,7 @@ public final class ChatPresentationModel: ObservableObject {
                     return
                 }
                 projectedStateContext = context
-                snapshot = current
+                installSnapshot(current)
             }
             await consumer.value
         } onCancel: {
@@ -79,6 +88,31 @@ public final class ChatPresentationModel: ObservableObject {
         }
         guard context == commandContext, !Task.isCancelled else { return }
         stateConsumer = nil
+    }
+
+    private func installSnapshot(_ replacement: ChatFeatureState) {
+        snapshot = replacement
+        let issue: ChatAttachmentPickerIssue?
+        switch replacement.newChatPicker {
+        case let .ready(picker):
+            issue = picker.issue
+        case .closed:
+            if case .loading = replacement.catalog {
+                return
+            }
+            issue = nil
+        case .loading, .failed:
+            issue = nil
+        }
+        guard issue != lastAnnouncedPickerIssue else { return }
+        lastAnnouncedPickerIssue = issue
+        if let issue {
+            announcements.post(
+                NewChatAttachmentPickerPresentation.accessibilityAnnouncement(
+                    for: issue
+                )
+            )
+        }
     }
 
     private static func issueCommandContext(
@@ -90,11 +124,6 @@ public final class ChatPresentationModel: ObservableObject {
             libraryScope: scope,
             generation: lastIssuedCommandGeneration
         )
-    }
-
-    public func createDevelopmentChat() {
-        guard let context = commandContext else { return }
-        send(.createDevelopmentChat(context))
     }
 
     public func beginNewChat() {

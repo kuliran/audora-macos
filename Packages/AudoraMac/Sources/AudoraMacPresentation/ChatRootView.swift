@@ -28,8 +28,6 @@ enum ChatNoticePresentation {
         case .coachContextUnavailable: "Context capacity is unavailable for this Coach configuration."
         case .messageMustBeShortened: "Message is too long. Shorten it to send."
         case .attachmentCatalogFailed: "Sessions could not be loaded for Chat creation."
-        case .attachmentUnavailable: "A selected Session changed or is no longer available."
-        case .chatContextCannotFit: "That Session combination exceeds Coach context capacity."
         }
     }
 
@@ -468,6 +466,21 @@ public struct ChatRootView: View {
                 }
 
                 creationQuote(picker)
+                if let issue = picker.issue {
+                    Label(
+                        NewChatAttachmentPickerPresentation.recoveryText(for: issue),
+                        systemImage: issue.blocksConfirmation
+                            ? "exclamationmark.triangle"
+                            : "info.circle"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(
+                        NewChatAttachmentPickerPresentation.accessibilityAnnouncement(
+                            for: issue
+                        )
+                    )
+                }
                 HStack {
                     Text("\(picker.selectionCount) selected")
                         .foregroundStyle(.secondary)
@@ -481,7 +494,7 @@ public struct ChatRootView: View {
                         model.performNewChatAttachmentPickerAction(.defaultAction)
                     }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(!picker.feasibility.permitsCreation)
+                        .disabled(!picker.permitsConfirmation)
                         .accessibilityHint("Creates a Chat without sending a message")
                 }
             }
@@ -505,20 +518,13 @@ public struct ChatRootView: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                if !quote.context.fits {
-                    Text("This combination does not fit the current Coach context.")
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel("Selected Sessions exceed current Coach context capacity")
-                }
             }
         case .unavailable(.providerUnavailable):
             Text("Coach capacity is unavailable until a provider is configured.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .unavailable:
-            Text("Current Coach context could not be verified. Try again.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            EmptyView()
         }
     }
 

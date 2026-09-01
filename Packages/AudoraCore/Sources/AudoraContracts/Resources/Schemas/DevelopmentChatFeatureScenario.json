@@ -46,9 +46,6 @@
             "type": "number",
             "const": 0
         },
-        "providerAvailability": {
-            "$ref": "#/$defs/DevelopmentChatScenarioProviderAvailability"
-        },
         "contextCapacityMode": {
             "$ref": "#/$defs/DevelopmentChatScenarioContextCapacityMode"
         },
@@ -71,7 +68,7 @@
     "unevaluatedProperties": {
         "not": {}
     },
-    "description": "Portable zero-Session Development Chat behavior shared by feature implementations.",
+    "description": "Portable Chat behavior, including immutable Session attachment selection.",
     "$defs": {
         "LibraryId": {
             "type": "string",
@@ -157,7 +154,19 @@
         "DevelopmentChatScenarioCommand": {
             "oneOf": [
                 {
-                    "$ref": "#/$defs/CreateDevelopmentChatScenarioCommand"
+                    "$ref": "#/$defs/BeginNewChatScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/SetNewChatAttachmentFilterScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/ToggleNewChatAttachmentScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/CancelNewChatScenarioCommand"
+                },
+                {
+                    "$ref": "#/$defs/ConfirmNewChatScenarioCommand"
                 },
                 {
                     "$ref": "#/$defs/RenameDevelopmentChatScenarioCommand"
@@ -198,6 +207,30 @@
                 },
                 {
                     "$ref": "#/$defs/ChatStoreCatalogFailedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatAttachmentCatalogLoadedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatAttachmentCatalogReadOnlyEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatAttachmentCatalogFailedEvent"
+                },
+                {
+                    "$ref": "#/$defs/NewChatQuoteAvailableEvent"
+                },
+                {
+                    "$ref": "#/$defs/NewChatQuoteUnavailableEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatAttachmentsResolvedEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatAttachmentResolutionReadOnlyEvent"
+                },
+                {
+                    "$ref": "#/$defs/ChatAttachmentResolutionFailedEvent"
                 },
                 {
                     "$ref": "#/$defs/ChatStoreChatLoadedEvent"
@@ -305,6 +338,46 @@
                 },
                 "notice": {
                     "$ref": "#/$defs/DevelopmentChatScenarioNotice"
+                },
+                "newChatPickerStatus": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioPickerStatus"
+                },
+                "newChatFilterQuery": {
+                    "$ref": "#/$defs/DevelopmentChatAttachmentFilterText"
+                },
+                "newChatAllAttachmentIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatSessionAttachmentId"
+                    },
+                    "maxItems": 32768
+                },
+                "newChatVisibleAttachmentIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatSessionAttachmentId"
+                    },
+                    "maxItems": 32768
+                },
+                "newChatSelectedAttachmentIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatSessionAttachmentId"
+                    },
+                    "maxItems": 128
+                },
+                "newChatFeasibility": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioCreationFeasibility"
+                },
+                "newChatIssue": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioPickerIssue"
+                },
+                "openedAttachmentStatuses": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/DevelopmentChatOpenedAttachmentStatus"
+                    },
+                    "maxItems": 128
                 }
             },
             "required": [
@@ -314,18 +387,6 @@
             "unevaluatedProperties": {
                 "not": {}
             }
-        },
-        "DevelopmentChatScenarioProviderAvailability": {
-            "anyOf": [
-                {
-                    "type": "string",
-                    "const": "available"
-                },
-                {
-                    "type": "string",
-                    "const": "unavailable"
-                }
-            ]
         },
         "DevelopmentChatScenarioContextCapacityMode": {
             "anyOf": [
@@ -421,12 +482,80 @@
                 "not": {}
             }
         },
-        "CreateDevelopmentChatScenarioCommand": {
+        "BeginNewChatScenarioCommand": {
             "type": "object",
             "properties": {
                 "kind": {
                     "type": "string",
-                    "const": "createDevelopmentChat"
+                    "const": "beginNewChat"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SetNewChatAttachmentFilterScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "setNewChatAttachmentFilter"
+                },
+                "query": {
+                    "$ref": "#/$defs/DevelopmentChatAttachmentFilterText"
+                }
+            },
+            "required": [
+                "kind",
+                "query"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ToggleNewChatAttachmentScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "toggleNewChatAttachment"
+                },
+                "attachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                }
+            },
+            "required": [
+                "kind",
+                "attachmentId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CancelNewChatScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "cancelNewChat"
+                }
+            },
+            "required": [
+                "kind"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ConfirmNewChatScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "confirmNewChat"
                 }
             },
             "required": [
@@ -688,6 +817,225 @@
                 "effect",
                 "outcome",
                 "reason"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatAttachmentCatalogLoadedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "attachmentSource"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "loadCandidates"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "loaded"
+                },
+                "candidates": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/DevelopmentChatAttachmentCandidate"
+                    },
+                    "maxItems": 32768
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "candidates"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatAttachmentCatalogReadOnlyEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "attachmentSource"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "loadCandidates"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "readOnlyLibrary"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatAttachmentCatalogFailedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "attachmentSource"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "loadCandidates"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "failed"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "NewChatQuoteAvailableEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "coachContext"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "quoteNewChat"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "available"
+                },
+                "fits": {
+                    "type": "boolean"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "fits"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "NewChatQuoteUnavailableEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "coachContext"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "quoteNewChat"
+                },
+                "outcome": {
+                    "$ref": "#/$defs/DevelopmentChatScenarioQuoteUnavailableReason"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatAttachmentsResolvedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "attachmentSource"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "resolveAttachments"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "resolved"
+                },
+                "resolutions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/DevelopmentChatAttachmentResolution"
+                    },
+                    "maxItems": 128
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome",
+                "resolutions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatAttachmentResolutionReadOnlyEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "attachmentSource"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "resolveAttachments"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "readOnlyLibrary"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatAttachmentResolutionFailedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "attachmentSource"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "resolveAttachments"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "failed"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
             ],
             "unevaluatedProperties": {
                 "not": {}
@@ -1252,14 +1600,125 @@
                 {
                     "type": "string",
                     "const": "messageMustBeShortened"
+                },
+                {
+                    "type": "string",
+                    "const": "attachmentCatalogFailed"
                 }
             ]
+        },
+        "DevelopmentChatScenarioPickerStatus": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "closed"
+                },
+                {
+                    "type": "string",
+                    "const": "loading"
+                },
+                {
+                    "type": "string",
+                    "const": "ready"
+                },
+                {
+                    "type": "string",
+                    "const": "failed"
+                }
+            ]
+        },
+        "DevelopmentChatAttachmentFilterText": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
         },
         "ChatSessionAttachmentId": {
             "type": "string",
             "minLength": 1,
             "maxLength": 64,
             "pattern": "^[0-9A-Za-z_-]+$"
+        },
+        "DevelopmentChatScenarioCreationFeasibility": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "quoting"
+                },
+                {
+                    "type": "string",
+                    "const": "fits"
+                },
+                {
+                    "type": "string",
+                    "const": "cannotFit"
+                },
+                {
+                    "type": "string",
+                    "const": "providerUnavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "sourceUnavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "staleState"
+                },
+                {
+                    "type": "string",
+                    "const": "invalidContext"
+                }
+            ]
+        },
+        "DevelopmentChatScenarioPickerIssue": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "selectionLimitReached"
+                },
+                {
+                    "type": "string",
+                    "const": "attachmentUnavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "contextCannotFit"
+                },
+                {
+                    "type": "string",
+                    "const": "providerUnavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "sourceUnavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "staleState"
+                },
+                {
+                    "type": "string",
+                    "const": "invalidContext"
+                }
+            ]
+        },
+        "DevelopmentChatOpenedAttachmentStatus": {
+            "type": "object",
+            "properties": {
+                "attachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                },
+                "status": {
+                    "$ref": "#/$defs/DevelopmentChatOpenedAttachmentAvailability"
+                }
+            },
+            "required": [
+                "attachmentId",
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
         },
         "SessionId": {
             "type": "string",
@@ -1268,6 +1727,177 @@
         "TranscriptRevisionId": {
             "type": "string",
             "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "DevelopmentChatAttachmentCandidate": {
+            "type": "object",
+            "properties": {
+                "sessionId": {
+                    "$ref": "#/$defs/SessionId"
+                },
+                "transcriptRevisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId"
+                },
+                "displayLabel": {
+                    "$ref": "#/$defs/DevelopmentChatAttachmentDisplayLabel"
+                },
+                "durationMilliseconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2700000
+                },
+                "approximateTranscriptTokens": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 16777216
+                },
+                "delivery": {
+                    "$ref": "#/$defs/DevelopmentChatAttachmentDelivery"
+                }
+            },
+            "required": [
+                "sessionId",
+                "transcriptRevisionId",
+                "displayLabel",
+                "durationMilliseconds",
+                "approximateTranscriptTokens",
+                "delivery"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "DevelopmentChatScenarioQuoteUnavailableReason": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "providerUnavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "sourceUnavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "staleState"
+                },
+                {
+                    "type": "string",
+                    "const": "invalidContext"
+                }
+            ]
+        },
+        "DevelopmentChatAttachmentResolution": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/DevelopmentChatAvailableAttachmentResolution"
+                },
+                {
+                    "$ref": "#/$defs/DevelopmentChatUnavailableAttachmentResolution"
+                }
+            ]
+        },
+        "DevelopmentChatOpenedAttachmentAvailability": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "available"
+                },
+                {
+                    "type": "string",
+                    "const": "missing"
+                },
+                {
+                    "type": "string",
+                    "const": "inTrash"
+                },
+                {
+                    "type": "string",
+                    "const": "corrupt"
+                },
+                {
+                    "type": "string",
+                    "const": "unsupportedSchema"
+                }
+            ]
+        },
+        "DevelopmentChatAttachmentDisplayLabel": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
+        },
+        "DevelopmentChatAttachmentDelivery": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "inline"
+                },
+                {
+                    "type": "string",
+                    "const": "onDemand"
+                }
+            ]
+        },
+        "DevelopmentChatAvailableAttachmentResolution": {
+            "type": "object",
+            "properties": {
+                "attachment": {
+                    "$ref": "#/$defs/ChatSessionAttachment"
+                },
+                "status": {
+                    "type": "string",
+                    "const": "available"
+                },
+                "candidate": {
+                    "$ref": "#/$defs/DevelopmentChatAttachmentCandidate"
+                }
+            },
+            "required": [
+                "attachment",
+                "status",
+                "candidate"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "DevelopmentChatUnavailableAttachmentResolution": {
+            "type": "object",
+            "properties": {
+                "attachment": {
+                    "$ref": "#/$defs/ChatSessionAttachment"
+                },
+                "status": {
+                    "$ref": "#/$defs/DevelopmentChatAttachmentUnavailableReason"
+                }
+            },
+            "required": [
+                "attachment",
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "DevelopmentChatAttachmentUnavailableReason": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "missing"
+                },
+                {
+                    "type": "string",
+                    "const": "inTrash"
+                },
+                {
+                    "type": "string",
+                    "const": "corrupt"
+                },
+                {
+                    "type": "string",
+                    "const": "unsupportedSchema"
+                }
+            ]
         }
     }
 }

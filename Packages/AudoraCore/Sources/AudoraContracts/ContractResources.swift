@@ -48,6 +48,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case newerDevelopmentChatScenario
     case collisionDevelopmentChatScenario
     case providerUnavailableDevelopmentChatScenario
+    case invalidContextDevelopmentChatScenario
     case suspendedLibrarySwitchDevelopmentChatScenario
     case libraryLaunchNoSelectionScenario
     case libraryCreateScenario
@@ -237,6 +238,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "create-collision-limit.v1.json"
         case .providerUnavailableDevelopmentChatScenario:
             "provider-unavailable-creates-locally.v1.json"
+        case .invalidContextDevelopmentChatScenario:
+            "invalid-context-blocks-new-chat.v1.json"
         case .suspendedLibrarySwitchDevelopmentChatScenario:
             "library-switch-during-suspended-load.v1.json"
         case .libraryLaunchNoSelectionScenario:
@@ -442,6 +445,7 @@ public enum ContractResource: CaseIterable, Sendable {
              .corruptDevelopmentChatScenario, .newerDevelopmentChatScenario,
              .collisionDevelopmentChatScenario,
              .providerUnavailableDevelopmentChatScenario,
+             .invalidContextDevelopmentChatScenario,
              .suspendedLibrarySwitchDevelopmentChatScenario:
             "Scenarios/Chat"
         case .libraryLaunchNoSelectionScenario:

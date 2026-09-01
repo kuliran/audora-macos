@@ -526,8 +526,9 @@ final class ContractResourcesTests: XCTestCase {
         _ name: String,
         in definitions: [String: Any]
     ) throws -> [String] {
+        let union = try XCTUnwrap(definitions[name] as? [String: Any])
         let variants = try XCTUnwrap(
-            (definitions[name] as? [String: Any])?["anyOf"] as? [[String: Any]]
+            (union["oneOf"] ?? union["anyOf"]) as? [[String: Any]]
         )
         return try variants.map { variant in
             try definitionName(from: variant)
@@ -639,6 +640,7 @@ final class ContractResourcesTests: XCTestCase {
             .newerDevelopmentChatScenario,
             .collisionDevelopmentChatScenario,
             .providerUnavailableDevelopmentChatScenario,
+            .invalidContextDevelopmentChatScenario,
             .suspendedLibrarySwitchDevelopmentChatScenario,
         ]
         for resource in resources {
@@ -688,7 +690,99 @@ final class ContractResourcesTests: XCTestCase {
                 "chatFrozen", "catalogFailed", "readOnlyLibrary", "invalidDraft",
                 "draftSaveFailed", "draftChanged", "pendingUserTurnFailed",
                 "coachContextUnavailable", "messageMustBeShortened",
+                "attachmentCatalogFailed",
             ]
+        )
+    }
+
+    func testDevelopmentChatScenarioSchemaModelsBoundedAttachmentPickerWorkflow() throws {
+        let root = try jsonObject(.developmentChatFeatureScenarioSchema)
+        let definitions = try XCTUnwrap(root["$defs"] as? [String: Any])
+
+        let commandNames = try unionReferences(
+            "DevelopmentChatScenarioCommand",
+            in: definitions
+        )
+        let commandKinds = try commandNames.flatMap { name in
+            let properties = try schemaProperties(name, in: definitions)
+            return literalValues(in: properties["kind"])
+        }
+        XCTAssertTrue(
+            Set(commandKinds).isSuperset(of: [
+                "beginNewChat", "setNewChatAttachmentFilter",
+                "toggleNewChatAttachment", "cancelNewChat", "confirmNewChat",
+            ])
+        )
+
+        let catalog = try schemaProperties(
+            "ChatAttachmentCatalogLoadedEvent",
+            in: definitions
+        )
+        XCTAssertEqual(
+            (catalog["candidates"] as? [String: Any])?["maxItems"] as? Int,
+            32_768
+        )
+        let candidate = try schemaProperties(
+            "DevelopmentChatAttachmentCandidate",
+            in: definitions
+        )
+        XCTAssertEqual(
+            (candidate["displayLabel"] as? [String: Any])?["$ref"] as? String,
+            "#/$defs/DevelopmentChatAttachmentDisplayLabel"
+        )
+        let displayLabel = try XCTUnwrap(
+            definitions["DevelopmentChatAttachmentDisplayLabel"] as? [String: Any]
+        )
+        XCTAssertEqual(displayLabel["minLength"] as? Int, 1)
+        XCTAssertEqual(displayLabel["maxLength"] as? Int, 256)
+        XCTAssertEqual(
+            displayLabel["pattern"] as? String,
+            #"^[^\u0000-\u001F\u007F-\u009F]*$"#
+        )
+        let filterText = try XCTUnwrap(
+            definitions["DevelopmentChatAttachmentFilterText"] as? [String: Any]
+        )
+        XCTAssertEqual(filterText["maxLength"] as? Int, 256)
+        XCTAssertEqual(
+            filterText["pattern"] as? String,
+            #"^[^\u0000-\u001F\u007F-\u009F]*$"#
+        )
+        XCTAssertEqual(
+            (candidate["durationMilliseconds"] as? [String: Any])?["maximum"]
+                as? Int,
+            2_700_000
+        )
+        XCTAssertEqual(
+            (candidate["approximateTranscriptTokens"] as? [String: Any])?["maximum"]
+                as? Int,
+            16_777_216
+        )
+
+        let expectedState = try schemaProperties(
+            "DevelopmentChatScenarioState",
+            in: definitions
+        )
+        XCTAssertEqual(
+            (expectedState["newChatSelectedAttachmentIds"]
+                as? [String: Any])?["maxItems"] as? Int,
+            128
+        )
+        XCTAssertNotNil(expectedState["newChatFeasibility"])
+        XCTAssertNotNil(expectedState["newChatIssue"])
+        XCTAssertNotNil(expectedState["openedAttachmentStatuses"])
+
+        let dependencyNames = try unionReferences(
+            "DevelopmentChatDependencyEvent",
+            in: definitions
+        )
+        let dependencyEffects = try dependencyNames.flatMap { name in
+            let properties = try schemaProperties(name, in: definitions)
+            return literalValues(in: properties["effect"])
+        }
+        XCTAssertTrue(
+            Set(dependencyEffects).isSuperset(of: [
+                "loadCandidates", "quoteNewChat", "resolveAttachments",
+            ])
         )
     }
 }

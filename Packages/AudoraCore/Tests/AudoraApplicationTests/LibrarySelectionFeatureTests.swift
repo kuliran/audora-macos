@@ -45,6 +45,29 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         XCTAssertEqual(finalAdmission, .idle)
     }
 
+    func testNewChatConfirmationBeginsAnApplicationBoundary() async throws {
+        let trace = LibrarySelectionTrace()
+        let chat = SuspendedBoundaryChatFeature(trace: trace)
+        let library = SelectionLibraryFeature(trace: trace)
+        let feature = DefaultApplicationCommandFeature(library: library, chat: chat)
+        let context = ChatCommandContext(
+            libraryScope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+
+        let boundary = feature.enqueue(.confirmNewChat(context))
+
+        XCTAssertTrue(feature.admissionState.isChatBoundaryPending)
+        await chat.waitUntilCommandStarts()
+        let commandsWhileSuspended = await chat.commands
+        XCTAssertEqual(commandsWhileSuspended, [.confirmNewChat(context)])
+        await chat.resume()
+        await boundary.value
+        XCTAssertEqual(feature.admissionState, .idle)
+    }
+
     func testOneApplicationFIFOOrdersDraftSendDeferredStartAndTermination() async throws {
         let firstScope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
