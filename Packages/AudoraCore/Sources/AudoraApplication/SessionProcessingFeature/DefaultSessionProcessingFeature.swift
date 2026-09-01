@@ -5,7 +5,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private static let maximumIdentityAttempts = 16
     /// Bounds exact-winner rediscovery independently of inventory size. The
     /// monotonic Job graph normally settles sooner; exhaustion fails closed.
-    private static let maximumActivationReconciliationPassCount = 8
+    private static let maximumExactWinnerReconciliationPassCount = 8
     private static let maximumReconciledJobCount = 10_000
 
     private struct CompletedRecoveryKey: Hashable {
@@ -261,6 +261,15 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         activeReconciliationScope = nil
         selectedProfile = preservedProfile
         await jobs.finishReconciliation(reconciliationID)
+
+        // Activation may have changed the durable authority for the Session
+        // already on screen. Refresh it before releasing command serialization,
+        // unless a newer selection/clear command is already waiting to win.
+        guard pendingSelectionCommand == nil,
+              let selected = lastSelection,
+              selected.scope == scope
+        else { return }
+        await select(selected)
     }
 
     private func reconcileActivationJob(
@@ -276,7 +285,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         var isExactWinner = false
         var observedJobs: [SessionProcessingJob] = []
 
-        for _ in 0..<Self.maximumActivationReconciliationPassCount {
+        for _ in 0..<Self.maximumExactWinnerReconciliationPassCount {
             guard !observedJobs.contains(job) else {
                 retainActivationRecovery(.unconfirmed(job), for: job)
                 return
@@ -803,90 +812,122 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     }
 
     private func reconcile(
-        _ job: SessionProcessingJob,
+        _ initial: SessionProcessingJob,
         source: SessionTranscriptionSource
     ) async {
-        switch job.state {
-        case .queued:
-            // Running is persisted before any engine launch. A durable queued
-            // Job therefore proves that no worker acquired execution authority,
-            // but the interrupted create→running window still needs an explicit
-            // retry path after relaunch.
-            await interrupt(job, source: source)
-        case .preparing, .running:
-            guard job.cancellationAuthorityID != nil else {
+        var job = initial
+        var observedJobs: [SessionProcessingJob] = []
+
+        for _ in 0..<Self.maximumExactWinnerReconciliationPassCount {
+            guard !observedJobs.contains(job) else {
                 transition(to: .recoveryRequired(job))
                 return
             }
-            switch await engine.workerPresence(for: job.executionReference) {
-            case .absent:
-                await finishAbandoned(job, source: source)
-            case .present:
-                let outcome = await engine.cancel(job.executionReference)
-                guard outcome == .reaped || outcome == .alreadyAbsent else {
+            observedJobs.append(job)
+
+            switch job.state {
+            case .queued:
+                // Running is persisted before any engine launch. A durable queued
+                // Job therefore proves that no worker acquired execution authority,
+                // but the interrupted create→running window still needs an explicit
+                // retry path after relaunch.
+                await interrupt(job, source: source)
+                return
+            case .preparing, .running:
+                guard job.cancellationAuthorityID != nil else {
                     transition(to: .recoveryRequired(job))
                     return
                 }
-                await finishAbandoned(job, source: source)
-            case .unknown:
-                transition(to: .recoveryRequired(job))
-            }
-        case .validating:
-            await resumeValidation(job, source: source)
-        case .completed:
-            guard await completedRevisionMatches(job, source: source) else {
+                switch await engine.workerPresence(for: job.executionReference) {
+                case .absent:
+                    await finishAbandoned(job, source: source)
+                case .present:
+                    let outcome = await engine.cancel(job.executionReference)
+                    guard outcome == .reaped || outcome == .alreadyAbsent else {
+                        transition(to: .recoveryRequired(job))
+                        return
+                    }
+                    await finishAbandoned(job, source: source)
+                case .unknown:
+                    transition(to: .recoveryRequired(job))
+                }
+                return
+            case .validating:
+                switch await resumeValidation(job, source: source) {
+                case .settled, .unconfirmed:
+                    return
+                case .stale:
+                    guard let winner = await loadExactWinner(
+                        afterStaleWriteFor: job,
+                        selection: source.selection
+                    ) else {
+                        transition(to: .recoveryRequired(job))
+                        return
+                    }
+                    job = winner
+                    continue
+                }
+            case .completed:
+                guard await completedRevisionMatches(job, source: source) else {
+                    transition(
+                        to: .failed(
+                            SessionProcessingFailedSnapshot(
+                                job: job,
+                                reason: .canonicalRevisionIntegrityFailed,
+                                actions: []
+                            )
+                        )
+                    )
+                    return
+                }
+                transition(
+                    to: .completed(
+                        SessionProcessingCompletedSnapshot(
+                            sessionID: job.sessionID,
+                            jobID: job.jobID,
+                            revisionID: job.revisionID,
+                            selectedRevisionID: source.expectedSelectedRevisionID
+                        )
+                    )
+                )
+                return
+            case .failed:
                 transition(
                     to: .failed(
                         SessionProcessingFailedSnapshot(
                             job: job,
-                            reason: .canonicalRevisionIntegrityFailed,
-                            actions: []
+                            reason: job.failure ?? .jobPersistenceFailed,
+                            actions: [.retry]
+                        )
+                    )
+                )
+                return
+            case .cancelled:
+                transition(
+                    to: .cancelled(
+                        SessionProcessingRecoverableSnapshot(
+                            source: source,
+                            job: job,
+                            actions: [.retry]
+                        )
+                    )
+                )
+                return
+            case .interrupted:
+                transition(
+                    to: .interrupted(
+                        SessionProcessingRecoverableSnapshot(
+                            source: source,
+                            job: job,
+                            actions: [.retry]
                         )
                     )
                 )
                 return
             }
-            transition(
-                to: .completed(
-                    SessionProcessingCompletedSnapshot(
-                        sessionID: job.sessionID,
-                        jobID: job.jobID,
-                        revisionID: job.revisionID,
-                        selectedRevisionID: source.expectedSelectedRevisionID
-                    )
-                )
-            )
-        case .failed:
-            transition(
-                to: .failed(
-                    SessionProcessingFailedSnapshot(
-                        job: job,
-                        reason: job.failure ?? .jobPersistenceFailed,
-                        actions: [.retry]
-                    )
-                )
-            )
-        case .cancelled:
-            transition(
-                to: .cancelled(
-                    SessionProcessingRecoverableSnapshot(
-                        source: source,
-                        job: job,
-                        actions: [.retry]
-                    )
-                )
-            )
-        case .interrupted:
-            transition(
-                to: .interrupted(
-                    SessionProcessingRecoverableSnapshot(
-                        source: source,
-                        job: job,
-                        actions: [.retry]
-                    )
-                )
-            )
         }
+
+        transition(to: .recoveryRequired(job))
     }
 
     @discardableResult
@@ -1263,21 +1304,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private func resumeDurableWinnerAfterCancellationCASLoss(
         _ active: SessionProcessingActiveSnapshot
     ) async -> Bool {
-        guard case let .loaded(current) = await jobs.load(
-            jobID: active.job.jobID,
-            for: active.source.selection
+        guard let current = await loadExactWinner(
+            afterStaleWriteFor: active.job,
+            selection: active.source.selection
         ),
-              current.jobID == active.job.jobID,
-              current.sessionID == active.job.sessionID,
-              current.revisionID == active.job.revisionID,
-              current.profileID == active.job.profileID,
-              current.createdAt == active.job.createdAt,
-              current.expectedSelectedRevisionID ==
-                active.job.expectedSelectedRevisionID,
-              current.hasCapturedSelectionBaseline ==
-                active.job.hasCapturedSelectionBaseline,
-              current.cancellationAuthorityID ==
-                active.job.cancellationAuthorityID,
               current.state == .validating || current.state == .completed ||
                 current.state == .failed
         else { return false }
@@ -1411,12 +1441,20 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     }
 
     private var acceptsStartCommand: Bool {
-        switch state {
+        guard !selectedSessionHasPendingActivationAuthority else { return false }
+        return switch state {
         case .ready, .completed: true
         case .unavailable, .preparing, .queued, .running, .cancelling,
              .validating, .failed, .cancelled, .interrupted, .recoveryRequired:
             false
         }
+    }
+
+    private var selectedSessionHasPendingActivationAuthority: Bool {
+        guard let lastSelection else { return false }
+        let key = CompletedRecoveryKey(lastSelection)
+        return invalidCompletedJobs[key] != nil ||
+            activationRecovery[key]?.isEmpty == false
     }
 
     private var acceptsRefreshedRetryLaunch: Bool {
