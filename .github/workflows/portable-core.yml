@@ -76,6 +76,10 @@ jobs:
           swift --version
       - name: Test macOS Infrastructure, audio import, synthetic Recording, and Presentation
         run: swift test --package-path Packages/AudoraMac --parallel
+      - name: Enforce Coach-context SPI boundaries including macOS evidence adapter
+        env:
+          AUDORA_REQUIRE_MAC_COACH_CONTEXT_INTERFACE: "1"
+        run: sh scripts/check-coach-context-interface.sh
       - name: Validate package document declaration
         run: plutil -lint audora/Info.plist
       - name: Build Debug application

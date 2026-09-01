@@ -71,6 +71,31 @@ final class CoachContextFeatureTests: XCTestCase {
         XCTAssertEqual(triggers, [.chatCreation(request.creation)])
     }
 
+    func testProviderUnavailableExceptionRequiresKnownCurrentConfiguration()
+        async throws
+    {
+        let request = try CoachContextNewChatQuoteRequest(
+            library: Self.scope,
+            attachments: .empty,
+            creationKind: .newChat
+        )
+
+        let knownConfiguration = await DefaultCoachContextFeature()
+            .quoteNewChat(request)
+        let missingConfiguration = await DefaultCoachContextFeature(
+            source: UnconfiguredProviderUnavailableSnapshotPort()
+        ).quoteNewChat(request)
+
+        XCTAssertEqual(
+            knownConfiguration,
+            .unavailable(.providerUnavailable)
+        )
+        XCTAssertEqual(
+            missingConfiguration,
+            .unavailable(.sourceUnavailable)
+        )
+    }
+
     func testOversizedPendingDraftShortCircuitsBeforeEvenFailClosedResolution() async throws {
         let aggregate = try fixtureAggregate(
             draftText: String(
@@ -276,6 +301,32 @@ final class CoachContextFeatureTests: XCTestCase {
                 )
             )
         )
+    }
+}
+
+private struct UnconfiguredProviderUnavailableSnapshotPort:
+    CoachContextSnapshotPort
+{
+    func resolveNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .providerUnavailable
+    }
+
+    func resolveChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .providerUnavailable
+    }
+
+    func resolvePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .providerUnavailable
+    }
+
+    func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
+        false
     }
 }
 

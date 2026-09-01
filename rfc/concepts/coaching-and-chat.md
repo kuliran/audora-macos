@@ -304,6 +304,15 @@ including the current Profile. In Chat, a compact `~X / max` quote updates as th
 Draft, Profile, Memory, history, or provider configuration changes. It explains the
 major categories but never exposes a raw payload editor.
 
+The picker catalog, exact attachment re-resolution, and creation quote use one
+provider-configuration authority. Their in-memory stamps include both authority
+identity and generation; equal generation numbers from different authorities are
+not interchangeable. If the configuration changes, Application reprojects the
+catalog, preserves every still-available immutable Session/Revision selection, and
+requires a fresh confirmation. A known qualified projection may remain usable
+while its provider is temporarily unavailable, but absence of a usable
+configuration cannot be reported as the provider-unavailable creation exception.
+
 The creation quote uses an explicit app-only creation-context frame. A new Chat has
 no provider trigger yet, so Application neither fabricates user prose nor treats an
 empty placeholder as successful history. Only a later nonempty ordinary Draft is a

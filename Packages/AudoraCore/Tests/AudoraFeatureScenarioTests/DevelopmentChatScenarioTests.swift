@@ -47,6 +47,13 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 events: dto.dependencyTrace.filter { $0.port == "attachmentSource" },
                 recorder: recorder
             )
+            let baseCoachContext = DefaultCoachContextFeature(
+                source: ScenarioCoachContextSnapshotPort(
+                    mode: dto.contextCapacityMode ?? "alwaysFits",
+                    events: dto.dependencyTrace.filter { $0.port == "coachContext" },
+                    recorder: recorder
+                )
+            )
             let feature = DefaultChatFeature(
                 store: store,
                 profileReader: scripted,
@@ -56,14 +63,10 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 memoryIDGenerator: scripted,
                 pendingUserTurnIDGenerator: scripted,
                 responsePositionIDGenerator: scripted,
-                coachContext: DefaultCoachContextFeature(
-                    source: ScenarioCoachContextSnapshotPort(
-                        mode: dto.contextCapacityMode ?? "alwaysFits",
-                        events: dto.dependencyTrace.filter { $0.port == "coachContext" },
-                        recorder: recorder
-                    )
-                ),
-                attachmentSource: attachmentSource
+                coachContext: ScenarioBoundCoachContext(
+                    attachmentSource: attachmentSource,
+                    base: baseCoachContext
+                )
             )
             let scope = LibraryScope(libraryID: try LibraryID(dto.libraryId))
             var commandGeneration: UInt64 = 1
@@ -1063,6 +1066,71 @@ private actor ChatScenarioScript:
     }
 }
 
+private let developmentScenarioConfigurationStamp = CoachContextConfigurationStamp(
+    authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000225")!,
+    generation: 1
+)
+
+private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
+    let attachmentSource: any ChatSessionAttachmentSource
+    let base: any CoachContextCoordinating
+
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        await attachmentSource.loadCandidates(in: library)
+    }
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        await attachmentSource.resolve(attachments, in: library)
+    }
+
+    func quoteNewChatBoundToConfiguration(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome {
+        switch await base.quoteNewChat(request) {
+        case let .available(quote):
+            return .available(
+                quote,
+                configuration: developmentScenarioConfigurationStamp
+            )
+        case .unavailable(.providerUnavailable):
+            return .providerUnavailable(
+                configuration: developmentScenarioConfigurationStamp
+            )
+        case let .unavailable(reason):
+            return .unavailable(reason)
+        }
+    }
+
+    func isCurrentAttachmentConfiguration(
+        _ stamp: CoachContextConfigurationStamp
+    ) async -> Bool {
+        stamp == developmentScenarioConfigurationStamp
+    }
+
+    func quoteNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ChatCreationQuoteOutcome {
+        await base.quoteNewChat(request)
+    }
+
+    func quoteChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextQuoteOutcome {
+        await base.quoteChat(request)
+    }
+
+    func preparePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextPendingPreparationOutcome {
+        await base.preparePendingUserTurn(request)
+    }
+}
+
 private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
     private var events: [DevelopmentChatEventDTO]
     private let recorder: ChatScenarioRecorder
@@ -1083,7 +1151,10 @@ private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
         switch event.outcome.rendered {
         case "loaded":
             do {
-                return .loaded(try (event.candidates ?? []).map { try $0.candidate() })
+                return .loaded(
+                    try (event.candidates ?? []).map { try $0.candidate() },
+                    configuration: developmentScenarioConfigurationStamp
+                )
             } catch {
                 XCTFail("invalid scripted attachment candidate: \(error)")
                 return .failed
@@ -1109,7 +1180,10 @@ private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
             do {
                 let resolved = try (event.resolutions ?? []).map { try $0.resolution() }
                 XCTAssertEqual(resolved.map(\.attachment), attachments.values)
-                return .resolved(resolved)
+                return .resolved(
+                    resolved,
+                    configuration: developmentScenarioConfigurationStamp
+                )
             } catch {
                 XCTFail("invalid scripted attachment resolution: \(error)")
                 return .failed
@@ -1221,6 +1295,22 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         authority.contextGeneration == UInt64(pendingResolutionCount + 1) &&
             authority.configurationGeneration == UInt64(pendingResolutionCount + 1)
+    }
+
+    func currentAttachmentProjectionPolicy()
+        async -> CoachAttachmentProjectionPolicyOutcome
+    {
+        .knownQualified(
+            policy: try! CoachAttachmentProjectionPolicy(
+                maximumInlineTranscriptTokens: 8_192,
+                tokenEstimator: .utf8ByteUpperBound()
+            ),
+            configurationGeneration: UInt64(pendingResolutionCount + 1)
+        )
+    }
+
+    func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool {
+        configurationGeneration == UInt64(pendingResolutionCount + 1)
     }
 
     private func newChatSnapshot(

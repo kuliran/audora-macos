@@ -223,20 +223,34 @@ public struct ResolvedChatAttachment: Equatable, Sendable {
     }
 }
 
-public enum ChatAttachmentCatalogOutcome: Equatable, Sendable {
-    case loaded([ChatAttachmentCandidate])
+struct CoachContextConfigurationStamp: Equatable, Sendable {
+    let authorityID: UUID
+    let generation: UInt64
+}
+
+enum ChatAttachmentCatalogOutcome: Equatable, Sendable {
+    case loaded(
+        [ChatAttachmentCandidate],
+        configuration: CoachContextConfigurationStamp
+    )
+    case configurationChanged
     case readOnlyLibrary
     case failed
 }
 
-public enum ChatAttachmentResolutionOutcome: Equatable, Sendable {
-    case resolved([ResolvedChatAttachment])
+enum ChatAttachmentResolutionOutcome: Equatable, Sendable {
+    case resolved(
+        [ResolvedChatAttachment],
+        configuration: CoachContextConfigurationStamp
+    )
+    case configurationChanged
     case readOnlyLibrary
     case failed
 }
 
 /// Hash-verified canonical evidence returned by a persistence adapter before any
 /// provider/model policy is applied.
+@_spi(CoachContextQualification)
 public struct ChatAttachmentEvidence: Equatable, Sendable {
     public let displayLabel: String
     public let revision: TranscriptRevision
@@ -251,11 +265,13 @@ public struct ChatAttachmentEvidence: Equatable, Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public enum ChatAttachmentEvidenceResolution: Equatable, Sendable {
     case available(ChatAttachmentEvidence)
     case unavailable(ChatAttachmentUnavailableReason)
 }
 
+@_spi(CoachContextQualification)
 public struct ResolvedChatAttachmentEvidence: Equatable, Sendable {
     public let attachment: ChatSessionAttachment
     public let resolution: ChatAttachmentEvidenceResolution
@@ -276,12 +292,14 @@ public struct ResolvedChatAttachmentEvidence: Equatable, Sendable {
     }
 }
 
+@_spi(CoachContextQualification)
 public enum ChatAttachmentEvidenceCatalogOutcome: Equatable, Sendable {
     case loaded([ChatAttachmentEvidence])
     case readOnlyLibrary
     case failed
 }
 
+@_spi(CoachContextQualification)
 public enum ChatAttachmentEvidenceResolutionOutcome: Equatable, Sendable {
     case resolved([ResolvedChatAttachmentEvidence])
     case readOnlyLibrary
@@ -290,6 +308,7 @@ public enum ChatAttachmentEvidenceResolutionOutcome: Equatable, Sendable {
 
 /// Persistence-only seam. Provider token estimation and delivery policy are
 /// intentionally applied by an Application decorator, never by this port.
+@_spi(CoachContextQualification)
 public protocol ChatSessionAttachmentEvidenceSource: Sendable {
     func loadEvidence(
         in library: LibraryScope
@@ -301,7 +320,7 @@ public protocol ChatSessionAttachmentEvidenceSource: Sendable {
 }
 
 /// The single local seam for listing selected revisions and reopening exact pins.
-public protocol ChatSessionAttachmentSource: Sendable {
+protocol ChatSessionAttachmentSource: Sendable {
     func loadCandidates(in library: LibraryScope) async -> ChatAttachmentCatalogOutcome
     func resolve(
         _ attachments: ChatAttachments,
@@ -309,16 +328,16 @@ public protocol ChatSessionAttachmentSource: Sendable {
     ) async -> ChatAttachmentResolutionOutcome
 }
 
-public struct UnavailableChatSessionAttachmentSource: ChatSessionAttachmentSource {
-    public init() {}
+struct UnavailableChatSessionAttachmentSource: ChatSessionAttachmentSource {
+    init() {}
 
-    public func loadCandidates(
+    func loadCandidates(
         in library: LibraryScope
     ) async -> ChatAttachmentCatalogOutcome {
         .failed
     }
 
-    public func resolve(
+    func resolve(
         _ attachments: ChatAttachments,
         in library: LibraryScope
     ) async -> ChatAttachmentResolutionOutcome {

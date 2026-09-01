@@ -502,6 +502,87 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         XCTAssertEqual(quoteCount, 3)
     }
 
+    func testProviderConfigurationChangeRefreshesProjectionBeforeCreation()
+        async throws
+    {
+        let evidence = try attachmentEvidence()
+        let authority = ChangingAttachmentConfigurationSource()
+        let store = AttachmentChatStoreFixture()
+        let feature = makeFeature(
+            coordinatedContext: DefaultCoachContextFeature(
+                source: authority,
+                attachmentEvidenceSource:
+                    AttachmentEvidenceSourceForFeature(evidence: evidence)
+            ),
+            store: store
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initial) = await feature.currentState.newChatPicker,
+              let initialRow = initial.allRows.first
+        else { return XCTFail("Expected the initial configured projection") }
+        XCTAssertEqual(initialRow.approximateTranscriptTokens, 10)
+        XCTAssertEqual(initialRow.delivery, .inline)
+        await feature.send(
+            .toggleNewChatAttachment(Self.context, initialRow.id)
+        )
+
+        await authority.advanceConfiguration()
+        await feature.send(.confirmNewChat(Self.context))
+
+        let seedBeforeFreshConfirmation = await store.createdSeed
+        XCTAssertNil(seedBeforeFreshConfirmation)
+        guard case let .ready(refreshed) = await feature.currentState.newChatPicker,
+              let refreshedRow = refreshed.allRows.first
+        else { return XCTFail("Expected a refreshed configured projection") }
+        XCTAssertEqual(refreshedRow.approximateTranscriptTokens, 20)
+        XCTAssertEqual(refreshedRow.delivery, .onDemand)
+        XCTAssertEqual(refreshed.selectedAttachmentIDs, Set([refreshedRow.id]))
+        XCTAssertTrue(refreshed.permitsConfirmation)
+
+        await feature.send(.confirmNewChat(Self.context))
+
+        let committedSeed = await store.createdSeed
+        XCTAssertNotNil(committedSeed)
+    }
+
+    func testEqualGenerationFromDifferentConfigurationAuthorityCannotCreate()
+        async throws
+    {
+        let candidate = try candidate(
+            session: "ses-20260830T110000000Z-5KMN",
+            revision: "trv-20260830T111000000Z-6PQR",
+            label: "Authority rehearsal"
+        )
+        let coordinator = MismatchedAttachmentAuthorityFixture(
+            attachmentSource: AttachmentSourceFixture(candidates: [candidate]),
+            base: DefaultCoachContextFeature()
+        )
+        let store = AttachmentChatStoreFixture()
+        let feature = makeFeature(
+            coordinatedContext: coordinator,
+            store: store
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initial) = await feature.currentState.newChatPicker,
+              let row = initial.allRows.first
+        else { return XCTFail("Expected initial picker") }
+        await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+
+        await coordinator.replaceConfigurationAuthorityWithoutChangingGeneration()
+        await feature.send(.confirmNewChat(Self.context))
+
+        let seed = await store.createdSeed
+        XCTAssertNil(seed)
+        guard case let .ready(rejected) = await feature.currentState.newChatPicker else {
+            return XCTFail("A mismatched authority must keep the picker open")
+        }
+        XCTAssertEqual(rejected.issue, .contextUnavailable(.staleState))
+        XCTAssertFalse(rejected.permitsConfirmation)
+        XCTAssertEqual(rejected.selectionCount, 1)
+    }
+
     private func makeFeature(
         source: any ChatSessionAttachmentSource,
         store: AttachmentChatStoreFixture = AttachmentChatStoreFixture(),
@@ -517,8 +598,28 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
             pendingUserTurnIDGenerator: AttachmentIDsFixture(),
             responsePositionIDGenerator: AttachmentIDsFixture(),
             autosaveScheduler: AttachmentAutosaveFixture(),
-            coachContext: coachContext,
-            attachmentSource: source
+            coachContext: AttachmentBoundCoachContextFixture(
+                attachmentSource: source,
+                base: coachContext
+            )
+        )
+    }
+
+    private func makeFeature(
+        coordinatedContext: any ChatCoachContextCoordinating,
+        store: AttachmentChatStoreFixture
+    ) -> DefaultChatFeature {
+        DefaultChatFeature(
+            store: store,
+            profileReader: AttachmentProfileReaderFixture(),
+            clock: AttachmentClockFixture(),
+            chatIDGenerator: AttachmentIDsFixture(),
+            draftIDGenerator: AttachmentIDsFixture(),
+            memoryIDGenerator: AttachmentIDsFixture(),
+            pendingUserTurnIDGenerator: AttachmentIDsFixture(),
+            responsePositionIDGenerator: AttachmentIDsFixture(),
+            autosaveScheduler: AttachmentAutosaveFixture(),
+            coachContext: coordinatedContext
         )
     }
 
@@ -548,6 +649,430 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
             delivery: delivery
         )
     }
+
+    private func attachmentEvidence() throws -> ChatAttachmentEvidence {
+        let fingerprint = try AudioFingerprint(
+            sha256: String(repeating: "a", count: 64)
+        )
+        let timeRange = try SessionTimeRange(
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            sessionDurationMilliseconds: 1_000
+        )
+        let usePolicy = try EngineUsePolicy(
+            policyID: "configuration-refresh-fixture-v1",
+            coveredArtifacts: [.transcriptRevision],
+            privateLocalUseAllowed: true,
+            privateExportAllowed: true,
+            externalProcessingAllowed: false,
+            publicDistributionAllowed: false,
+            commercialUseAllowed: false,
+            licenseReference: "test-license",
+            licenseSHA256: String(repeating: "b", count: 64)
+        )
+        return ChatAttachmentEvidence(
+            displayLabel: "Configuration rehearsal",
+            revision: try TranscriptRevision(
+                revisionID: TranscriptRevisionID(
+                    "trv-20260830T111000000Z-6PQR"
+                ),
+                sessionID: SessionID("ses-20260830T110000000Z-5KMN"),
+                jobID: TranscriptionJobID("job-20260830T110500000Z-7STV"),
+                createdAt: UTCInstant("2026-08-30T11:10:00.000Z"),
+                durationMilliseconds: 1_000,
+                audioFingerprint: fingerprint,
+                sourceFingerprints: [
+                    TranscriptSourceFingerprint(
+                        audioSourceID: .microphone,
+                        fingerprint: fingerprint
+                    ),
+                ],
+                candidateArtifactFingerprint: AudioFingerprint(
+                    sha256: String(repeating: "c", count: 64)
+                ),
+                engine: TranscriptEngineProvenance(
+                    provider: "crisperwhisper",
+                    model: "small",
+                    revision: "configuration-refresh-v1",
+                    language: "en",
+                    mode: "verbatim",
+                    decodingOptionsSHA256: String(repeating: "d", count: 64),
+                    qualification: TranscriptEngineQualification(
+                        qualificationProfileID: "configuration-refresh-v1",
+                        engineLockSHA256: String(repeating: "e", count: 64),
+                        runtimeIdentity: "configuration-runtime-v1",
+                        runtimeLockSHA256: String(repeating: "f", count: 64),
+                        compatibilityPatchID: "configuration-patch-v1"
+                    ),
+                    usePolicy: usePolicy
+                ),
+                lines: [
+                    TranscriptLine(
+                        lineID: TranscriptLineID("l000000"),
+                        order: 0,
+                        audioSourceID: .microphone,
+                        timeRange: timeRange,
+                        text: "hello",
+                        words: [
+                            TranscriptWord(
+                                wordID: TranscriptWordID("w000000"),
+                                ordinal: 0,
+                                text: "hello",
+                                displayRange: LineTextRange(
+                                    startUTF8Byte: 0,
+                                    endUTF8Byte: 5
+                                ),
+                                timeRange: timeRange,
+                                confidence: 0.99,
+                                wordKind: .lexical
+                            ),
+                        ]
+                    ),
+                ],
+                audioEvents: []
+            )
+        )
+    }
+}
+
+private let attachmentFeatureConfigurationStamp = CoachContextConfigurationStamp(
+    authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000025")!,
+    generation: 1
+)
+
+private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating {
+    let attachmentSource: any ChatSessionAttachmentSource
+    let base: any CoachContextCoordinating
+
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        await attachmentSource.loadCandidates(in: library)
+    }
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        await attachmentSource.resolve(attachments, in: library)
+    }
+
+    func quoteNewChatBoundToConfiguration(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome {
+        switch await base.quoteNewChat(request) {
+        case let .available(quote):
+            return .available(
+                quote,
+                configuration: attachmentFeatureConfigurationStamp
+            )
+        case .unavailable(.providerUnavailable):
+            return .providerUnavailable(
+                configuration: attachmentFeatureConfigurationStamp
+            )
+        case let .unavailable(reason):
+            return .unavailable(reason)
+        }
+    }
+
+    func isCurrentAttachmentConfiguration(
+        _ stamp: CoachContextConfigurationStamp
+    ) async -> Bool {
+        stamp == attachmentFeatureConfigurationStamp
+    }
+
+    func quoteNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ChatCreationQuoteOutcome {
+        await base.quoteNewChat(request)
+    }
+
+    func quoteChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextQuoteOutcome {
+        await base.quoteChat(request)
+    }
+
+    func preparePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextPendingPreparationOutcome {
+        await base.preparePendingUserTurn(request)
+    }
+}
+
+private struct AttachmentEvidenceSourceForFeature:
+    ChatSessionAttachmentEvidenceSource
+{
+    let evidence: ChatAttachmentEvidence
+
+    func loadEvidence(
+        in library: LibraryScope
+    ) async -> ChatAttachmentEvidenceCatalogOutcome {
+        .loaded([evidence])
+    }
+
+    func resolveEvidence(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentEvidenceResolutionOutcome {
+        do {
+            return .resolved(try attachments.values.map { attachment in
+                try ResolvedChatAttachmentEvidence(
+                    attachment: attachment,
+                    resolution: attachment.sessionID == evidence.sessionID &&
+                        attachment.transcriptRevisionID ==
+                        evidence.transcriptRevisionID
+                        ? .available(evidence)
+                        : .unavailable(.missing)
+                )
+            })
+        } catch {
+            return .failed
+        }
+    }
+}
+
+private actor ChangingAttachmentConfigurationSource: CoachContextSnapshotPort {
+    private var configurationGeneration: UInt64 = 1
+
+    func advanceConfiguration() {
+        configurationGeneration += 1
+    }
+
+    func currentAttachmentProjectionPolicy()
+        async -> CoachAttachmentProjectionPolicyOutcome
+    {
+        .knownQualified(
+            policy: projectionPolicy(),
+            configurationGeneration: configurationGeneration
+        )
+    }
+
+    func isCurrentConfiguration(_ candidate: UInt64) async -> Bool {
+        candidate == configurationGeneration
+    }
+
+    func resolveNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        do {
+            let policy = projectionPolicy()
+            let attachments = try request.attachments.values.map { attachment in
+                let handle = try PreparedCoachTranscriptHandle(
+                    "00000000-0000-0000-0000-000000000025"
+                )
+                if policy.maximumInlineTranscriptTokens == 15,
+                   configurationGeneration == 1
+                {
+                    return PreparedCoachAttachment.inline(
+                        requestValue: .object([
+                            "displayLabel": .string("Configuration rehearsal"),
+                            "kind": .string("inline"),
+                            "sessionAttachmentId": .string(
+                                attachment.attachmentID.rawValue
+                            ),
+                            "transcript": .object(["lines": .array([])]),
+                        ])
+                    )
+                }
+                return PreparedCoachAttachment.onDemand(
+                    requestValue: .object([
+                        "displayLabel": .string("Configuration rehearsal"),
+                        "kind": .string("onDemand"),
+                        "sessionAttachmentId": .string(
+                            attachment.attachmentID.rawValue
+                        ),
+                        "sessionTranscriptHandle": .string(handle.rawValue),
+                    ]),
+                    sessionTranscriptHandle: handle,
+                    transcriptDisclosure: .object([
+                        "sessionAttachmentId": .string(
+                            attachment.attachmentID.rawValue
+                        ),
+                        "transcript": .object(["lines": .array([])]),
+                    ])
+                )
+            }
+            return .resolved(
+                try CoachContextResolvedSnapshot(
+                    input: CoachContextQuoteInput(
+                        profile: .object(["statements": .array([])]),
+                        memory: .object([
+                            "generalNotes": .string(""),
+                            "sessionSummaries": .array([]),
+                        ]),
+                        creation: request.creation,
+                        attachments: attachments
+                    ),
+                    configuration: configuration(policy: policy),
+                    authority: CoachContextSnapshotAuthority(
+                        binding: .newChat(
+                            library: request.library,
+                            attachments: request.attachments,
+                            creation: request.creation
+                        ),
+                        contextGeneration: 1,
+                        configurationGeneration: configurationGeneration
+                    )
+                )
+            )
+        } catch {
+            return .sourceUnavailable
+        }
+    }
+
+    func resolveChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .sourceUnavailable
+    }
+
+    func resolvePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .sourceUnavailable
+    }
+
+    func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
+        authority.contextGeneration == 1 &&
+            authority.configurationGeneration == configurationGeneration
+    }
+
+    private func projectionPolicy() -> CoachAttachmentProjectionPolicy {
+        let tokens = configurationGeneration == 1 ? 10 : 20
+        return try! CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 15,
+            tokenEstimator: try! CoachTokenEstimator(
+                identifier: "configuration-(configurationGeneration)-fixture-v1",
+                mode: .exact,
+                maximumUTF8BytesPerToken: 4,
+                implementation: { _ in tokens }
+            )
+        )
+    }
+
+    private func configuration(
+        policy: CoachAttachmentProjectionPolicy
+    ) throws -> CoachContextConfiguration {
+        try CoachContextConfiguration(
+            descriptor: CoachProviderDescriptor(
+                displayName: "Changing provider fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: 100_000,
+                    responseReservedTokens: 32,
+                    safetyMarginTokens: 8
+                ),
+                coachMemoryMaxTokens: 1
+            ),
+            policy: CoachProviderEstimationPolicy(
+                providerIdentifier:
+                    "configuration-(configurationGeneration)-fixture-v1",
+                responseCollectorByteCeiling: 8_192,
+                framing: CoachProviderFraming(),
+                attachmentProjectionPolicy: policy
+            )
+        )
+    }
+}
+
+private actor MismatchedAttachmentAuthorityFixture:
+    ChatCoachContextCoordinating
+{
+    private let attachmentSource: any ChatSessionAttachmentSource
+    private let base: any CoachContextCoordinating
+    private var replaced = false
+    private let originalStamp = CoachContextConfigurationStamp(
+        authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000425")!,
+        generation: 1
+    )
+    private let replacementStamp = CoachContextConfigurationStamp(
+        authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000426")!,
+        generation: 1
+    )
+
+    init(
+        attachmentSource: any ChatSessionAttachmentSource,
+        base: any CoachContextCoordinating
+    ) {
+        self.attachmentSource = attachmentSource
+        self.base = base
+    }
+
+    func replaceConfigurationAuthorityWithoutChangingGeneration() {
+        replaced = true
+    }
+
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        switch await attachmentSource.loadCandidates(in: library) {
+        case let .loaded(candidates, _):
+            return .loaded(candidates, configuration: originalStamp)
+        case .configurationChanged:
+            return .configurationChanged
+        case .readOnlyLibrary:
+            return .readOnlyLibrary
+        case .failed:
+            return .failed
+        }
+    }
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        switch await attachmentSource.resolve(attachments, in: library) {
+        case let .resolved(resolved, _):
+            return .resolved(
+                resolved,
+                configuration: replaced ? replacementStamp : originalStamp
+            )
+        case .configurationChanged:
+            return .configurationChanged
+        case .readOnlyLibrary:
+            return .readOnlyLibrary
+        case .failed:
+            return .failed
+        }
+    }
+
+    func quoteNewChatBoundToConfiguration(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome {
+        let stamp = replaced ? replacementStamp : originalStamp
+        switch await base.quoteNewChat(request) {
+        case let .available(quote):
+            return .available(quote, configuration: stamp)
+        case .unavailable(.providerUnavailable):
+            return .providerUnavailable(configuration: stamp)
+        case let .unavailable(reason):
+            return .unavailable(reason)
+        }
+    }
+
+    func isCurrentAttachmentConfiguration(
+        _ stamp: CoachContextConfigurationStamp
+    ) async -> Bool {
+        stamp == (replaced ? replacementStamp : originalStamp)
+    }
+
+    func quoteNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ChatCreationQuoteOutcome {
+        await base.quoteNewChat(request)
+    }
+
+    func quoteChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextQuoteOutcome {
+        await base.quoteChat(request)
+    }
+
+    func preparePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextPendingPreparationOutcome {
+        await base.preparePendingUserTurn(request)
+    }
 }
 
 private actor AttachmentSourceFixture: ChatSessionAttachmentSource {
@@ -560,7 +1085,10 @@ private actor AttachmentSourceFixture: ChatSessionAttachmentSource {
     }
 
     func loadCandidates(in library: LibraryScope) async -> ChatAttachmentCatalogOutcome {
-        .loaded(candidates)
+        .loaded(
+            candidates,
+            configuration: attachmentFeatureConfigurationStamp
+        )
     }
 
     func resolve(
@@ -581,7 +1109,7 @@ private actor AttachmentSourceFixture: ChatSessionAttachmentSource {
                     ?? candidate.map(ChatAttachmentResolution.available)
                     ?? .unavailable(.missing)
             )
-        })
+        }, configuration: attachmentFeatureConfigurationStamp)
     }
 
     func markUnavailable(
@@ -606,7 +1134,10 @@ private actor SuspendedAttachmentCatalogSource: ChatSessionAttachmentSource {
     func loadCandidates(in library: LibraryScope) async -> ChatAttachmentCatalogOutcome {
         loadStarted = true
         await withCheckedContinuation { continuation = $0 }
-        return .loaded(candidates)
+        return .loaded(
+            candidates,
+            configuration: attachmentFeatureConfigurationStamp
+        )
     }
 
     func resolve(

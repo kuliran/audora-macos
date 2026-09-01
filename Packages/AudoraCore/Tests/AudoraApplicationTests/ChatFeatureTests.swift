@@ -1,5 +1,6 @@
 @testable @_spi(CoachContextQualification) import AudoraApplication
 import AudoraDomain
+import Foundation
 import XCTest
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
@@ -1218,10 +1219,12 @@ final class ChatFeatureTests: XCTestCase {
             pendingUserTurnIDGenerator: pendingUserTurnIDGenerator,
             responsePositionIDGenerator: FixedChatIDs(),
             autosaveScheduler: autosaveScheduler,
-            coachContext: DefaultCoachContextFeature(
-                source: AlwaysFitCoachContextSnapshotPort()
-            ),
-            attachmentSource: EmptyChatAttachmentSource()
+            coachContext: ChatFeatureBoundCoachContextFixture(
+                attachmentSource: EmptyChatAttachmentSource(),
+                base: DefaultCoachContextFeature(
+                    source: AlwaysFitCoachContextSnapshotPort()
+                )
+            )
         )
     }
 
@@ -1311,18 +1314,80 @@ final class ChatFeatureTests: XCTestCase {
     }
 }
 
+private let chatFeatureConfigurationStamp = CoachContextConfigurationStamp(
+    authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000125")!,
+    generation: 1
+)
+
+private struct ChatFeatureBoundCoachContextFixture: ChatCoachContextCoordinating {
+    let attachmentSource: any ChatSessionAttachmentSource
+    let base: any CoachContextCoordinating
+
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        await attachmentSource.loadCandidates(in: library)
+    }
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        await attachmentSource.resolve(attachments, in: library)
+    }
+
+    func quoteNewChatBoundToConfiguration(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome {
+        switch await base.quoteNewChat(request) {
+        case let .available(quote):
+            return .available(quote, configuration: chatFeatureConfigurationStamp)
+        case .unavailable(.providerUnavailable):
+            return .providerUnavailable(
+                configuration: chatFeatureConfigurationStamp
+            )
+        case let .unavailable(reason):
+            return .unavailable(reason)
+        }
+    }
+
+    func isCurrentAttachmentConfiguration(
+        _ stamp: CoachContextConfigurationStamp
+    ) async -> Bool {
+        stamp == chatFeatureConfigurationStamp
+    }
+
+    func quoteNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ChatCreationQuoteOutcome {
+        await base.quoteNewChat(request)
+    }
+
+    func quoteChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextQuoteOutcome {
+        await base.quoteChat(request)
+    }
+
+    func preparePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextPendingPreparationOutcome {
+        await base.preparePendingUserTurn(request)
+    }
+}
+
 private struct EmptyChatAttachmentSource: ChatSessionAttachmentSource {
     func loadCandidates(
         in library: LibraryScope
     ) async -> ChatAttachmentCatalogOutcome {
-        .loaded([])
+        .loaded([], configuration: chatFeatureConfigurationStamp)
     }
 
     func resolve(
         _ attachments: ChatAttachments,
         in library: LibraryScope
     ) async -> ChatAttachmentResolutionOutcome {
-        .resolved([])
+        .resolved([], configuration: chatFeatureConfigurationStamp)
     }
 }
 

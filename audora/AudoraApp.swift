@@ -1,6 +1,6 @@
 import AppKit
 @_spi(CoachContextQualification) import AudoraApplication
-import AudoraMacInfrastructure
+@_spi(CoachContextQualification) import AudoraMacInfrastructure
 import AudoraMacPresentation
 import SwiftUI
 
@@ -88,10 +88,6 @@ struct AudoraApp: App {
             activityCoordinator: activityCoordinator
         )
         let chatIdentityGenerator = RandomChatIdentityGenerator()
-        let coachAttachmentProjectionPolicy = try! CoachAttachmentProjectionPolicy(
-            maximumInlineTranscriptTokens: 8_192,
-            tokenEstimator: .utf8ByteUpperBound()
-        )
         let chatFeature = DefaultChatFeature(
             store: PortableChatStore(workspace: workspace),
             profileReader: ActiveLibraryProfileStatementGenerationReader(
@@ -103,10 +99,8 @@ struct AudoraApp: App {
             memoryIDGenerator: chatIdentityGenerator,
             pendingUserTurnIDGenerator: chatIdentityGenerator,
             responsePositionIDGenerator: chatIdentityGenerator,
-            attachmentSource: ProjectedChatSessionAttachmentSource(
-                evidenceSource: PortableChatSessionAttachmentSource(workspace: workspace),
-                projectionPolicy: coachAttachmentProjectionPolicy
-            )
+            attachmentEvidenceSource:
+                PortableChatSessionAttachmentSource(workspace: workspace)
         )
         let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,

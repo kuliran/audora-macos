@@ -1,4 +1,5 @@
 import AudoraDomain
+import Foundation
 
 public enum CoachContextRequestError: Error, Equatable, Sendable {
     case pendingDraftMismatch
@@ -179,6 +180,17 @@ enum CoachContextSnapshotOutcome: Sendable {
     case staleState
 }
 
+/// The one provider/model projection policy currently qualified for this app
+/// process. A provider can be temporarily unavailable while this configuration
+/// remains known; absence of a qualified policy is represented separately.
+enum CoachAttachmentProjectionPolicyOutcome: Sendable {
+    case knownQualified(
+        policy: CoachAttachmentProjectionPolicy,
+        configurationGeneration: UInt64
+    )
+    case unavailable
+}
+
 /// Outbound seam hidden behind DefaultCoachContextFeature.
 protocol CoachContextSnapshotPort: Sendable {
     func resolveNewChat(
@@ -196,6 +208,82 @@ protocol CoachContextSnapshotPort: Sendable {
     /// Revalidates the exact external-context and provider-configuration
     /// generations after deterministic measurement completes.
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool
+
+    /// Reads the same configuration generation used by quote and final
+    /// preparation. Attachment projection must never capture a parallel policy.
+    func currentAttachmentProjectionPolicy()
+        async -> CoachAttachmentProjectionPolicyOutcome
+
+    func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool
+}
+
+extension CoachContextSnapshotPort {
+    func currentAttachmentProjectionPolicy()
+        async -> CoachAttachmentProjectionPolicyOutcome
+    {
+        .unavailable
+    }
+
+    func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool {
+        false
+    }
+}
+
+struct CoachAttachmentProjectionConfiguration: Sendable {
+    let policy: CoachAttachmentProjectionPolicy
+    let stamp: CoachContextConfigurationStamp
+}
+
+enum CoachAttachmentProjectionConfigurationOutcome: Sendable {
+    case configured(CoachAttachmentProjectionConfiguration)
+    case unavailable
+}
+
+protocol CoachAttachmentProjectionConfigurationAuthority: Sendable {
+    func currentAttachmentProjectionConfiguration()
+        async -> CoachAttachmentProjectionConfigurationOutcome
+    func isCurrent(_ stamp: CoachContextConfigurationStamp) async -> Bool
+}
+
+private struct CoachContextConfigurationAuthority:
+    CoachAttachmentProjectionConfigurationAuthority,
+    Sendable
+{
+    let authorityID: UUID
+    let source: any CoachContextSnapshotPort
+
+    init(source: any CoachContextSnapshotPort, authorityID: UUID = UUID()) {
+        self.source = source
+        self.authorityID = authorityID
+    }
+
+    func currentAttachmentProjectionConfiguration()
+        async -> CoachAttachmentProjectionConfigurationOutcome
+    {
+        switch await source.currentAttachmentProjectionPolicy() {
+        case let .knownQualified(policy, configurationGeneration):
+            return .configured(
+                CoachAttachmentProjectionConfiguration(
+                    policy: policy,
+                    stamp: stamp(for: configurationGeneration)
+                )
+            )
+        case .unavailable:
+            return .unavailable
+        }
+    }
+
+    func isCurrent(_ stamp: CoachContextConfigurationStamp) async -> Bool {
+        guard stamp.authorityID == authorityID else { return false }
+        return await source.isCurrentConfiguration(stamp.generation)
+    }
+
+    func stamp(for configurationGeneration: UInt64) -> CoachContextConfigurationStamp {
+        CoachContextConfigurationStamp(
+            authorityID: authorityID,
+            generation: configurationGeneration
+        )
+    }
 }
 
 public enum CoachContextUnavailableReason: String, Error, Equatable, Sendable {
@@ -219,6 +307,15 @@ enum CoachContextPendingPreparationOutcome: Equatable, Sendable {
     case prepared(PreparedCoachLaunchContext)
     case messageTooLong(maximumUTF8Bytes: Int)
     case cannotFit(CoachContextCapacityFailure)
+    case unavailable(CoachContextUnavailableReason)
+}
+
+enum ConfigurationBoundChatCreationQuoteOutcome: Equatable, Sendable {
+    case available(
+        ChatCreationQuote,
+        configuration: CoachContextConfigurationStamp
+    )
+    case providerUnavailable(configuration: CoachContextConfigurationStamp)
     case unavailable(CoachContextUnavailableReason)
 }
 
@@ -261,14 +358,62 @@ protocol CoachContextPendingPreparing: Sendable {
 
 typealias CoachContextCoordinating = CoachContextFeature & CoachContextPendingPreparing
 
-public struct DefaultCoachContextFeature: CoachContextFeature, CoachContextPendingPreparing, Sendable {
+protocol ChatCoachContextCoordinating:
+    CoachContextFeature,
+    CoachContextPendingPreparing,
+    Sendable
+{
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome
+
+    func quoteNewChatBoundToConfiguration(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome
+
+    func isCurrentAttachmentConfiguration(
+        _ stamp: CoachContextConfigurationStamp
+    ) async -> Bool
+}
+
+public struct DefaultCoachContextFeature:
+    CoachContextFeature,
+    CoachContextPendingPreparing,
+    ChatCoachContextCoordinating,
+    Sendable
+{
     private let source: any CoachContextSnapshotPort
     private let capacity: CoachContextCapacity
+    private let configurationAuthority: CoachContextConfigurationAuthority
+    private let attachmentSource: any ChatSessionAttachmentSource
 
     /// Live composition fails closed until a provider descriptor is qualified.
     public init() {
-        source = UnavailableCoachContextSnapshotPort()
+        let source = UnavailableCoachContextSnapshotPort()
+        self.source = source
         capacity = CoachContextCapacity()
+        configurationAuthority = CoachContextConfigurationAuthority(source: source)
+        attachmentSource = UnavailableChatSessionAttachmentSource()
+    }
+
+    @_spi(CoachContextQualification)
+    public init(
+        attachmentEvidenceSource: any ChatSessionAttachmentEvidenceSource
+    ) {
+        let source = UnavailableCoachContextSnapshotPort()
+        let configurationAuthority = CoachContextConfigurationAuthority(source: source)
+        self.source = source
+        capacity = CoachContextCapacity()
+        self.configurationAuthority = configurationAuthority
+        attachmentSource = ProjectedChatSessionAttachmentSource(
+            evidenceSource: attachmentEvidenceSource,
+            configurationAuthority: configurationAuthority
+        )
     }
 
     init(
@@ -277,11 +422,41 @@ public struct DefaultCoachContextFeature: CoachContextFeature, CoachContextPendi
     ) {
         self.source = source
         self.capacity = capacity
+        configurationAuthority = CoachContextConfigurationAuthority(source: source)
+        attachmentSource = UnavailableChatSessionAttachmentSource()
     }
 
-    public func quoteNewChat(
+    init(
+        source: any CoachContextSnapshotPort,
+        attachmentEvidenceSource: any ChatSessionAttachmentEvidenceSource,
+        capacity: CoachContextCapacity = CoachContextCapacity()
+    ) {
+        let configurationAuthority = CoachContextConfigurationAuthority(source: source)
+        self.source = source
+        self.capacity = capacity
+        self.configurationAuthority = configurationAuthority
+        attachmentSource = ProjectedChatSessionAttachmentSource(
+            evidenceSource: attachmentEvidenceSource,
+            configurationAuthority: configurationAuthority
+        )
+    }
+
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        await attachmentSource.loadCandidates(in: library)
+    }
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        await attachmentSource.resolve(attachments, in: library)
+    }
+
+    func quoteNewChatBoundToConfiguration(
         _ request: CoachContextNewChatQuoteRequest
-    ) async -> ChatCreationQuoteOutcome {
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome {
         switch await source.resolveNewChat(request) {
         case let .resolved(snapshot):
             guard snapshot.authority.binding == request.snapshotBinding,
@@ -297,16 +472,49 @@ public struct DefaultCoachContextFeature: CoachContextFeature, CoachContextPendi
                 guard await source.isCurrent(snapshot.authority) else {
                     return .unavailable(.staleState)
                 }
-                return .available(quote)
+                return .available(
+                    quote,
+                    configuration: configurationAuthority.stamp(
+                        for: snapshot.authority.configurationGeneration
+                    )
+                )
             } catch {
                 return .unavailable(.invalidContext)
             }
         case .providerUnavailable:
-            return .unavailable(.providerUnavailable)
+            guard case let .configured(configuration) =
+                await configurationAuthority
+                    .currentAttachmentProjectionConfiguration()
+            else {
+                return .unavailable(.sourceUnavailable)
+            }
+            guard await configurationAuthority.isCurrent(configuration.stamp) else {
+                return .unavailable(.staleState)
+            }
+            return .providerUnavailable(configuration: configuration.stamp)
         case .sourceUnavailable:
             return .unavailable(.sourceUnavailable)
         case .staleState:
             return .unavailable(.staleState)
+        }
+    }
+
+    func isCurrentAttachmentConfiguration(
+        _ stamp: CoachContextConfigurationStamp
+    ) async -> Bool {
+        await configurationAuthority.isCurrent(stamp)
+    }
+
+    public func quoteNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ChatCreationQuoteOutcome {
+        switch await quoteNewChatBoundToConfiguration(request) {
+        case let .available(quote, _):
+            return .available(quote)
+        case .providerUnavailable:
+            return .unavailable(.providerUnavailable)
+        case let .unavailable(reason):
+            return .unavailable(reason)
         }
     }
 
@@ -402,6 +610,15 @@ public struct DefaultCoachContextFeature: CoachContextFeature, CoachContextPendi
 
 /// Live fail-closed source used until a provider/model configuration is qualified.
 struct UnavailableCoachContextSnapshotPort: CoachContextSnapshotPort {
+    /// The locally qualified conservative projection remains usable while no
+    /// provider transport is installed. Quote requests still report
+    /// `providerUnavailable`; absence of this policy would fail the picker.
+    private static let attachmentProjectionPolicy =
+        try! CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 8_192,
+            tokenEstimator: .utf8ByteUpperBound()
+        )
+
     init() {}
 
     func resolveNewChat(
@@ -424,5 +641,18 @@ struct UnavailableCoachContextSnapshotPort: CoachContextSnapshotPort {
 
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         false
+    }
+
+    func currentAttachmentProjectionPolicy()
+        async -> CoachAttachmentProjectionPolicyOutcome
+    {
+        .knownQualified(
+            policy: Self.attachmentProjectionPolicy,
+            configurationGeneration: 1
+        )
+    }
+
+    func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool {
+        configurationGeneration == 1
     }
 }

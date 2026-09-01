@@ -186,9 +186,15 @@ public struct CoachAttachmentProjection: Equatable, Sendable {
     }
 
     public func prepareAttachment(
-        sessionAttachmentID: ChatSessionAttachmentID,
+        attachment: ChatSessionAttachment,
         transcriptHandle: PreparedCoachTranscriptHandle
-    ) -> PreparedCoachAttachment {
+    ) throws -> PreparedCoachAttachment {
+        guard attachment.sessionID == evidence.sessionID,
+              attachment.transcriptRevisionID == evidence.transcriptRevisionID
+        else {
+            throw ChatAttachmentResolutionError.identityMismatch
+        }
+        let sessionAttachmentID = attachment.attachmentID
         let base: [String: CanonicalJSONValue] = [
             "displayLabel": .string(evidence.displayLabel),
             "sessionAttachmentId": .string(sessionAttachmentID.rawValue),
@@ -219,22 +225,29 @@ public struct CoachAttachmentProjection: Equatable, Sendable {
 
 /// Application decorator that turns verified immutable transcript evidence into
 /// the picker/reopen projection consumed by Chat use cases.
-@_spi(CoachContextQualification)
-public actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
+actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
     private let evidenceSource: any ChatSessionAttachmentEvidenceSource
-    private let projectionPolicy: CoachAttachmentProjectionPolicy
+    private let configurationAuthority:
+        any CoachAttachmentProjectionConfigurationAuthority
 
-    public init(
+    init(
         evidenceSource: any ChatSessionAttachmentEvidenceSource,
-        projectionPolicy: CoachAttachmentProjectionPolicy
+        configurationAuthority:
+            any CoachAttachmentProjectionConfigurationAuthority
     ) {
         self.evidenceSource = evidenceSource
-        self.projectionPolicy = projectionPolicy
+        self.configurationAuthority = configurationAuthority
     }
 
-    public func loadCandidates(
+    func loadCandidates(
         in library: LibraryScope
     ) async -> ChatAttachmentCatalogOutcome {
+        guard case let .configured(configuration) =
+            await configurationAuthority
+                .currentAttachmentProjectionConfiguration()
+        else {
+            return .failed
+        }
         switch await evidenceSource.loadEvidence(in: library) {
         case let .loaded(evidence):
             var candidates: [ChatAttachmentCandidate] = []
@@ -242,7 +255,7 @@ public actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
             for item in evidence {
                 do {
                     candidates.append(
-                        try projectionPolicy
+                        try configuration.policy
                             .project(evidence: item)
                             .makeCandidate()
                     )
@@ -254,7 +267,10 @@ public actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
                     return .failed
                 }
             }
-            return .loaded(candidates)
+            guard await configurationAuthority.isCurrent(configuration.stamp) else {
+                return .configurationChanged
+            }
+            return .loaded(candidates, configuration: configuration.stamp)
         case .readOnlyLibrary:
             return .readOnlyLibrary
         case .failed:
@@ -262,18 +278,24 @@ public actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
         }
     }
 
-    public func resolve(
+    func resolve(
         _ attachments: ChatAttachments,
         in library: LibraryScope
     ) async -> ChatAttachmentResolutionOutcome {
+        guard case let .configured(configuration) =
+            await configurationAuthority
+                .currentAttachmentProjectionConfiguration()
+        else {
+            return .failed
+        }
         switch await evidenceSource.resolveEvidence(attachments, in: library) {
         case let .resolved(evidence):
             do {
-                return .resolved(try evidence.map { item in
+                let resolved = try evidence.map { item in
                     let resolution: ChatAttachmentResolution
                     switch item.resolution {
                     case let .available(value):
-                        let candidate = try projectionPolicy
+                        let candidate = try configuration.policy
                             .project(evidence: value)
                             .makeCandidate()
                         resolution = .available(candidate)
@@ -284,7 +306,11 @@ public actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
                         attachment: item.attachment,
                         resolution: resolution
                     )
-                })
+                }
+                guard await configurationAuthority.isCurrent(configuration.stamp) else {
+                    return .configurationChanged
+                }
+                return .resolved(resolved, configuration: configuration.stamp)
             } catch {
                 return .failed
             }

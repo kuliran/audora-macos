@@ -1,4 +1,4 @@
-import AudoraApplication
+@_spi(CoachContextQualification) import AudoraApplication
 import AudoraDomain
 import CoreFoundation
 import CryptoKit

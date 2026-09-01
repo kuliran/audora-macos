@@ -1,5 +1,5 @@
-@testable import AudoraMacInfrastructure
-import AudoraApplication
+@testable @_spi(CoachContextQualification) import AudoraMacInfrastructure
+@_spi(CoachContextQualification) import AudoraApplication
 import AudoraDomain
 import CryptoKit
 import Foundation

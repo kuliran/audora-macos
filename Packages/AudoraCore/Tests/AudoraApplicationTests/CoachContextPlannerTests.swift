@@ -335,8 +335,13 @@ final class CoachContextPlannerTests: XCTestCase {
         )
         let projection = try policy.project(evidence: evidence)
         let candidate = try projection.makeCandidate()
-        let prepared = projection.prepareAttachment(
-            sessionAttachmentID: try ChatSessionAttachmentID("attachment-1"),
+        let attachment = ChatSessionAttachment(
+            attachmentID: try ChatSessionAttachmentID("attachment-1"),
+            sessionID: evidence.sessionID,
+            transcriptRevisionID: evidence.transcriptRevisionID
+        )
+        let prepared = try projection.prepareAttachment(
+            attachment: attachment,
             transcriptHandle: try PreparedCoachTranscriptHandle(
                 "00000000-0000-0000-0000-000000000001"
             )
@@ -354,6 +359,49 @@ final class CoachContextPlannerTests: XCTestCase {
         XCTAssertEqual(candidate.delivery, .onDemand)
         guard case .onDemand = prepared else {
             return XCTFail("the authoritative form must use the same delivery decision")
+        }
+    }
+
+    func testAttachmentProjectionRejectsAProviderIDForDifferentImmutableEvidence()
+        throws
+    {
+        let evidence = ChatAttachmentEvidence(
+            displayLabel: "Pinned evidence",
+            revision: try manyShortWordRevision(wordCount: 1)
+        )
+        let projection = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 8_192,
+            tokenEstimator: .utf8ByteUpperBound()
+        ).project(evidence: evidence)
+        let mismatchedAttachments = [
+            ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-session"),
+                sessionID: try SessionID("ses-20260830T112000000Z-7STV"),
+                transcriptRevisionID: evidence.transcriptRevisionID
+            ),
+            ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-revision"),
+                sessionID: evidence.sessionID,
+                transcriptRevisionID: try TranscriptRevisionID(
+                    "trv-20260830T113000000Z-8WXY"
+                )
+            ),
+        ]
+
+        for mismatchedAttachment in mismatchedAttachments {
+            XCTAssertThrowsError(
+                try projection.prepareAttachment(
+                    attachment: mismatchedAttachment,
+                    transcriptHandle: try PreparedCoachTranscriptHandle(
+                        "00000000-0000-0000-0000-000000000001"
+                    )
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? ChatAttachmentResolutionError,
+                    .identityMismatch
+                )
+            }
         }
     }
 
@@ -491,6 +539,8 @@ final class CoachContextPlannerTests: XCTestCase {
             maximumInlineTranscriptTokens: 8,
             tokenEstimator: estimator
         )
+        let configurationAuthority =
+            FixedAttachmentProjectionConfigurationAuthority(policy: policy)
         let mixedSource = ProjectedChatSessionAttachmentSource(
             evidenceSource: AttachmentEvidenceSourceFixture(
                 catalog: [oversized, healthy],
@@ -501,20 +551,20 @@ final class CoachContextPlannerTests: XCTestCase {
                     ),
                 ]
             ),
-            projectionPolicy: policy
+            configurationAuthority: configurationAuthority
         )
         let oversizedOnlySource = ProjectedChatSessionAttachmentSource(
             evidenceSource: AttachmentEvidenceSourceFixture(
                 catalog: [oversized],
                 resolutions: []
             ),
-            projectionPolicy: policy
+            configurationAuthority: configurationAuthority
         )
         let library = LibraryScope(
             libraryID: try LibraryID("lib-20260830T120000000Z-7NPQ")
         )
 
-        guard case let .loaded(candidates) = await mixedSource.loadCandidates(
+        guard case let .loaded(candidates, _) = await mixedSource.loadCandidates(
             in: library
         ) else {
             return XCTFail("one unprojectable Session must not fail the catalog")
@@ -526,7 +576,7 @@ final class CoachContextPlannerTests: XCTestCase {
         let emptyCatalog = await oversizedOnlySource.loadCandidates(in: library)
         XCTAssertEqual(
             emptyCatalog,
-            .loaded([]),
+            .loaded([], configuration: configurationAuthority.stamp),
             "an empty projected catalog must preserve the zero-selection path"
         )
         let pinnedResolution = await mixedSource.resolve(
@@ -556,10 +606,13 @@ final class CoachContextPlannerTests: XCTestCase {
                 catalog: [evidence],
                 resolutions: []
             ),
-            projectionPolicy: try CoachAttachmentProjectionPolicy(
-                maximumInlineTranscriptTokens: 8,
-                tokenEstimator: estimator
-            )
+            configurationAuthority:
+                FixedAttachmentProjectionConfigurationAuthority(
+                    policy: try CoachAttachmentProjectionPolicy(
+                        maximumInlineTranscriptTokens: 8,
+                        tokenEstimator: estimator
+                    )
+                )
         )
         let library = LibraryScope(
             libraryID: try LibraryID("lib-20260830T120000000Z-7NPQ")
@@ -728,6 +781,31 @@ private final class AttachmentEncodingObservation: @unchecked Sendable {
 
     func recordSerialization() {
         lock.withLock { serializations += 1 }
+    }
+}
+
+private struct FixedAttachmentProjectionConfigurationAuthority:
+    CoachAttachmentProjectionConfigurationAuthority
+{
+    let policy: CoachAttachmentProjectionPolicy
+    let stamp = CoachContextConfigurationStamp(
+        authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000325")!,
+        generation: 1
+    )
+
+    func currentAttachmentProjectionConfiguration()
+        async -> CoachAttachmentProjectionConfigurationOutcome
+    {
+        .configured(
+            CoachAttachmentProjectionConfiguration(
+                policy: policy,
+                stamp: stamp
+            )
+        )
+    }
+
+    func isCurrent(_ candidate: CoachContextConfigurationStamp) async -> Bool {
+        candidate == stamp
     }
 }
 

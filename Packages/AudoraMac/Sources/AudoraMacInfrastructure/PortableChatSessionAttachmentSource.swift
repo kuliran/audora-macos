@@ -1,8 +1,9 @@
-import AudoraApplication
+@_spi(CoachContextQualification) import AudoraApplication
 import AudoraDomain
 
 /// Portable-library adapter for verified immutable transcript evidence. It does
 /// not estimate provider tokens or choose a delivery form.
+@_spi(CoachContextQualification)
 public actor PortableChatSessionAttachmentSource: ChatSessionAttachmentEvidenceSource {
     private let workspace: PortableLibraryWorkspace
 
