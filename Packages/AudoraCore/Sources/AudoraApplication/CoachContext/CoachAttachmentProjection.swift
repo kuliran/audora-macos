@@ -1,0 +1,216 @@
+import AudoraDomain
+import Foundation
+
+@_spi(CoachContextQualification)
+public enum CoachAttachmentProjectionPolicyError: Error, Equatable, Sendable {
+    case invalidMaximumInlineTranscriptTokens
+}
+
+/// The qualified provider/model policy shared by picker estimates and final
+/// context preparation. It measures one complete canonical `SessionTranscript`
+/// value, preserving tokenizer boundaries and JSON overhead.
+@_spi(CoachContextQualification)
+public struct CoachAttachmentProjectionPolicy: Sendable {
+    public let maximumInlineTranscriptTokens: Int
+    public let tokenEstimator: CoachTokenEstimator
+
+    public init(
+        maximumInlineTranscriptTokens: Int,
+        tokenEstimator: CoachTokenEstimator
+    ) throws {
+        guard maximumInlineTranscriptTokens > 0 else {
+            throw CoachAttachmentProjectionPolicyError
+                .invalidMaximumInlineTranscriptTokens
+        }
+        self.maximumInlineTranscriptTokens = maximumInlineTranscriptTokens
+        self.tokenEstimator = tokenEstimator
+    }
+
+    public func project(
+        evidence: ChatAttachmentEvidence
+    ) throws -> CoachAttachmentProjection {
+        let canonicalTranscript = Self.canonicalTranscript(evidence.revision)
+        let approximateTranscriptTokens = try tokenEstimator.tokenCount(
+            forUTF8: CanonicalJSON.serialize(canonicalTranscript)
+        )
+        return CoachAttachmentProjection(
+            evidence: evidence,
+            canonicalTranscript: canonicalTranscript,
+            approximateTranscriptTokens: approximateTranscriptTokens,
+            delivery: approximateTranscriptTokens <= maximumInlineTranscriptTokens
+                ? .inline
+                : .onDemand
+        )
+    }
+
+    private static func canonicalTranscript(
+        _ revision: TranscriptRevision
+    ) -> CanonicalJSONValue {
+        .object([
+            "audioEvents": .array(revision.audioEvents.map { event in
+                .object([
+                    "audioEventId": .string(event.audioEventID.rawValue),
+                    "category": .string(event.category.rawValue),
+                    "timeRange": canonicalTimeRange(event.timeRange),
+                ])
+            }),
+            "lines": .array(revision.lines.map { line in
+                .object([
+                    "text": .string(line.text),
+                    "timeRange": canonicalTimeRange(line.timeRange),
+                    "words": .array(line.words.map(canonicalWord)),
+                ])
+            }),
+        ])
+    }
+
+    private static func canonicalWord(_ word: TranscriptWord) -> CanonicalJSONValue {
+        var fields: [String: CanonicalJSONValue] = [
+            "text": .string(word.text),
+            "wordId": .string(word.wordID.rawValue),
+        ]
+        if let timeRange = word.timeRange {
+            fields["timeRange"] = canonicalTimeRange(timeRange)
+        }
+        return .object(fields)
+    }
+
+    private static func canonicalTimeRange(
+        _ range: SessionTimeRange
+    ) -> CanonicalJSONValue {
+        .object([
+            "endMs": .integer(Int64(range.endMilliseconds)),
+            "startMs": .integer(Int64(range.startMilliseconds)),
+        ])
+    }
+}
+
+@_spi(CoachContextQualification)
+public struct CoachAttachmentProjection: Equatable, Sendable {
+    public let canonicalTranscript: CanonicalJSONValue
+    public let approximateTranscriptTokens: Int
+    public let delivery: ChatAttachmentDelivery
+    private let evidence: ChatAttachmentEvidence
+
+    init(
+        evidence: ChatAttachmentEvidence,
+        canonicalTranscript: CanonicalJSONValue,
+        approximateTranscriptTokens: Int,
+        delivery: ChatAttachmentDelivery
+    ) {
+        self.evidence = evidence
+        self.canonicalTranscript = canonicalTranscript
+        self.approximateTranscriptTokens = approximateTranscriptTokens
+        self.delivery = delivery
+    }
+
+    public func makeCandidate() throws -> ChatAttachmentCandidate {
+        try ChatAttachmentCandidate(
+            sessionID: evidence.sessionID,
+            transcriptRevisionID: evidence.transcriptRevisionID,
+            displayLabel: evidence.displayLabel,
+            durationMilliseconds: evidence.durationMilliseconds,
+            approximateTranscriptTokens: approximateTranscriptTokens,
+            delivery: delivery
+        )
+    }
+
+    public func prepareAttachment(
+        sessionAttachmentID: ChatSessionAttachmentID,
+        transcriptHandle: PreparedCoachTranscriptHandle
+    ) -> PreparedCoachAttachment {
+        let base: [String: CanonicalJSONValue] = [
+            "displayLabel": .string(evidence.displayLabel),
+            "sessionAttachmentId": .string(sessionAttachmentID.rawValue),
+        ]
+        switch delivery {
+        case .inline:
+            return .inline(
+                requestValue: .object(base.merging([
+                    "kind": .string("inline"),
+                    "transcript": canonicalTranscript,
+                ]) { _, new in new })
+            )
+        case .onDemand:
+            return .onDemand(
+                requestValue: .object(base.merging([
+                    "kind": .string("onDemand"),
+                    "sessionTranscriptHandle": .string(transcriptHandle.rawValue),
+                ]) { _, new in new }),
+                sessionTranscriptHandle: transcriptHandle,
+                transcriptDisclosure: .object([
+                    "sessionAttachmentId": .string(sessionAttachmentID.rawValue),
+                    "transcript": canonicalTranscript,
+                ])
+            )
+        }
+    }
+}
+
+/// Application decorator that turns verified immutable transcript evidence into
+/// the picker/reopen projection consumed by Chat use cases.
+@_spi(CoachContextQualification)
+public actor ProjectedChatSessionAttachmentSource: ChatSessionAttachmentSource {
+    private let evidenceSource: any ChatSessionAttachmentEvidenceSource
+    private let projectionPolicy: CoachAttachmentProjectionPolicy
+
+    public init(
+        evidenceSource: any ChatSessionAttachmentEvidenceSource,
+        projectionPolicy: CoachAttachmentProjectionPolicy
+    ) {
+        self.evidenceSource = evidenceSource
+        self.projectionPolicy = projectionPolicy
+    }
+
+    public func loadCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        switch await evidenceSource.loadEvidence(in: library) {
+        case let .loaded(evidence):
+            do {
+                return .loaded(try evidence.map { item in
+                    try projectionPolicy.project(evidence: item).makeCandidate()
+                })
+            } catch {
+                return .failed
+            }
+        case .readOnlyLibrary:
+            return .readOnlyLibrary
+        case .failed:
+            return .failed
+        }
+    }
+
+    public func resolve(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        switch await evidenceSource.resolveEvidence(attachments, in: library) {
+        case let .resolved(evidence):
+            do {
+                return .resolved(try evidence.map { item in
+                    let resolution: ChatAttachmentResolution
+                    switch item.resolution {
+                    case let .available(value):
+                        let candidate = try projectionPolicy
+                            .project(evidence: value)
+                            .makeCandidate()
+                        resolution = .available(candidate)
+                    case let .unavailable(reason):
+                        resolution = .unavailable(reason)
+                    }
+                    return try ResolvedChatAttachment(
+                        attachment: item.attachment,
+                        resolution: resolution
+                    )
+                })
+            } catch {
+                return .failed
+            }
+        case .readOnlyLibrary:
+            return .readOnlyLibrary
+        case .failed:
+            return .failed
+        }
+    }
+}

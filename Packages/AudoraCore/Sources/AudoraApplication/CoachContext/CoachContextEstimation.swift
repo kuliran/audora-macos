@@ -212,18 +212,21 @@ public struct CoachProviderEstimationPolicy: Sendable {
     public let providerIdentifier: String
     public let responseCollectorByteCeiling: Int
     public let framing: CoachProviderFraming
-    public let tokenEstimator: CoachTokenEstimator
+    public let attachmentProjectionPolicy: CoachAttachmentProjectionPolicy
+    public var tokenEstimator: CoachTokenEstimator {
+        attachmentProjectionPolicy.tokenEstimator
+    }
 
     public init(
         providerIdentifier: String,
         responseCollectorByteCeiling: Int,
         framing: CoachProviderFraming,
-        tokenEstimator: CoachTokenEstimator
+        attachmentProjectionPolicy: CoachAttachmentProjectionPolicy
     ) {
         self.providerIdentifier = providerIdentifier
         self.responseCollectorByteCeiling = responseCollectorByteCeiling
         self.framing = framing
-        self.tokenEstimator = tokenEstimator
+        self.attachmentProjectionPolicy = attachmentProjectionPolicy
     }
 }
 

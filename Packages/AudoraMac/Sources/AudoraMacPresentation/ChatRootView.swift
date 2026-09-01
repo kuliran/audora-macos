@@ -8,6 +8,28 @@ struct ChatRenameEditorTaskID: Hashable {
     let manifestRevision: UInt64
 }
 
+struct NewChatSheetInteractionPresentation: Equatable, Sendable {
+    let allowsControlInteraction: Bool
+    let preventsInteractiveDismissal: Bool
+    let busyAccessibilityLabel: String?
+
+    init(
+        admissionState: ApplicationCommandAdmissionState,
+        chatState: ChatFeatureState
+    ) {
+        let allowsNavigationAndMutation =
+            !admissionState.isLibraryNavigationPending &&
+            !admissionState.isChatBoundaryPending &&
+            !admissionState.isOrderlyTerminationPending &&
+            ChatInteractionPolicy.allowsNavigationAndMutation(in: chatState)
+        allowsControlInteraction = allowsNavigationAndMutation
+        preventsInteractiveDismissal = !allowsNavigationAndMutation
+        busyAccessibilityLabel = allowsNavigationAndMutation
+            ? nil
+            : "New Chat is busy. Search, Session selection, Cancel, and Create Chat are temporarily unavailable."
+    }
+}
+
 enum ChatNoticePresentation {
     static func recoveryText(for notice: ChatNotice) -> String {
         switch notice {
@@ -364,10 +386,7 @@ public struct ChatRootView: View {
     }
 
     private var allowsNavigationAndMutation: Bool {
-        !dispatcher.isLibraryNavigationPending &&
-            !dispatcher.isChatBoundaryPending &&
-            !dispatcher.isOrderlyTerminationPending &&
-            ChatInteractionPolicy.allowsNavigationAndMutation(in: model.snapshot)
+        newChatSheetInteractionPresentation.allowsControlInteraction
     }
 
     private var newChatSheetIsPresented: Binding<Bool> {
@@ -501,6 +520,26 @@ public struct ChatRootView: View {
         }
         .padding(24)
         .frame(minWidth: 620, minHeight: 520)
+        .disabled(!newChatSheetInteractionPresentation.allowsControlInteraction)
+        .overlay(alignment: .bottomLeading) {
+            if let busyAccessibilityLabel =
+                newChatSheetInteractionPresentation.busyAccessibilityLabel
+            {
+                ProgressView("Finishing current action…")
+                    .accessibilityLabel(busyAccessibilityLabel)
+                    .padding(24)
+            }
+        }
+        .interactiveDismissDisabled(
+            newChatSheetInteractionPresentation.preventsInteractiveDismissal
+        )
+    }
+
+    private var newChatSheetInteractionPresentation: NewChatSheetInteractionPresentation {
+        NewChatSheetInteractionPresentation(
+            admissionState: dispatcher.admissionState,
+            chatState: model.snapshot
+        )
     }
 
     @ViewBuilder

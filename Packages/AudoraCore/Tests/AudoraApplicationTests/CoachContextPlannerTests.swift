@@ -1,4 +1,5 @@
 @testable @_spi(CoachContextQualification) import AudoraApplication
+import AudoraDomain
 import Foundation
 import XCTest
 
@@ -309,6 +310,101 @@ final class CoachContextPlannerTests: XCTestCase {
         }
     }
 
+    func testAttachmentProjectionMeasuresCompleteManyWordEvidenceWithQualifiedPolicy()
+        throws
+    {
+        let revision = try manyShortWordRevision(wordCount: 128)
+        let observation = AttachmentEstimatorObservation()
+        let estimator = try CoachTokenEstimator(
+            identifier: "many-short-word-fixture-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 4,
+            implementation: { bytes in
+                observation.record(bytes)
+                return bytes.count
+            }
+        )
+        let policy = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 1_000,
+            tokenEstimator: estimator
+        )
+
+        let evidence = ChatAttachmentEvidence(
+            displayLabel: "Many short words",
+            revision: revision
+        )
+        let projection = try policy.project(evidence: evidence)
+        let candidate = try projection.makeCandidate()
+        let prepared = projection.prepareAttachment(
+            sessionAttachmentID: try ChatSessionAttachmentID("attachment-1"),
+            transcriptHandle: try PreparedCoachTranscriptHandle(
+                "00000000-0000-0000-0000-000000000001"
+            )
+        )
+        let canonicalTranscript = CanonicalJSON.serialize(
+            projection.canonicalTranscript
+        )
+
+        XCTAssertEqual(observation.values, [canonicalTranscript])
+        XCTAssertEqual(candidate.approximateTranscriptTokens, canonicalTranscript.count)
+        XCTAssertGreaterThan(
+            candidate.approximateTranscriptTokens,
+            revision.lines[0].text.utf8.count / 4
+        )
+        XCTAssertEqual(candidate.delivery, .onDemand)
+        guard case .onDemand = prepared else {
+            return XCTFail("the authoritative form must use the same delivery decision")
+        }
+    }
+
+    func testAttachmentProjectionUsesInjectedExactCeilingAndProviderEstimator() throws {
+        let revision = try manyShortWordRevision(wordCount: 2)
+        let estimator = try CoachTokenEstimator(
+            identifier: "constant-73-token-fixture-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 4,
+            implementation: { _ in 73 }
+        )
+        let atLimit = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 73,
+            tokenEstimator: estimator
+        )
+        let overLimit = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 72,
+            tokenEstimator: estimator
+        )
+        let providerPolicy = CoachProviderEstimationPolicy(
+            providerIdentifier: "non-default-threshold-fixture-v1",
+            responseCollectorByteCeiling: 8_192,
+            framing: CoachProviderFraming(),
+            attachmentProjectionPolicy: atLimit
+        )
+
+        XCTAssertEqual(
+            try atLimit.project(
+                evidence: ChatAttachmentEvidence(
+                    displayLabel: "Exact limit",
+                    revision: revision
+                )
+            ).delivery,
+            .inline
+        )
+        XCTAssertEqual(
+            try overLimit.project(
+                evidence: ChatAttachmentEvidence(
+                    displayLabel: "One over",
+                    revision: revision
+                )
+            ).delivery,
+            .onDemand
+        )
+        XCTAssertEqual(providerPolicy.tokenEstimator.identifier, estimator.identifier)
+        XCTAssertEqual(
+            providerPolicy.attachmentProjectionPolicy.maximumInlineTranscriptTokens,
+            73
+        )
+    }
+
     private func fixtureConfiguration(
         contextWindow: Int,
         responseReserve: Int = 32,
@@ -338,8 +434,108 @@ final class CoachContextPlannerTests: XCTestCase {
                     initialRequestHiddenTokens: 0,
                     transcriptReadExchangeHiddenTokens: 0
                 ),
-                tokenEstimator: estimator
+                attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 8_192,
+                    tokenEstimator: estimator
+                )
             )
         )
+    }
+
+    private func manyShortWordRevision(wordCount: Int) throws -> TranscriptRevision {
+        let tokens = (0..<wordCount).map { "w\($0)" }
+        let lineText = tokens.joined(separator: " ")
+        var cursor = 0
+        let words = try tokens.enumerated().map { index, token in
+            defer { cursor += token.utf8.count + 1 }
+            return TranscriptWord(
+                wordID: try TranscriptWordID(
+                    "w" + String(format: "%06d", index)
+                ),
+                ordinal: index,
+                text: token,
+                displayRange: LineTextRange(
+                    startUTF8Byte: cursor,
+                    endUTF8Byte: cursor + token.utf8.count
+                ),
+                timeRange: nil,
+                confidence: 0.95,
+                wordKind: .lexical
+            )
+        }
+        let range = try SessionTimeRange(
+            startMilliseconds: 0,
+            endMilliseconds: 1_000,
+            sessionDurationMilliseconds: 1_000
+        )
+        let fingerprint = try AudioFingerprint(sha256: String(repeating: "a", count: 64))
+        let usePolicy = try EngineUsePolicy(
+            policyID: "projection-test-v1",
+            coveredArtifacts: [.transcriptRevision],
+            privateLocalUseAllowed: true,
+            privateExportAllowed: true,
+            externalProcessingAllowed: false,
+            publicDistributionAllowed: false,
+            commercialUseAllowed: false,
+            licenseReference: "test-license",
+            licenseSHA256: String(repeating: "b", count: 64)
+        )
+        return try TranscriptRevision(
+            revisionID: try TranscriptRevisionID("trv-20260830T121000000Z-4FGH"),
+            sessionID: try SessionID("ses-20260830T120000000Z-3DEF"),
+            jobID: try TranscriptionJobID("job-20260830T120500000Z-5GHJ"),
+            createdAt: try UTCInstant("2026-08-30T12:10:00.000Z"),
+            durationMilliseconds: 1_000,
+            audioFingerprint: fingerprint,
+            sourceFingerprints: [
+                TranscriptSourceFingerprint(
+                    audioSourceID: .microphone,
+                    fingerprint: fingerprint
+                ),
+            ],
+            candidateArtifactFingerprint: try AudioFingerprint(
+                sha256: String(repeating: "c", count: 64)
+            ),
+            engine: try TranscriptEngineProvenance(
+                provider: "crisperwhisper",
+                model: "small",
+                revision: "projection-test-v1",
+                language: "en",
+                mode: "verbatim",
+                decodingOptionsSHA256: String(repeating: "d", count: 64),
+                qualification: try TranscriptEngineQualification(
+                    qualificationProfileID: "projection-test-v1",
+                    engineLockSHA256: String(repeating: "e", count: 64),
+                    runtimeIdentity: "projection-runtime-v1",
+                    runtimeLockSHA256: String(repeating: "f", count: 64),
+                    compatibilityPatchID: "projection-patch-v1"
+                ),
+                usePolicy: usePolicy
+            ),
+            lines: [
+                TranscriptLine(
+                    lineID: try TranscriptLineID("l000000"),
+                    order: 0,
+                    audioSourceID: .microphone,
+                    timeRange: range,
+                    text: lineText,
+                    words: words
+                ),
+            ],
+            audioEvents: []
+        )
+    }
+}
+
+private final class AttachmentEstimatorObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [Data] = []
+
+    var values: [Data] {
+        lock.withLock { recorded }
+    }
+
+    func record(_ value: Data) {
+        lock.withLock { recorded.append(value) }
     }
 }

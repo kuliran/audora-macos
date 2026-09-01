@@ -1269,7 +1269,11 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
                             providerIdentifier: "synthetic-scenario-v1",
                             responseCollectorByteCeiling: 8_192,
                             framing: CoachProviderFraming(),
-                            tokenEstimator: .utf8ByteUpperBound()
+                            attachmentProjectionPolicy:
+                                try CoachAttachmentProjectionPolicy(
+                                    maximumInlineTranscriptTokens: 8_192,
+                                    tokenEstimator: .utf8ByteUpperBound()
+                                )
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(
@@ -1323,7 +1327,11 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
                             providerIdentifier: "synthetic-invalid-context-v1",
                             responseCollectorByteCeiling: 8_192,
                             framing: CoachProviderFraming(),
-                            tokenEstimator: rejectingEstimator
+                            attachmentProjectionPolicy:
+                                try CoachAttachmentProjectionPolicy(
+                                    maximumInlineTranscriptTokens: 8_192,
+                                    tokenEstimator: rejectingEstimator
+                                )
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(
@@ -1388,7 +1396,11 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
                             providerIdentifier: "synthetic-scenario-v1",
                             responseCollectorByteCeiling: 8_192,
                             framing: CoachProviderFraming(),
-                            tokenEstimator: .utf8ByteUpperBound()
+                            attachmentProjectionPolicy:
+                                try CoachAttachmentProjectionPolicy(
+                                    maximumInlineTranscriptTokens: 8_192,
+                                    tokenEstimator: .utf8ByteUpperBound()
+                                )
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(

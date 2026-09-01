@@ -1512,7 +1512,10 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
                 providerIdentifier: "synthetic-chat-feature-v1",
                 responseCollectorByteCeiling: 8_192,
                 framing: CoachProviderFraming(),
-                tokenEstimator: .utf8ByteUpperBound()
+                attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 8_192,
+                    tokenEstimator: .utf8ByteUpperBound()
+                )
             )
         )
     }

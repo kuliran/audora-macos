@@ -234,6 +234,71 @@ public enum ChatAttachmentResolutionOutcome: Equatable, Sendable {
     case failed
 }
 
+/// Hash-verified canonical evidence returned by a persistence adapter before any
+/// provider/model policy is applied.
+public struct ChatAttachmentEvidence: Equatable, Sendable {
+    public let displayLabel: String
+    public let revision: TranscriptRevision
+
+    public var sessionID: SessionID { revision.sessionID }
+    public var transcriptRevisionID: TranscriptRevisionID { revision.revisionID }
+    public var durationMilliseconds: UInt64 { revision.durationMilliseconds }
+
+    public init(displayLabel: String, revision: TranscriptRevision) {
+        self.displayLabel = displayLabel
+        self.revision = revision
+    }
+}
+
+public enum ChatAttachmentEvidenceResolution: Equatable, Sendable {
+    case available(ChatAttachmentEvidence)
+    case unavailable(ChatAttachmentUnavailableReason)
+}
+
+public struct ResolvedChatAttachmentEvidence: Equatable, Sendable {
+    public let attachment: ChatSessionAttachment
+    public let resolution: ChatAttachmentEvidenceResolution
+
+    public init(
+        attachment: ChatSessionAttachment,
+        resolution: ChatAttachmentEvidenceResolution
+    ) throws {
+        if case let .available(evidence) = resolution {
+            guard evidence.sessionID == attachment.sessionID,
+                  evidence.transcriptRevisionID == attachment.transcriptRevisionID
+            else {
+                throw ChatAttachmentResolutionError.identityMismatch
+            }
+        }
+        self.attachment = attachment
+        self.resolution = resolution
+    }
+}
+
+public enum ChatAttachmentEvidenceCatalogOutcome: Equatable, Sendable {
+    case loaded([ChatAttachmentEvidence])
+    case readOnlyLibrary
+    case failed
+}
+
+public enum ChatAttachmentEvidenceResolutionOutcome: Equatable, Sendable {
+    case resolved([ResolvedChatAttachmentEvidence])
+    case readOnlyLibrary
+    case failed
+}
+
+/// Persistence-only seam. Provider token estimation and delivery policy are
+/// intentionally applied by an Application decorator, never by this port.
+public protocol ChatSessionAttachmentEvidenceSource: Sendable {
+    func loadEvidence(
+        in library: LibraryScope
+    ) async -> ChatAttachmentEvidenceCatalogOutcome
+    func resolveEvidence(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentEvidenceResolutionOutcome
+}
+
 /// The single local seam for listing selected revisions and reopening exact pins.
 public protocol ChatSessionAttachmentSource: Sendable {
     func loadCandidates(in library: LibraryScope) async -> ChatAttachmentCatalogOutcome

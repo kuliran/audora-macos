@@ -47,6 +47,10 @@ for forbidden_symbol in \
   CanonicalJSON \
   CoachTokenEstimatorError \
   CoachTokenEstimator \
+  CoachAttachmentProjectionPolicyError \
+  CoachAttachmentProjectionPolicy \
+  CoachAttachmentProjection \
+  ProjectedChatSessionAttachmentSource \
   CompleteToolResponseBudgetError \
   CompleteToolResponseBudget \
   CoachContextBudget \

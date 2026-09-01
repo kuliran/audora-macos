@@ -15,6 +15,7 @@ public enum TranscriptRevisionPersistenceFaultPoint: Equatable, Sendable {
     case afterSessionManifestPartialFlush
     case afterSessionManifestInstall
     case afterSessionDirectoryFlush
+    case beforeChatAttachmentFinalRevalidation
 }
 
 enum PortableSessionTranscriptionRead: Sendable {
@@ -44,7 +45,7 @@ struct PortableVerifiedReviewSession: Sendable {
 }
 
 enum PortableChatAttachmentRead: Sendable {
-    case available(ChatAttachmentCandidate)
+    case available(ChatAttachmentEvidence)
     case unavailable(ChatAttachmentUnavailableReason)
 }
 
@@ -448,10 +449,12 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         }
     }
 
-    /// Lists only active Sessions and projects each currently selected immutable
-    /// Transcript Revision. The descriptor-confined Session reader remains the
-    /// authority for identity, hashes, duration, and revision integrity.
-    func loadChatAttachmentCatalogSynchronously() throws -> [ChatAttachmentCandidate] {
+    /// Lists only active Sessions and returns each currently selected immutable
+    /// Transcript Revision as verified Domain evidence. Provider token and delivery
+    /// policy belongs to the Application projection decorator.
+    func loadChatAttachmentEvidenceCatalogSynchronously() throws
+        -> [ChatAttachmentEvidence]
+    {
         try activeSessionIDsSynchronously().compactMap { sessionID in
             switch loadChatAttachmentSynchronously(
                 sessionID: sessionID,
@@ -468,20 +471,20 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
 
     /// Reopens the exact historical revision pinned by a Chat, even if the
     /// Session later selects a different revision.
-    func resolveChatAttachmentsSynchronously(
+    func resolveChatAttachmentEvidenceSynchronously(
         _ attachments: ChatAttachments
-    ) -> [ResolvedChatAttachment] {
+    ) -> [ResolvedChatAttachmentEvidence] {
         attachments.values.map { attachment in
             let read = loadChatAttachmentSynchronously(
                 sessionID: attachment.sessionID,
                 transcriptRevisionID: attachment.transcriptRevisionID
             )
-            let resolution: ChatAttachmentResolution
+            let resolution: ChatAttachmentEvidenceResolution
             switch read {
-            case let .available(candidate): resolution = .available(candidate)
+            case let .available(evidence): resolution = .available(evidence)
             case let .unavailable(reason): resolution = .unavailable(reason)
             }
-            return try! ResolvedChatAttachment(
+            return try! ResolvedChatAttachmentEvidence(
                 attachment: attachment,
                 resolution: resolution
             )
@@ -549,12 +552,30 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                 let expectedSHA256: String?
                 if let expectedRevisionID {
                     guard loaded.manifest.transcriptRevisionIDs.contains(expectedRevisionID)
-                    else { return .unavailable(.missing) }
+                    else {
+                        try fault(.beforeChatAttachmentFinalRevalidation)
+                        try revalidate(authority, expectedSessionID: sessionID)
+                        try requireCurrentSessionManifest(
+                            expectedData: loaded.manifestData,
+                            expectedSelectedRevisionID: loaded.manifest.selectedRevisionID,
+                            expectedSessionID: sessionID,
+                            under: authority.sessionDescriptor
+                        )
+                        return .unavailable(.missing)
+                    }
                     revisionID = expectedRevisionID
                     expectedSHA256 = loaded.manifest.selectedTranscriptRevision
                         .flatMap { $0.revisionID == expectedRevisionID ? $0.revisionSHA256 : nil }
                 } else {
                     guard let selected = loaded.manifest.selectedTranscriptRevision else {
+                        try fault(.beforeChatAttachmentFinalRevalidation)
+                        try revalidate(authority, expectedSessionID: sessionID)
+                        try requireCurrentSessionManifest(
+                            expectedData: loaded.manifestData,
+                            expectedSelectedRevisionID: loaded.manifest.selectedRevisionID,
+                            expectedSessionID: sessionID,
+                            under: authority.sessionDescriptor
+                        )
                         return .unavailable(.missing)
                     }
                     revisionID = selected.revisionID
@@ -571,6 +592,7 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     under: transcripts
                 ) {
                 case .absent:
+                    try fault(.beforeChatAttachmentFinalRevalidation)
                     try revalidate(authority, expectedSessionID: sessionID)
                     try revalidateDirectoryEntry(
                         named: "transcripts",
@@ -585,6 +607,12 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                         throw TranscriptRevisionRepositoryFailure
                             .sessionIntegrityMismatch
                     }
+                    try requireCurrentSessionManifest(
+                        expectedData: loaded.manifestData,
+                        expectedSelectedRevisionID: loaded.manifest.selectedRevisionID,
+                        expectedSessionID: sessionID,
+                        under: authority.sessionDescriptor
+                    )
                     return .unavailable(.missing)
                 case .invalid:
                     throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
@@ -599,12 +627,19 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     under: transcripts
                 )
                 defer { Darwin.close(installed.authority.descriptor) }
+                try fault(.beforeChatAttachmentFinalRevalidation)
                 try revalidate(authority, expectedSessionID: sessionID)
                 try revalidateDirectoryEntry(
                     named: "transcripts",
                     under: authority.sessionDescriptor,
                     descriptor: transcripts,
                     expectedIdentity: transcriptsIdentity
+                )
+                try requireCurrentSessionManifest(
+                    expectedData: loaded.manifestData,
+                    expectedSelectedRevisionID: loaded.manifest.selectedRevisionID,
+                    expectedSessionID: sessionID,
+                    under: authority.sessionDescriptor
                 )
                 try revalidateInstalledRevision(
                     installed.authority,
@@ -614,17 +649,9 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     under: transcripts
                 )
                 return .available(
-                    try ChatAttachmentCandidate(
-                        sessionID: sessionID,
-                        transcriptRevisionID: revisionID,
+                    ChatAttachmentEvidence(
                         displayLabel: loaded.manifest.chatDisplayLabel,
-                        durationMilliseconds: loaded.audio.durationMilliseconds,
-                        approximateTranscriptTokens: Self.approximateTranscriptTokens(
-                            installed.revision
-                        ),
-                        delivery: Self.chatDelivery(
-                            for: installed.revision
-                        )
+                        revision: installed.revision
                     )
                 )
             }
@@ -748,26 +775,6 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         }
         guard (metadata.st_mode & S_IFMT) == S_IFDIR else { return .invalid }
         return .directory(EntryIdentity(metadata))
-    }
-
-    private static func approximateTranscriptTokens(_ revision: TranscriptRevision) -> Int {
-        var bytes = 0
-        for line in revision.lines {
-            let (sum, overflow) = bytes.addingReportingOverflow(line.text.utf8.count + 1)
-            if overflow { return Int.max }
-            bytes = sum
-        }
-        let eventBytes = revision.audioEvents.count.multipliedReportingOverflow(by: 48)
-        if eventBytes.overflow { return Int.max }
-        let total = bytes.addingReportingOverflow(eventBytes.partialValue)
-        if total.overflow { return Int.max }
-        return total.partialValue / 4 + (total.partialValue % 4 == 0 ? 0 : 1)
-    }
-
-    private static func chatDelivery(
-        for revision: TranscriptRevision
-    ) -> ChatAttachmentDelivery {
-        approximateTranscriptTokens(revision) <= 8_192 ? .inline : .onDemand
     }
 
     private func reopenSelectedLocked(

@@ -744,7 +744,11 @@ private actor AttachmentCapacitySource: CoachContextSnapshotPort {
                             providerIdentifier: "synthetic-fixture-v1",
                             responseCollectorByteCeiling: 8_192,
                             framing: CoachProviderFraming(),
-                            tokenEstimator: .utf8ByteUpperBound()
+                            attachmentProjectionPolicy:
+                                try CoachAttachmentProjectionPolicy(
+                                    maximumInlineTranscriptTokens: 8_192,
+                                    tokenEstimator: .utf8ByteUpperBound()
+                                )
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(

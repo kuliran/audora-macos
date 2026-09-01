@@ -99,6 +99,38 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    func testNewChatSheetProjectionTracksGlobalInteractionAuthorityAcrossAdmissionClosure() {
+        let readyState = ChatFeatureState(
+            catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
+        )
+        let open = NewChatSheetInteractionPresentation(
+            admissionState: .idle,
+            chatState: readyState
+        )
+
+        XCTAssertTrue(open.allowsControlInteraction)
+        XCTAssertFalse(open.preventsInteractiveDismissal)
+        XCTAssertNil(open.busyAccessibilityLabel)
+
+        let closedAdmissions = [
+            ApplicationCommandAdmissionState(isChatBoundaryPending: true),
+            ApplicationCommandAdmissionState(isLibraryNavigationPending: true),
+            ApplicationCommandAdmissionState(isOrderlyTerminationPending: true),
+        ]
+        for admissionState in closedAdmissions {
+            let closed = NewChatSheetInteractionPresentation(
+                admissionState: admissionState,
+                chatState: readyState
+            )
+            XCTAssertFalse(closed.allowsControlInteraction)
+            XCTAssertTrue(closed.preventsInteractiveDismissal)
+            XCTAssertEqual(
+                closed.busyAccessibilityLabel,
+                "New Chat is busy. Search, Session selection, Cancel, and Create Chat are temporarily unavailable."
+            )
+        }
+    }
+
     func testUserActionsCaptureTheCurrentLibraryCommandContext() async throws {
         let scope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")

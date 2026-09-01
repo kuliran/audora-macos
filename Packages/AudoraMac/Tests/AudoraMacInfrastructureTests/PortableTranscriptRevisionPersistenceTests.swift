@@ -35,14 +35,15 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
             )
             let attachments = try ChatAttachments(validating: [attachment])
 
-            let resolved = repository.resolveChatAttachmentsSynchronously(attachments)
+            let resolved = repository.resolveChatAttachmentEvidenceSynchronously(attachments)
 
             XCTAssertEqual(resolved.map(\.attachment), [attachment])
-            guard case let .available(candidate) = resolved[0].resolution else {
+            guard case let .available(evidence) = resolved[0].resolution else {
                 return XCTFail("expected the exact historical Revision")
             }
-            XCTAssertEqual(candidate.sessionID, receipt.sessionID)
-            XCTAssertEqual(candidate.transcriptRevisionID, first.revisionID)
+            XCTAssertEqual(evidence.sessionID, receipt.sessionID)
+            XCTAssertEqual(evidence.transcriptRevisionID, first.revisionID)
+            XCTAssertEqual(evidence.revision, first)
         }
     }
 
@@ -70,7 +71,7 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 )
             )
 
-            let resolved = repository.resolveChatAttachmentsSynchronously(attachments)
+            let resolved = repository.resolveChatAttachmentEvidenceSynchronously(attachments)
 
             XCTAssertEqual(resolved.map(\.attachment), [attachment])
             XCTAssertEqual(resolved.map(\.resolution), [.unavailable(.missing)])
@@ -110,7 +111,7 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 )
             )
 
-            let resolved = repository.resolveChatAttachmentsSynchronously(attachments)
+            let resolved = repository.resolveChatAttachmentEvidenceSynchronously(attachments)
 
             XCTAssertEqual(resolved.map(\.attachment), [attachment])
             XCTAssertEqual(resolved.map(\.resolution), [.unavailable(.inTrash)])
@@ -145,11 +146,12 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 withIntermediateDirectories: false
             )
 
-            let catalog = try repository.loadChatAttachmentCatalogSynchronously()
+            let catalog = try repository.loadChatAttachmentEvidenceCatalogSynchronously()
 
             XCTAssertEqual(catalog.count, 1)
             XCTAssertEqual(catalog[0].sessionID, receipt.sessionID)
             XCTAssertEqual(catalog[0].transcriptRevisionID, revision.revisionID)
+            XCTAssertEqual(catalog[0].revision, revision)
         }
     }
 
@@ -169,11 +171,88 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 withIntermediateDirectories: false
             )
 
-            let catalog = try repository.loadChatAttachmentCatalogSynchronously()
+            let catalog = try repository.loadChatAttachmentEvidenceCatalogSynchronously()
 
             XCTAssertEqual(catalog.count, 1)
             XCTAssertEqual(catalog[0].sessionID, receipt.sessionID)
             XCTAssertEqual(catalog[0].transcriptRevisionID, revision.revisionID)
+        }
+    }
+
+    func testChatAttachmentCatalogDoesNotReturnStaleAvailableAfterManifestSubstitution()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            _ = try await PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            ).publishAndSelect(revision, expectedSelectedRevisionID: nil)
+            let sessionManifest = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/session.json"
+            )
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: sessionManifest))
+                    as? [String: Any]
+            )
+            object["createdAt"] = "2026-08-30T12:00:01.000Z"
+            let replacement = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            ) { point in
+                guard point == .beforeChatAttachmentFinalRevalidation else { return }
+                try replacement.write(to: sessionManifest, options: .atomic)
+            }
+
+            let catalog = try repository.loadChatAttachmentEvidenceCatalogSynchronously()
+
+            XCTAssertTrue(catalog.isEmpty)
+        }
+    }
+
+    func testExactChatAttachmentDoesNotReturnStaleAvailableAfterManifestSubstitution()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            _ = try await PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            ).publishAndSelect(revision, expectedSelectedRevisionID: nil)
+            let attachment = ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-1"),
+                sessionID: receipt.sessionID,
+                transcriptRevisionID: revision.revisionID
+            )
+            let attachments = try ChatAttachments(validating: [attachment])
+            let sessionManifest = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/session.json"
+            )
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: sessionManifest))
+                    as? [String: Any]
+            )
+            object["createdAt"] = "2026-08-30T12:00:01.000Z"
+            let replacement = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            ) { point in
+                guard point == .beforeChatAttachmentFinalRevalidation else { return }
+                try replacement.write(to: sessionManifest, options: .atomic)
+            }
+
+            let resolved = repository.resolveChatAttachmentEvidenceSynchronously(attachments)
+
+            XCTAssertEqual(resolved.map(\.attachment), [attachment])
+            XCTAssertEqual(resolved.map(\.resolution), [.unavailable(.corrupt)])
         }
     }
 
