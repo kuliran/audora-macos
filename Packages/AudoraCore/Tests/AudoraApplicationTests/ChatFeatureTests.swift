@@ -45,7 +45,11 @@ final class ChatFeatureTests: XCTestCase {
         let reopenedRequests = await gateway.requests
         let reopenedLocks = await store.pendingLocks
         XCTAssertEqual(reopenedRequests.count, 1)
-        XCTAssertEqual(reopenedLocks.count, 1)
+        XCTAssertEqual(
+            reopenedLocks,
+            [],
+            "the Invocation gateway, not ChatStore, owns Pending installation"
+        )
     }
 
     func testAdmissionCooldownRetainsFailedPendingTurnWithoutLaunchingRetry() async throws {
@@ -779,7 +783,12 @@ final class ChatFeatureTests: XCTestCase {
         let aggregate = try Self.aggregate()
         let store = RecordingChatStore(catalog: [.available(aggregate)])
         let scheduler = ControlledChatAutosaveScheduler()
-        let feature = makeFeature(store: store, autosaveScheduler: scheduler)
+        let gateway = RecordingInterruptedInvocationGateway()
+        let feature = makeFeature(
+            store: store,
+            autosaveScheduler: scheduler,
+            invocations: gateway
+        )
         await feature.send(.start(Self.context))
         await feature.send(.open(Self.context, aggregate.chat.id))
         await feature.send(
@@ -809,7 +818,56 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(lockedAggregate.pendingUserTurn, pending)
         XCTAssertEqual(lockedAggregate.chat.messageIDs, [])
         let calls = await store.calls
-        XCTAssertEqual(calls, [.loadCatalog, .load, .saveDraft, .lockPendingUserTurn])
+        XCTAssertEqual(calls, [.loadCatalog, .load, .saveDraft])
+        let preparations = await gateway.preparations
+        XCTAssertEqual(preparations.count, 1)
+        XCTAssertEqual(preparations.first?.observedAggregate.chat.draft, lockedDraft)
+        XCTAssertEqual(preparations.first?.pendingUserTurn, pending)
+    }
+
+    func testSendLeavesDraftEditableWhenAnotherInvocationOwnsTheLibrary() async throws {
+        let aggregate = try Self.aggregate(draftText: "Keep this Draft editable.")
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let gateway = BusyPreparingInvocationGateway()
+        let feature = makeFeature(store: store, invocations: gateway)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), aggregate)
+        XCTAssertEqual(state.composer, .editable(aggregate.chat.draft, isDirty: false))
+        XCTAssertEqual(state.notice, .coachBusy)
+        XCTAssertNil(state.activity)
+        let locks = await store.pendingLocks
+        XCTAssertEqual(locks, [])
+    }
+
+    func testSupersedingLibraryAbandonsPreparedPendingBeforeInvocationStarts() async throws {
+        let aggregate = try Self.aggregate(draftText: "Do not outlive this Library.")
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let gateway = SuspendedPreparingInvocationGateway()
+        let feature = makeFeature(store: store, invocations: gateway)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        async let send: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        await gateway.waitUntilPreparationStarts()
+        await feature.send(.start(Self.secondContext))
+        await gateway.resumePreparation()
+        await send
+
+        let abandoned = await gateway.abandoned
+        let invocationCount = await gateway.invocationCount
+        let loadedScopes = await store.loadedScopes
+        XCTAssertEqual(abandoned.count, 1)
+        XCTAssertEqual(invocationCount, 0)
+        XCTAssertEqual(loadedScopes, [Self.scope, Self.secondScope])
     }
 
     func testOperationalInterruptionProjectsRetryForTheExactUnchangedPendingIntent() async throws {
@@ -1499,7 +1557,27 @@ final class ChatFeatureTests: XCTestCase {
 /// The feature retains its already-installed lock while this recorder reports
 /// an interruption without fabricating provider execution in these tests.
 private actor RecordingInterruptedInvocationGateway: Invocations {
+    private(set) var preparations: [NewPendingCoachInvocationRequest] = []
     private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        preparations.append(request)
+        return .prepared(
+            try! PreparedPendingCoachInvocation(preparing: request)
+        )
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
 
     func admissionAvailability(
         in library: LibraryScope
@@ -1513,12 +1591,106 @@ private actor RecordingInterruptedInvocationGateway: Invocations {
     }
 }
 
+private actor BusyPreparingInvocationGateway: Invocations {
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .activeInvocation
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        .rejected(prepared.aggregate, .activeInvocation)
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        .rejected(nil, .activeInvocation)
+    }
+}
+
+private actor SuspendedPreparingInvocationGateway: Invocations {
+    private var preparation: NewPendingCoachInvocationRequest?
+    private var preparationContinuation: CheckedContinuation<Void, Never>?
+    private(set) var abandoned: [PreparedPendingCoachInvocation] = []
+    private(set) var invocationCount = 0
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        preparation = request
+        await withCheckedContinuation { preparationContinuation = $0 }
+        return .prepared(
+            try! PreparedPendingCoachInvocation(preparing: request)
+        )
+    }
+
+    func waitUntilPreparationStarts() async {
+        while preparation == nil { await Task.yield() }
+    }
+
+    func resumePreparation() {
+        preparationContinuation?.resume()
+        preparationContinuation = nil
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {
+        abandoned.append(prepared)
+    }
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        invocationCount += 1
+        return .interrupted(prepared.aggregate, .providerFailed)
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        invocationCount += 1
+        return .interrupted(nil, .providerFailed)
+    }
+}
+
 private actor OperationallyInterruptedInvocationGateway: Invocations {
     private let fallback: ChatAggregate?
     private(set) var requests: [PendingCoachInvocationRequest] = []
 
     init(fallback: ChatAggregate? = nil) {
         self.fallback = fallback
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
     }
 
     func admissionAvailability(
@@ -1535,6 +1707,22 @@ private actor OperationallyInterruptedInvocationGateway: Invocations {
 
 private actor VanishingOperationalRetryInvocationGateway: Invocations {
     private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
 
     func admissionAvailability(
         in library: LibraryScope
@@ -1557,6 +1745,22 @@ private actor ProjectedAdmissionInvocationGateway: Invocations {
 
     init(availability: InvocationAdmissionAvailability) {
         self.availability = availability
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
     }
 
     func admissionAvailability(

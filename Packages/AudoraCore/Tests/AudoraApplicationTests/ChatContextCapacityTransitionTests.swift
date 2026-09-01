@@ -222,6 +222,29 @@ private actor CapacityOnlyInvocationGateway: Invocations {
         .available
     }
 
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        switch await store.lockPendingUserTurn(request.lockMutation) {
+        case .committed:
+            return .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+        case let .stale(current): return .stale(current)
+        case let .frozen(frozen): return .frozen(frozen)
+        case .readOnlyLibrary: return .readOnlyLibrary
+        default: return .failed
+        }
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
+
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
         invocationCount += 1
         guard case let .loaded(locked) = await store.load(request.chatID, in: request.library),
@@ -300,6 +323,29 @@ private actor CooldownInvocationGateway: Invocations {
         in library: LibraryScope
     ) async -> InvocationAdmissionAvailability {
         .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        switch await store.lockPendingUserTurn(request.lockMutation) {
+        case .committed:
+            return .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+        case let .stale(current): return .stale(current)
+        case let .frozen(frozen): return .frozen(frozen)
+        case .readOnlyLibrary: return .readOnlyLibrary
+        default: return .failed
+        }
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
     }
 
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {

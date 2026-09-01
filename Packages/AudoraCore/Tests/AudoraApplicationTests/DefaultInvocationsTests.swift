@@ -3,6 +3,73 @@ import AudoraDomain
 import XCTest
 
 final class DefaultInvocationsTests: XCTestCase {
+    func testPreparedNewInvocationCapabilityIsExactOneShotAndCannotBeForged() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence.resetForNewSend(fixture.unlocked)
+        let newRequest = try NewPendingCoachInvocationRequest(
+            library: fixture.scope,
+            observedAggregate: fixture.unlocked,
+            pendingUserTurn: fixture.pending
+        )
+        guard case let .prepared(prepared) = await fixture.invocations
+            .prepareNewInvocation(newRequest)
+        else { return XCTFail("new Send did not acquire its exact Pending authority") }
+        let forged = try PreparedPendingCoachInvocation(preparing: newRequest)
+
+        let forgedOutcome = await fixture.invocations.tryInvoke(forged)
+        XCTAssertEqual(
+            forgedOutcome,
+            .rejected(nil, .eligibilityChanged)
+        )
+
+        guard case .published = await fixture.invocations.tryInvoke(prepared) else {
+            return XCTFail("the exact prepared capability did not invoke")
+        }
+        let reusedOutcome = await fixture.invocations.tryInvoke(prepared)
+        let claimCount = await fixture.admission.claimCount
+        let launchCount = await fixture.provider.launchCount
+        XCTAssertEqual(
+            reusedOutcome,
+            .rejected(nil, .eligibilityChanged)
+        )
+        XCTAssertEqual(claimCount, 1)
+        XCTAssertEqual(launchCount, 1)
+    }
+
+    func testAbandonPreparedNewInvocationReleasesAuthorityAndInvalidatesCapability() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence.resetForNewSend(fixture.unlocked)
+        let newRequest = try NewPendingCoachInvocationRequest(
+            library: fixture.scope,
+            observedAggregate: fixture.unlocked,
+            pendingUserTurn: fixture.pending
+        )
+        guard case let .prepared(prepared) = await fixture.invocations
+            .prepareNewInvocation(newRequest)
+        else { return XCTFail("new Send did not acquire its exact Pending authority") }
+
+        await fixture.invocations.abandonPreparedInvocation(prepared)
+
+        let abandonedOutcome = await fixture.invocations.tryInvoke(prepared)
+        XCTAssertEqual(
+            abandonedOutcome,
+            .rejected(nil, .eligibilityChanged)
+        )
+        let reacquired = await fixture.persistence.acquirePendingInvocation(
+            prepared.request
+        )
+        XCTAssertEqual(
+            reacquired,
+            .acquired(
+                try InvocationPendingAuthority(
+                    request: prepared.request,
+                    aggregate: prepared.aggregate
+                )
+            )
+        )
+        await fixture.persistence.cancelInvocationReservation(prepared.request)
+    }
+
     func testReadOnlyAdmissionAvailabilityProjectsReopeningWithoutClaiming() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         let reopensAt = try UTCInstant("2026-08-30T12:01:00.000Z")
@@ -445,6 +512,46 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertNil(active)
     }
 
+    func testCommittedPublicationSurvivesFailedImmediateReconciliationWithExactQuote() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence.commitNextPublicationButReportFailure()
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .published(aggregate, quote) = outcome else {
+            return XCTFail("an exact already-published replacement must remain published")
+        }
+        let observedPublication = await fixture.persistence.lastPublication
+        let publication = try XCTUnwrap(observedPublication)
+        let activeInvocation = await fixture.persistence.activeInvocation
+        XCTAssertEqual(aggregate, publication.replacement)
+        XCTAssertEqual(aggregate.chat.messageIDs, [
+            fixture.userMessageID,
+            fixture.coachMessageID,
+        ])
+        XCTAssertNil(aggregate.pendingUserTurn)
+        XCTAssertTrue(quote.fits)
+        XCTAssertNil(activeInvocation)
+    }
+
+    func testCommittedPublicationSurvivesAbortFailureAndRecoveryReread() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence.commitNextPublicationButReportFailure()
+        await fixture.persistence.failNextAbortWithoutCommit()
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .published(aggregate, quote) = outcome else {
+            return XCTFail("recovery must recognize the complete intended replacement")
+        }
+        let observedPublication = await fixture.persistence.lastPublication
+        let publication = try XCTUnwrap(observedPublication)
+        let recoveredRequests = await fixture.persistence.recoveredRequests
+        XCTAssertEqual(aggregate, publication.replacement)
+        XCTAssertTrue(quote.fits)
+        XCTAssertEqual(recoveredRequests, [fixture.request])
+    }
+
     func testConcurrentDuplicateRequestUsesOneAdmissionOneLaunchAndOnePublication() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         await fixture.provider.suspendNextLaunch()
@@ -564,6 +671,7 @@ private final class InvocationFixture: @unchecked Sendable {
         libraryID: try! LibraryID("lib-20260830T115900000Z-1ABC")
     )
     let instant = try! UTCInstant("2026-08-30T12:00:00.000Z")
+    let unlocked: ChatAggregate
     let initial: ChatAggregate
     let pending: PendingUserTurn
     let request: PendingCoachInvocationRequest
@@ -594,7 +702,7 @@ private final class InvocationFixture: @unchecked Sendable {
             profileStatementGeneration: 7
         )
         let draft = try empty.chat.draft.edited(text: draftText, at: instant)
-        let unlocked = try ChatAggregate(
+        unlocked = try ChatAggregate(
             chat: empty.chat.replacingDraft(with: draft),
             memory: empty.memory
         )
@@ -665,6 +773,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private var installStalesWithoutSnapshot = false
     private var publicationConflicts = false
     private var publicationFails = false
+    private var publicationCommitsButReportsFailure = false
     private var secondResolutionIsIneligible = false
     private var interruptedMutationFailsAfterCommit = false
     private var abortFailsWithoutCommit = false
@@ -689,6 +798,9 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     func staleWithoutSnapshotNextInstall() { installStalesWithoutSnapshot = true }
     func conflictNextPublication() { publicationConflicts = true }
     func failNextPublication() { publicationFails = true }
+    func commitNextPublicationButReportFailure() {
+        publicationCommitsButReportsFailure = true
+    }
     func makeSecondResolutionIneligible() { secondResolutionIsIneligible = true }
     func failNextInterruptedMutationAfterCommit() {
         interruptedMutationFailsAfterCommit = true
@@ -702,6 +814,39 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     }
     func collideNextIdentities(_ collisions: [InvocationLaunchIdentityCollision]) {
         identityCollisions = collisions
+    }
+    func resetForNewSend(_ unlocked: ChatAggregate) {
+        aggregate = unlocked
+        reservedRequest = nil
+        activeInvocation = nil
+    }
+
+    func prepareNewPendingInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> InvocationPendingPreparationOutcome {
+        guard activeInvocation == nil, reservedRequest == nil else {
+            return .activeExists
+        }
+        guard aggregate.pendingUserTurn == nil,
+              aggregate.chat.id == request.chatID,
+              aggregate.chat.draft == request.observedAggregate.chat.draft
+        else { return .stale(aggregate) }
+        aggregate = try! ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: request.pendingUserTurn
+        )
+        let pendingRequest = PendingCoachInvocationRequest(
+            library: request.library,
+            chatID: request.chatID,
+            pendingUserTurnID: request.pendingUserTurn.id
+        )
+        let authority = try! InvocationPendingAuthority(
+            request: pendingRequest,
+            aggregate: aggregate
+        )
+        reservedRequest = pendingRequest
+        return .prepared(authority)
     }
 
     func acquirePendingInvocation(
@@ -869,6 +1014,10 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
             activeInvocation = nil
             return .failed
         }
+        if lastPublication?.replacement == aggregate {
+            activeInvocation = nil
+            return .stale(aggregate)
+        }
         activeInvocation = nil
         aggregate = try! ChatAggregate(
             chat: aggregate.chat,
@@ -886,6 +1035,12 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         await recorder.record("publish")
         publicationCount += 1
         guard activeInvocation == mutation.invocation else { return .stale(aggregate) }
+        if publicationCommitsButReportsFailure {
+            publicationCommitsButReportsFailure = false
+            lastPublication = mutation
+            aggregate = mutation.replacement
+            return .failed
+        }
         if publicationFails {
             publicationFails = false
             return .failed

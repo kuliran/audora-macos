@@ -17,6 +17,97 @@ public struct PendingCoachInvocationRequest: Equatable, Hashable, Sendable {
     }
 }
 
+public enum NewPendingCoachInvocationRequestError: Error, Equatable, Sendable {
+    case pendingAlreadyExists
+    case draftMismatch
+    case failedPending
+}
+
+/// One exact new-Send intent observed by Chat before Invocation persistence
+/// acquires Library-wide liveness. Persistence installs this Pending only while
+/// it owns that liveness namespace.
+public struct NewPendingCoachInvocationRequest: Equatable, Sendable {
+    public let library: LibraryScope
+    public let observedAggregate: ChatAggregate
+    public let pendingUserTurn: PendingUserTurn
+
+    public init(
+        library: LibraryScope,
+        observedAggregate: ChatAggregate,
+        pendingUserTurn: PendingUserTurn
+    ) throws {
+        guard observedAggregate.pendingUserTurn == nil else {
+            throw NewPendingCoachInvocationRequestError.pendingAlreadyExists
+        }
+        guard pendingUserTurn.draftID == observedAggregate.chat.draft.draftID,
+              pendingUserTurn.draftVersion == observedAggregate.chat.draft.version
+        else {
+            throw NewPendingCoachInvocationRequestError.draftMismatch
+        }
+        guard pendingUserTurn.failure == nil else {
+            throw NewPendingCoachInvocationRequestError.failedPending
+        }
+        self.library = library
+        self.observedAggregate = observedAggregate
+        self.pendingUserTurn = pendingUserTurn
+    }
+
+    public var chatID: ChatID { observedAggregate.chat.id }
+
+    var lockMutation: LockPendingUserTurnMutation {
+        LockPendingUserTurnMutation(
+            library: library,
+            chatID: chatID,
+            pendingUserTurn: pendingUserTurn
+        )
+    }
+}
+
+/// Opaque, one-shot Application capability proving that persistence installed
+/// the exact Pending while retaining its Library and Pending-file authority.
+public struct PreparedPendingCoachInvocation: Equatable, Sendable {
+    public let request: PendingCoachInvocationRequest
+    public let aggregate: ChatAggregate
+    fileprivate let capabilityID: UUID
+
+    fileprivate init(
+        authority: InvocationPendingAuthority,
+        capabilityID: UUID = UUID()
+    ) {
+        request = authority.request
+        aggregate = authority.aggregate
+        self.capabilityID = capabilityID
+    }
+
+    init(preparing newRequest: NewPendingCoachInvocationRequest) throws {
+        let aggregate = try ChatAggregate(
+            chat: newRequest.observedAggregate.chat,
+            memory: newRequest.observedAggregate.memory,
+            pendingUserTurn: newRequest.pendingUserTurn
+        )
+        let request = PendingCoachInvocationRequest(
+            library: newRequest.library,
+            chatID: newRequest.chatID,
+            pendingUserTurnID: newRequest.pendingUserTurn.id
+        )
+        self.init(
+            authority: try InvocationPendingAuthority(
+                request: request,
+                aggregate: aggregate
+            )
+        )
+    }
+}
+
+public enum NewPendingCoachInvocationOutcome: Equatable, Sendable {
+    case prepared(PreparedPendingCoachInvocation)
+    case stale(ChatAggregate)
+    case frozen(FrozenChatSnapshot)
+    case readOnlyLibrary
+    case activeInvocation
+    case failed
+}
+
 public enum InvocationRejectionReason: Equatable, Sendable {
     case eligibilityChanged
     case activeInvocation
@@ -64,6 +155,18 @@ public protocol Invocations: Sendable {
     func admissionAvailability(
         in library: LibraryScope
     ) async -> InvocationAdmissionAvailability
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome
 
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome
 }
@@ -124,6 +227,16 @@ public enum InvocationPendingResolutionOutcome: Equatable, Sendable {
 public enum InvocationPendingAcquisitionOutcome: Equatable, Sendable {
     case acquired(InvocationPendingAuthority)
     case ineligible(ChatAggregate?)
+    case activeExists
+    case unavailable
+}
+
+@_spi(InvocationInfrastructure)
+public enum InvocationPendingPreparationOutcome: Equatable, Sendable {
+    case prepared(InvocationPendingAuthority)
+    case stale(ChatAggregate)
+    case frozen(FrozenChatSnapshot)
+    case readOnlyLibrary
     case activeExists
     case unavailable
 }
@@ -274,6 +387,13 @@ public enum InvocationPublicationOutcome: Equatable, Sendable {
 
 @_spi(InvocationInfrastructure)
 public protocol InvocationPersistencePort: Sendable {
+    /// Acquires Library-wide Invocation liveness before atomically installing
+    /// and binding the exact new Pending. Every non-prepared result owns no
+    /// liveness lease.
+    func prepareNewPendingInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> InvocationPendingPreparationOutcome
+
     /// Acquires the Library-wide Invocation liveness authority before reading
     /// and resolving this exact Pending. Any non-acquired result owns no lease.
     func acquirePendingInvocation(
@@ -396,6 +516,16 @@ struct DeterministicSyntheticCoachProvider: SyntheticCoachProviderPort {
 }
 
 public actor DefaultInvocations: Invocations {
+    private struct PublicationRecoveryIntent: Sendable {
+        let mutation: PublishCoachInvocationMutation
+        let quote: CoachContextQuote
+    }
+
+    private struct OperationalRetrySnapshot: Sendable {
+        let fallback: ChatAggregate
+        let publication: PublicationRecoveryIntent?
+    }
+
     static let maximumLaunchIdentityCandidates = 4
     private let persistence: any InvocationPersistencePort
     private let admission: any InvocationAdmissionPort
@@ -404,8 +534,9 @@ public actor DefaultInvocations: Invocations {
     private let clock: any ChatClock
     private let identities: any InvocationIdentityGenerating
     private var inFlightRequests: Set<PendingCoachInvocationRequest> = []
+    private var preparedAuthorities: [UUID: InvocationPendingAuthority] = [:]
     private var operationalRetrySnapshots: [
-        PendingCoachInvocationRequest: ChatAggregate
+        PendingCoachInvocationRequest: OperationalRetrySnapshot
     ] = [:]
 
     init(
@@ -442,6 +573,58 @@ public actor DefaultInvocations: Invocations {
         self.identities = identities
     }
 
+    public func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        switch await persistence.prepareNewPendingInvocation(request) {
+        case let .prepared(authority):
+            let prepared = PreparedPendingCoachInvocation(authority: authority)
+            preparedAuthorities[prepared.capabilityID] = authority
+            return .prepared(prepared)
+        case let .stale(current):
+            return .stale(current)
+        case let .frozen(frozen):
+            return .frozen(frozen)
+        case .readOnlyLibrary:
+            return .readOnlyLibrary
+        case .activeExists:
+            return .activeInvocation
+        case .unavailable:
+            return .failed
+        }
+    }
+
+    public func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {
+        guard let authority = preparedAuthorities[prepared.capabilityID],
+              authority.request == prepared.request,
+              authority.aggregate == prepared.aggregate
+        else { return }
+        preparedAuthorities.removeValue(forKey: prepared.capabilityID)
+        await persistence.cancelInvocationReservation(authority.request)
+    }
+
+    public func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        guard let authority = preparedAuthorities[prepared.capabilityID],
+              authority.request == prepared.request,
+              authority.aggregate == prepared.aggregate
+        else {
+            return .rejected(nil, .eligibilityChanged)
+        }
+        preparedAuthorities.removeValue(forKey: prepared.capabilityID)
+        let request = prepared.request
+        guard inFlightRequests.insert(request).inserted else {
+            await persistence.cancelInvocationReservation(request)
+            return .rejected(nil, .activeInvocation)
+        }
+        defer { inFlightRequests.remove(request) }
+
+        return await invoke(request, firstAuthority: authority)
+    }
+
     public func tryInvoke(
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationTryOutcome {
@@ -466,6 +649,13 @@ public actor DefaultInvocations: Invocations {
             return .rejected(nil, .persistenceUnavailable)
         }
 
+        return await invoke(request, firstAuthority: firstAuthority)
+    }
+
+    private func invoke(
+        _ request: PendingCoachInvocationRequest,
+        firstAuthority: InvocationPendingAuthority
+    ) async -> InvocationTryOutcome {
         let draft = firstAuthority.aggregate.chat.draft
         guard draft.text.utf8.count <= CoachContextInputLimits.maximumUserMessageUTF8Bytes else {
             return await reject(
@@ -689,13 +879,21 @@ public actor DefaultInvocations: Invocations {
             return await interruptAndAbort(
                 invocation,
                 fallback: current ?? finalAuthority.aggregate,
-                reason: .publicationConflict
+                reason: .publicationConflict,
+                publication: PublicationRecoveryIntent(
+                    mutation: publication,
+                    quote: prepared.quote
+                )
             )
         case .failed:
             return await interruptAndAbort(
                 invocation,
                 fallback: finalAuthority.aggregate,
-                reason: .persistenceUnavailable
+                reason: .persistenceUnavailable,
+                publication: PublicationRecoveryIntent(
+                    mutation: publication,
+                    quote: prepared.quote
+                )
             )
         }
     }
@@ -710,13 +908,28 @@ public actor DefaultInvocations: Invocations {
     private func interruptAndAbort(
         _ invocation: CoachInvocation,
         fallback: ChatAggregate,
-        reason: InvocationInterruptionReason
+        reason: InvocationInterruptionReason,
+        publication: PublicationRecoveryIntent? = nil
     ) async -> InvocationTryOutcome {
         switch await persistence.abortInstalledNewSend(invocation) {
         case let .committed(aggregate):
-            .interrupted(aggregate, reason)
+            if let published = publishedOutcome(
+                ifExact: aggregate,
+                publication: publication
+            ) {
+                published
+            } else {
+                .interrupted(aggregate, reason)
+            }
         case let .stale(current):
-            .interrupted(current ?? fallback, reason)
+            if let published = publishedOutcome(
+                ifExact: current,
+                publication: publication
+            ) {
+                published
+            } else {
+                .interrupted(current ?? fallback, reason)
+            }
         case .failed:
             await interruptionAfterTerminalFailure(
                 request: PendingCoachInvocationRequest(
@@ -724,7 +937,8 @@ public actor DefaultInvocations: Invocations {
                     chatID: invocation.chatID,
                     pendingUserTurnID: invocation.pendingUserTurnID
                 ),
-                fallback: fallback
+                fallback: fallback,
+                publication: publication
             )
         }
     }
@@ -748,24 +962,59 @@ public actor DefaultInvocations: Invocations {
 
     private func interruptionAfterTerminalFailure(
         request: PendingCoachInvocationRequest,
-        fallback: ChatAggregate
+        fallback: ChatAggregate,
+        publication: PublicationRecoveryIntent? = nil
     ) async -> InvocationTryOutcome {
         switch await persistence.recoverPendingAfterTerminalFailure(request) {
         case let .eligible(authority):
+            if let published = publishedOutcome(
+                ifExact: authority.aggregate,
+                publication: publication
+            ) {
+                return published
+            }
             return interruptionOutcome(
                 current: authority.aggregate,
                 request: request
             )
         case let .ineligible(current):
+            if let published = publishedOutcome(
+                ifExact: current,
+                publication: publication
+            ) {
+                return published
+            }
             return interruptionOutcome(current: current, request: request)
         case .unavailable:
-            operationalRetrySnapshots[request] = fallback
+            operationalRetrySnapshots[request] = OperationalRetrySnapshot(
+                fallback: fallback,
+                publication: publication
+            )
             return .operationallyInterrupted(
                 fallback,
                 request,
                 .persistenceUnavailable
             )
         }
+    }
+
+    private func publishedOutcome(
+        ifExact aggregate: ChatAggregate?,
+        publication: PublicationRecoveryIntent?
+    ) -> InvocationTryOutcome? {
+        guard let aggregate,
+              let publication,
+              aggregate == publication.mutation.replacement
+        else { return nil }
+        let request = PendingCoachInvocationRequest(
+            library: LibraryScope(
+                libraryID: publication.mutation.invocation.libraryID
+            ),
+            chatID: publication.mutation.invocation.chatID,
+            pendingUserTurnID: publication.mutation.invocation.pendingUserTurnID
+        )
+        operationalRetrySnapshots.removeValue(forKey: request)
+        return .published(aggregate, publication.quote)
     }
 
     private func interruptionOutcome(
@@ -781,7 +1030,10 @@ public actor DefaultInvocations: Invocations {
             return .interrupted(current, .persistenceUnavailable)
         }
         guard pending.failure != nil else {
-            operationalRetrySnapshots[request] = current
+            operationalRetrySnapshots[request] = OperationalRetrySnapshot(
+                fallback: current,
+                publication: nil
+            )
             return .operationallyInterrupted(
                 current,
                 request,
@@ -795,11 +1047,20 @@ public actor DefaultInvocations: Invocations {
     private func recoverOperationalRetryIfNeeded(
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationTryOutcome? {
-        guard let fallback = operationalRetrySnapshots[request] else { return nil }
+        guard let snapshot = operationalRetrySnapshots[request] else { return nil }
         switch await persistence.recoverPendingAfterTerminalFailure(request) {
         case let .eligible(authority):
+            if let published = publishedOutcome(
+                ifExact: authority.aggregate,
+                publication: snapshot.publication
+            ) {
+                return published
+            }
             guard authority.pendingUserTurn.failure != nil else {
-                operationalRetrySnapshots[request] = authority.aggregate
+                operationalRetrySnapshots[request] = OperationalRetrySnapshot(
+                    fallback: authority.aggregate,
+                    publication: snapshot.publication
+                )
                 return .operationallyInterrupted(
                     authority.aggregate,
                     request,
@@ -809,11 +1070,17 @@ public actor DefaultInvocations: Invocations {
             operationalRetrySnapshots.removeValue(forKey: request)
             return nil
         case let .ineligible(current):
+            if let published = publishedOutcome(
+                ifExact: current,
+                publication: snapshot.publication
+            ) {
+                return published
+            }
             operationalRetrySnapshots.removeValue(forKey: request)
             return .rejected(current, .eligibilityChanged)
         case .unavailable:
             return .operationallyInterrupted(
-                fallback,
+                snapshot.fallback,
                 request,
                 .persistenceUnavailable
             )

@@ -859,25 +859,39 @@ public actor DefaultChatFeature: ChatFeature {
         gateway: any Invocations,
         context: ChatCommandContext
     ) async {
-        let lockOutcome = await store.lockPendingUserTurn(
-            LockPendingUserTurnMutation(
+        let preparationRequest: NewPendingCoachInvocationRequest
+        do {
+            preparationRequest = try NewPendingCoachInvocationRequest(
                 library: context.libraryScope,
-                chatID: aggregate.chat.id,
+                observedAggregate: aggregate,
                 pendingUserTurn: pending
             )
-        )
-        guard isActive(context) else { return }
-        let locked: ChatAggregate
-        switch lockOutcome {
-        case let .committed(current)
-            where current.chat.id == aggregate.chat.id &&
-            current.pendingUserTurn == pending:
-            locked = current
+        } catch {
+            state = replacing(activity: nil, notice: .pendingUserTurnFailed)
+            publish()
+            return
+        }
+        let preparation = await gateway.prepareNewInvocation(preparationRequest)
+        guard isCurrent(context) else {
+            if case let .prepared(prepared) = preparation {
+                await gateway.abandonPreparedInvocation(prepared)
+            }
+            return
+        }
+        let prepared: PreparedPendingCoachInvocation
+        switch preparation {
+        case let .prepared(value)
+            where value.aggregate.chat.id == aggregate.chat.id &&
+            value.aggregate.pendingUserTurn == pending &&
+            value.request.library == context.libraryScope &&
+            value.request.chatID == aggregate.chat.id &&
+            value.request.pendingUserTurnID == pending.id:
+            prepared = value
             install(
-                current,
-                selection: .open(current),
+                value.aggregate,
+                selection: .open(value.aggregate),
                 notice: nil,
-                activity: .invokingCoach(current.chat.id)
+                activity: .invokingCoach(value.aggregate.chat.id)
             )
         case let .stale(current):
             install(current, selection: .open(current), notice: .draftChanged)
@@ -889,23 +903,26 @@ public actor DefaultChatFeature: ChatFeature {
             state = replacing(activity: nil, notice: .readOnlyLibrary)
             publish()
             return
-        case .collision, .profileStatementGenerationChanged, .failed, .committed:
+        case .activeInvocation:
+            applyInvocationOutcome(.rejected(nil, .activeInvocation))
+            return
+        case let .prepared(value):
+            await gateway.abandonPreparedInvocation(value)
+            state = replacing(activity: nil, notice: .pendingUserTurnFailed)
+            publish()
+            return
+        case .failed:
             state = replacing(activity: nil, notice: .pendingUserTurnFailed)
             publish()
             return
         }
 
-        let request = PendingCoachInvocationRequest(
-            library: context.libraryScope,
-            chatID: locked.chat.id,
-            pendingUserTurnID: pending.id
-        )
-        let outcome = await gateway.tryInvoke(request)
+        let outcome = await gateway.tryInvoke(prepared)
         guard isActive(context) else { return }
         applyInvocationOutcome(outcome)
         await refreshSelectionIfInvocationEligibilityVanished(
             outcome,
-            request: request,
+            request: prepared.request,
             context: context
         )
         await refreshAdmissionAvailability(in: context)

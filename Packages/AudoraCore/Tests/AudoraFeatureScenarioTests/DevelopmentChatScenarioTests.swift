@@ -849,6 +849,29 @@ private actor ScenarioContextInvocationGateway: ScenarioMeasuringInvocations {
         .available
     }
 
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        switch await store.lockPendingUserTurn(request.lockMutation) {
+        case .committed:
+            return .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+        case let .stale(current): return .stale(current)
+        case let .frozen(frozen): return .frozen(frozen)
+        case .readOnlyLibrary: return .readOnlyLibrary
+        default: return .failed
+        }
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
+
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
         callCount += 1
         guard let locked = await store.invocationSnapshot(request.chatID),
@@ -920,6 +943,25 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
         return await coordinator.tryInvoke(request)
     }
 
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        await coordinator.prepareNewInvocation(request)
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {
+        await coordinator.abandonPreparedInvocation(prepared)
+    }
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        invocationCalls += 1
+        return await coordinator.tryInvoke(prepared)
+    }
+
     func admissionAvailability(
         in library: LibraryScope
     ) async -> InvocationAdmissionAvailability {
@@ -941,6 +983,30 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
     private var active: CoachInvocation?
 
     init(store: ChatScenarioStore) { self.store = store }
+
+    func prepareNewPendingInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> InvocationPendingPreparationOutcome {
+        guard active == nil, reserved == nil else { return .activeExists }
+        switch await store.lockPendingUserTurn(request.lockMutation) {
+        case let .committed(aggregate):
+            let pendingRequest = PendingCoachInvocationRequest(
+                library: request.library,
+                chatID: request.chatID,
+                pendingUserTurnID: request.pendingUserTurn.id
+            )
+            guard let authority = try? InvocationPendingAuthority(
+                request: pendingRequest,
+                aggregate: aggregate
+            ) else { return .unavailable }
+            reserved = pendingRequest
+            return .prepared(authority)
+        case let .stale(current): return .stale(current)
+        case let .frozen(frozen): return .frozen(frozen)
+        case .readOnlyLibrary: return .readOnlyLibrary
+        default: return .unavailable
+        }
+    }
 
     func acquirePendingInvocation(
         _ request: PendingCoachInvocationRequest

@@ -24,6 +24,192 @@ private extension PortableInvocationStore {
 }
 
 final class PortableLibraryWorkspaceTests: XCTestCase {
+    func testPreparedNewPendingIsNeverRecoverableBetweenExactBindingAndHandoff() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let baseline = PortableChatPersistence()
+            guard case let .committed(unlocked) = try baseline.discardPendingUserTurn(
+                DiscardPendingUserTurnMutation(
+                    library: fixture.scope,
+                    chatID: fixture.locked.chat.id,
+                    pendingUserTurn: fixture.install.authority.pendingUserTurn
+                ),
+                at: fixture.root
+            ) else { return XCTFail("Pending setup did not unlock") }
+            guard case .committed = try baseline.discardPendingUserTurn(
+                DiscardPendingUserTurnMutation(
+                    library: fixture.scope,
+                    chatID: fixture.competingAuthority.request.chatID,
+                    pendingUserTurn: fixture.competingAuthority.pendingUserTurn
+                ),
+                at: fixture.root
+            ) else { return XCTFail("sibling Pending setup did not unlock") }
+            let request = try NewPendingCoachInvocationRequest(
+                library: fixture.scope,
+                observedAggregate: unlocked,
+                pendingUserTurn: fixture.install.authority.pendingUserTurn
+            )
+            let suspension = SuspendedInvocationAcquisition()
+            let owner = PortableInvocationStore(
+                persistence: PortableChatPersistence { point in
+                    guard point == .afterPendingInvocationAuthorityBound else { return }
+                    suspension.suspend()
+                },
+                workspace: fixture.workspace
+            )
+            let recoveryWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await recoveryWorkspace.chooseLibrary()
+            let recoveringChats = PortableChatStore(workspace: recoveryWorkspace)
+
+            async let preparation = owner.prepareNewPendingInvocation(request)
+            await suspension.waitUntilSuspended()
+
+            guard case let .loaded(entries) = await recoveringChats.loadCatalog(
+                in: fixture.scope
+            ) else {
+                suspension.resume()
+                return XCTFail("catalog recovery did not load")
+            }
+            let live = entries.compactMap { entry -> ChatAggregate? in
+                guard case let .available(aggregate) = entry,
+                      aggregate.chat.id == request.chatID
+                else { return nil }
+                return aggregate
+            }.first
+            XCTAssertEqual(live?.pendingUserTurn, request.pendingUserTurn)
+            XCTAssertNil(live?.pendingUserTurn?.failure)
+
+            suspension.resume()
+            guard case let .prepared(authority) = await preparation else {
+                return XCTFail("new Send did not retain its bound authority")
+            }
+            XCTAssertEqual(authority.aggregate.pendingUserTurn, request.pendingUserTurn)
+            XCTAssertNil(authority.pendingUserTurn.failure)
+            await owner.cancelInvocationReservation(authority.request)
+        }
+    }
+
+    func testRecoveryOwnerPreventsPendingInstallAndLeavesDraftUnchanged() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let baseline = PortableChatPersistence()
+            guard case let .committed(unlocked) = try baseline.discardPendingUserTurn(
+                DiscardPendingUserTurnMutation(
+                    library: fixture.scope,
+                    chatID: fixture.locked.chat.id,
+                    pendingUserTurn: fixture.install.authority.pendingUserTurn
+                ),
+                at: fixture.root
+            ) else { return XCTFail("Pending setup did not unlock") }
+            let request = try NewPendingCoachInvocationRequest(
+                library: fixture.scope,
+                observedAggregate: unlocked,
+                pendingUserTurn: fixture.install.authority.pendingUserTurn
+            )
+            let suspension = SuspendedInvocationAcquisition()
+            let recoveryWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await recoveryWorkspace.chooseLibrary()
+            let recoveringChats = PortableChatStore(
+                persistence: PortableChatPersistence { point in
+                    guard point == .beforeInvocationReconciliation else { return }
+                    suspension.suspend()
+                },
+                workspace: recoveryWorkspace
+            )
+            let owner = PortableInvocationStore(workspace: fixture.workspace)
+
+            async let catalog = recoveringChats.loadCatalog(in: fixture.scope)
+            await suspension.waitUntilSuspended()
+
+            let preparation = await owner.prepareNewPendingInvocation(request)
+            XCTAssertEqual(
+                preparation,
+                .activeExists
+            )
+            guard case let .readWrite(duringRecovery) = try baseline.load(
+                request.chatID,
+                at: fixture.root,
+                in: fixture.scope
+            ) else {
+                suspension.resume()
+                return XCTFail("Chat did not remain readable")
+            }
+            XCTAssertEqual(duringRecovery, unlocked)
+
+            suspension.resume()
+            guard case .loaded = await catalog else {
+                return XCTFail("recovery did not finish")
+            }
+        }
+    }
+
+    func testPreparedNewPendingReconcilesEveryPostcommitLockFaultWhileStillOwned() async throws {
+        let points: [PortableChatFaultPoint] = [
+            .afterPendingInstall,
+            .afterPendingDirectoryFlush,
+            .beforePendingFinalRead,
+            .afterPendingInvocationAuthorityBound,
+        ]
+        for point in points {
+            try await withTemporaryParent { parent in
+                let fixture = try await makeInvocationStoreFixture(in: parent)
+                let baseline = PortableChatPersistence()
+                guard case let .committed(unlocked) = try baseline
+                    .discardPendingUserTurn(
+                        DiscardPendingUserTurnMutation(
+                            library: fixture.scope,
+                            chatID: fixture.locked.chat.id,
+                            pendingUserTurn: fixture.install.authority.pendingUserTurn
+                        ),
+                        at: fixture.root
+                    ),
+                    case .committed = try baseline.discardPendingUserTurn(
+                        DiscardPendingUserTurnMutation(
+                            library: fixture.scope,
+                            chatID: fixture.competingAuthority.request.chatID,
+                            pendingUserTurn: fixture.competingAuthority.pendingUserTurn
+                        ),
+                        at: fixture.root
+                    )
+                else { return XCTFail("Pending setup did not unlock") }
+                let request = try NewPendingCoachInvocationRequest(
+                    library: fixture.scope,
+                    observedAggregate: unlocked,
+                    pendingUserTurn: fixture.install.authority.pendingUserTurn
+                )
+                let store = PortableInvocationStore(
+                    persistence: PortableChatPersistence { reached in
+                        if reached == point {
+                            throw PortableChatPersistenceError.injectedFault(point)
+                        }
+                    },
+                    workspace: fixture.workspace
+                )
+
+                guard case let .prepared(authority) = await store
+                    .prepareNewPendingInvocation(request)
+                else {
+                    return XCTFail("exact committed Pending was lost at \(point)")
+                }
+                XCTAssertEqual(authority.aggregate.pendingUserTurn, request.pendingUserTurn)
+                XCTAssertNil(authority.pendingUserTurn.failure)
+                await store.cancelInvocationReservation(authority.request)
+            }
+        }
+    }
+
     func testCatalogLoadCannotReconcilePendingBetweenAtomicResolutionAndOwnership() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)
@@ -1108,6 +1294,44 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 fixture.competingAuthority.request
             )
             XCTAssertEqual(next, .none)
+        }
+    }
+
+    func testCommittedPublicationSurvivesFailedImmediateReconciliationAndRecoveryReread() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let persistence = PortableChatPersistence { point in
+                if point == .afterPublicationManifestInstall
+                    || point == .beforePublicationReconciliationRead
+                {
+                    throw PortableChatPersistenceError.injectedFault(point)
+                }
+            }
+            let store = PortableInvocationStore(
+                persistence: persistence,
+                workspace: fixture.workspace
+            )
+            let acquired = await store.acquirePendingInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(acquired, .acquired(fixture.install.authority))
+            guard case .installed = await store.installInvocation(fixture.install) else {
+                return XCTFail("Invocation was not installed")
+            }
+
+            let publish = await store.publish(fixture.publication)
+            XCTAssertEqual(publish, .failed)
+            let abort = await store.abortInstalledNewSend(
+                fixture.install.invocation
+            )
+            XCTAssertEqual(abort, .stale(fixture.publication.replacement))
+            let recovery = await store.recoverPendingAfterTerminalFailure(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(
+                recovery,
+                .ineligible(fixture.publication.replacement)
+            )
         }
     }
 
