@@ -270,89 +270,184 @@ final class PortableInvocationStoreTests: XCTestCase {
     func testTypedTerminalIntentIsDurableBeforePendingMutationAndCannotBeDowngraded()
         async throws
     {
-        try await withTemporaryParent { parent in
-            let fixture = try await makeInvocationStoreFixture(
-                in: parent,
-                pendingFailure: .coachContextCannotFit
-            )
-            let intentFault = OneShot()
-            let persistence = PortableChatPersistence { point in
-                if point == .afterInvocationTerminalIntentDirectoryFlush,
-                   intentFault.take()
-                {
-                    throw PortableChatPersistenceError.injectedFault(point)
-                }
-            }
-            let lease = try XCTUnwrap(
-                persistence.acquireInvocationLivenessLease(
-                    at: fixture.root,
-                    in: fixture.scope,
-                    for: fixture.install.authority.request
-                )
-            )
-            guard case .installed = try persistence.installInvocation(
-                fixture.install,
-                at: fixture.root,
-                holding: lease
-            ) else { return XCTFail("Retry Invocation was not installed") }
-
-            XCTAssertThrowsError(
-                try persistence.abortInstalledNewSend(
-                    fixture.install.invocation,
-                    failure: .coachResponseInvalid,
-                    at: fixture.root,
-                    in: fixture.scope,
-                    holding: lease
-                )
-            )
-            XCTAssertFalse(intentFault.take(), "terminal-intent fault was not reached")
-
-            let chatRoot = fixture.root
-                .appendingPathComponent("chats", isDirectory: true)
-                .appendingPathComponent(
-                    fixture.locked.chat.id.rawValue,
-                    isDirectory: true
-                )
-            let pendingObject = try XCTUnwrap(
-                JSONSerialization.jsonObject(
-                    with: Data(contentsOf: chatRoot.appendingPathComponent(
-                        "pending-user-turn.json"
-                    ))
-                ) as? [String: Any]
-            )
-            XCTAssertNil(pendingObject["failure"])
-
-            let invocationURL = fixture.root
-                .appendingPathComponent("invocations", isDirectory: true)
-                .appendingPathComponent(
-                    fixture.install.invocation.id.rawValue,
-                    isDirectory: true
-                )
-                .appendingPathComponent("invocation.json")
-            let invocationText = try XCTUnwrap(
-                String(data: Data(contentsOf: invocationURL), encoding: .utf8)
-            )
-            XCTAssertTrue(invocationText.contains("coachResponseInvalid"))
-            XCTAssertFalse(invocationText.contains("providerIdempotencyValue"))
-
-            lease.release()
-            let relaunchedWorkspace = PortableLibraryWorkspace(
-                locations: QueueLocations(existing: [fixture.root]),
-                bookmarks: SyntheticBookmarks(),
-                access: RecordingAccessGrantor(),
-                locatorStore: MemoryLocatorStore(),
-                revealer: RecordingRevealer()
-            )
-            _ = await relaunchedWorkspace.chooseLibrary()
-            let chats = PortableChatStore(workspace: relaunchedWorkspace)
-            guard case let .loaded(reopened) = await chats.load(
-                fixture.locked.chat.id,
-                in: fixture.scope
-            ) else { return XCTFail("terminal intent was not reconciled") }
-            XCTAssertEqual(
-                reopened.pendingUserTurn?.failure,
+        let cases: [(PortableChatFaultPoint, PendingUserTurnFailure)] = [
+            (
+                .beforeInvocationTerminalIntentPartialWrite,
+                .coachResponseInterrupted
+            ),
+            (
+                .afterInvocationTerminalIntentPartialWrite,
+                .coachResponseInterrupted
+            ),
+            (
+                .afterInvocationTerminalIntentFileFlush,
+                .coachResponseInterrupted
+            ),
+            (
+                .afterInvocationTerminalIntentInstall,
                 .coachResponseInvalid
-            )
+            ),
+            (
+                .afterInvocationTerminalIntentDirectoryFlush,
+                .coachResponseInvalid
+            ),
+        ]
+        try await withTemporaryParent { parent in
+            for (index, testCase) in cases.enumerated() {
+                let (point, expectedFailure) = testCase
+                let label = String(describing: point)
+                let caseParent = parent.appendingPathComponent(
+                    "terminal-intent-\(index)",
+                    isDirectory: true
+                )
+                try FileManager.default.createDirectory(
+                    at: caseParent,
+                    withIntermediateDirectories: false
+                )
+                let transcriptHandle = try CoachProviderTranscriptHandle(
+                    "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+                )
+                let fixture = try await makeInvocationStoreFixture(
+                    in: caseParent,
+                    libraryID: "lib-20260830T12010\(index)000Z-2ABC",
+                    pendingFailure: .coachContextCannotFit,
+                    transcriptHandles: [transcriptHandle]
+                )
+                let transport = try XCTUnwrap(
+                    fixture.install.invocation.attempt.transportAuthority
+                )
+                let intentFault = OneShot()
+                let persistence = PortableChatPersistence { reached in
+                    if reached == point, intentFault.take() {
+                        throw PortableChatPersistenceError.injectedFault(reached)
+                    }
+                }
+                let lease = try XCTUnwrap(
+                    persistence.acquireInvocationLivenessLease(
+                        at: fixture.root,
+                        in: fixture.scope,
+                        for: fixture.install.authority.request
+                    )
+                )
+                guard case .installed = try persistence.installInvocation(
+                    fixture.install,
+                    at: fixture.root,
+                    holding: lease
+                ) else { return XCTFail("Retry Invocation was not installed: \(label)") }
+
+                XCTAssertThrowsError(
+                    try persistence.abortInstalledNewSend(
+                        fixture.install.invocation,
+                        failure: .coachResponseInvalid,
+                        at: fixture.root,
+                        in: fixture.scope,
+                        holding: lease
+                    ),
+                    label
+                )
+                XCTAssertFalse(
+                    intentFault.take(),
+                    "terminal-intent fault was not reached: \(label)"
+                )
+
+                let chatRoot = fixture.root
+                    .appendingPathComponent("chats", isDirectory: true)
+                    .appendingPathComponent(
+                        fixture.locked.chat.id.rawValue,
+                        isDirectory: true
+                    )
+                let pendingObject = try XCTUnwrap(
+                    JSONSerialization.jsonObject(
+                        with: Data(contentsOf: chatRoot.appendingPathComponent(
+                            "pending-user-turn.json"
+                        ))
+                    ) as? [String: Any]
+                )
+                XCTAssertNil(
+                    pendingObject["failure"],
+                    "terminal intent must precede Pending mutation: \(label)"
+                )
+
+                let invocationRoot = fixture.root
+                    .appendingPathComponent("invocations", isDirectory: true)
+                    .appendingPathComponent(
+                        fixture.install.invocation.id.rawValue,
+                        isDirectory: true
+                    )
+                let invocationURL = invocationRoot.appendingPathComponent(
+                    "invocation.json"
+                )
+                let invocationText = try XCTUnwrap(
+                    String(data: Data(contentsOf: invocationURL), encoding: .utf8)
+                )
+                XCTAssertEqual(
+                    invocationText.contains("coachResponseInvalid"),
+                    expectedFailure == .coachResponseInvalid,
+                    "rename is the terminal-intent commit boundary: \(label)"
+                )
+                XCTAssertFalse(
+                    invocationText.contains("providerIdempotencyValue"),
+                    label
+                )
+                XCTAssertFalse(
+                    invocationText.contains(transport.providerIdempotencyValue.rawValue),
+                    label
+                )
+                XCTAssertFalse(invocationText.contains("transcriptHandles"), label)
+                XCTAssertFalse(invocationText.contains(transcriptHandle.rawValue), label)
+                XCTAssertFalse(
+                    try FileManager.default.contentsOfDirectory(
+                        atPath: invocationRoot.path
+                    ).contains(where: { $0.hasSuffix(".partial") }),
+                    label
+                )
+
+                lease.release()
+                let relaunchedWorkspace = PortableLibraryWorkspace(
+                    locations: QueueLocations(existing: [fixture.root]),
+                    bookmarks: SyntheticBookmarks(),
+                    access: RecordingAccessGrantor(),
+                    locatorStore: MemoryLocatorStore(),
+                    revealer: RecordingRevealer()
+                )
+                _ = await relaunchedWorkspace.chooseLibrary()
+                let chats = PortableChatStore(workspace: relaunchedWorkspace)
+                guard case let .loaded(reopened) = await chats.load(
+                    fixture.locked.chat.id,
+                    in: fixture.scope
+                ) else { return XCTFail("terminal intent was not reconciled: \(label)") }
+
+                XCTAssertEqual(
+                    reopened.pendingUserTurn,
+                    fixture.locked.pendingUserTurn?.replacingFailure(expectedFailure),
+                    label
+                )
+                XCTAssertNotEqual(
+                    reopened.pendingUserTurn?.failure,
+                    .coachContextCannotFit,
+                    "recovery must not restore the stale pre-Retry failure: \(label)"
+                )
+                XCTAssertEqual(reopened.chat.messageIDs, [], label)
+                XCTAssertFalse(
+                    try PortableChatPersistence().hasActiveInvocation(
+                        at: fixture.root,
+                        in: fixture.scope
+                    ),
+                    label
+                )
+                XCTAssertFalse(
+                    FileManager.default.fileExists(atPath: invocationRoot.path),
+                    label
+                )
+                let chatNames = try FileManager.default.contentsOfDirectory(
+                    atPath: chatRoot.path
+                )
+                XCTAssertFalse(chatNames.contains("aborting-invocation.json"), label)
+                XCTAssertFalse(
+                    chatNames.contains(where: { $0.hasSuffix(".partial") }),
+                    label
+                )
+            }
         }
     }
 

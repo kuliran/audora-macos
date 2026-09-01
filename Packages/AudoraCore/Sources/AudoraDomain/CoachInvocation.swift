@@ -337,6 +337,18 @@ public enum CoachInvocationError: Error, Equatable, Sendable {
     case invalidTerminalFailure
 }
 
+/// A generated live Attempt identity conflicts with authority already consumed
+/// by this Invocation. Callers may regenerate only these values; every other
+/// validation failure remains fail-closed.
+public enum CoachInvocationAttemptInstallError: Error, Equatable, Sendable {
+    case attemptIDCollision
+    case providerIdempotencyValueCollision
+    case userMessageIDCollision
+    case coachMessageIDCollision
+    case freshDraftIDCollision
+    case transcriptHandleCollision
+}
+
 /// Durable top-level authority for one admitted Coach operation. Its identity,
 /// intent, admission, and frozen semantic context stay stable while the nested
 /// current Attempt is atomically replaced.
@@ -481,35 +493,39 @@ public struct CoachInvocation: Equatable, Sendable {
               attempts.count < Int(CoachProviderAttempt.maximumOrdinal),
               next.ordinal == attempt.ordinal + 1,
               attempt.kind == .standard,
-              Set(attempts.map(\.id)).isDisjoint(with: [next.id]),
-              Set(attempts.compactMap {
-                  $0.transportAuthority?.providerIdempotencyValue
-              }).isDisjoint(
-                  with: [nextTransport.providerIdempotencyValue]
-              ),
-              Set(attempts.compactMap(\.userMessageID)).isDisjoint(
-                  with: [next.userMessageID].compactMap { $0 }
-              ),
-              Set(attempts.compactMap(\.coachMessageID)).isDisjoint(
-                  with: [next.coachMessageID].compactMap { $0 }
-              ),
-              Set(attempts.flatMap { attempt in
-                  [attempt.userMessageID, attempt.coachMessageID].compactMap { $0 }
-              }).isDisjoint(with: [
-                  next.userMessageID,
-                  next.coachMessageID,
-              ].compactMap { $0 }),
-              Set(attempts.compactMap(\.freshDraftID)).isDisjoint(
-                  with: [next.freshDraftID].compactMap { $0 }
-              ),
-              Set(attempts.compactMap(\.transportAuthority).flatMap(
-                  \.transcriptHandles
-              )).isDisjoint(
-                  with: nextTransport.transcriptHandles
-              ),
               nextTransport.transcriptHandles.count ==
               currentTransport.transcriptHandles.count
         else { throw CoachInvocationError.attemptPublicationAuthorityRequired }
+
+        guard Set(attempts.map(\.id)).isDisjoint(with: [next.id]) else {
+            throw CoachInvocationAttemptInstallError.attemptIDCollision
+        }
+        guard Set(attempts.compactMap {
+            $0.transportAuthority?.providerIdempotencyValue
+        }).isDisjoint(with: [nextTransport.providerIdempotencyValue]) else {
+            throw CoachInvocationAttemptInstallError.providerIdempotencyValueCollision
+        }
+        let priorMessageIDs = Set(attempts.flatMap { attempt in
+            [attempt.userMessageID, attempt.coachMessageID].compactMap { $0 }
+        })
+        guard let publicationAuthority = next.publicationAuthority,
+              !priorMessageIDs.contains(publicationAuthority.userMessageID)
+        else {
+            throw CoachInvocationAttemptInstallError.userMessageIDCollision
+        }
+        guard !priorMessageIDs.contains(publicationAuthority.coachMessageID) else {
+            throw CoachInvocationAttemptInstallError.coachMessageIDCollision
+        }
+        guard Set(attempts.compactMap(\.freshDraftID)).isDisjoint(
+            with: [publicationAuthority.freshDraftID]
+        ) else {
+            throw CoachInvocationAttemptInstallError.freshDraftIDCollision
+        }
+        guard Set(attempts.compactMap(\.transportAuthority).flatMap(
+            \.transcriptHandles
+        )).isDisjoint(with: nextTransport.transcriptHandles) else {
+            throw CoachInvocationAttemptInstallError.transcriptHandleCollision
+        }
         return try CoachInvocation(
             schemaVersion: Self.schemaVersion,
             id: id,

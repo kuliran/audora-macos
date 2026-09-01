@@ -425,6 +425,11 @@ public enum InvocationPendingMutationOutcome: Equatable, Sendable {
 }
 
 @_spi(InvocationInfrastructure)
+public enum InstallNextCoachProviderAttemptMutationError: Error, Equatable, Sendable {
+    case identityCollision(InvocationLaunchIdentityCollision)
+}
+
+@_spi(InvocationInfrastructure)
 public struct InstallNextCoachProviderAttemptMutation: Equatable, Sendable {
     public let base: CoachInvocation
     public let replacement: CoachInvocation
@@ -436,9 +441,22 @@ public struct InstallNextCoachProviderAttemptMutation: Equatable, Sendable {
     ) throws {
         self.base = base
         let nextOrdinal = base.attempt.ordinal + 1
-        replacement = try base.installingAttempt(
-            identity.makeAttempt(ordinal: nextOrdinal, kind: kind)
-        )
+        let next = try identity.makeAttempt(ordinal: nextOrdinal, kind: kind)
+        do {
+            replacement = try base.installingAttempt(next)
+        } catch let error as CoachInvocationAttemptInstallError {
+            let collision: InvocationLaunchIdentityCollision = switch error {
+            case .attemptIDCollision: .attemptID
+            case .providerIdempotencyValueCollision: .providerIdempotencyValue
+            case .userMessageIDCollision: .userMessageID
+            case .coachMessageIDCollision: .coachMessageID
+            case .freshDraftIDCollision: .freshDraftID
+            case .transcriptHandleCollision: .transcriptHandle
+            }
+            throw InstallNextCoachProviderAttemptMutationError.identityCollision(
+                collision
+            )
+        }
     }
 }
 
@@ -1347,6 +1365,12 @@ public actor DefaultInvocations: Invocations {
                     identity: identity,
                     kind: kind
                 )
+            } catch let error as InstallNextCoachProviderAttemptMutationError {
+                switch error {
+                case let .identityCollision(collision):
+                    lastCollision = collision
+                    continue
+                }
             } catch {
                 return .terminal(
                     await interruptAndAbort(

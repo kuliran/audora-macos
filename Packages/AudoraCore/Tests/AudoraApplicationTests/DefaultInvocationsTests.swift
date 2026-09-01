@@ -166,6 +166,67 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(claimCount, 1)
     }
 
+    func testSameInvocationIdentityCollisionRegeneratesBeforeInstallingNextAttempt() async throws {
+        for collision in SameInvocationCollisionIdentities.Collision.allCases {
+            let identities = SameInvocationCollisionIdentities(
+                collision: collision,
+                collidingCandidateCount: 1
+            )
+            let fixture = try InvocationFixture(
+                contextWindow: 100_000,
+                providerOutcomes: [
+                    .autoRetryableFailure,
+                    .complete(markdown: "A fresh second Attempt succeeds."),
+                ],
+                includesOnDemandAttachment: true,
+                identityGenerator: identities
+            )
+
+            guard case .published = await fixture.invocations.tryInvoke(fixture.request)
+            else {
+                return XCTFail("a fresh candidate must recover from \(collision)")
+            }
+
+            let generatedIdentityCount = await identities.generatedAttemptIdentityCount
+            let installedOrdinals = await fixture.persistence.installedAttemptOrdinals
+            let launchCount = await fixture.provider.launchCount
+            XCTAssertEqual(generatedIdentityCount, 3, "\(collision)")
+            XCTAssertEqual(installedOrdinals, [1, 2], "\(collision)")
+            XCTAssertEqual(launchCount, 2, "\(collision)")
+        }
+    }
+
+    func testSameInvocationIdentityCollisionExhaustionNeverLaunchesAnUnrecordedAttempt() async throws {
+        let identities = SameInvocationCollisionIdentities(
+            collision: .attemptID,
+            collidingCandidateCount: DefaultInvocations.maximumLaunchIdentityCandidates
+        )
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .complete(markdown: "Must not launch."),
+            ],
+            includesOnDemandAttachment: true,
+            identityGenerator: identities
+        )
+
+        guard case let .interrupted(aggregate, .persistenceUnavailable) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("bounded collision exhaustion must interrupt") }
+
+        let generatedIdentityCount = await identities.generatedAttemptIdentityCount
+        let installedOrdinals = await fixture.persistence.installedAttemptOrdinals
+        let launchCount = await fixture.provider.launchCount
+        XCTAssertEqual(
+            generatedIdentityCount,
+            DefaultInvocations.maximumLaunchIdentityCandidates + 1
+        )
+        XCTAssertEqual(installedOrdinals, [1])
+        XCTAssertEqual(launchCount, 1)
+        XCTAssertEqual(aggregate?.pendingUserTurn?.failure, .coachResponseInterrupted)
+    }
+
     func testOverflowUsesOneImmediateShorterCompleteRepairWithoutChangingSemanticBytes() async throws {
         let fixture = try InvocationFixture(
             contextWindow: 100_000,
@@ -2070,6 +2131,139 @@ private struct MalformedInitialAttemptIdentities: InvocationIdentityGenerating {
                 "drf-20260830T120000000Z-9YZ0"
             ),
             transcriptHandles: handles
+        )
+    }
+}
+
+private actor SameInvocationCollisionIdentities: InvocationIdentityGenerating {
+    enum Collision: CaseIterable, CustomStringConvertible, Equatable {
+        case attemptID
+        case providerIdempotencyValue
+        case userMessageID
+        case coachMessageID
+        case freshDraftID
+        case transcriptHandle
+
+        var description: String {
+            switch self {
+            case .attemptID: "Attempt ID"
+            case .providerIdempotencyValue: "provider idempotency value"
+            case .userMessageID: "user Message ID"
+            case .coachMessageID: "Coach Message ID"
+            case .freshDraftID: "fresh Draft ID"
+            case .transcriptHandle: "transcript handle"
+            }
+        }
+    }
+
+    private let collision: Collision
+    private let collidingCandidateCount: Int
+    private(set) var generatedAttemptIdentityCount = 0
+    private var generatedNextAttemptCandidateCount = 0
+
+    init(collision: Collision, collidingCandidateCount: Int) {
+        self.collision = collision
+        self.collidingCandidateCount = collidingCandidateCount
+    }
+
+    func generateInvocationID(at instant: UTCInstant) async -> CoachInvocationID {
+        try! CoachInvocationID("inv-20260830T120000000Z-5KMN")
+    }
+
+    func generateAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationAttemptIdentity {
+        generatedAttemptIdentityCount += 1
+        if ordinal == 1 {
+            return identity(
+                attemptSuffix: "6NPQ",
+                idempotencyValue: "synthetic-attempt-1",
+                userSuffix: "7RST",
+                coachSuffix: "8VWX",
+                draftSuffix: "9YZ0",
+                transcriptHandleOrdinal: 1,
+                transcriptHandleCount: transcriptHandleCount
+            )
+        }
+
+        generatedNextAttemptCandidateCount += 1
+        let shouldCollide = generatedNextAttemptCandidateCount <= collidingCandidateCount
+        var candidate = identity(
+            attemptSuffix: "A234",
+            idempotencyValue: "synthetic-attempt-2",
+            userSuffix: "B345",
+            coachSuffix: "C456",
+            draftSuffix: "D567",
+            transcriptHandleOrdinal: 2,
+            transcriptHandleCount: transcriptHandleCount
+        )
+        guard shouldCollide else { return candidate }
+
+        let first = identity(
+            attemptSuffix: "6NPQ",
+            idempotencyValue: "synthetic-attempt-1",
+            userSuffix: "7RST",
+            coachSuffix: "8VWX",
+            draftSuffix: "9YZ0",
+            transcriptHandleOrdinal: 1,
+            transcriptHandleCount: transcriptHandleCount
+        )
+        candidate = InvocationAttemptIdentity(
+            attemptID: collision == .attemptID ? first.attemptID : candidate.attemptID,
+            idempotencyValue: collision == .providerIdempotencyValue
+                ? first.idempotencyValue
+                : candidate.idempotencyValue,
+            userMessageID: collision == .userMessageID
+                ? first.userMessageID
+                : candidate.userMessageID,
+            coachMessageID: collision == .coachMessageID
+                ? first.coachMessageID
+                : candidate.coachMessageID,
+            freshDraftID: collision == .freshDraftID
+                ? first.freshDraftID
+                : candidate.freshDraftID,
+            transcriptHandles: collision == .transcriptHandle
+                ? first.transcriptHandles
+                : candidate.transcriptHandles
+        )
+        return candidate
+    }
+
+    private func identity(
+        attemptSuffix: String,
+        idempotencyValue: String,
+        userSuffix: String,
+        coachSuffix: String,
+        draftSuffix: String,
+        transcriptHandleOrdinal: Int,
+        transcriptHandleCount: Int
+    ) -> InvocationAttemptIdentity {
+        InvocationAttemptIdentity(
+            attemptID: try! CoachProviderAttemptID(
+                "atm-20260830T120000000Z-\(attemptSuffix)"
+            ),
+            idempotencyValue: try! ProviderIdempotencyValue(idempotencyValue),
+            userMessageID: try! ChatMessageID(
+                "msg-20260830T120000000Z-\(userSuffix)"
+            ),
+            coachMessageID: try! ChatMessageID(
+                "msg-20260830T120000000Z-\(coachSuffix)"
+            ),
+            freshDraftID: try! ChatDraftID(
+                "drf-20260830T120000000Z-\(draftSuffix)"
+            ),
+            transcriptHandles: (0 ..< transcriptHandleCount).map { handleIndex in
+                try! PreparedCoachTranscriptHandle(
+                    String(
+                        format: "00000000-0000-0000-%04x-%012x",
+                        transcriptHandleOrdinal,
+                        handleIndex + 1
+                    )
+                )
+            }
         )
     }
 }

@@ -963,6 +963,71 @@ final class ChatFeatureTests: XCTestCase {
         }
     }
 
+    func testTypedInvocationFailureCardSuppressesRedundantInterruptionNotice() async throws {
+        for (failure, reason) in [
+            (
+                PendingUserTurnFailure.coachProviderError,
+                InvocationInterruptionReason.providerFailed
+            ),
+            (
+                PendingUserTurnFailure.coachResponseInvalid,
+                InvocationInterruptionReason.invalidProviderResponse
+            ),
+        ] {
+            let aggregate = try Self.aggregate(
+                draftText: "Keep this synthetic Draft locked."
+            )
+            let store = RecordingChatStore(catalog: [.available(aggregate)])
+            let gateway = TypedTerminalInvocationGateway(
+                failure: failure,
+                reason: reason
+            )
+            let feature = makeFeature(store: store, invocations: gateway)
+            await feature.send(.start(Self.context))
+            await feature.send(.open(Self.context, aggregate.chat.id))
+
+            await feature.send(
+                .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+            )
+
+            let state = await feature.currentState
+            XCTAssertEqual(
+                Self.openAggregate(in: state)?.pendingUserTurn?.failure,
+                failure,
+                failure.rawValue
+            )
+            XCTAssertNil(
+                state.notice,
+                "the authoritative \(failure.rawValue) card must not be contradicted"
+            )
+        }
+    }
+
+    func testGenericInterruptionStillProjectsInterruptionNotice() async throws {
+        let aggregate = try Self.aggregate(
+            draftText: "Keep this interrupted synthetic Draft locked."
+        )
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let gateway = TypedTerminalInvocationGateway(
+            failure: .coachResponseInterrupted,
+            reason: .persistenceUnavailable
+        )
+        let feature = makeFeature(store: store, invocations: gateway)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let state = await feature.currentState
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        XCTAssertEqual(state.notice, .coachResponseInterrupted)
+    }
+
     func testOperationalRetryClearsItsProjectionWhenThePendingHasVanished() async throws {
         let aggregate = try Self.aggregate(draftText: "Retry this exact Draft.")
         let store = RecordingChatStore(
@@ -1610,6 +1675,55 @@ private actor RecordingInterruptedInvocationGateway: Invocations {
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
         requests.append(request)
         return .interrupted(nil, .providerFailed)
+    }
+}
+
+private actor TypedTerminalInvocationGateway: Invocations {
+    private let failure: PendingUserTurnFailure
+    private let reason: InvocationInterruptionReason
+
+    init(
+        failure: PendingUserTurnFailure,
+        reason: InvocationInterruptionReason
+    ) {
+        self.failure = failure
+        self.reason = reason
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        guard let pending = prepared.aggregate.pendingUserTurn else {
+            return .interrupted(nil, reason)
+        }
+        let terminal = try! ChatAggregate(
+            chat: prepared.aggregate.chat,
+            memory: prepared.aggregate.memory,
+            pendingUserTurn: pending.replacingFailure(failure)
+        )
+        return .interrupted(terminal, reason)
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        .interrupted(nil, reason)
     }
 }
 

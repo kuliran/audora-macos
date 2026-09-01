@@ -977,14 +977,20 @@ public actor DefaultChatFeature: ChatFeature {
                 publish()
             }
         case let .interrupted(current, _):
+            let notice: ChatNotice? = switch current?.pendingUserTurn?.failure {
+            case .coachProviderError, .coachResponseInvalid:
+                nil
+            case .coachContextCannotFit, .coachResponseInterrupted, .none:
+                .coachResponseInterrupted
+            }
             if let current {
                 install(
                     current,
                     selection: .open(current),
-                    notice: .coachResponseInterrupted
+                    notice: notice
                 )
             } else {
-                state = replacing(activity: nil, notice: .coachResponseInterrupted)
+                state = replacing(activity: nil, notice: notice)
                 publish()
             }
         case let .operationallyInterrupted(current, request, _):
