@@ -55,10 +55,62 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
         }
     }
 
+    public func availability(
+        library: LibraryScope,
+        at instant: UTCInstant
+    ) async -> InvocationAdmissionAvailability {
+        do {
+            return try availabilitySynchronously(library: library, at: instant)
+        } catch {
+            return .unavailable
+        }
+    }
+
     private func claimSynchronously(
         library: LibraryScope,
         at instant: UTCInstant
     ) throws -> InvocationAdmissionClaimOutcome {
+        try withLockedLedger { ledger, fileName, parent in
+            let decision = ledger.claim(library: library, at: instant)
+            switch decision {
+            case .admitted:
+                try persist(ledger, named: fileName, under: parent)
+                return .admitted
+            case let .cooldown(lastAdmittedAt, reopensAt):
+                return .cooldown(lastAdmittedAt: lastAdmittedAt, reopensAt: reopensAt)
+            case let .clockRollback(lastAdmittedAt):
+                return .clockRollback(lastAdmittedAt: lastAdmittedAt)
+            case .ledgerFull:
+                return .ledgerFull
+            case .invalidClockRange:
+                return .unavailable
+            }
+        }
+    }
+
+    private func availabilitySynchronously(
+        library: LibraryScope,
+        at instant: UTCInstant
+    ) throws -> InvocationAdmissionAvailability {
+        try withLockedLedger { ledger, _, _ in
+            switch ledger.availability(library: library, at: instant) {
+            case .available:
+                return .available
+            case let .cooldown(_, reopensAt), let .clockRollback(_, reopensAt):
+                return .cooldown(reopensAt: reopensAt)
+            case .ledgerFull, .invalidClockRange:
+                return .unavailable
+            }
+        }
+    }
+
+    private func withLockedLedger<Result>(
+        _ operation: (
+            inout RollingInvocationAdmissionLedger,
+            _ fileName: String,
+            _ parent: Int32
+        ) throws -> Result
+    ) throws -> Result {
         Self.processLock.lock()
         defer { Self.processLock.unlock() }
         guard maximumLibraries > 0 else { throw MachineInvocationAdmissionError.unavailable }
@@ -109,20 +161,7 @@ public actor ApplicationSupportInvocationAdmission: InvocationAdmissionPort {
         defer { _ = invocationAdmissionFlock(lockDescriptor, LOCK_UN) }
 
         var ledger = try loadLedger(named: fileName, under: parent)
-        let decision = ledger.claim(library: library, at: instant)
-        switch decision {
-        case .admitted:
-            try persist(ledger, named: fileName, under: parent)
-            return .admitted
-        case let .cooldown(lastAdmittedAt, reopensAt):
-            return .cooldown(lastAdmittedAt: lastAdmittedAt, reopensAt: reopensAt)
-        case let .clockRollback(lastAdmittedAt):
-            return .clockRollback(lastAdmittedAt: lastAdmittedAt)
-        case .ledgerFull:
-            return .ledgerFull
-        case .invalidClockRange:
-            return .unavailable
-        }
+        return try operation(&ledger, fileName, parent)
     }
 
     private func loadLedger(
@@ -313,6 +352,13 @@ public struct UnavailableInvocationAdmission: InvocationAdmissionPort {
         library: LibraryScope,
         at instant: UTCInstant
     ) async -> InvocationAdmissionClaimOutcome {
+        .unavailable
+    }
+
+    public func availability(
+        library: LibraryScope,
+        at instant: UTCInstant
+    ) async -> InvocationAdmissionAvailability {
         .unavailable
     }
 }

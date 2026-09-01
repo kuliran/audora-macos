@@ -622,6 +622,7 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(schema.contains("PendingUserTurnId"))
         XCTAssertTrue(schema.contains("ChatResponsePositionId"))
         XCTAssertTrue(schema.contains("coachContextCannotFit"))
+        XCTAssertTrue(schema.contains("coachResponseInterrupted"))
         XCTAssertTrue(schema.contains("unevaluatedProperties"))
     }
 
@@ -653,11 +654,18 @@ final class ContractResourcesTests: XCTestCase {
                 (object["expectedProviderCalls"] as? NSNumber)?.intValue,
                 executesFake ? 1 : 0
             )
-            let expectedInvocationCalls = [
+            let expectedInvocationCalls = if resource ==
+                .contextCapacityRecoveryDevelopmentChatScenario
+            {
+                2
+            } else if [
                 ContractResource.draftSendDiscardDevelopmentChatScenario,
-                .contextCapacityRecoveryDevelopmentChatScenario,
                 .fakeProviderSuccessDevelopmentChatScenario,
-            ].contains(resource) ? 1 : 0
+            ].contains(resource) {
+                1
+            } else {
+                0
+            }
             XCTAssertEqual(
                 (object["expectedInvocationCalls"] as? NSNumber)?.intValue,
                 expectedInvocationCalls
@@ -685,6 +693,17 @@ final class ContractResourcesTests: XCTestCase {
         )
         XCTAssertEqual(invocation["draftVersion"] as? Int, 1)
         XCTAssertEqual(invocation["expectedManifestRevision"] as? Int, 1)
+        XCTAssertEqual(user["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(coach["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(invocation["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(
+            coach["profileRevisionId"] as? String,
+            invocation["profileRevisionId"] as? String
+        )
+        XCTAssertEqual(
+            coach["profileStatementGeneration"] as? Int,
+            invocation["profileStatementGeneration"] as? Int
+        )
 
         let ledger = try jsonObject(.invocationAdmissionLedgerExample)
         let entries = try XCTUnwrap(ledger["entries"] as? [[String: Any]])

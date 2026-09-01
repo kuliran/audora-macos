@@ -3,6 +3,22 @@ import AudoraDomain
 import XCTest
 
 final class DefaultInvocationsTests: XCTestCase {
+    func testReadOnlyAdmissionAvailabilityProjectsReopeningWithoutClaiming() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        let reopensAt = try UTCInstant("2026-08-30T12:01:00.000Z")
+        await fixture.admission.setAvailability(.cooldown(reopensAt: reopensAt))
+
+        let availability = await fixture.invocations.admissionAvailability(
+            in: fixture.scope
+        )
+
+        XCTAssertEqual(availability, .cooldown(reopensAt: reopensAt))
+        let claimCount = await fixture.admission.claimCount
+        let availabilityCount = await fixture.admission.availabilityCount
+        XCTAssertEqual(claimCount, 0)
+        XCTAssertEqual(availabilityCount, 1)
+    }
+
     func testSuccessDebitsAndInstallsBeforeOneProviderLaunchThenPublishesOneTurn() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
@@ -27,6 +43,15 @@ final class DefaultInvocationsTests: XCTestCase {
         let exactBytes = await fixture.provider.serializedRequests
         XCTAssertEqual(exactBytes.count, 1)
         XCTAssertFalse(exactBytes[0].isEmpty)
+        let publication = await fixture.persistence.lastPublication
+        XCTAssertEqual(
+            publication?.invocation.preparedProfile,
+            fixture.contextSource.profile
+        )
+        XCTAssertEqual(
+            publication?.coachMessage.coachProfile,
+            fixture.contextSource.profile
+        )
     }
 
     func testContextCapacityFailureIsDurableAndConsumesNoAdmissionOrProviderLaunch() async throws {
@@ -47,6 +72,52 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(claimCount, 0)
         XCTAssertEqual(launchCount, 0)
         XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testCapacityFailureRetryUsesSameIntentAndPublishesThroughFreshInvocation() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            pendingFailure: .coachContextCannotFit
+        )
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .published(aggregate, _) = outcome else {
+            return XCTFail("the retryable Pending intent must re-enter the gateway")
+        }
+        XCTAssertEqual(
+            aggregate.chat.messageIDs,
+            [fixture.userMessageID, fixture.coachMessageID]
+        )
+        XCTAssertNil(aggregate.pendingUserTurn)
+        let claimCount = await fixture.admission.claimCount
+        let launchCount = await fixture.provider.launchCount
+        XCTAssertEqual(claimCount, 1)
+        XCTAssertEqual(launchCount, 1)
+    }
+
+    func testRetryAdmissionRejectionRetainsExactFailureAndLaunchesNothing() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            admissionDecision: .cooldown(
+                lastAdmittedAt: UTCInstant("2026-08-30T11:59:30.001Z"),
+                reopensAt: UTCInstant("2026-08-30T12:00:30.001Z")
+            ),
+            pendingFailure: .coachContextCannotFit
+        )
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .rejected(aggregate, .admissionCooldown) = outcome else {
+            return XCTFail("expected retry admission rejection")
+        }
+        XCTAssertEqual(aggregate, fixture.initial)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachContextCannotFit
+        )
+        let launchCount = await fixture.provider.launchCount
+        XCTAssertEqual(launchCount, 0)
     }
 
     func testAdmissionRejectionLaunchesNothingAndUnlocksTheSamePopulatedDraft() async throws {
@@ -71,35 +142,63 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(publicationCount, 0)
     }
 
-    func testInstallFailureAfterDurableDebitNeverLaunchesAndUnlocksNewSend() async throws {
+    func testInstallFailureAfterDurableDebitNeverLaunchesAndRetainsRetryableIntent() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         await fixture.persistence.failNextInstall()
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
-        guard case let .rejected(aggregate, .persistenceUnavailable) = outcome else {
-            return XCTFail("expected an install rejection")
+        guard case let .interrupted(aggregate, .persistenceUnavailable) = outcome else {
+            return XCTFail("expected a durable interrupted failure")
         }
         let claimCount = await fixture.admission.claimCount
         let launchCount = await fixture.provider.launchCount
         XCTAssertEqual(claimCount, 1)
         XCTAssertEqual(launchCount, 0)
-        XCTAssertNil(aggregate?.pendingUserTurn)
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
     }
 
-    func testInstallStaleOutcomeUnlocksAStillMatchingPendingDraft() async throws {
+    func testInstallStaleOutcomeRetainsAStillMatchingPendingAsInterrupted() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         await fixture.persistence.staleNextInstall()
 
         let outcome = await fixture.invocations.tryInvoke(fixture.request)
 
-        guard case let .rejected(aggregate, .eligibilityChanged) = outcome else {
-            return XCTFail("a stale install must reject through the matching Pending authority")
+        guard case let .interrupted(aggregate, .persistenceUnavailable) = outcome else {
+            return XCTFail("a stale install must retain the matching Pending authority")
         }
-        XCTAssertNil(aggregate?.pendingUserTurn)
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         let launchCount = await fixture.provider.launchCount
+        XCTAssertEqual(launchCount, 0)
+    }
+
+    func testInstallActiveExistsAfterDebitRetainsPendingAsInterrupted() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence.returnActiveExistsNextInstall()
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .interrupted(aggregate, .persistenceUnavailable) = outcome else {
+            return XCTFail("a post-debit install conflict must retain the Pending intent")
+        }
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        let claimCount = await fixture.admission.claimCount
+        let launchCount = await fixture.provider.launchCount
+        XCTAssertEqual(claimCount, 1)
         XCTAssertEqual(launchCount, 0)
     }
 
@@ -129,7 +228,11 @@ final class DefaultInvocationsTests: XCTestCase {
         let activeInvocation = await fixture.persistence.activeInvocation
         XCTAssertEqual(launchCount, 1)
         XCTAssertEqual(aggregate?.chat.messageIDs, [])
-        XCTAssertNil(aggregate?.pendingUserTurn)
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         XCTAssertNil(activeInvocation)
     }
@@ -167,7 +270,11 @@ final class DefaultInvocationsTests: XCTestCase {
         guard case let .rejected(aggregate, .contextChanged) = outcome else {
             return XCTFail("stale exact context must abort before launch")
         }
-        XCTAssertNil(aggregate?.pendingUserTurn)
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         let claimCount = await fixture.admission.claimCount
         let launchCount = await fixture.provider.launchCount
@@ -187,7 +294,11 @@ final class DefaultInvocationsTests: XCTestCase {
             return XCTFail("provider crash must retire the interrupted Invocation")
         }
         XCTAssertEqual(aggregate?.chat.messageIDs, [])
-        XCTAssertNil(aggregate?.pendingUserTurn)
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         let active = await fixture.persistence.activeInvocation
         let publicationCount = await fixture.persistence.publicationCount
@@ -205,7 +316,11 @@ final class DefaultInvocationsTests: XCTestCase {
             return XCTFail("invalid response must retire the interrupted Invocation")
         }
         XCTAssertEqual(aggregate?.chat.messageIDs, [])
-        XCTAssertNil(aggregate?.pendingUserTurn)
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         let active = await fixture.persistence.activeInvocation
         XCTAssertNil(active)
@@ -221,7 +336,11 @@ final class DefaultInvocationsTests: XCTestCase {
             return XCTFail("publication failure must retire the interrupted Invocation")
         }
         XCTAssertEqual(aggregate?.chat.messageIDs, [])
-        XCTAssertNil(aggregate?.pendingUserTurn)
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         let active = await fixture.persistence.activeInvocation
         XCTAssertNil(active)
@@ -261,6 +380,75 @@ final class DefaultInvocationsTests: XCTestCase {
         )
         XCTAssertEqual(nextReservation, .none)
     }
+
+    func testIdentityCollisionRegeneratesBeforeAdmissionOrProviderLaunch() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence.collideNextIdentities([.userMessageID])
+
+        guard case .published = await fixture.invocations.tryInvoke(fixture.request) else {
+            return XCTFail("a fresh available candidate must continue through publication")
+        }
+
+        let identityCheckCount = await fixture.persistence.identityCheckCount
+        let claimCount = await fixture.admission.claimCount
+        let launchCount = await fixture.provider.launchCount
+        XCTAssertEqual(identityCheckCount, 2)
+        XCTAssertEqual(claimCount, 1)
+        XCTAssertEqual(launchCount, 1)
+    }
+
+    func testAdmissionDebitUsesAFreshInstantAfterIdentityPreflight() async throws {
+        let identityInstant = try UTCInstant("2026-08-30T12:00:00.000Z")
+        let admittedAt = try UTCInstant("2026-08-30T12:00:12.000Z")
+        let completedAt = try UTCInstant("2026-08-30T12:00:13.000Z")
+        let clock = SequencedInvocationClock(
+            instants: [identityInstant, admittedAt, completedAt]
+        )
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            clock: clock
+        )
+
+        guard case .published = await fixture.invocations.tryInvoke(fixture.request) else {
+            return XCTFail("expected publication")
+        }
+
+        let claimedAt = await fixture.admission.claimedAt
+        let publication = await fixture.persistence.lastPublication
+        XCTAssertEqual(claimedAt, [admittedAt])
+        XCTAssertEqual(publication?.invocation.admittedAt, admittedAt)
+    }
+
+    func testEveryIdentityNamespaceCollisionExhaustsBeforeAdmissionAndProvider() async throws {
+        for collision in InvocationLaunchIdentityCollision.allCases {
+            let fixture = try InvocationFixture(contextWindow: 100_000)
+            await fixture.persistence.collideNextIdentities(
+                Array(
+                    repeating: collision,
+                    count: DefaultInvocations.maximumLaunchIdentityCandidates
+                )
+            )
+
+            let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+            guard case let .rejected(
+                _,
+                .identityCollisionExhausted(lastCollision)
+            ) = outcome else {
+                return XCTFail("expected typed exhaustion for \(collision), got \(outcome)")
+            }
+            XCTAssertEqual(lastCollision, collision)
+            let identityCheckCount = await fixture.persistence.identityCheckCount
+            let claimCount = await fixture.admission.claimCount
+            let launchCount = await fixture.provider.launchCount
+            XCTAssertEqual(
+                identityCheckCount,
+                DefaultInvocations.maximumLaunchIdentityCandidates
+            )
+            XCTAssertEqual(claimCount, 0)
+            XCTAssertEqual(launchCount, 0)
+        }
+    }
 }
 
 private final class InvocationFixture: @unchecked Sendable {
@@ -286,7 +474,9 @@ private final class InvocationFixture: @unchecked Sendable {
         contextWindow: Int,
         admissionDecision: InvocationAdmissionClaimOutcome = .admitted,
         draftText: String = "Keep this exact user Draft",
-        contextIsCurrent: Bool = true
+        contextIsCurrent: Bool = true,
+        pendingFailure: PendingUserTurnFailure? = nil,
+        clock: (any ChatClock)? = nil
     ) throws {
         let empty = try ChatAggregate.emptyDevelopmentChat(
             chatID: ChatID("cht-20260830T120000000Z-1ABC"),
@@ -306,7 +496,8 @@ private final class InvocationFixture: @unchecked Sendable {
             draftVersion: draft.version,
             responsePositionID: try ChatResponsePositionID(
                 "rsp-20260830T120000000Z-5MNP"
-            )
+            ),
+            failure: pendingFailure
         )
         initial = try ChatAggregate(
             chat: unlocked.chat,
@@ -333,7 +524,7 @@ private final class InvocationFixture: @unchecked Sendable {
             admission: admission,
             provider: provider,
             coachContext: DefaultCoachContextFeature(source: contextSource),
-            clock: FixedInvocationClock(instant: instant),
+            clock: clock ?? FixedInvocationClock(instant: instant),
             identities: FixedInvocationIdentities(
                 invocationID: try CoachInvocationID(
                     "inv-20260830T120000000Z-5KMN"
@@ -361,15 +552,19 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private var aggregate: ChatAggregate
     private let recorder: InvocationEventRecorder
     private var installFails = false
+    private var installReturnsActiveExists = false
     private var installStales = false
     private var installStalesWithoutSnapshot = false
     private var publicationConflicts = false
     private var publicationFails = false
     private var secondResolutionIsIneligible = false
+    private var identityCollisions: [InvocationLaunchIdentityCollision] = []
+    private(set) var identityCheckCount = 0
     private var resolutionCount = 0
     private var reservedRequest: PendingCoachInvocationRequest?
     private(set) var activeInvocation: CoachInvocation?
     private(set) var publicationCount = 0
+    private(set) var lastPublication: PublishCoachInvocationMutation?
 
     init(initial: ChatAggregate, recorder: InvocationEventRecorder) {
         aggregate = initial
@@ -377,11 +572,15 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     }
 
     func failNextInstall() { installFails = true }
+    func returnActiveExistsNextInstall() { installReturnsActiveExists = true }
     func staleNextInstall() { installStales = true }
     func staleWithoutSnapshotNextInstall() { installStalesWithoutSnapshot = true }
     func conflictNextPublication() { publicationConflicts = true }
     func failNextPublication() { publicationFails = true }
     func makeSecondResolutionIneligible() { secondResolutionIsIneligible = true }
+    func collideNextIdentities(_ collisions: [InvocationLaunchIdentityCollision]) {
+        identityCollisions = collisions
+    }
 
     func resolvePending(
         _ request: PendingCoachInvocationRequest
@@ -418,6 +617,10 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
             installFails = false
             return .failed
         }
+        if installReturnsActiveExists {
+            installReturnsActiveExists = false
+            return .activeExists
+        }
         if installStalesWithoutSnapshot {
             installStalesWithoutSnapshot = false
             return .stale(nil)
@@ -439,9 +642,34 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         if reservedRequest == request { reservedRequest = nil }
     }
 
+    func checkLaunchIdentity(
+        _ identity: InvocationLaunchIdentity,
+        for authority: InvocationPendingAuthority
+    ) async -> InvocationLaunchIdentityAvailabilityOutcome {
+        identityCheckCount += 1
+        guard reservedRequest == authority.request,
+              aggregate == authority.aggregate
+        else { return .stale(aggregate) }
+        guard !identityCollisions.isEmpty else { return .available }
+        return .collision(identityCollisions.removeFirst())
+    }
+
     func markContextCapacityFailure(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
+        markPendingFailure(authority, failure: .coachContextCannotFit)
+    }
+
+    func markInterruptedNewSend(
+        _ authority: InvocationPendingAuthority
+    ) async -> InvocationPendingMutationOutcome {
+        markPendingFailure(authority, failure: .coachResponseInterrupted)
+    }
+
+    private func markPendingFailure(
+        _ authority: InvocationPendingAuthority,
+        failure: PendingUserTurnFailure
+    ) -> InvocationPendingMutationOutcome {
         if reservedRequest == authority.request { reservedRequest = nil }
         guard authority.aggregate == aggregate, let pending = aggregate.pendingUserTurn else {
             return .stale(aggregate)
@@ -449,7 +677,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         aggregate = try! ChatAggregate(
             chat: aggregate.chat,
             memory: aggregate.memory,
-            pendingUserTurn: pending.replacingFailure(.coachContextCannotFit)
+            pendingUserTurn: pending.replacingFailure(failure)
         )
         return .committed(aggregate)
     }
@@ -470,7 +698,13 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     ) async -> InvocationPendingMutationOutcome {
         guard activeInvocation == invocation else { return .stale(aggregate) }
         activeInvocation = nil
-        aggregate = try! ChatAggregate(chat: aggregate.chat, memory: aggregate.memory)
+        aggregate = try! ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: aggregate.pendingUserTurn?.replacingFailure(
+                .coachResponseInterrupted
+            )
+        )
         return .committed(aggregate)
     }
 
@@ -489,6 +723,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
             return .stale(aggregate)
         }
         guard mutation.base == aggregate else { return .stale(aggregate) }
+        lastPublication = mutation
         aggregate = mutation.replacement
         activeInvocation = nil
         return .committed(aggregate)
@@ -499,10 +734,25 @@ private actor ScriptedInvocationAdmission: InvocationAdmissionPort {
     private let decision: InvocationAdmissionClaimOutcome
     private let recorder: InvocationEventRecorder
     private(set) var claimCount = 0
+    private(set) var availabilityCount = 0
+    private(set) var claimedAt: [UTCInstant] = []
+    private var projectedAvailability: InvocationAdmissionAvailability = .available
 
     init(decision: InvocationAdmissionClaimOutcome, recorder: InvocationEventRecorder) {
         self.decision = decision
         self.recorder = recorder
+    }
+
+    func setAvailability(_ availability: InvocationAdmissionAvailability) {
+        projectedAvailability = availability
+    }
+
+    func availability(
+        library: LibraryScope,
+        at instant: UTCInstant
+    ) async -> InvocationAdmissionAvailability {
+        availabilityCount += 1
+        return projectedAvailability
     }
 
     func claim(
@@ -510,6 +760,7 @@ private actor ScriptedInvocationAdmission: InvocationAdmissionPort {
         at instant: UTCInstant
     ) async -> InvocationAdmissionClaimOutcome {
         claimCount += 1
+        claimedAt.append(instant)
         await recorder.record("admission")
         return decision
     }
@@ -570,6 +821,10 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
     private let current: Bool
     private(set) var pendingResolutionCount = 0
     private var currentCheckCount = 0
+    nonisolated let profile = CoachProfileProvenance(
+        revisionID: try! ProfileRevisionID("prf-20260830T115900000Z-4GHJ"),
+        statementGeneration: 9
+    )
 
     init(contextWindow: Int, isCurrent: Bool) {
         self.contextWindow = contextWindow
@@ -627,7 +882,8 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                             responsePositionID: request.pendingUserTurn.responsePositionID
                         ),
                         contextGeneration: 1,
-                        configurationGeneration: 1
+                        configurationGeneration: 1,
+                        profile: profile
                     )
                 )
             )
@@ -645,6 +901,17 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
 private struct FixedInvocationClock: ChatClock {
     let instant: UTCInstant
     func now() async -> UTCInstant { instant }
+}
+
+private actor SequencedInvocationClock: ChatClock {
+    private var instants: [UTCInstant]
+
+    init(instants: [UTCInstant]) { self.instants = instants }
+
+    func now() async -> UTCInstant {
+        precondition(!instants.isEmpty)
+        return instants.removeFirst()
+    }
 }
 
 private struct FixedInvocationIdentities: InvocationIdentityGenerating {

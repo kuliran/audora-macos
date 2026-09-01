@@ -5,6 +5,42 @@ import Foundation
 import XCTest
 
 final class MachineInvocationAdmissionTests: XCTestCase {
+    func testReadOnlyAvailabilitySurvivesRelaunchAndDoesNotConsumeReopening() async throws {
+        let fixture = try Fixture()
+        let admittedAt = fixture.instant(0)
+        let reopensAt = fixture.instant(60_000)
+        let first = ApplicationSupportInvocationAdmission(fileURL: fixture.fileURL)
+        let firstClaim = await first.claim(
+            library: fixture.firstLibrary,
+            at: admittedAt
+        )
+        XCTAssertEqual(firstClaim, .admitted)
+
+        let relaunched = ApplicationSupportInvocationAdmission(fileURL: fixture.fileURL)
+        let cooldown = await relaunched.availability(
+            library: fixture.firstLibrary,
+            at: fixture.instant(59_999)
+        )
+        XCTAssertEqual(
+            cooldown,
+            .cooldown(reopensAt: reopensAt)
+        )
+        let available = await relaunched.availability(
+            library: fixture.firstLibrary,
+            at: reopensAt
+        )
+        XCTAssertEqual(available, .available)
+        let reopenedClaim = await relaunched.claim(
+            library: fixture.firstLibrary,
+            at: reopensAt
+        )
+        XCTAssertEqual(
+            reopenedClaim,
+            .admitted,
+            "observing an open window must not debit it"
+        )
+    }
+
     func testProductionIdentityGeneratorEmitsPortableTypedAuthorities() async throws {
         let generated = await RandomInvocationIdentityGenerator().generate(
             at: try UTCInstant("2026-08-30T12:00:02.000Z")

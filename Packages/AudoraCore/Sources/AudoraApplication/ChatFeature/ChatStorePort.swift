@@ -1,4 +1,5 @@
 import AudoraDomain
+import Foundation
 
 public protocol ChatStorePort: Sendable {
     func loadCatalog(in library: LibraryScope) async -> ChatCatalogOutcome
@@ -51,6 +52,32 @@ public struct SystemChatAutosaveScheduler: ChatAutosaveScheduling {
     public func sleep(forNanoseconds nanoseconds: UInt64) async throws {
         try await Task.sleep(nanoseconds: nanoseconds)
     }
+}
+
+public protocol ChatAdmissionRefreshScheduling: Sendable {
+    func sleep(until deadline: UTCInstant) async throws
+}
+
+public struct SystemChatAdmissionRefreshScheduler: ChatAdmissionRefreshScheduling {
+    public init() {}
+
+    public func sleep(until deadline: UTCInstant) async throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let deadlineDate = formatter.date(from: deadline.rawValue) else {
+            throw ChatAdmissionRefreshSchedulerError.invalidDeadline
+        }
+        let interval = max(0, deadlineDate.timeIntervalSinceNow)
+        let nanoseconds = interval * 1_000_000_000
+        guard nanoseconds <= Double(UInt64.max) else {
+            throw ChatAdmissionRefreshSchedulerError.invalidDeadline
+        }
+        try await Task.sleep(nanoseconds: UInt64(nanoseconds.rounded(.up)))
+    }
+}
+
+public enum ChatAdmissionRefreshSchedulerError: Error, Equatable, Sendable {
+    case invalidDeadline
 }
 
 public protocol ProfileStatementGenerationReading: Sendable {

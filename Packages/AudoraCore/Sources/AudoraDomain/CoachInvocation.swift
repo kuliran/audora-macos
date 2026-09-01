@@ -61,27 +61,49 @@ public enum ChatMessageContent: Equatable, Sendable {
     case coach(markdown: String)
 }
 
+/// Exact Profile authority used to prepare one Coach response. A `nil`
+/// revision represents the canonical no-selected-Profile head; the statement
+/// generation still fences semantic changes to that head.
+public struct CoachProfileProvenance: Equatable, Sendable {
+    public let revisionID: ProfileRevisionID?
+    public let statementGeneration: UInt64
+
+    public init(
+        revisionID: ProfileRevisionID?,
+        statementGeneration: UInt64
+    ) {
+        self.revisionID = revisionID
+        self.statementGeneration = statementGeneration
+    }
+}
+
 public enum ChatMessageError: Error, Equatable, Sendable {
+    case invalidSchemaVersion
     case emptyContent
     case contentTooLong
     case invalidContent
+    case profileProvenanceMismatch
 }
 
 public struct ChatMessage: Equatable, Sendable {
-    public static let schemaVersion: UInt32 = 1
-    public static let maximumUserTextUTF8Bytes = ChatDraft.maximumUTF8Bytes
+    public static let schemaVersion: UInt32 = 2
+    public static let maximumUserTextUTF8Bytes = 16_384
     /// Bounded provider text; persistence separately checks the exact encoded envelope.
     public static let maximumCoachMarkdownUTF8Bytes = 64_000
 
+    public let persistedSchemaVersion: UInt32
     public let id: ChatMessageID
     public let responsePositionID: ChatResponsePositionID
     public let content: ChatMessageContent
+    public let coachProfile: CoachProfileProvenance?
     public let createdAt: UTCInstant
 
     public init(
+        schemaVersion: UInt32 = Self.schemaVersion,
         id: ChatMessageID,
         responsePositionID: ChatResponsePositionID,
         content: ChatMessageContent,
+        coachProfile: CoachProfileProvenance? = nil,
         createdAt: UTCInstant
     ) throws {
         let text: String
@@ -89,7 +111,9 @@ public struct ChatMessage: Equatable, Sendable {
         switch content {
         case let .user(value):
             text = value
-            maximum = Self.maximumUserTextUTF8Bytes
+            maximum = schemaVersion == 1
+                ? ChatDraft.maximumUTF8Bytes
+                : Self.maximumUserTextUTF8Bytes
         case let .coach(value):
             text = value
             maximum = Self.maximumCoachMarkdownUTF8Bytes
@@ -101,26 +125,41 @@ public struct ChatMessage: Equatable, Sendable {
         guard !text.unicodeScalars.contains(where: { $0.value == 0 }) else {
             throw ChatMessageError.invalidContent
         }
+        switch (schemaVersion, content, coachProfile) {
+        case (1, .user, nil), (1, .coach, nil),
+             (Self.schemaVersion, .user, nil),
+             (Self.schemaVersion, .coach, .some):
+            break
+        case (1, _, .some), (Self.schemaVersion, _, _):
+            throw ChatMessageError.profileProvenanceMismatch
+        default:
+            throw ChatMessageError.invalidSchemaVersion
+        }
+        persistedSchemaVersion = schemaVersion
         self.id = id
         self.responsePositionID = responsePositionID
         self.content = content
+        self.coachProfile = coachProfile
         self.createdAt = createdAt
     }
 }
 
 public enum CoachInvocationError: Error, Equatable, Sendable {
+    case invalidSchemaVersion
     case chatMismatch
     case pendingMismatch
     case draftMismatch
     case responsePositionMismatch
     case manifestRevisionMismatch
     case failedPending
+    case profileProvenanceMismatch
 }
 
 /// Durable launch authority for one admitted top-level Coach operation.
 public struct CoachInvocation: Equatable, Sendable {
-    public static let schemaVersion: UInt32 = 1
+    public static let schemaVersion: UInt32 = 2
 
+    public let persistedSchemaVersion: UInt32
     public let id: CoachInvocationID
     public let attemptID: CoachProviderAttemptID
     public let providerIdempotencyValue: ProviderIdempotencyValue
@@ -130,20 +169,31 @@ public struct CoachInvocation: Equatable, Sendable {
     public let draftID: ChatDraftID
     public let draftVersion: UInt64
     public let responsePositionID: ChatResponsePositionID
+    public let preparedProfile: CoachProfileProvenance?
     public let expectedManifestRevision: UInt64
     public let admittedAt: UTCInstant
 
     public init(
+        schemaVersion: UInt32 = Self.schemaVersion,
         id: CoachInvocationID,
         attemptID: CoachProviderAttemptID,
         providerIdempotencyValue: ProviderIdempotencyValue,
         library: LibraryScope,
         chatID: ChatID,
         pendingUserTurn: PendingUserTurn,
+        preparedProfile: CoachProfileProvenance?,
         expectedManifestRevision: UInt64,
         admittedAt: UTCInstant
     ) throws {
-        guard pendingUserTurn.failure == nil else { throw CoachInvocationError.failedPending }
+        switch (schemaVersion, preparedProfile) {
+        case (1, nil), (Self.schemaVersion, .some):
+            break
+        case (1, .some), (Self.schemaVersion, nil):
+            throw CoachInvocationError.profileProvenanceMismatch
+        default:
+            throw CoachInvocationError.invalidSchemaVersion
+        }
+        persistedSchemaVersion = schemaVersion
         self.id = id
         self.attemptID = attemptID
         self.providerIdempotencyValue = providerIdempotencyValue
@@ -153,18 +203,21 @@ public struct CoachInvocation: Equatable, Sendable {
         draftID = pendingUserTurn.draftID
         draftVersion = pendingUserTurn.draftVersion
         responsePositionID = pendingUserTurn.responsePositionID
+        self.preparedProfile = preparedProfile
         self.expectedManifestRevision = expectedManifestRevision
         self.admittedAt = admittedAt
     }
 
-    public func validate(against aggregate: ChatAggregate) throws {
+    /// Validates the durable user intent independently of the Chat manifest CAS.
+    /// Title-only metadata changes may advance the manifest while preserving this
+    /// exact Pending/Draft/response authority, which recovery must still retire.
+    public func validateIntent(against aggregate: ChatAggregate) throws {
         guard aggregate.chat.id == chatID else { throw CoachInvocationError.chatMismatch }
         guard let pending = aggregate.pendingUserTurn,
               pending.id == pendingUserTurnID
         else {
             throw CoachInvocationError.pendingMismatch
         }
-        guard pending.failure == nil else { throw CoachInvocationError.failedPending }
         guard aggregate.chat.draft.draftID == draftID,
               aggregate.chat.draft.version == draftVersion,
               pending.draftID == draftID,
@@ -175,6 +228,10 @@ public struct CoachInvocation: Equatable, Sendable {
         guard pending.responsePositionID == responsePositionID else {
             throw CoachInvocationError.responsePositionMismatch
         }
+    }
+
+    public func validate(against aggregate: ChatAggregate) throws {
+        try validateIntent(against: aggregate)
         guard aggregate.chat.manifestRevision == expectedManifestRevision else {
             throw CoachInvocationError.manifestRevisionMismatch
         }
@@ -185,6 +242,7 @@ public enum InvocationPublicationError: Error, Equatable, Sendable {
     case responsePositionMismatch
     case userMessageRequired
     case coachMessageRequired
+    case coachProfileProvenanceMismatch
     case userTextMismatch
     case duplicateMessageID
     case freshDraftRequired
@@ -212,6 +270,15 @@ public extension ChatAggregate {
         }
         guard case .coach = coachMessage.content else {
             throw InvocationPublicationError.coachMessageRequired
+        }
+        guard invocation.persistedSchemaVersion == CoachInvocation.schemaVersion,
+              userMessage.persistedSchemaVersion == ChatMessage.schemaVersion,
+              coachMessage.persistedSchemaVersion == ChatMessage.schemaVersion,
+              let preparedProfile = invocation.preparedProfile,
+              userMessage.coachProfile == nil,
+              coachMessage.coachProfile == preparedProfile
+        else {
+            throw InvocationPublicationError.coachProfileProvenanceMismatch
         }
         guard userText == chat.draft.text else {
             throw InvocationPublicationError.userTextMismatch

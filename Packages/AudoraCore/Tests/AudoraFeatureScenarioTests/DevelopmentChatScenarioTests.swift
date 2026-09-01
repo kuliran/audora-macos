@@ -842,6 +842,12 @@ private actor ScenarioContextInvocationGateway: ScenarioMeasuringInvocations {
         context = DefaultCoachContextFeature(source: source)
     }
 
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
         callCount += 1
         guard let locked = await store.invocationSnapshot(request.chatID),
@@ -913,6 +919,12 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
         return await coordinator.tryInvoke(request)
     }
 
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        await coordinator.admissionAvailability(in: library)
+    }
+
     func counts() async -> ScenarioInvocationCounts {
         ScenarioInvocationCounts(
             invocations: invocationCalls,
@@ -964,10 +976,33 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
         _ request: PendingCoachInvocationRequest
     ) async {}
 
+    func checkLaunchIdentity(
+        _ identity: InvocationLaunchIdentity,
+        for authority: InvocationPendingAuthority
+    ) async -> InvocationLaunchIdentityAvailabilityOutcome {
+        guard await store.invocationSnapshot(authority.request.chatID) ==
+            authority.aggregate
+        else { return .stale(await store.invocationSnapshot(authority.request.chatID)) }
+        return .available
+    }
+
     func markContextCapacityFailure(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
-        let failed = authority.pendingUserTurn.replacingFailure(.coachContextCannotFit)
+        await markPendingFailure(authority, failure: .coachContextCannotFit)
+    }
+
+    func markInterruptedNewSend(
+        _ authority: InvocationPendingAuthority
+    ) async -> InvocationPendingMutationOutcome {
+        await markPendingFailure(authority, failure: .coachResponseInterrupted)
+    }
+
+    private func markPendingFailure(
+        _ authority: InvocationPendingAuthority,
+        failure: PendingUserTurnFailure
+    ) async -> InvocationPendingMutationOutcome {
+        let failed = authority.pendingUserTurn.replacingFailure(failure)
         guard let mutation = try? ReplacePendingUserTurnMutation(
             library: authority.request.library,
             chatID: authority.request.chatID,
@@ -999,14 +1034,14 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
               let pending = aggregate.pendingUserTurn
         else { return .stale(await store.invocationSnapshot(invocation.chatID)) }
         active = nil
+        guard let mutation = try? ReplacePendingUserTurnMutation(
+            library: LibraryScope(libraryID: invocation.libraryID),
+            chatID: invocation.chatID,
+            base: pending,
+            replacement: pending.replacingFailure(.coachResponseInterrupted)
+        ) else { return .failed }
         return pendingOutcome(
-            await store.discardPendingUserTurn(
-                DiscardPendingUserTurnMutation(
-                    library: LibraryScope(libraryID: invocation.libraryID),
-                    chatID: invocation.chatID,
-                    pendingUserTurn: pending
-                )
-            )
+            await store.replacePendingUserTurn(mutation)
         )
     }
 
@@ -1034,6 +1069,13 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
 
 private actor ScenarioInvocationAdmission: InvocationAdmissionPort {
     private(set) var callCount = 0
+
+    func availability(
+        library: LibraryScope,
+        at instant: UTCInstant
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
 
     func claim(
         library: LibraryScope,
@@ -1250,7 +1292,11 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
                     authority: CoachContextSnapshotAuthority(
                         binding: binding,
                         contextGeneration: UInt64(pendingResolutionCount + 1),
-                        configurationGeneration: UInt64(pendingResolutionCount + 1)
+                        configurationGeneration: UInt64(pendingResolutionCount + 1),
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
                     )
                 )
             )

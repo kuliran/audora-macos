@@ -4,4 +4,8 @@ public enum ChatInteractionPolicy {
         if case .opening = state.selection { return false }
         return true
     }
+
+    public static func allowsCoachInvocation(in state: ChatFeatureState) -> Bool {
+        state.admissionAvailability == .available
+    }
 }

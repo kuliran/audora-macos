@@ -1186,6 +1186,10 @@
                 {
                     "type": "string",
                     "const": "coachContextCannotFit"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInterrupted"
                 }
             ]
         },

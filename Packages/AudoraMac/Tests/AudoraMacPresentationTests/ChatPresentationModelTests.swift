@@ -6,6 +6,24 @@ import XCTest
 
 @MainActor
 final class ChatPresentationModelTests: XCTestCase {
+    func testInvocationControlPresentationExposesTheSameUnavailableReasonWithoutHover() throws {
+        let reopensAt = try UTCInstant("2026-08-30T12:01:00.000Z")
+
+        XCTAssertEqual(
+            ChatInvocationAdmissionPresentation.unavailableReason(
+                for: .cooldown(reopensAt: reopensAt)
+            ),
+            "Coach admission reopens at 2026-08-30T12:01:00.000Z."
+        )
+        XCTAssertEqual(
+            ChatInvocationAdmissionPresentation.unavailableReason(for: .unavailable),
+            "Coach admission availability could not be checked."
+        )
+        XCTAssertNil(
+            ChatInvocationAdmissionPresentation.unavailableReason(for: .available)
+        )
+    }
+
     func testStartScopesTheFeatureAndPublishesItsInitialSnapshot() async throws {
         let state = ChatFeatureState(catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])))
         let feature = RecordingPresentationChatFeature(initial: state)

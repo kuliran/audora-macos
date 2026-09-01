@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "invocationId": "inv-20260830T120002000Z-5KMN",
   "attemptId": "atm-20260830T120002000Z-6PQR",
   "providerIdempotencyValue": "synthetic-attempt-6PQR",
@@ -10,5 +10,7 @@
   "draftVersion": 1,
   "responsePositionId": "rsp-20260830T120001000Z-6PQR",
   "expectedManifestRevision": 1,
+  "profileRevisionId": "prf-20260830T120100000Z-3DEF",
+  "profileStatementGeneration": 1,
   "admittedAt": "2026-08-30T12:00:02.000Z"
 }

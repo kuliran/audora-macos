@@ -28,6 +28,7 @@ public enum InvocationRejectionReason: Equatable, Sendable {
     case admissionLedgerFull
     case admissionUnavailable
     case persistenceUnavailable
+    case identityCollisionExhausted(lastCollision: InvocationLaunchIdentityCollision)
 }
 
 public enum InvocationInterruptionReason: Equatable, Sendable {
@@ -44,8 +45,26 @@ public enum InvocationTryOutcome: Equatable, Sendable {
     case interrupted(ChatAggregate?, InvocationInterruptionReason)
 }
 
+public enum InvocationAdmissionAvailability: Equatable, Sendable {
+    case available
+    case cooldown(reopensAt: UTCInstant)
+    case unavailable
+}
+
 public protocol Invocations: Sendable {
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability
+
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome
+}
+
+public extension Invocations {
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .unavailable
+    }
 }
 
 @_spi(InvocationInfrastructure)
@@ -73,9 +92,6 @@ public struct InvocationPendingAuthority: Equatable, Sendable {
               pending.id == request.pendingUserTurnID
         else {
             throw InvocationPendingAuthorityError.missingPending
-        }
-        guard pending.failure == nil else {
-            throw InvocationPendingAuthorityError.failedPending
         }
         guard pending.draftID == aggregate.chat.draft.draftID,
               pending.draftVersion == aggregate.chat.draft.version
@@ -133,6 +149,23 @@ public protocol InvocationIdentityGenerating: Sendable {
     func generate(at instant: UTCInstant) async -> InvocationLaunchIdentity
 }
 
+public enum InvocationLaunchIdentityCollision: String, CaseIterable, Equatable, Sendable {
+    case invocationID
+    case attemptID
+    case providerIdempotencyValue
+    case userMessageID
+    case coachMessageID
+    case freshDraftID
+}
+
+@_spi(InvocationInfrastructure)
+public enum InvocationLaunchIdentityAvailabilityOutcome: Equatable, Sendable {
+    case available
+    case collision(InvocationLaunchIdentityCollision)
+    case stale(ChatAggregate?)
+    case unavailable
+}
+
 @_spi(InvocationInfrastructure)
 public struct InstallCoachInvocationMutation: Equatable, Sendable {
     public let authority: InvocationPendingAuthority
@@ -141,6 +174,7 @@ public struct InstallCoachInvocationMutation: Equatable, Sendable {
     public init(
         authority: InvocationPendingAuthority,
         identity: InvocationLaunchIdentity,
+        preparedProfile: CoachProfileProvenance,
         admittedAt: UTCInstant
     ) throws {
         self.authority = authority
@@ -151,6 +185,7 @@ public struct InstallCoachInvocationMutation: Equatable, Sendable {
             library: authority.request.library,
             chatID: authority.request.chatID,
             pendingUserTurn: authority.pendingUserTurn,
+            preparedProfile: preparedProfile,
             expectedManifestRevision: authority.aggregate.chat.manifestRevision,
             admittedAt: admittedAt
         )
@@ -201,6 +236,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
             id: identity.coachMessageID,
             responsePositionID: invocation.responsePositionID,
             content: .coach(markdown: coachMarkdown),
+            coachProfile: invocation.preparedProfile,
             createdAt: completedAt
         )
         freshDraft = try ChatDraft(
@@ -249,7 +285,20 @@ public protocol InvocationPersistencePort: Sendable {
         _ request: PendingCoachInvocationRequest
     ) async
 
+    /// Persistence owns every durable identity namespace. This check runs while
+    /// the exact Pending/Library reservation is held and before admission debit.
+    func checkLaunchIdentity(
+        _ identity: InvocationLaunchIdentity,
+        for authority: InvocationPendingAuthority
+    ) async -> InvocationLaunchIdentityAvailabilityOutcome
+
     func markContextCapacityFailure(
+        _ authority: InvocationPendingAuthority
+    ) async -> InvocationPendingMutationOutcome
+
+    /// Releases the exact pre-install reservation while durably retaining the
+    /// Pending intent as an interrupted user-retryable failure.
+    func markInterruptedNewSend(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome
 
@@ -277,10 +326,25 @@ public enum InvocationAdmissionClaimOutcome: Equatable, Sendable {
 
 @_spi(InvocationInfrastructure)
 public protocol InvocationAdmissionPort: Sendable {
+    func availability(
+        library: LibraryScope,
+        at instant: UTCInstant
+    ) async -> InvocationAdmissionAvailability
+
     func claim(
         library: LibraryScope,
         at instant: UTCInstant
     ) async -> InvocationAdmissionClaimOutcome
+}
+
+@_spi(InvocationInfrastructure)
+public extension InvocationAdmissionPort {
+    func availability(
+        library: LibraryScope,
+        at instant: UTCInstant
+    ) async -> InvocationAdmissionAvailability {
+        .unavailable
+    }
 }
 
 struct SyntheticCoachProviderRequest: Sendable {
@@ -301,6 +365,7 @@ struct DeterministicSyntheticCoachProvider: SyntheticCoachProviderPort {
 }
 
 public actor DefaultInvocations: Invocations {
+    static let maximumLaunchIdentityCandidates = 4
     private let persistence: any InvocationPersistencePort
     private let admission: any InvocationAdmissionPort
     private let provider: any SyntheticCoachProviderPort
@@ -430,6 +495,48 @@ public actor DefaultInvocations: Invocations {
             return await reject(firstAuthority, reason: .persistenceUnavailable)
         }
 
+        let identityInstant = await clock.now()
+        var selectedIdentity: InvocationLaunchIdentity?
+        var lastCollision: InvocationLaunchIdentityCollision?
+        for _ in 0 ..< Self.maximumLaunchIdentityCandidates {
+            let candidate = await identities.generate(at: identityInstant)
+            switch await persistence.checkLaunchIdentity(
+                candidate,
+                for: finalAuthority
+            ) {
+            case .available:
+                selectedIdentity = candidate
+            case let .collision(collision):
+                lastCollision = collision
+                continue
+            case let .stale(current):
+                if let current,
+                   let currentAuthority = try? InvocationPendingAuthority(
+                       request: request,
+                       aggregate: current
+                   )
+                {
+                    return await reject(currentAuthority, reason: .eligibilityChanged)
+                }
+                await persistence.cancelInvocationReservation(finalAuthority.request)
+                return .rejected(current, .eligibilityChanged)
+            case .unavailable:
+                return await reject(finalAuthority, reason: .persistenceUnavailable)
+            }
+            break
+        }
+        guard let identity = selectedIdentity else {
+            return await reject(
+                finalAuthority,
+                reason: .identityCollisionExhausted(
+                    lastCollision: lastCollision ?? .invocationID
+                )
+            )
+        }
+
+        // Identity discovery may scan every durable namespace. Debit against a
+        // fresh instant so the rolling window starts when admission is claimed,
+        // not when that potentially slow preflight began.
         let admittedAt = await clock.now()
         switch await admission.claim(library: request.library, at: admittedAt) {
         case .admitted:
@@ -444,16 +551,19 @@ public actor DefaultInvocations: Invocations {
             return await reject(finalAuthority, reason: .admissionUnavailable)
         }
 
-        let identity = await identities.generate(at: admittedAt)
         let install: InstallCoachInvocationMutation
         do {
             install = try InstallCoachInvocationMutation(
                 authority: finalAuthority,
                 identity: identity,
+                preparedProfile: prepared.authority.profile,
                 admittedAt: admittedAt
             )
         } catch {
-            return await reject(finalAuthority, reason: .eligibilityChanged)
+            return await interruptPending(
+                finalAuthority,
+                reason: .persistenceUnavailable
+            )
         }
 
         let invocation: CoachInvocation
@@ -461,7 +571,10 @@ public actor DefaultInvocations: Invocations {
         case let .installed(value):
             invocation = value
         case .activeExists:
-            return await reject(finalAuthority, reason: .activeInvocation)
+            return await interruptPending(
+                finalAuthority,
+                reason: .persistenceUnavailable
+            )
         case let .stale(current):
             if let current,
                let currentAuthority = try? InvocationPendingAuthority(
@@ -469,12 +582,18 @@ public actor DefaultInvocations: Invocations {
                    aggregate: current
                )
             {
-                return await reject(currentAuthority, reason: .eligibilityChanged)
+                return await interruptPending(
+                    currentAuthority,
+                    reason: .persistenceUnavailable
+                )
             }
             await persistence.cancelInvocationReservation(finalAuthority.request)
             return .rejected(current, .eligibilityChanged)
         case .failed:
-            return await reject(finalAuthority, reason: .persistenceUnavailable)
+            return await interruptPending(
+                finalAuthority,
+                reason: .persistenceUnavailable
+            )
         }
 
         guard await coachContext.isPreparedContextCurrent(prepared) else {
@@ -540,6 +659,13 @@ public actor DefaultInvocations: Invocations {
         }
     }
 
+    public func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        let instant = await clock.now()
+        return await admission.availability(library: library, at: instant)
+    }
+
     private func interruptAndAbort(
         _ invocation: CoachInvocation,
         fallback: ChatAggregate,
@@ -555,11 +681,29 @@ public actor DefaultInvocations: Invocations {
         }
     }
 
+    private func interruptPending(
+        _ authority: InvocationPendingAuthority,
+        reason: InvocationInterruptionReason
+    ) async -> InvocationTryOutcome {
+        switch await persistence.markInterruptedNewSend(authority) {
+        case let .committed(aggregate):
+            .interrupted(aggregate, reason)
+        case let .stale(current):
+            .interrupted(current ?? authority.aggregate, reason)
+        case .failed:
+            .interrupted(authority.aggregate, .persistenceUnavailable)
+        }
+    }
+
     private func reject(
         _ authority: InvocationPendingAuthority,
         reason: InvocationRejectionReason
     ) async -> InvocationTryOutcome {
-        switch await persistence.rejectNewSend(authority) {
+        if authority.pendingUserTurn.failure != nil {
+            await persistence.cancelInvocationReservation(authority.request)
+            return .rejected(authority.aggregate, reason)
+        }
+        return switch await persistence.rejectNewSend(authority) {
         case let .committed(aggregate):
             .rejected(aggregate, reason)
         case let .stale(current):

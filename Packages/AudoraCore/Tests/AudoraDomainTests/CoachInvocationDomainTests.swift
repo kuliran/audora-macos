@@ -15,6 +15,7 @@ final class CoachInvocationDomainTests: XCTestCase {
             id: fixture.coachMessageID,
             responsePositionID: fixture.pending.responsePositionID,
             content: .coach(markdown: "A concise **synthetic** answer."),
+            coachProfile: fixture.profile,
             createdAt: fixture.instant
         )
         let freshDraft = try ChatDraft(
@@ -59,6 +60,7 @@ final class CoachInvocationDomainTests: XCTestCase {
             id: fixture.coachMessageID,
             responsePositionID: fixture.pending.responsePositionID,
             content: .coach(markdown: "Synthetic answer"),
+            coachProfile: fixture.profile,
             createdAt: fixture.instant
         )
         let freshDraft = try fixture.freshDraft()
@@ -106,6 +108,7 @@ final class CoachInvocationDomainTests: XCTestCase {
                 id: fixture.coachMessageID,
                 responsePositionID: fixture.pending.responsePositionID,
                 content: .coach(markdown: String(repeating: "x", count: 65_537)),
+                coachProfile: fixture.profile,
                 createdAt: fixture.instant
             )
         ) { error in
@@ -126,11 +129,118 @@ final class CoachInvocationDomainTests: XCTestCase {
                 library: fixture.library,
                 chatID: fixture.aggregate.chat.id,
                 pendingUserTurn: anotherPending,
+                preparedProfile: fixture.profile,
                 expectedManifestRevision: fixture.aggregate.chat.manifestRevision,
                 admittedAt: fixture.instant
             ).validate(against: fixture.aggregate)
         ) { error in
             XCTAssertEqual(error as? CoachInvocationError, .pendingMismatch)
+        }
+    }
+
+    func testInvocationIntentAuthoritySurvivesUnrelatedManifestRename() throws {
+        let fixture = try Fixture()
+        let invocation = try fixture.invocation()
+        let renamed = try ChatAggregate(
+            chat: fixture.aggregate.chat.renamed(
+                to: ChatTitle("Renamed While Coach Runs"),
+                at: try UTCInstant("2026-08-30T12:00:01.000Z")
+            ),
+            memory: fixture.aggregate.memory,
+            pendingUserTurn: fixture.pending
+        )
+
+        XCTAssertNoThrow(try invocation.validateIntent(against: renamed))
+        XCTAssertThrowsError(try invocation.validate(against: renamed)) { error in
+            XCTAssertEqual(
+                error as? CoachInvocationError,
+                .manifestRevisionMismatch
+            )
+        }
+    }
+
+    func testPersistedUserMessageUsesIndependentUTF8SendLimit() throws {
+        let fixture = try Fixture()
+        let exactBoundary = String(repeating: "é", count: 8_192)
+
+        XCTAssertNoThrow(
+            try ChatMessage(
+                id: fixture.userMessageID,
+                responsePositionID: fixture.pending.responsePositionID,
+                content: .user(text: exactBoundary),
+                createdAt: fixture.instant
+            )
+        )
+        XCTAssertThrowsError(
+            try ChatMessage(
+                id: fixture.userMessageID,
+                responsePositionID: fixture.pending.responsePositionID,
+                content: .user(text: exactBoundary + "é"),
+                createdAt: fixture.instant
+            )
+        ) { error in
+            XCTAssertEqual(error as? ChatMessageError, .contentTooLong)
+        }
+    }
+
+    func testLegacyV1UserMessageRetainsOriginalDraftSizedTextCompatibility() throws {
+        let fixture = try Fixture()
+        let legacyText = String(repeating: "é", count: 8_193)
+
+        XCTAssertNoThrow(
+            try ChatMessage(
+                schemaVersion: 1,
+                id: fixture.userMessageID,
+                responsePositionID: fixture.pending.responsePositionID,
+                content: .user(text: legacyText),
+                createdAt: fixture.instant
+            )
+        )
+        XCTAssertThrowsError(
+            try ChatMessage(
+                id: fixture.userMessageID,
+                responsePositionID: fixture.pending.responsePositionID,
+                content: .user(text: legacyText),
+                createdAt: fixture.instant
+            )
+        ) { error in
+            XCTAssertEqual(error as? ChatMessageError, .contentTooLong)
+        }
+    }
+
+    func testPublicationRequiresExactPreparedProfileProvenance() throws {
+        let fixture = try Fixture()
+        let invocation = try fixture.invocation()
+        let user = try ChatMessage(
+            id: fixture.userMessageID,
+            responsePositionID: fixture.pending.responsePositionID,
+            content: .user(text: fixture.aggregate.chat.draft.text),
+            createdAt: fixture.instant
+        )
+        let staleCoach = try ChatMessage(
+            id: fixture.coachMessageID,
+            responsePositionID: fixture.pending.responsePositionID,
+            content: .coach(markdown: "Synthetic answer"),
+            coachProfile: CoachProfileProvenance(
+                revisionID: fixture.profile.revisionID,
+                statementGeneration: fixture.profile.statementGeneration + 1
+            ),
+            createdAt: fixture.instant
+        )
+
+        XCTAssertThrowsError(
+            try fixture.aggregate.publishingTurn(
+                invocation: invocation,
+                userMessage: user,
+                coachMessage: staleCoach,
+                freshDraft: fixture.freshDraft(),
+                at: fixture.instant
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? InvocationPublicationError,
+                .coachProfileProvenanceMismatch
+            )
         }
     }
 }
@@ -148,6 +258,10 @@ private struct Fixture {
     let coachMessageID = try! ChatMessageID("msg-20260830T120000000Z-8VWX")
     let freshDraftID = try! ChatDraftID("drf-20260830T120000000Z-9YZ0")
     let idempotency = try! ProviderIdempotencyValue("synthetic-attempt-6NPQ")
+    let profile = CoachProfileProvenance(
+        revisionID: try! ProfileRevisionID("prf-20260830T115900000Z-4GHJ"),
+        statementGeneration: 9
+    )
 
     init() throws {
         let empty = try ChatAggregate.emptyDevelopmentChat(
@@ -185,6 +299,7 @@ private struct Fixture {
             library: library,
             chatID: aggregate.chat.id,
             pendingUserTurn: pending,
+            preparedProfile: profile,
             expectedManifestRevision: aggregate.chat.manifestRevision,
             admittedAt: instant
         )

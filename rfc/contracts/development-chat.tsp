@@ -62,6 +62,7 @@ namespace Audora.Contracts {
 
   union PendingUserTurnFailure {
     coachContextCannotFit: "coachContextCannotFit",
+    coachResponseInterrupted: "coachResponseInterrupted",
   }
 
   @pattern("^cht-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")

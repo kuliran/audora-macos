@@ -300,6 +300,7 @@ public struct ChatDraft: Equatable, Sendable {
 
 public enum PendingUserTurnFailure: String, Equatable, Sendable {
     case coachContextCannotFit
+    case coachResponseInterrupted
 }
 
 public struct PendingUserTurn: Equatable, Sendable {

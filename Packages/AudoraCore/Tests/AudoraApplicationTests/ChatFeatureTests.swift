@@ -4,6 +4,89 @@ import XCTest
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 final class ChatFeatureTests: XCTestCase {
+    func testAdmissionCooldownBlocksSendUntilItsExactDeadlineRefreshes() async throws {
+        let aggregate = try Self.aggregate(draftText: "Coach this exact Draft.")
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let reopensAt = try UTCInstant("2026-08-30T12:01:00.000Z")
+        let gateway = ProjectedAdmissionInvocationGateway(
+            availability: .cooldown(reopensAt: reopensAt)
+        )
+        let scheduler = ControlledAdmissionRefreshScheduler()
+        let feature = makeFeature(
+            store: store,
+            admissionRefreshScheduler: scheduler,
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        await feature.send(.sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft))
+
+        let blockedRequests = await gateway.requests
+        let blockedLocks = await store.pendingLocks
+        let cooldownState = await feature.currentState
+        XCTAssertEqual(blockedRequests, [])
+        XCTAssertEqual(blockedLocks, [])
+        XCTAssertEqual(
+            cooldownState.admissionAvailability,
+            .cooldown(reopensAt: reopensAt)
+        )
+        await scheduler.waitUntilScheduled()
+        let deadlines = await scheduler.deadlines
+        XCTAssertEqual(deadlines, [reopensAt])
+
+        await gateway.setAvailability(.available)
+        await scheduler.resume()
+        while await feature.currentState.admissionAvailability != .available {
+            await Task.yield()
+        }
+        await feature.send(.sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft))
+
+        let reopenedRequests = await gateway.requests
+        let reopenedLocks = await store.pendingLocks
+        XCTAssertEqual(reopenedRequests.count, 1)
+        XCTAssertEqual(reopenedLocks.count, 1)
+    }
+
+    func testAdmissionCooldownRetainsFailedPendingTurnWithoutLaunchingRetry() async throws {
+        let aggregate = try Self.aggregate(draftText: "Retry this exact Draft.")
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            ),
+            failure: .coachContextCannotFit
+        )
+        let locked = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: pending
+        )
+        let store = RecordingChatStore(catalog: [.available(locked)])
+        let gateway = ProjectedAdmissionInvocationGateway(
+            availability: .cooldown(
+                reopensAt: try UTCInstant("2026-08-30T12:01:00.000Z")
+            )
+        )
+        let feature = makeFeature(
+            store: store,
+            admissionRefreshScheduler: ControlledAdmissionRefreshScheduler(),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, locked.chat.id))
+
+        await feature.send(.retryPendingUserTurn(Self.context, pending.id))
+
+        let requests = await gateway.requests
+        let state = await feature.currentState
+        XCTAssertEqual(requests, [])
+        XCTAssertEqual(Self.openAggregate(in: state)?.pendingUserTurn, pending)
+        XCTAssertEqual(state.composer, .locked(locked.chat.draft, pending))
+    }
+
     func testDelayedCreateFromPreviousLibraryContextIsRejectedAfterSwitch() async {
         let store = RecordingChatStore()
         let feature = makeFeature(store: store)
@@ -1202,6 +1285,8 @@ final class ChatFeatureTests: XCTestCase {
         clock: any ChatClock = FixedChatClock(),
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator = FixedChatIDs(),
         autosaveScheduler: any ChatAutosaveScheduling = ImmediateChatAutosaveScheduler(),
+        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling =
+            ImmediateAdmissionRefreshScheduler(),
         invocations: any Invocations = RecordingInterruptedInvocationGateway()
     ) -> DefaultChatFeature {
         DefaultChatFeature(
@@ -1214,6 +1299,7 @@ final class ChatFeatureTests: XCTestCase {
             pendingUserTurnIDGenerator: pendingUserTurnIDGenerator,
             responsePositionIDGenerator: FixedChatIDs(),
             autosaveScheduler: autosaveScheduler,
+            admissionRefreshScheduler: admissionRefreshScheduler,
             coachContext: DefaultCoachContextFeature(
                 source: AlwaysFitCoachContextSnapshotPort()
             ),
@@ -1312,6 +1398,36 @@ final class ChatFeatureTests: XCTestCase {
 /// an interruption without fabricating provider execution in these tests.
 private actor RecordingInterruptedInvocationGateway: Invocations {
     private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        requests.append(request)
+        return .interrupted(nil, .providerFailed)
+    }
+}
+
+private actor ProjectedAdmissionInvocationGateway: Invocations {
+    private var availability: InvocationAdmissionAvailability
+    private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    init(availability: InvocationAdmissionAvailability) {
+        self.availability = availability
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        availability
+    }
+
+    func setAvailability(_ value: InvocationAdmissionAvailability) {
+        availability = value
+    }
 
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
         requests.append(request)
@@ -1471,7 +1587,11 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
                     authority: CoachContextSnapshotAuthority(
                         binding: binding,
                         contextGeneration: 1,
-                        configurationGeneration: 1
+                        configurationGeneration: 1,
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
                     )
                 )
             )
@@ -1727,6 +1847,38 @@ private struct FixedChatIDs:
 
 private struct ImmediateChatAutosaveScheduler: ChatAutosaveScheduling {
     func sleep(forNanoseconds nanoseconds: UInt64) async throws {}
+}
+
+private struct ImmediateAdmissionRefreshScheduler: ChatAdmissionRefreshScheduling {
+    func sleep(until deadline: UTCInstant) async throws {}
+}
+
+private actor ControlledAdmissionRefreshScheduler: ChatAdmissionRefreshScheduling {
+    private(set) var deadlines: [UTCInstant] = []
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    func sleep(until deadline: UTCInstant) async throws {
+        deadlines.append(deadline)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation = $0 }
+        } onCancel: {
+            Task { await self.cancel() }
+        }
+    }
+
+    func waitUntilScheduled() async {
+        while deadlines.isEmpty { await Task.yield() }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    private func cancel() {
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
 }
 
 private actor ControlledChatAutosaveScheduler: ChatAutosaveScheduling {

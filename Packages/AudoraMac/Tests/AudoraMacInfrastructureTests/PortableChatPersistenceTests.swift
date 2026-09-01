@@ -1394,6 +1394,61 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testRelaunchPreservesInvocationWhenPublishedTailProfileConflicts() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let faulting = PortableChatPersistence { point in
+                if point == .afterPublicationManifestInstall {
+                    throw PortableChatPersistenceError.injectedFault(point)
+                }
+            }
+            XCTAssertThrowsError(
+                try faulting.publishInvocation(
+                    fixture.publication,
+                    at: root,
+                    in: scope
+                )
+            )
+            let coachURL = chatRoot(root, fixture.locked.chat.id)
+                .appendingPathComponent("messages", isDirectory: true)
+                .appendingPathComponent(
+                    "\(fixture.publication.coachMessage.id.rawValue).json"
+                )
+            var coach = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: coachURL))
+                    as? [String: Any]
+            )
+            coach["profileStatementGeneration"] = 10
+            try JSONSerialization.data(
+                withJSONObject: coach,
+                options: [.sortedKeys]
+            ).write(to: coachURL, options: .atomic)
+            let invocationRoot = root.appendingPathComponent(
+                "invocations/\(fixture.install.invocation.id.rawValue)",
+                isDirectory: true
+            )
+
+            XCTAssertThrowsError(
+                try persistence.reconcileInterruptedInvocations(
+                    at: root,
+                    in: scope
+                )
+            )
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: invocationRoot.path)
+            )
+        }
+    }
+
     func testInvocationPublicationRejectsLibraryIdentityReplacementBeforeCommit() throws {
         try withCreatedLibrary { root, scope in
             let baseline = PortableChatPersistence()
@@ -1444,7 +1499,7 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testPublicationIsIdempotentAfterCommitAndAbortUnlocksWithoutMessages() throws {
+    func testPublicationIsIdempotentAfterCommitAndAbortRetainsRetryableIntentWithoutMessages() throws {
         try withCreatedLibrary { root, scope in
             let persistence = PortableChatPersistence()
             let fixture = try makeInvocationFixture(
@@ -1490,10 +1545,218 @@ final class PortableChatPersistenceTests: XCTestCase {
                 at: root,
                 in: scope
             ) else { return XCTFail("Invocation abort did not commit") }
-            XCTAssertNil(unlocked.pendingUserTurn)
+            XCTAssertEqual(
+                unlocked.pendingUserTurn?.failure,
+                .coachResponseInterrupted
+            )
             XCTAssertEqual(unlocked.chat.draft, fixture.locked.chat.draft)
             XCTAssertEqual(unlocked.chat.messageIDs, [])
             XCTAssertFalse(try persistence.hasActiveInvocation(at: root, in: scope))
+        }
+    }
+
+    func testAbortAfterTitleRenameRetainsExactRetryableIntent() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let title = try ChatTitle("Renamed While Coach Runs")
+            guard case let .renamed(renamed) = try persistence.rename(
+                RenameChatMutation(
+                    library: scope,
+                    base: fixture.locked,
+                    title: title,
+                    updatedAt: try UTCInstant("2026-08-30T12:00:02.500Z")
+                ),
+                at: root
+            ) else { return XCTFail("Chat rename did not commit") }
+            XCTAssertTrue(try persistence.hasActiveInvocation(at: root, in: scope))
+
+            guard case let .committed(interrupted) = try persistence.abortInstalledNewSend(
+                fixture.install.invocation,
+                at: root,
+                in: scope
+            ) else { return XCTFail("Invocation abort did not preserve the intent") }
+
+            XCTAssertEqual(interrupted.chat.title, title)
+            XCTAssertEqual(interrupted.chat.manifestRevision, renamed.chat.manifestRevision)
+            XCTAssertEqual(
+                interrupted.pendingUserTurn,
+                renamed.pendingUserTurn?.replacingFailure(.coachResponseInterrupted)
+            )
+            XCTAssertEqual(interrupted.chat.draft, fixture.locked.chat.draft)
+            XCTAssertEqual(interrupted.chat.messageIDs, [])
+            XCTAssertFalse(try persistence.hasActiveInvocation(at: root, in: scope))
+        }
+    }
+
+    func testLoadFreezesCanonicalHistoryWithOneSidedResponse() throws {
+        try withPublishedInvocation { root, scope, persistence, fixture in
+            let published = fixture.publication.replacement.chat
+            let oneSided = try chat(
+                published,
+                replacingMessageIDsWith: [fixture.publication.userMessage.id]
+            )
+            try persistence.encodeChat(oneSided).write(
+                to: chatRoot(root, published.id).appendingPathComponent("chat.json"),
+                options: .atomic
+            )
+
+            try assertChatFreezesAsCorrupt(published.id, at: root, in: scope)
+        }
+    }
+
+    func testLoadFreezesCanonicalHistoryWithReversedRoleOrder() throws {
+        try withPublishedInvocation { root, scope, persistence, fixture in
+            let userSlot = try ChatMessage(
+                id: fixture.publication.userMessage.id,
+                responsePositionID: fixture.publication.userMessage.responsePositionID,
+                content: .coach(markdown: "Coach content in the user slot."),
+                coachProfile: fixture.install.invocation.preparedProfile,
+                createdAt: fixture.publication.userMessage.createdAt
+            )
+            let coachSlot = try ChatMessage(
+                id: fixture.publication.coachMessage.id,
+                responsePositionID: fixture.publication.coachMessage.responsePositionID,
+                content: .user(text: "User content in the Coach slot."),
+                createdAt: fixture.publication.coachMessage.createdAt
+            )
+            try writeMessage(
+                userSlot,
+                using: persistence,
+                under: root,
+                chatID: fixture.locked.chat.id
+            )
+            try writeMessage(
+                coachSlot,
+                using: persistence,
+                under: root,
+                chatID: fixture.locked.chat.id
+            )
+
+            try assertChatFreezesAsCorrupt(
+                fixture.locked.chat.id,
+                at: root,
+                in: scope
+            )
+        }
+    }
+
+    func testLoadFreezesCanonicalHistoryWithMismatchedResponsePositions() throws {
+        try withPublishedInvocation { root, scope, persistence, fixture in
+            let mismatchedCoach = try ChatMessage(
+                id: fixture.publication.coachMessage.id,
+                responsePositionID: ChatResponsePositionID(
+                    "rsp-20260830T120004000Z-9Z23"
+                ),
+                content: fixture.publication.coachMessage.content,
+                coachProfile: fixture.publication.coachMessage.coachProfile,
+                createdAt: fixture.publication.coachMessage.createdAt
+            )
+            try writeMessage(
+                mismatchedCoach,
+                using: persistence,
+                under: root,
+                chatID: fixture.locked.chat.id
+            )
+
+            try assertChatFreezesAsCorrupt(
+                fixture.locked.chat.id,
+                at: root,
+                in: scope
+            )
+        }
+    }
+
+    func testLegacyV1MessagePairReopensWithoutInventingProfileProvenance() throws {
+        try withPublishedInvocation { root, scope, persistence, fixture in
+            for message in [
+                fixture.publication.userMessage,
+                fixture.publication.coachMessage,
+            ] {
+                let url = chatRoot(root, fixture.locked.chat.id)
+                    .appendingPathComponent("messages", isDirectory: true)
+                    .appendingPathComponent("\(message.id.rawValue).json")
+                var object = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: Data(contentsOf: url))
+                        as? [String: Any]
+                )
+                object["schemaVersion"] = 1
+                object.removeValue(forKey: "profileRevisionId")
+                object.removeValue(forKey: "profileStatementGeneration")
+                if message.id == fixture.publication.userMessage.id {
+                    object["text"] = String(repeating: "é", count: 8_193)
+                }
+                try JSONSerialization.data(
+                    withJSONObject: object,
+                    options: [.sortedKeys]
+                ).write(to: url, options: .atomic)
+            }
+
+            XCTAssertEqual(
+                try persistence.load(
+                    fixture.locked.chat.id,
+                    at: root,
+                    in: scope
+                ),
+                .readWrite(fixture.publication.replacement)
+            )
+        }
+    }
+
+    func testV2CoachMessageWithoutProfileProvenanceFreezesChat() throws {
+        try withPublishedInvocation { root, scope, _, fixture in
+            let coach = fixture.publication.coachMessage
+            let url = chatRoot(root, fixture.locked.chat.id)
+                .appendingPathComponent("messages", isDirectory: true)
+                .appendingPathComponent("\(coach.id.rawValue).json")
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: url))
+                    as? [String: Any]
+            )
+            object.removeValue(forKey: "profileRevisionId")
+            object.removeValue(forKey: "profileStatementGeneration")
+            try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            ).write(to: url, options: .atomic)
+
+            try assertChatFreezesAsCorrupt(
+                fixture.locked.chat.id,
+                at: root,
+                in: scope
+            )
+        }
+    }
+
+    func testMixedV1V2MessagePairFreezesChat() throws {
+        try withPublishedInvocation { root, scope, _, fixture in
+            let user = fixture.publication.userMessage
+            let url = chatRoot(root, fixture.locked.chat.id)
+                .appendingPathComponent("messages", isDirectory: true)
+                .appendingPathComponent("\(user.id.rawValue).json")
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: url))
+                    as? [String: Any]
+            )
+            object["schemaVersion"] = 1
+            try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            ).write(to: url, options: .atomic)
+
+            try assertChatFreezesAsCorrupt(
+                fixture.locked.chat.id,
+                at: root,
+                in: scope
+            )
         }
     }
 
@@ -1522,11 +1785,184 @@ final class PortableChatPersistenceTests: XCTestCase {
                 at: root,
                 in: scope
             ) else { return XCTFail("recovery froze the Chat") }
-            XCTAssertNil(reopened.pendingUserTurn)
+            XCTAssertEqual(
+                reopened.pendingUserTurn?.failure,
+                .coachResponseInterrupted
+            )
             XCTAssertEqual(reopened.chat.draft, fixture.locked.chat.draft)
             XCTAssertEqual(reopened.chat.messageIDs, [])
             XCTAssertFalse(try persistence.hasActiveInvocation(at: root, in: scope))
             XCTAssertFalse(FileManager.default.fileExists(atPath: invocationRoot.path))
+        }
+    }
+
+    func testRelaunchAfterTitleRenameRetainsExactRetryableIntent() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let title = try ChatTitle("Renamed Before Relaunch")
+            guard case let .renamed(renamed) = try persistence.rename(
+                RenameChatMutation(
+                    library: scope,
+                    base: fixture.locked,
+                    title: title,
+                    updatedAt: try UTCInstant("2026-08-30T12:00:02.500Z")
+                ),
+                at: root
+            ) else { return XCTFail("Chat rename did not commit") }
+
+            try persistence.reconcileInterruptedInvocations(at: root, in: scope)
+
+            guard case let .readWrite(reopened) = try persistence.load(
+                fixture.locked.chat.id,
+                at: root,
+                in: scope
+            ) else { return XCTFail("recovery froze the Chat") }
+            XCTAssertEqual(reopened.chat.title, title)
+            XCTAssertEqual(reopened.chat.manifestRevision, renamed.chat.manifestRevision)
+            XCTAssertEqual(
+                reopened.pendingUserTurn,
+                renamed.pendingUserTurn?.replacingFailure(.coachResponseInterrupted)
+            )
+            XCTAssertEqual(reopened.chat.draft, fixture.locked.chat.draft)
+            XCTAssertEqual(reopened.chat.messageIDs, [])
+            XCTAssertFalse(try persistence.hasActiveInvocation(at: root, in: scope))
+        }
+    }
+
+    func testRelaunchSafelyRetiresLegacyV1InvocationWithoutInventingProfile() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let url = root.appendingPathComponent(
+                "invocations/\(fixture.install.invocation.id.rawValue)/invocation.json"
+            )
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: url))
+                    as? [String: Any]
+            )
+            object["schemaVersion"] = 1
+            object.removeValue(forKey: "profileRevisionId")
+            object.removeValue(forKey: "profileStatementGeneration")
+            try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            ).write(to: url, options: .atomic)
+
+            try persistence.reconcileInterruptedInvocations(at: root, in: scope)
+
+            guard case let .readWrite(reopened) = try persistence.load(
+                fixture.locked.chat.id,
+                at: root,
+                in: scope
+            ) else { return XCTFail("legacy recovery froze the Chat") }
+            XCTAssertEqual(
+                reopened.pendingUserTurn?.failure,
+                .coachResponseInterrupted
+            )
+            XCTAssertEqual(reopened.chat.messageIDs, [])
+            XCTAssertFalse(try persistence.hasActiveInvocation(at: root, in: scope))
+        }
+    }
+
+    func testMalformedV2InvocationWithNullProfileGenerationIsRejectedWithoutTrap() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let url = root.appendingPathComponent(
+                "invocations/\(fixture.install.invocation.id.rawValue)/invocation.json"
+            )
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: url))
+                    as? [String: Any]
+            )
+            object["profileStatementGeneration"] = NSNull()
+            try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            ).write(to: url, options: .atomic)
+
+            XCTAssertThrowsError(
+                try persistence.reconcileInterruptedInvocations(at: root, in: scope)
+            )
+        }
+    }
+
+    func testV2InvocationWithoutSelectedProfileOmitsRevisionInsteadOfEncodingNull() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            let original = fixture.install.invocation
+            let authority = try InvocationPendingAuthority(
+                request: PendingCoachInvocationRequest(
+                    library: scope,
+                    chatID: original.chatID,
+                    pendingUserTurnID: original.pendingUserTurnID
+                ),
+                aggregate: fixture.locked
+            )
+            let identity = InvocationLaunchIdentity(
+                invocationID: original.id,
+                attemptID: original.attemptID,
+                idempotencyValue: original.providerIdempotencyValue,
+                userMessageID: fixture.publication.userMessage.id,
+                coachMessageID: fixture.publication.coachMessage.id,
+                freshDraftID: fixture.publication.freshDraft.draftID
+            )
+            let install = try InstallCoachInvocationMutation(
+                authority: authority,
+                identity: identity,
+                preparedProfile: CoachProfileProvenance(
+                    revisionID: nil,
+                    statementGeneration: 9
+                ),
+                admittedAt: original.admittedAt
+            )
+
+            guard case .installed = try persistence.installInvocation(
+                install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let url = root.appendingPathComponent(
+                "invocations/\(install.invocation.id.rawValue)/invocation.json"
+            )
+            let object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: url))
+                    as? [String: Any]
+            )
+            XCTAssertFalse(object.keys.contains("profileRevisionId"))
+            XCTAssertEqual(
+                (object["profileStatementGeneration"] as? NSNumber)?.uint64Value,
+                9
+            )
         }
     }
 
@@ -1567,11 +2003,11 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testAbortFaultsReconcileToUnlockedDraftAndNoActiveInvocation() throws {
+    func testAbortFaultsReconcileToRetryableDraftAndNoActiveInvocation() throws {
         let points: [PortableChatFaultPoint] = [
             .afterInvocationAbortMarkerInstall,
             .afterInvocationAbortDirectoryRemoval,
-            .afterInvocationAbortPendingRemoval,
+            .afterInvocationAbortPendingFailureInstall,
         ]
         for point in points {
             try withCreatedLibrary { root, scope in
@@ -1604,7 +2040,11 @@ final class PortableChatPersistenceTests: XCTestCase {
                     at: root,
                     in: scope
                 ) else { return XCTFail("abort recovery froze the Chat") }
-                XCTAssertNil(reopened.pendingUserTurn, String(describing: point))
+                XCTAssertEqual(
+                    reopened.pendingUserTurn?.failure,
+                    .coachResponseInterrupted,
+                    String(describing: point)
+                )
                 XCTAssertEqual(
                     reopened.chat.draft,
                     fixture.locked.chat.draft,
@@ -1630,6 +2070,10 @@ final class PortableChatPersistenceTests: XCTestCase {
                     repeating: "\"",
                     count: ChatMessage.maximumCoachMarkdownUTF8Bytes
                 )
+            ),
+            coachProfile: CoachProfileProvenance(
+                revisionID: try ProfileRevisionID("prf-20260830T115900000Z-4GHJ"),
+                statementGeneration: 9
             ),
             createdAt: UTCInstant("2026-08-30T12:00:03.000Z")
         )
@@ -1762,6 +2206,10 @@ final class PortableChatPersistenceTests: XCTestCase {
         let install = try InstallCoachInvocationMutation(
             authority: authority,
             identity: identity,
+            preparedProfile: CoachProfileProvenance(
+                revisionID: try ProfileRevisionID("prf-20260830T115900000Z-4GHJ"),
+                statementGeneration: 9
+            ),
             admittedAt: try UTCInstant("2026-08-30T12:\(minute):02.000Z")
         )
         let publication = try PublishCoachInvocationMutation(
@@ -1776,6 +2224,34 @@ final class PortableChatPersistenceTests: XCTestCase {
             install: install,
             publication: publication
         )
+    }
+
+    private func withPublishedInvocation(
+        _ body: (
+            URL,
+            LibraryScope,
+            PortableChatPersistence,
+            InvocationPersistenceFixture
+        ) throws -> Void
+    ) throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            guard case .committed = try persistence.publishInvocation(
+                fixture.publication,
+                at: root,
+                in: scope
+            ) else { return XCTFail("Invocation did not publish") }
+            try body(root, scope, persistence, fixture)
+        }
     }
 
     private func withCreatedChat(
@@ -1893,6 +2369,39 @@ final class PortableChatPersistenceTests: XCTestCase {
 
     private func chatRoot(_ root: URL, _ chatID: ChatID) -> URL {
         root.appendingPathComponent("chats/\(chatID.rawValue)", isDirectory: true)
+    }
+
+    private func chat(
+        _ source: Chat,
+        replacingMessageIDsWith messageIDs: [ChatMessageID]
+    ) throws -> Chat {
+        try Chat(
+            id: source.id,
+            manifestRevision: source.manifestRevision,
+            title: source.title,
+            createdAt: source.createdAt,
+            updatedAt: source.updatedAt,
+            creation: source.creation,
+            profileStatementGenerationAtCreation: source
+                .profileStatementGenerationAtCreation,
+            attachments: source.attachments,
+            draft: source.draft,
+            messageIDs: messageIDs,
+            currentMemoryID: source.currentMemoryID
+        )
+    }
+
+    private func writeMessage(
+        _ message: ChatMessage,
+        using persistence: PortableChatPersistence,
+        under root: URL,
+        chatID: ChatID
+    ) throws {
+        try persistence.encodeMessage(message).write(
+            to: chatRoot(root, chatID)
+                .appendingPathComponent("messages/\(message.id.rawValue).json"),
+            options: .atomic
+        )
     }
 
     private func assertChatFreezesAsCorrupt(

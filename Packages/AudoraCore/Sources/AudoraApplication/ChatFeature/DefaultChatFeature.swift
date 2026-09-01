@@ -21,6 +21,12 @@ private struct ScheduledAutosave: Sendable {
     let chatID: ChatID
 }
 
+private struct ScheduledAdmissionRefresh: Sendable {
+    let context: ChatCommandContext
+    let deadline: UTCInstant
+    let task: Task<Void, Never>
+}
+
 private enum DraftSaveDisposition: Equatable, Sendable {
     case notAttempted
     case durable
@@ -43,6 +49,7 @@ public actor DefaultChatFeature: ChatFeature {
     private let pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator
     private let responsePositionIDGenerator: any ChatResponsePositionIDGenerator
     private let autosaveScheduler: any ChatAutosaveScheduling
+    private let admissionRefreshScheduler: any ChatAdmissionRefreshScheduling
     private let coachContext: any CoachContextCoordinating
     private let invocations: any Invocations
 
@@ -56,6 +63,7 @@ public actor DefaultChatFeature: ChatFeature {
     private var autosaveTimer: (id: UInt64, task: Task<Void, Never>)?
     private var autosaveWrite: (id: UInt64, task: Task<DraftSaveDisposition, Never>)?
     private var autosaveDueAfterWrite: ScheduledAutosave?
+    private var admissionRefresh: ScheduledAdmissionRefresh?
     private var nextAutosaveID: UInt64 = 0
     private var suppressAutosaveScheduling = false
     private var continuations: [Int: AsyncStream<ChatFeatureState>.Continuation] = [:]
@@ -71,6 +79,8 @@ public actor DefaultChatFeature: ChatFeature {
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
+        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling =
+            SystemChatAdmissionRefreshScheduler(),
         invocations: any Invocations
     ) {
         self.store = store
@@ -82,6 +92,7 @@ public actor DefaultChatFeature: ChatFeature {
         self.pendingUserTurnIDGenerator = pendingUserTurnIDGenerator
         self.responsePositionIDGenerator = responsePositionIDGenerator
         self.autosaveScheduler = autosaveScheduler
+        self.admissionRefreshScheduler = admissionRefreshScheduler
         coachContext = DefaultCoachContextFeature()
         self.invocations = invocations
     }
@@ -96,6 +107,8 @@ public actor DefaultChatFeature: ChatFeature {
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
+        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling =
+            SystemChatAdmissionRefreshScheduler(),
         coachContext: any CoachContextCoordinating,
         invocations: any Invocations
     ) {
@@ -108,6 +121,7 @@ public actor DefaultChatFeature: ChatFeature {
         self.pendingUserTurnIDGenerator = pendingUserTurnIDGenerator
         self.responsePositionIDGenerator = responsePositionIDGenerator
         self.autosaveScheduler = autosaveScheduler
+        self.admissionRefreshScheduler = admissionRefreshScheduler
         self.coachContext = coachContext
         self.invocations = invocations
     }
@@ -282,6 +296,8 @@ public actor DefaultChatFeature: ChatFeature {
                 guard context == requestedContext else { continue }
             }
             activeContext = context
+            admissionRefresh?.task.cancel()
+            admissionRefresh = nil
             state = ChatFeatureState(
                 catalog: .loading,
                 filterQuery: state.filterQuery,
@@ -321,6 +337,7 @@ public actor DefaultChatFeature: ChatFeature {
             )
         }
         publish()
+        await refreshAdmissionAvailability(in: context)
     }
 
     private func createDevelopmentChat(context: ChatCommandContext) async {
@@ -537,6 +554,7 @@ public actor DefaultChatFeature: ChatFeature {
                 selection: state.selection,
                 composer: state.composer,
                 contextAdvisory: state.contextAdvisory,
+                admissionAvailability: state.admissionAvailability,
                 createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
                 activity: state.activity,
                 notice: state.notice
@@ -555,6 +573,7 @@ public actor DefaultChatFeature: ChatFeature {
             selection: state.selection,
             composer: state.composer,
             contextAdvisory: state.contextAdvisory,
+            admissionAvailability: state.admissionAvailability,
             createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
             activity: state.activity,
             notice: nil
@@ -763,6 +782,9 @@ public actor DefaultChatFeature: ChatFeature {
         expectedChatID: ChatID,
         expectedDraft: ChatDraft
     ) async {
+        guard ChatInteractionPolicy.allowsCoachInvocation(in: state) else {
+            return
+        }
         guard isActive(context),
               case let .open(aggregate) = state.selection,
               aggregate.chat.id == expectedChatID,
@@ -879,6 +901,11 @@ public actor DefaultChatFeature: ChatFeature {
             )
         )
         guard isActive(context) else { return }
+        applyInvocationOutcome(outcome)
+        await refreshAdmissionAvailability(in: context)
+    }
+
+    private func applyInvocationOutcome(_ outcome: InvocationTryOutcome) {
         switch outcome {
         case let .published(current, quote):
             state = replacing(
@@ -946,7 +973,7 @@ public actor DefaultChatFeature: ChatFeature {
         case .contextUnavailable:
             .coachContextUnavailable
         case .eligibilityChanged, .contextChanged, .admissionUnavailable,
-             .persistenceUnavailable:
+             .persistenceUnavailable, .identityCollisionExhausted:
             .coachSendUnavailable
         }
     }
@@ -991,11 +1018,14 @@ public actor DefaultChatFeature: ChatFeature {
         _ pendingUserTurnID: PendingUserTurnID,
         context: ChatCommandContext
     ) async {
+        guard ChatInteractionPolicy.allowsCoachInvocation(in: state) else {
+            return
+        }
         guard isActive(context),
               case let .open(aggregate) = state.selection,
               let pending = aggregate.pendingUserTurn,
               pending.id == pendingUserTurnID,
-              pending.failure == .coachContextCannotFit,
+              pending.failure != nil,
               case let .locked(draft, locked) = state.composer,
               locked == pending,
               draft == aggregate.chat.draft
@@ -1004,90 +1034,20 @@ public actor DefaultChatFeature: ChatFeature {
         }
         state = replacing(
             clearsRecoveryIntent: true,
-            activity: .retryingPendingUserTurn(aggregate.chat.id),
+            activity: .invokingCoach(aggregate.chat.id),
             notice: nil
         )
         publish()
-        let request: CoachContextPendingTurnRequest
-        do {
-            request = try CoachContextPendingTurnRequest(
+        let outcome = await invocations.tryInvoke(
+            PendingCoachInvocationRequest(
                 library: context.libraryScope,
                 chatID: aggregate.chat.id,
-                draft: draft,
-                pendingUserTurn: pending
+                pendingUserTurnID: pending.id
             )
-        } catch {
-            state = replacing(activity: nil, notice: .coachContextUnavailable)
-            publish()
-            return
-        }
-        let preparation = await coachContext.preparePendingUserTurn(request)
-        guard isActive(context),
-              case let .open(current) = state.selection,
-              current.chat.id == aggregate.chat.id,
-              current.pendingUserTurn == pending,
-              case let .locked(currentDraft, currentPending) = state.composer,
-              currentDraft == draft,
-              currentPending == pending
-        else {
-            return
-        }
-        switch preparation {
-        case let .prepared(prepared):
-            let replacement = pending.replacingFailure(nil)
-            state = replacing(
-                contextAdvisory: .available(prepared.quote),
-                activity: .retryingPendingUserTurn(aggregate.chat.id),
-                notice: nil
-            )
-            publish()
-            let mutation: ReplacePendingUserTurnMutation
-            do {
-                mutation = try ReplacePendingUserTurnMutation(
-                    library: context.libraryScope,
-                    chatID: aggregate.chat.id,
-                    base: pending,
-                    replacement: replacement
-                )
-            } catch {
-                state = replacing(activity: nil, notice: .pendingUserTurnFailed)
-                publish()
-                return
-            }
-            let outcome = await store.replacePendingUserTurn(
-                mutation
-            )
-            guard isActive(context) else { return }
-            applyPendingMutationOutcome(
-                outcome,
-                expectedChatID: aggregate.chat.id,
-                expectedPending: replacement,
-                operationFailure: .pendingUserTurnFailed
-            )
-        case let .cannotFit(failure):
-            state = replacing(
-                contextAdvisory: .available(failure.quote),
-                activity: nil,
-                notice: nil
-            )
-            publish()
-        case let .messageTooLong(maximumUTF8Bytes):
-            state = replacing(
-                contextAdvisory: .messageTooLong(
-                    maximumUTF8Bytes: maximumUTF8Bytes
-                ),
-                activity: nil,
-                notice: .messageMustBeShortened
-            )
-            publish()
-        case let .unavailable(reason):
-            state = replacing(
-                contextAdvisory: .unavailable(reason),
-                activity: nil,
-                notice: .coachContextUnavailable
-            )
-            publish()
-        }
+        )
+        guard isActive(context) else { return }
+        applyInvocationOutcome(outcome)
+        await refreshAdmissionAvailability(in: context)
     }
 
     private func createNewChatFromCapacityFailure(
@@ -1115,6 +1075,62 @@ public actor DefaultChatFeature: ChatFeature {
             notice: nil
         )
         publish()
+    }
+
+    private func refreshAdmissionAvailability(in context: ChatCommandContext) async {
+        let availability = await invocations.admissionAvailability(
+            in: context.libraryScope
+        )
+        guard isActive(context) else { return }
+
+        admissionRefresh?.task.cancel()
+        admissionRefresh = nil
+        state = ChatFeatureState(
+            catalog: state.catalog,
+            filterQuery: state.filterQuery,
+            selection: state.selection,
+            composer: state.composer,
+            contextAdvisory: state.contextAdvisory,
+            admissionAvailability: availability,
+            createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
+            activity: state.activity,
+            notice: state.notice
+        )
+        publish()
+
+        guard case let .cooldown(reopensAt) = availability else { return }
+        let scheduler = admissionRefreshScheduler
+        let task = Task { [weak self] in
+            do {
+                try await scheduler.sleep(until: reopensAt)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await self?.admissionRefreshDeadlineReached(
+                context: context,
+                deadline: reopensAt
+            )
+        }
+        admissionRefresh = ScheduledAdmissionRefresh(
+            context: context,
+            deadline: reopensAt,
+            task: task
+        )
+    }
+
+    private func admissionRefreshDeadlineReached(
+        context: ChatCommandContext,
+        deadline: UTCInstant
+    ) async {
+        guard admissionRefresh?.context == context,
+              admissionRefresh?.deadline == deadline,
+              isActive(context)
+        else {
+            return
+        }
+        admissionRefresh = nil
+        await refreshAdmissionAvailability(in: context)
     }
 
     private func scheduleAutosave(for context: ChatCommandContext, chatID: ChatID) {
@@ -1486,6 +1502,7 @@ public actor DefaultChatFeature: ChatFeature {
             contextAdvisory: preservesSelectedChat
                 ? state.contextAdvisory
                 : .notRequested,
+            admissionAvailability: state.admissionAvailability,
             createNewChatRecoveryIntent: preservesSelectedChat
                 ? state.createNewChatRecoveryIntent
                 : nil,
@@ -1584,6 +1601,7 @@ public actor DefaultChatFeature: ChatFeature {
             selection: selection ?? state.selection,
             composer: replacesComposer ? composer : state.composer,
             contextAdvisory: contextAdvisory ?? state.contextAdvisory,
+            admissionAvailability: state.admissionAvailability,
             createNewChatRecoveryIntent: clearsRecoveryIntent
                 ? nil
                 : recoveryIntent ?? state.createNewChatRecoveryIntent,

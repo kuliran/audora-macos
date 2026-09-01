@@ -1,5 +1,6 @@
 import AudoraApplication
 import AudoraDomain
+import AppKit
 import SwiftUI
 
 struct ChatRenameEditorTaskID: Hashable {
@@ -65,6 +66,56 @@ enum CoachContextQuotePresentation {
         case .responseReserve: "Response reserve"
         case .safetyMargin: "Safety margin"
         }
+    }
+}
+
+enum ChatInvocationAdmissionPresentation {
+    static func unavailableReason(
+        for availability: InvocationAdmissionAvailability?
+    ) -> String? {
+        switch availability {
+        case nil:
+            "Coach admission availability is being checked."
+        case let .cooldown(reopensAt):
+            "Coach admission reopens at \(reopensAt.rawValue)."
+        case .unavailable:
+            "Coach admission availability could not be checked."
+        case .available:
+            nil
+        }
+    }
+}
+
+private struct CoachInvocationControlModifier: ViewModifier {
+    let disabled: Bool
+    let unavailableReason: String?
+
+    func body(content: Content) -> some View {
+        content
+            .disabled(disabled)
+            .accessibilityHint(unavailableReason ?? "")
+            .onHover { hovering in
+                if hovering, disabled {
+                    NSCursor.operationNotAllowed.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+    }
+}
+
+private extension View {
+    func coachInvocationControl(
+        disabled: Bool,
+        admissionAvailability: InvocationAdmissionAvailability?
+    ) -> some View {
+        modifier(
+            CoachInvocationControlModifier(
+                disabled: disabled,
+                unavailableReason: ChatInvocationAdmissionPresentation
+                    .unavailableReason(for: admissionAvailability)
+            )
+        )
     }
 }
 
@@ -273,14 +324,21 @@ public struct ChatRootView: View {
                         Button("Send") { model.sendDraft() }
                             .keyboardShortcut(.return, modifiers: [.command])
                             .accessibilityLabel("Send Chat Draft")
-                            .disabled(
+                            .coachInvocationControl(
+                                disabled:
                                 !allowsNavigationAndMutation ||
+                                    !ChatInteractionPolicy.allowsCoachInvocation(
+                                        in: model.snapshot
+                                    ) ||
                                     !sendIsContextEligible ||
                                     !draft.text.unicodeScalars.contains {
                                         !$0.properties.isWhitespace
-                                    }
+                                    },
+                                admissionAvailability: model.snapshot
+                                    .admissionAvailability
                             )
                     }
+                    admissionUnavailableReason
                     contextDetails
                     if messageNeedsShortening {
                         Text("Message is too long. Shorten it to send.")
@@ -303,6 +361,7 @@ public struct ChatRootView: View {
                     Text("This exact Draft is locked outside successful history.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    admissionUnavailableReason
                     if pending.failure == .coachContextCannotFit {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Chat size exceeded. Please create a new one.")
@@ -316,18 +375,54 @@ public struct ChatRootView: View {
                                     model.retryPendingUserTurn(pending.id)
                                 }
                                 .accessibilityLabel("Retry Pending User Turn")
+                                .coachInvocationControl(
+                                    disabled: !allowsNavigationAndMutation ||
+                                        !ChatInteractionPolicy.allowsCoachInvocation(
+                                            in: model.snapshot
+                                        ),
+                                    admissionAvailability: model.snapshot
+                                        .admissionAvailability
+                                )
                                 Button("Discard") {
                                     model.discardPendingUserTurn(pending.id)
                                 }
                                 .accessibilityLabel("Discard Pending User Turn")
+                                .disabled(!allowsNavigationAndMutation)
                                 Button("Create New Chat") {
                                     model.createNewChatFromCapacityFailure(pending.id)
                                 }
                                 .accessibilityLabel(
                                     "Create New Chat from capacity failure"
                                 )
+                                .disabled(!allowsNavigationAndMutation)
                             }
-                            .disabled(!allowsNavigationAndMutation)
+                        }
+                    } else if pending.failure == .coachResponseInterrupted {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("The Coach response was interrupted. Nothing was published.")
+                                .font(.callout.weight(.semibold))
+                                .accessibilityLabel(
+                                    "The Coach response was interrupted. Nothing was published."
+                                )
+                            HStack {
+                                Button("Retry") {
+                                    model.retryPendingUserTurn(pending.id)
+                                }
+                                .accessibilityLabel("Retry Interrupted Coach Response")
+                                .coachInvocationControl(
+                                    disabled: !allowsNavigationAndMutation ||
+                                        !ChatInteractionPolicy.allowsCoachInvocation(
+                                            in: model.snapshot
+                                        ),
+                                    admissionAvailability: model.snapshot
+                                        .admissionAvailability
+                                )
+                                Button("Discard") {
+                                    model.discardPendingUserTurn(pending.id)
+                                }
+                                .accessibilityLabel("Discard Interrupted Coach Response")
+                                .disabled(!allowsNavigationAndMutation)
+                            }
                         }
                     } else {
                         HStack {
@@ -371,6 +466,18 @@ public struct ChatRootView: View {
             !dispatcher.isChatBoundaryPending &&
             !dispatcher.isOrderlyTerminationPending &&
             ChatInteractionPolicy.allowsNavigationAndMutation(in: model.snapshot)
+    }
+
+    @ViewBuilder
+    private var admissionUnavailableReason: some View {
+        if let reason = ChatInvocationAdmissionPresentation.unavailableReason(
+            for: model.snapshot.admissionAvailability
+        ) {
+            Text(reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(reason)
+        }
     }
 
     @ViewBuilder

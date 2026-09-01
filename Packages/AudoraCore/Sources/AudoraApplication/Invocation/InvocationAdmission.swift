@@ -27,6 +27,15 @@ public enum RollingInvocationAdmissionDecision: Equatable, Sendable {
     case invalidClockRange
 }
 
+@_spi(InvocationInfrastructure)
+public enum RollingInvocationAdmissionAvailability: Equatable, Sendable {
+    case available
+    case cooldown(lastAdmittedAt: UTCInstant, reopensAt: UTCInstant)
+    case clockRollback(lastAdmittedAt: UTCInstant, reopensAt: UTCInstant)
+    case ledgerFull
+    case invalidClockRange
+}
+
 /// The deterministic policy value persisted by the machine-local admission adapter.
 ///
 /// A wall-clock rollback is conservative: an instant earlier than the last durable
@@ -70,16 +79,46 @@ public struct RollingInvocationAdmissionLedger: Equatable, Sendable {
         library: LibraryScope,
         at instant: UTCInstant
     ) -> RollingInvocationAdmissionDecision {
+        switch availability(library: library, at: instant) {
+        case .available:
+            if let index = entries.firstIndex(where: { $0.library == library }) {
+                entries[index] = RollingInvocationAdmissionEntry(
+                    library: library,
+                    lastAdmittedAt: instant
+                )
+            } else {
+                entries.append(
+                    RollingInvocationAdmissionEntry(
+                        library: library,
+                        lastAdmittedAt: instant
+                    )
+                )
+                entries.sort {
+                    $0.library.libraryID.rawValue < $1.library.libraryID.rawValue
+                }
+            }
+            return .admitted
+        case let .cooldown(lastAdmittedAt, reopensAt):
+            return .cooldown(lastAdmittedAt: lastAdmittedAt, reopensAt: reopensAt)
+        case let .clockRollback(lastAdmittedAt, _):
+            return .clockRollback(lastAdmittedAt: lastAdmittedAt)
+        case .ledgerFull:
+            return .ledgerFull
+        case .invalidClockRange:
+            return .invalidClockRange
+        }
+    }
+
+    public func availability(
+        library: LibraryScope,
+        at instant: UTCInstant
+    ) -> RollingInvocationAdmissionAvailability {
         guard let now = InvocationWallClock(instant) else {
             return .invalidClockRange
         }
-        if let index = entries.firstIndex(where: { $0.library == library }) {
-            let previous = entries[index]
+        if let previous = entries.first(where: { $0.library == library }) {
             guard let admitted = InvocationWallClock(previous.lastAdmittedAt) else {
                 return .invalidClockRange
-            }
-            guard now.milliseconds >= admitted.milliseconds else {
-                return .clockRollback(lastAdmittedAt: previous.lastAdmittedAt)
             }
             let (reopeningMilliseconds, overflow) = admitted.milliseconds
                 .addingReportingOverflow(Self.windowMilliseconds)
@@ -90,28 +129,22 @@ public struct RollingInvocationAdmissionLedger: Equatable, Sendable {
             else {
                 return .invalidClockRange
             }
+            guard now.milliseconds >= admitted.milliseconds else {
+                return .clockRollback(
+                    lastAdmittedAt: previous.lastAdmittedAt,
+                    reopensAt: reopensAt
+                )
+            }
             guard now.milliseconds >= reopeningMilliseconds else {
                 return .cooldown(
                     lastAdmittedAt: previous.lastAdmittedAt,
                     reopensAt: reopensAt
                 )
             }
-            entries[index] = RollingInvocationAdmissionEntry(
-                library: library,
-                lastAdmittedAt: instant
-            )
-            return .admitted
+            return .available
         }
 
-        guard entries.count < maximumLibraries else { return .ledgerFull }
-        entries.append(
-            RollingInvocationAdmissionEntry(
-                library: library,
-                lastAdmittedAt: instant
-            )
-        )
-        entries.sort { $0.library.libraryID.rawValue < $1.library.libraryID.rawValue }
-        return .admitted
+        return entries.count < maximumLibraries ? .available : .ledgerFull
     }
 }
 

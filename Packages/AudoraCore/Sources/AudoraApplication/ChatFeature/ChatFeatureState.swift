@@ -126,6 +126,7 @@ public struct ChatFeatureState: Equatable, Sendable {
     public let selection: Selection
     public let composer: ChatComposerState?
     public let contextAdvisory: CoachContextAdvisoryState
+    public let admissionAvailability: InvocationAdmissionAvailability?
     public let createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent?
     public let activity: Activity?
     public let notice: ChatNotice?
@@ -136,6 +137,7 @@ public struct ChatFeatureState: Equatable, Sendable {
         selection: Selection = .none,
         composer: ChatComposerState? = nil,
         contextAdvisory: CoachContextAdvisoryState = .notRequested,
+        admissionAvailability: InvocationAdmissionAvailability? = nil,
         createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
         activity: Activity? = nil,
         notice: ChatNotice? = nil
@@ -145,6 +147,7 @@ public struct ChatFeatureState: Equatable, Sendable {
         self.selection = selection
         self.composer = composer
         self.contextAdvisory = contextAdvisory
+        self.admissionAvailability = admissionAvailability
         self.createNewChatRecoveryIntent = createNewChatRecoveryIntent
         self.activity = activity
         self.notice = notice

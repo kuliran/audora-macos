@@ -3,6 +3,35 @@ import AudoraDomain
 import XCTest
 
 final class InvocationAdmissionLedgerTests: XCTestCase {
+    func testAvailabilityProjectsExactReopeningWithoutConsumingADebit() throws {
+        var ledger = RollingInvocationAdmissionLedger(maximumLibraries: 4)
+        let library = try scope("lib-20260830T120000000Z-1ABC")
+        let admittedAt = try instant("2026-08-30T12:00:00.000Z")
+        let reopensAt = try instant("2026-08-30T12:01:00.000Z")
+
+        XCTAssertEqual(
+            ledger.availability(library: library, at: admittedAt),
+            .available
+        )
+        XCTAssertEqual(ledger.claim(library: library, at: admittedAt), .admitted)
+        XCTAssertEqual(
+            ledger.availability(
+                library: library,
+                at: try instant("2026-08-30T12:00:59.999Z")
+            ),
+            .cooldown(lastAdmittedAt: admittedAt, reopensAt: reopensAt)
+        )
+        XCTAssertEqual(
+            ledger.availability(library: library, at: reopensAt),
+            .available
+        )
+        XCTAssertEqual(
+            ledger.entries,
+            [RollingInvocationAdmissionEntry(library: library, lastAdmittedAt: admittedAt)],
+            "read-only availability must not move the durable debit"
+        )
+    }
+
     func testRollingWindowRejectsAt59999MillisecondsAndAdmitsAt60000() throws {
         var ledger = RollingInvocationAdmissionLedger(maximumLibraries: 4)
         let library = try scope("lib-20260830T120000000Z-1ABC")

@@ -58,6 +58,97 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testCrossChatReservationReconcilesCrashedInvocationWithItsOwnPendingLease() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            guard case .installed = try PortableChatPersistence().installInvocation(
+                fixture.install,
+                at: fixture.root
+            ) else { return XCTFail("crashed Invocation fixture did not install") }
+            let store = PortableInvocationStore(workspace: fixture.workspace)
+
+            let reservation = await store.reserveInvocation(
+                fixture.competingAuthority.request
+            )
+
+            XCTAssertEqual(reservation, .none)
+            guard case let .readWrite(reopened) = try PortableChatPersistence().load(
+                fixture.locked.chat.id,
+                at: fixture.root,
+                in: fixture.scope
+            ) else { return XCTFail("recovery froze the interrupted Chat") }
+            XCTAssertEqual(
+                reopened.pendingUserTurn?.failure,
+                .coachResponseInterrupted
+            )
+            XCTAssertFalse(
+                try PortableChatPersistence().hasActiveInvocation(
+                    at: fixture.root,
+                    in: fixture.scope
+                )
+            )
+            await store.cancelInvocationReservation(
+                fixture.competingAuthority.request
+            )
+        }
+    }
+
+    func testIdenticalContenderCannotDiscardPendingWhileWinningProviderIsSuspended() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let owner = PortableInvocationStore(workspace: fixture.workspace)
+            let contender = PortableInvocationStore(workspace: fixture.workspace)
+
+            let winningReservation = await owner.reserveInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(winningReservation, .none)
+            let competingReservation = await contender.reserveInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(competingReservation, .exists)
+            guard case .installed = await owner.installInvocation(fixture.install) else {
+                return XCTFail("winning store did not install its Invocation")
+            }
+
+            let competingRejection = await contender.rejectNewSend(
+                fixture.install.authority
+            )
+            XCTAssertEqual(competingRejection, .stale(fixture.locked))
+
+            guard case let .committed(published) = await owner.publish(
+                fixture.publication
+            ) else { return XCTFail("winning Invocation did not publish") }
+            XCTAssertEqual(published, fixture.publication.replacement)
+        }
+    }
+
+    func testIdenticalContenderCannotReplacePendingWhileWinningProviderIsSuspended() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let owner = PortableInvocationStore(workspace: fixture.workspace)
+            let contender = PortableInvocationStore(workspace: fixture.workspace)
+
+            let reservation = await owner.reserveInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(reservation, .none)
+            guard case .installed = await owner.installInvocation(fixture.install) else {
+                return XCTFail("winning store did not install its Invocation")
+            }
+
+            let competingReplacement = await contender.markContextCapacityFailure(
+                fixture.install.authority
+            )
+            XCTAssertEqual(competingReplacement, .stale(fixture.locked))
+
+            guard case let .committed(published) = await owner.publish(
+                fixture.publication
+            ) else { return XCTFail("winning Invocation did not publish") }
+            XCTAssertEqual(published, fixture.publication.replacement)
+        }
+    }
+
     func testRejectedCompetingRequestDoesNotReleaseWinningRequestLivenessAuthority() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)
@@ -293,7 +384,7 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
             )
             let oneShot = OneShot()
             let persistence = PortableChatPersistence { point in
-                guard point == .afterInvocationAbortPendingRemoval,
+                guard point == .afterInvocationAbortPendingFailureInstall,
                       oneShot.take()
                 else { return }
                 try FileManager.default.moveItem(at: fixture.root, to: original)
@@ -327,7 +418,7 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
-    func testCrashedStoreReleasesLivenessAndRelaunchReconcilesItsInvocation() async throws {
+    func testLibraryLoadReconcilesCrashedInvocationBeforeAnyNewReservation() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)
             weak var releasedStore: PortableInvocationStore?
@@ -347,23 +438,90 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
             }
             XCTAssertNil(releasedStore)
 
-            let relaunched = PortableInvocationStore(workspace: fixture.workspace)
-            let reservation = await relaunched.reserveInvocation(
-                fixture.competingAuthority.request
-            )
-            XCTAssertEqual(reservation, .none)
+            let relaunched = PortableChatStore(workspace: fixture.workspace)
+            guard case let .loaded(reopened) = await relaunched.load(
+                fixture.locked.chat.id,
+                in: fixture.scope
+            ) else { return XCTFail("reconciled Chat was unavailable") }
             XCTAssertFalse(
                 try PortableChatPersistence().hasActiveInvocation(
                     at: fixture.root,
                     in: fixture.scope
                 )
             )
+            XCTAssertEqual(
+                reopened.pendingUserTurn?.failure,
+                .coachResponseInterrupted
+            )
+            XCTAssertEqual(reopened.chat.draft, fixture.locked.chat.draft)
+            XCTAssertEqual(reopened.chat.messageIDs, [])
+        }
+    }
+
+    func testLibraryLoadReconcilesPreinstallCrashToRetryablePendingIntent() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            XCTAssertFalse(
+                try PortableChatPersistence().hasActiveInvocation(
+                    at: fixture.root,
+                    in: fixture.scope
+                )
+            )
+            let persistence = PortableChatPersistence()
+            let competing = fixture.competingAuthority.pendingUserTurn
+            guard case .committed = try persistence.replacePendingUserTurn(
+                ReplacePendingUserTurnMutation(
+                    library: fixture.scope,
+                    chatID: fixture.competingAuthority.request.chatID,
+                    base: competing,
+                    replacement: competing.replacingFailure(
+                        .coachContextCannotFit
+                    )
+                ),
+                at: fixture.root
+            ) else { return XCTFail("failed to install existing recovery state") }
+
+            let relaunched = PortableChatStore(workspace: fixture.workspace)
+            guard case let .loaded(reopened) = await relaunched.load(
+                fixture.locked.chat.id,
+                in: fixture.scope
+            ) else { return XCTFail("reconciled Chat was unavailable") }
+
+            XCTAssertEqual(reopened.pendingUserTurn?.id, fixture.locked.pendingUserTurn?.id)
+            XCTAssertEqual(
+                reopened.pendingUserTurn?.failure,
+                .coachResponseInterrupted
+            )
+            XCTAssertEqual(reopened.chat.draft, fixture.locked.chat.draft)
+            XCTAssertEqual(reopened.chat.messageIDs, [])
+            guard case let .readWrite(competingReopened) = try persistence.load(
+                fixture.competingAuthority.request.chatID,
+                at: fixture.root,
+                in: fixture.scope
+            ) else { return XCTFail("existing recovery Chat did not reopen") }
+            XCTAssertEqual(
+                competingReopened.pendingUserTurn?.failure,
+                .coachContextCannotFit
+            )
+        }
+    }
+
+    func testInvocationGatewayResolutionDoesNotMisclassifyItsLivePendingAsCrashed() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let store = PortableInvocationStore(workspace: fixture.workspace)
+
+            let resolution = await store.resolvePending(
+                fixture.install.authority.request
+            )
+
+            XCTAssertEqual(resolution, .eligible(fixture.install.authority))
             guard case let .readWrite(reopened) = try PortableChatPersistence().load(
                 fixture.locked.chat.id,
                 at: fixture.root,
                 in: fixture.scope
-            ) else { return XCTFail("reconciled Chat was unavailable") }
-            XCTAssertNil(reopened.pendingUserTurn)
+            ) else { return XCTFail("live Pending did not reopen") }
+            XCTAssertNil(reopened.pendingUserTurn?.failure)
         }
     }
 
@@ -463,6 +621,166 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testLaunchIdentityPreflightOwnsEveryDurableNamespaceIncludingOrphans() async throws {
+        for expected in InvocationLaunchIdentityCollision.allCases {
+            try await withTemporaryParent { parent in
+                let fixture = try await makeInvocationStoreFixture(in: parent)
+                let persistence = PortableChatPersistence()
+                let store = PortableInvocationStore(
+                    persistence: persistence,
+                    workspace: fixture.workspace
+                )
+                let reservation = await store.reserveInvocation(
+                    fixture.install.authority.request
+                )
+                XCTAssertEqual(reservation, .none)
+                let candidate = InvocationLaunchIdentity(
+                    invocationID: fixture.install.invocation.id,
+                    attemptID: fixture.install.invocation.attemptID,
+                    idempotencyValue:
+                        fixture.install.invocation.providerIdempotencyValue,
+                    userMessageID: fixture.publication.userMessage.id,
+                    coachMessageID: fixture.publication.coachMessage.id,
+                    freshDraftID: expected == .freshDraftID
+                        ? fixture.locked.chat.draft.draftID
+                        : fixture.publication.freshDraft.draftID
+                )
+                let invocationsRoot = fixture.root.appendingPathComponent(
+                    "invocations",
+                    isDirectory: true
+                )
+                let messagesRoot = fixture.root
+                    .appendingPathComponent("chats", isDirectory: true)
+                    .appendingPathComponent(
+                        fixture.locked.chat.id.rawValue,
+                        isDirectory: true
+                    )
+                    .appendingPathComponent("messages", isDirectory: true)
+
+                switch expected {
+                case .invocationID:
+                    try FileManager.default.createDirectory(
+                        at: invocationsRoot.appendingPathComponent(
+                            candidate.invocationID.rawValue,
+                            isDirectory: true
+                        ),
+                        withIntermediateDirectories: false
+                    )
+                case .attemptID, .providerIdempotencyValue:
+                    let alternate = try CoachInvocation(
+                        id: CoachInvocationID("inv-20260830T120002000Z-7STV"),
+                        attemptID: expected == .attemptID
+                            ? candidate.attemptID
+                            : CoachProviderAttemptID(
+                                "atm-20260830T120002000Z-8WXY"
+                            ),
+                        providerIdempotencyValue:
+                            expected == .providerIdempotencyValue
+                            ? candidate.idempotencyValue
+                            : ProviderIdempotencyValue("alternate-8WXY"),
+                        library: fixture.scope,
+                        chatID: fixture.locked.chat.id,
+                        pendingUserTurn: fixture.locked.pendingUserTurn!,
+                        preparedProfile: fixture.install.invocation.preparedProfile,
+                        expectedManifestRevision:
+                            fixture.locked.chat.manifestRevision,
+                        admittedAt: fixture.install.invocation.admittedAt
+                    )
+                    let root = invocationsRoot.appendingPathComponent(
+                        alternate.id.rawValue,
+                        isDirectory: true
+                    )
+                    try FileManager.default.createDirectory(
+                        at: root,
+                        withIntermediateDirectories: false
+                    )
+                    try persistence.encodeInvocation(alternate).write(
+                        to: root.appendingPathComponent("invocation.json")
+                    )
+                case .userMessageID:
+                    try persistence.encodeMessage(fixture.publication.userMessage).write(
+                        to: messagesRoot.appendingPathComponent(
+                            "\(candidate.userMessageID.rawValue).json"
+                        )
+                    )
+                case .coachMessageID:
+                    try persistence.encodeMessage(fixture.publication.coachMessage).write(
+                        to: messagesRoot.appendingPathComponent(
+                            "\(candidate.coachMessageID.rawValue).json"
+                        )
+                    )
+                case .freshDraftID:
+                    break
+                }
+
+                let availability = await store.checkLaunchIdentity(
+                    candidate,
+                    for: fixture.install.authority
+                )
+                XCTAssertEqual(
+                    availability,
+                    .collision(expected),
+                    String(describing: expected)
+                )
+                await store.cancelInvocationReservation(
+                    fixture.install.authority.request
+                )
+            }
+        }
+    }
+
+    func testLaunchIdentityReservationFencesFreshDraftNamespaceWriterBeforeProvider() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let store = PortableInvocationStore(workspace: fixture.workspace)
+            let reservation = await store.reserveInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(reservation, .none)
+            let invocation = fixture.install.invocation
+            let identity = InvocationLaunchIdentity(
+                invocationID: invocation.id,
+                attemptID: invocation.attemptID,
+                idempotencyValue: invocation.providerIdempotencyValue,
+                userMessageID: fixture.publication.userMessage.id,
+                coachMessageID: fixture.publication.coachMessage.id,
+                freshDraftID: fixture.publication.freshDraft.draftID
+            )
+            let identityAvailability = await store.checkLaunchIdentity(
+                identity,
+                for: fixture.install.authority
+            )
+            XCTAssertEqual(identityAvailability, .available)
+            let conflictingSeed = try NewDevelopmentChatSeed(
+                library: fixture.scope,
+                chatID: ChatID("cht-20260830T120020000Z-3DEF"),
+                draftID: fixture.publication.freshDraft.draftID,
+                memoryID: CoachMemoryID("mem-20260830T120020000Z-5KMN"),
+                instant: UTCInstant("2026-08-30T12:00:20.000Z"),
+                profileStatementGeneration: 0
+            )
+
+            XCTAssertThrowsError(
+                try PortableChatPersistence().create(
+                    conflictingSeed,
+                    at: fixture.root
+                )
+            ) { error in
+                XCTAssertEqual(error as? PortableChatPersistenceError, .ioFailure)
+            }
+
+            await store.cancelInvocationReservation(
+                fixture.install.authority.request
+            )
+            XCTAssertNoThrow(
+                try PortableChatPersistence().create(
+                    conflictingSeed,
+                    at: fixture.root
+                )
+            )
+        }
+    }
+
     func testInvocationPublicationReleasesLibraryLivenessAuthority() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)
@@ -519,6 +837,7 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
             let alternateInstall = try InstallCoachInvocationMutation(
                 authority: fixture.install.authority,
                 identity: alternateIdentity,
+                preparedProfile: fixture.install.invocation.preparedProfile!,
                 admittedAt: UTCInstant("2026-08-30T12:00:02.000Z")
             )
             let alternatePublication = try PublishCoachInvocationMutation(
@@ -1186,9 +1505,10 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                     chatID: seed.aggregate.chat.id,
                     pendingUserTurn: pending
                 )
+                let oneShot = OneShot()
                 let store = PortableChatStore(
                     persistence: PortableChatPersistence { reached in
-                        if reached == point {
+                        if reached == point, oneShot.take() {
                             throw PortableChatPersistenceError.injectedFault(point)
                         }
                     },
@@ -1201,7 +1521,15 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 }
                 XCTAssertEqual(committed.pendingUserTurn, pending)
                 let reopened = await store.load(mutation.chatID, in: scope)
-                XCTAssertEqual(reopened, .loaded(committed))
+                guard case let .loaded(recovered) = reopened else {
+                    return XCTFail("Pending recovery did not reopen at \(point): \(reopened)")
+                }
+                XCTAssertEqual(
+                    recovered.pendingUserTurn,
+                    pending.replacingFailure(.coachResponseInterrupted)
+                )
+                XCTAssertEqual(recovered.chat, committed.chat)
+                XCTAssertEqual(recovered.memory, committed.memory)
             }
         }
     }
@@ -1575,6 +1903,10 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         let install = try InstallCoachInvocationMutation(
             authority: authority,
             identity: identity,
+            preparedProfile: CoachProfileProvenance(
+                revisionID: try ProfileRevisionID("prf-20260830T115900000Z-4GHJ"),
+                statementGeneration: 9
+            ),
             admittedAt: UTCInstant("2026-08-30T12:00:02.000Z")
         )
         return InvocationStoreFixture(
