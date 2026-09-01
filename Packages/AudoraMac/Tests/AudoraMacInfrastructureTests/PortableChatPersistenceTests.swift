@@ -1249,6 +1249,43 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testInvocationInstallRejectsLibraryIdentityReplacementBeforeCommit() throws {
+        try withCreatedLibrary { root, scope in
+            let baseline = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: baseline,
+                root: root,
+                scope: scope
+            )
+            let replacement = LibraryManifest(
+                libraryID: try LibraryID("lib-20260830T121000000Z-5KMN"),
+                createdAt: try UTCInstant("2026-08-30T11:59:00.000Z")
+            )
+            let faulting = PortableChatPersistence { point in
+                guard point == .afterInvocationFileFlush else { return }
+                try PortableLibraryPersistence().encodeManifest(replacement).write(
+                    to: root.appendingPathComponent("library.json"),
+                    options: .atomic
+                )
+            }
+
+            XCTAssertThrowsError(
+                try faulting.installInvocation(fixture.install, at: root)
+            ) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .libraryScopeMismatch
+                )
+            }
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: root.appendingPathComponent("invocations").path
+                ),
+                []
+            )
+        }
+    }
+
     func testConcurrentChatInstallsAdmitOnlyOneActiveInvocationPerLibrary() async throws {
         try await withCreatedLibraryAsync { root, scope in
             let persistence = PortableChatPersistence()
@@ -1354,6 +1391,56 @@ final class PortableChatPersistenceTests: XCTestCase {
                     )
                 }
             }
+        }
+    }
+
+    func testInvocationPublicationRejectsLibraryIdentityReplacementBeforeCommit() throws {
+        try withCreatedLibrary { root, scope in
+            let baseline = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: baseline,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try baseline.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let chatManifest = chatRoot(root, fixture.locked.chat.id)
+                .appendingPathComponent("chat.json")
+            let originalBytes = try Data(contentsOf: chatManifest)
+            let replacement = LibraryManifest(
+                libraryID: try LibraryID("lib-20260830T121000000Z-5KMN"),
+                createdAt: try UTCInstant("2026-08-30T11:59:00.000Z")
+            )
+            let faulting = PortableChatPersistence { point in
+                guard point == .afterPublicationManifestFileFlush else { return }
+                try PortableLibraryPersistence().encodeManifest(replacement).write(
+                    to: root.appendingPathComponent("library.json"),
+                    options: .atomic
+                )
+            }
+
+            XCTAssertThrowsError(
+                try faulting.publishInvocation(
+                    fixture.publication,
+                    at: root,
+                    in: scope
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .libraryScopeMismatch
+                )
+            }
+            XCTAssertEqual(try Data(contentsOf: chatManifest), originalBytes)
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: root.appendingPathComponent(
+                        "invocations/\(fixture.install.invocation.id.rawValue)"
+                    ).path
+                )
+            )
         }
     }
 

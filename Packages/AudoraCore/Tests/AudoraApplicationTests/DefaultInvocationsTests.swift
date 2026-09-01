@@ -103,6 +103,19 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(launchCount, 0)
     }
 
+    func testInstallStaleWithoutSnapshotStillTerminatesReservation() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence.staleWithoutSnapshotNextInstall()
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        XCTAssertEqual(outcome, .rejected(nil, .eligibilityChanged))
+        let nextReservation = await fixture.persistence.reserveInvocation(
+            fixture.request
+        )
+        XCTAssertEqual(nextReservation, .none)
+    }
+
     func testCASConflictAfterProviderLaunchPublishesNeitherMessageAndRetiresInvocation() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         await fixture.persistence.conflictNextPublication()
@@ -235,6 +248,19 @@ final class DefaultInvocationsTests: XCTestCase {
         let publicationCount = await fixture.persistence.publicationCount
         XCTAssertEqual(publicationCount, 1)
     }
+
+    func testSecondResolutionIneligibilityTerminatesTheExactReservation() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence.makeSecondResolutionIneligible()
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        XCTAssertEqual(outcome, .rejected(fixture.initial, .eligibilityChanged))
+        let nextReservation = await fixture.persistence.reserveInvocation(
+            fixture.request
+        )
+        XCTAssertEqual(nextReservation, .none)
+    }
 }
 
 private final class InvocationFixture: @unchecked Sendable {
@@ -336,8 +362,12 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private let recorder: InvocationEventRecorder
     private var installFails = false
     private var installStales = false
+    private var installStalesWithoutSnapshot = false
     private var publicationConflicts = false
     private var publicationFails = false
+    private var secondResolutionIsIneligible = false
+    private var resolutionCount = 0
+    private var reservedRequest: PendingCoachInvocationRequest?
     private(set) var activeInvocation: CoachInvocation?
     private(set) var publicationCount = 0
 
@@ -348,13 +378,20 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
 
     func failNextInstall() { installFails = true }
     func staleNextInstall() { installStales = true }
+    func staleWithoutSnapshotNextInstall() { installStalesWithoutSnapshot = true }
     func conflictNextPublication() { publicationConflicts = true }
     func failNextPublication() { publicationFails = true }
+    func makeSecondResolutionIneligible() { secondResolutionIsIneligible = true }
 
     func resolvePending(
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationPendingResolutionOutcome {
         await recorder.record("resolve")
+        resolutionCount += 1
+        if secondResolutionIsIneligible, resolutionCount == 2 {
+            secondResolutionIsIneligible = false
+            return .ineligible(aggregate)
+        }
         guard request.chatID == aggregate.chat.id,
               request.pendingUserTurnID == aggregate.pendingUserTurn?.id
         else { return .ineligible(aggregate) }
@@ -363,20 +400,27 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         )
     }
 
-    func checkActiveInvocation(
-        in library: LibraryScope
+    func reserveInvocation(
+        _ request: PendingCoachInvocationRequest
     ) async -> InvocationActiveCheckOutcome {
         await recorder.record("active")
-        return activeInvocation == nil ? .none : .exists
+        guard activeInvocation == nil, reservedRequest == nil else { return .exists }
+        reservedRequest = request
+        return .none
     }
 
     func installInvocation(
         _ mutation: InstallCoachInvocationMutation
     ) async -> InvocationInstallOutcome {
         await recorder.record("install")
+        guard reservedRequest == mutation.authority.request else { return .failed }
         if installFails {
             installFails = false
             return .failed
+        }
+        if installStalesWithoutSnapshot {
+            installStalesWithoutSnapshot = false
+            return .stale(nil)
         }
         if installStales {
             installStales = false
@@ -384,13 +428,21 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         }
         guard activeInvocation == nil else { return .activeExists }
         guard mutation.authority.aggregate == aggregate else { return .stale(aggregate) }
+        reservedRequest = nil
         activeInvocation = mutation.invocation
         return .installed(mutation.invocation)
+    }
+
+    func cancelInvocationReservation(
+        _ request: PendingCoachInvocationRequest
+    ) async {
+        if reservedRequest == request { reservedRequest = nil }
     }
 
     func markContextCapacityFailure(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
+        if reservedRequest == authority.request { reservedRequest = nil }
         guard authority.aggregate == aggregate, let pending = aggregate.pendingUserTurn else {
             return .stale(aggregate)
         }
@@ -405,6 +457,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     func rejectNewSend(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingMutationOutcome {
+        if reservedRequest == authority.request { reservedRequest = nil }
         guard aggregate.pendingUserTurn?.id == authority.request.pendingUserTurnID else {
             return .stale(aggregate)
         }

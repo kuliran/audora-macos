@@ -941,8 +941,8 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
         return .eligible(authority)
     }
 
-    func checkActiveInvocation(
-        in library: LibraryScope
+    func reserveInvocation(
+        _ request: PendingCoachInvocationRequest
     ) async -> InvocationActiveCheckOutcome {
         active == nil ? .none : .exists
     }
@@ -959,6 +959,10 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
         active = mutation.invocation
         return .installed(mutation.invocation)
     }
+
+    func cancelInvocationReservation(
+        _ request: PendingCoachInvocationRequest
+    ) async {}
 
     func markContextCapacityFailure(
         _ authority: InvocationPendingAuthority

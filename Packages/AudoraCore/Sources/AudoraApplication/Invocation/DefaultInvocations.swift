@@ -232,13 +232,22 @@ public protocol InvocationPersistencePort: Sendable {
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationPendingResolutionOutcome
 
-    func checkActiveInvocation(
-        in library: LibraryScope
+    /// Reserves the Library-wide Invocation authority for this exact request
+    /// when returning `.none`. The reservation remains held until that request
+    /// is installed or reaches a pending-terminal mutation.
+    func reserveInvocation(
+        _ request: PendingCoachInvocationRequest
     ) async -> InvocationActiveCheckOutcome
 
     func installInvocation(
         _ mutation: InstallCoachInvocationMutation
     ) async -> InvocationInstallOutcome
+
+    /// Releases only this exact pending reservation when no current Pending
+    /// authority remains available for a terminal mutation.
+    func cancelInvocationReservation(
+        _ request: PendingCoachInvocationRequest
+    ) async
 
     func markContextCapacityFailure(
         _ authority: InvocationPendingAuthority
@@ -365,7 +374,7 @@ public actor DefaultInvocations: Invocations {
             return await reject(firstAuthority, reason: .eligibilityChanged)
         }
 
-        switch await persistence.checkActiveInvocation(in: request.library) {
+        switch await persistence.reserveInvocation(request) {
         case .none:
             break
         case .exists:
@@ -415,6 +424,7 @@ public actor DefaultInvocations: Invocations {
         case let .eligible(authority):
             return await reject(authority, reason: .eligibilityChanged)
         case let .ineligible(current):
+            await persistence.cancelInvocationReservation(firstAuthority.request)
             return .rejected(current, .eligibilityChanged)
         case .unavailable:
             return await reject(firstAuthority, reason: .persistenceUnavailable)
@@ -461,6 +471,7 @@ public actor DefaultInvocations: Invocations {
             {
                 return await reject(currentAuthority, reason: .eligibilityChanged)
             }
+            await persistence.cancelInvocationReservation(finalAuthority.request)
             return .rejected(current, .eligibilityChanged)
         case .failed:
             return await reject(finalAuthority, reason: .persistenceUnavailable)
