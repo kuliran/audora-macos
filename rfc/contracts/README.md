@@ -92,7 +92,7 @@ current terminal reasons and legacy v1.
 | `TranscriptionWorkerMessage` | Confined worker -> adapter JSONL | No |
 | `TranscriptionWorkerRequest` | Adapter -> confined worker JSON | No |
 
-Invocation and Attempt identities, provider idempotency, admission state, token
+Invocation and Attempt identities, admission state, token
 estimator identity, Profile integrity hashes, and persisted-record schema versions
 remain outside these provider DTOs.
 
@@ -257,8 +257,10 @@ it declares one Invocation-gateway call and zero provider or admission calls.
 shapes. `CoachInvocation.json` is the portable launch authority bound to one
 Library, Chat, Pending User Turn, Draft version, response position, and expected
 manifest revision. Its current v3 record contains one to four durable Provider
-Attempts; each carries a fresh Attempt ID, idempotency value, transcript handles,
-and message/Draft publication authority. Legacy v1/v2 records retain their flat
+Attempts; each inherits v3 and carries only a fresh Attempt ID, ordinal/kind, and
+message/Draft publication authority. Provider idempotency values and opaque
+transcript handles are live transport authority and occur in neither this root nor
+its publication proof. Legacy v1/v2 records retain their strict historical flat
 single-Attempt shape only for safe relaunch retirement. `InvocationAdmissionLedger.json` is machine-local rather than
 portable Library content; it permits at most 4,096 Library debits and stores the
 last admitted UTC instant used by the conservative rolling-window policy. The

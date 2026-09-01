@@ -31,9 +31,10 @@ portable Invocation authority are durable before the deterministic synthetic
 provider can start. Successful fake turns publish one exact user message and one
 Markdown Coach message behind a single Chat-manifest CAS; pre-commit crashes and
 CAS conflicts publish neither. The current live composition still fails closed at
-context qualification because no production provider descriptor is qualified.
-Real provider adapters, automatic retries, Stop, transcript tools, and Profile or
-Memory effects remain later vertical slices.
+context qualification because no production provider descriptor is qualified. The
+synthetic vertical slice owns the exact bounded 5/10/15-second Attempt schedule
+and one shorter complete repair; real provider adapters, Stop, transcript tools,
+and Profile or Memory effects remain later vertical slices.
 
 ## Requirements
 

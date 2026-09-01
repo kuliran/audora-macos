@@ -97,6 +97,18 @@ enum CoachResponseFailurePresentation {
             "The Coach response was interrupted. Nothing was published."
         }
     }
+
+    static func retryAccessibilityLabel(
+        for _: PendingUserTurnFailure?
+    ) -> String {
+        "Retry Coach Response"
+    }
+
+    static func discardAccessibilityLabel(
+        for _: PendingUserTurnFailure?
+    ) -> String {
+        "Discard Coach Response"
+    }
 }
 
 private struct CoachInvocationControlModifier: ViewModifier {
@@ -427,7 +439,10 @@ public struct ChatRootView: View {
                                 Button("Retry") {
                                     model.retryPendingUserTurn(pending.id)
                                 }
-                                .accessibilityLabel("Retry Interrupted Coach Response")
+                                .accessibilityLabel(
+                                    CoachResponseFailurePresentation
+                                        .retryAccessibilityLabel(for: pending.failure)
+                                )
                                 .coachInvocationControl(
                                     disabled: !allowsNavigationAndMutation ||
                                         !ChatInteractionPolicy.allowsCoachInvocation(
@@ -439,7 +454,10 @@ public struct ChatRootView: View {
                                 Button("Discard") {
                                     model.discardPendingUserTurn(pending.id)
                                 }
-                                .accessibilityLabel("Discard Interrupted Coach Response")
+                                .accessibilityLabel(
+                                    CoachResponseFailurePresentation
+                                        .discardAccessibilityLabel(for: pending.failure)
+                                )
                                 .disabled(!allowsNavigationAndMutation)
                             }
                         }

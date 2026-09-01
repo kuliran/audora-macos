@@ -138,7 +138,12 @@ final class DefaultInvocationsTests: XCTestCase {
             .standard, .standard, .standard, .standard,
         ])
         XCTAssertEqual(Set(requests.map(\.attempt.id)).count, 4)
-        XCTAssertEqual(Set(requests.map(\.attempt.providerIdempotencyValue)).count, 4)
+        XCTAssertEqual(
+            Set(requests.compactMap {
+                $0.attempt.transportAuthority?.providerIdempotencyValue
+            }).count,
+            4
+        )
         XCTAssertEqual(Set(requests.map(\.attempt.userMessageID)).count, 4)
         XCTAssertEqual(Set(requests.map(\.attempt.coachMessageID)).count, 4)
         XCTAssertEqual(Set(requests.map(\.attempt.freshDraftID)).count, 4)
@@ -181,7 +186,12 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(requests[0].control, .standard)
         XCTAssertEqual(
             requests[1].control,
-            .shorterRepair(instruction: DefaultInvocations.shorterRepairInstruction)
+            .shorterRepair(
+                instruction: "The previous Attempt exceeded the response limit. " +
+                    "Return a materially shorter complete response. Preserve the " +
+                    "direct answer, remove repetition and optional detail, and " +
+                    "never return partial JSON."
+            )
         )
         let delays = await fixture.sleeper.recordedDelays()
         XCTAssertEqual(delays, [])
@@ -249,6 +259,35 @@ final class DefaultInvocationsTests: XCTestCase {
         let delays = await fixture.sleeper.recordedDelays()
         let publicationCount = await fixture.persistence.publicationCount
         XCTAssertEqual(ordinals, [1, 2, 3, 4])
+        XCTAssertEqual(delays, [5_000, 10_000, 15_000])
+        XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testOverflowOnFourthAutomaticAttemptCannotCreateFifthRepairAttempt() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .autoRetryableFailure,
+                .autoRetryableFailure,
+                .responseOverflow,
+            ]
+        )
+
+        guard case let .interrupted(aggregate, .invalidProviderResponse) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("fourth Attempt overflow must be terminal") }
+
+        XCTAssertEqual(aggregate?.pendingUserTurn?.failure, .coachResponseInvalid)
+        XCTAssertEqual(aggregate?.chat.messageIDs, [])
+        let requests = await fixture.provider.requests
+        XCTAssertEqual(requests.map(\.attempt.ordinal), [1, 2, 3, 4])
+        XCTAssertEqual(
+            requests.map(\.attempt.kind),
+            [.standard, .standard, .standard, .standard]
+        )
+        let delays = await fixture.sleeper.recordedDelays()
+        let publicationCount = await fixture.persistence.publicationCount
         XCTAssertEqual(delays, [5_000, 10_000, 15_000])
         XCTAssertEqual(publicationCount, 0)
     }
@@ -1304,6 +1343,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         guard activeInvocation == nil else { return .activeExists }
         guard mutation.authority.aggregate == aggregate else { return .stale(aggregate) }
         reservedRequest = nil
+        aggregate = mutation.processingAggregate
         activeInvocation = mutation.invocation
         installedAttemptOrdinals = [mutation.invocation.attempt.ordinal]
         return .installed(mutation.invocation)
@@ -1318,7 +1358,8 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         return .installed(
             ScriptedActiveInvocationSession(
                 persistence: self,
-                invocation: mutation.replacement
+                invocation: mutation.replacement,
+                processingAggregate: aggregate
             )
         )
     }
@@ -1582,7 +1623,8 @@ private actor ScriptedPendingInvocationSession: InvocationPendingPersistenceSess
             return .installed(
                 ScriptedActiveInvocationSession(
                     persistence: persistence,
-                    invocation: invocation
+                    invocation: invocation,
+                    processingAggregate: mutation.processingAggregate
                 )
             )
         case .activeExists:
@@ -1637,15 +1679,18 @@ private actor ScriptedPendingInvocationSession: InvocationPendingPersistenceSess
 
 private actor ScriptedActiveInvocationSession: InvocationActivePersistenceSession {
     nonisolated let invocation: CoachInvocation
+    nonisolated let processingAggregate: ChatAggregate
     private let persistence: MemoryInvocationPersistence
     private var isActive = true
 
     init(
         persistence: MemoryInvocationPersistence,
-        invocation: CoachInvocation
+        invocation: CoachInvocation,
+        processingAggregate: ChatAggregate
     ) {
         self.persistence = persistence
         self.invocation = invocation
+        self.processingAggregate = processingAggregate
     }
 
     func installNextAttempt(

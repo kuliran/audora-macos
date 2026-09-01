@@ -159,7 +159,8 @@ resolution, so concurrent catalog recovery cannot interrupt a live Send between
 resolution and reservation. Pending User Turn schema v3 persists context-fit,
 interrupted, Provider-error, and invalid-response failures. Strict v1 compatibility
 permits only no failure or the context-fit failure; v2 additionally permits the
-interrupted failure. Legacy Pending state upgrades when it is next written.
+interrupted failure. Valid legacy Pending state upgrades to v3 when it is next
+written; a root newer than v3 freezes only its own Chat.
 If response publication commits but immediate reconciliation is interrupted,
 Infrastructure proves the exact immutable user/Coach message pair, response
 position, consumed Pending, and fresh-Draft lineage before reporting success. A

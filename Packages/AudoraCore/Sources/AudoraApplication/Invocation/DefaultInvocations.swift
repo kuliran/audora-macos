@@ -362,6 +362,10 @@ public enum InvocationLaunchIdentityAvailabilityOutcome: Equatable, Sendable {
 public struct InstallCoachInvocationMutation: Equatable, Sendable {
     public let authority: InvocationPendingAuthority
     public let invocation: CoachInvocation
+    /// The exact Chat generation visible while the installed Invocation owns
+    /// provider work. Retry clears a prior terminal descriptor before provider
+    /// authority can escape; a first Send is already in this state.
+    public let processingAggregate: ChatAggregate
 
     public init(
         authority: InvocationPendingAuthority,
@@ -371,6 +375,11 @@ public struct InstallCoachInvocationMutation: Equatable, Sendable {
         admittedAt: UTCInstant
     ) throws {
         self.authority = authority
+        processingAggregate = try ChatAggregate(
+            chat: authority.aggregate.chat,
+            memory: authority.aggregate.memory,
+            pendingUserTurn: authority.pendingUserTurn.replacingFailure(nil)
+        )
         invocation = try CoachInvocation(
             id: invocationID,
             attempt: attemptIdentity.makeAttempt(ordinal: 1, kind: .standard),
@@ -608,6 +617,7 @@ public protocol InvocationPendingPersistenceSession: Sendable {
 @_spi(InvocationInfrastructure)
 public protocol InvocationActivePersistenceSession: Sendable {
     var invocation: CoachInvocation { get }
+    var processingAggregate: ChatAggregate { get }
 
     /// Atomically replaces the exact current Attempt while this session keeps
     /// the Library Invocation liveness lease. The returned session is the only
@@ -1156,6 +1166,7 @@ public actor DefaultInvocations: Invocations {
                 reason: .persistenceUnavailable
             )
         }
+        let processingAggregate = activeSession.processingAggregate
         guard await coachContext.isPreparedContextCurrent(prepared) else {
             switch await activeSession.abort() {
             case let .committed(aggregate):
@@ -1166,7 +1177,7 @@ public actor DefaultInvocations: Invocations {
                 return interruptionAfterTerminalRecovery(
                     resolution,
                     request: finalAuthority.request,
-                    fallback: finalAuthority.aggregate
+                    fallback: processingAggregate
                 )
             }
         }
@@ -1175,6 +1186,13 @@ public actor DefaultInvocations: Invocations {
         providerAttempts: while true {
             let invocation = activeSession.invocation
             let attempt = invocation.attempt
+            guard let transportAuthority = attempt.transportAuthority else {
+                return await interruptAndAbort(
+                    activeSession,
+                    fallback: processingAggregate,
+                    reason: .persistenceUnavailable
+                )
+            }
             let control: CoachProviderAttemptControl = switch attempt.kind {
             case .standard:
                 .standard
@@ -1187,7 +1205,7 @@ public actor DefaultInvocations: Invocations {
                     attempt: attempt,
                     exchange: prepared.exchange,
                     transcriptAccess: ProviderAttemptTranscriptAccess(
-                        handles: attempt.transcriptHandles
+                        handles: transportAuthority.transcriptHandles
                     ),
                     control: control
                 )
@@ -1199,7 +1217,7 @@ public actor DefaultInvocations: Invocations {
             case .userRetryableFailure:
                 return await interruptAndAbort(
                     activeSession,
-                    fallback: finalAuthority.aggregate,
+                    fallback: processingAggregate,
                     reason: .providerFailed
                 )
             case .autoRetryableFailure:
@@ -1208,7 +1226,7 @@ public actor DefaultInvocations: Invocations {
                 else {
                     return await interruptAndAbort(
                         activeSession,
-                        fallback: finalAuthority.aggregate,
+                        fallback: processingAggregate,
                         reason: .providerFailed
                     )
                 }
@@ -1217,7 +1235,7 @@ public actor DefaultInvocations: Invocations {
                 else {
                     return await interruptAndAbort(
                         activeSession,
-                        fallback: finalAuthority.aggregate,
+                        fallback: processingAggregate,
                         reason: .providerFailed
                     )
                 }
@@ -1228,7 +1246,7 @@ public actor DefaultInvocations: Invocations {
                 } catch {
                     return await interruptAndAbort(
                         activeSession,
-                        fallback: finalAuthority.aggregate,
+                        fallback: processingAggregate,
                         reason: .providerFailed
                     )
                 }
@@ -1236,7 +1254,7 @@ public actor DefaultInvocations: Invocations {
                     after: activeSession,
                     kind: .standard,
                     prepared: prepared,
-                    fallback: finalAuthority.aggregate
+                    fallback: processingAggregate
                 ) {
                 case let .installed(next): activeSession = next
                 case let .terminal(outcome): return outcome
@@ -1247,7 +1265,7 @@ public actor DefaultInvocations: Invocations {
                 else {
                     return await interruptAndAbort(
                         activeSession,
-                        fallback: finalAuthority.aggregate,
+                        fallback: processingAggregate,
                         reason: .invalidProviderResponse
                     )
                 }
@@ -1255,7 +1273,7 @@ public actor DefaultInvocations: Invocations {
                     after: activeSession,
                     kind: .shorterRepair,
                     prepared: prepared,
-                    fallback: finalAuthority.aggregate
+                    fallback: processingAggregate
                 ) {
                 case let .installed(next): activeSession = next
                 case let .terminal(outcome): return outcome
@@ -1268,7 +1286,7 @@ public actor DefaultInvocations: Invocations {
         let publication: PublishCoachInvocationMutation
         do {
             publication = try PublishCoachInvocationMutation(
-                base: finalAuthority.aggregate,
+                base: processingAggregate,
                 invocation: invocation,
                 coachMarkdown: coachMarkdown,
                 completedAt: completedAt
@@ -1276,7 +1294,7 @@ public actor DefaultInvocations: Invocations {
         } catch {
             return await interruptAndAbort(
                 activeSession,
-                fallback: finalAuthority.aggregate,
+                fallback: processingAggregate,
                 reason: .invalidProviderResponse
             )
         }
@@ -1287,7 +1305,7 @@ public actor DefaultInvocations: Invocations {
         case let .stale(current):
             return await interruptAndAbort(
                 activeSession,
-                fallback: current ?? finalAuthority.aggregate,
+                fallback: current ?? processingAggregate,
                 reason: .publicationConflict,
                 publication: PublicationRecoveryIntent(
                     mutation: publication,
@@ -1297,7 +1315,7 @@ public actor DefaultInvocations: Invocations {
         case .failed:
             return await interruptAndAbort(
                 activeSession,
-                fallback: finalAuthority.aggregate,
+                fallback: processingAggregate,
                 reason: .persistenceUnavailable,
                 publication: PublicationRecoveryIntent(
                     mutation: publication,

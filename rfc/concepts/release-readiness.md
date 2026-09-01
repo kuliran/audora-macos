@@ -265,7 +265,14 @@ execution profile.
   user-retryable.
 - Every Provider Attempt has a fresh ID, provider idempotency value, transcript
   handles, one-time transcript access, and publication authority. User Retry creates
-  a new Invocation and fresh first Attempt values.
+  a new Invocation and fresh first Attempt values. Idempotency values, handles,
+  and bearer access are process-live only and never persisted or logged. Invocation
+  v3 embeds only the bounded ordered safe Attempt projection (ID, ordinal/kind,
+  and publication authority); nested Attempts inherit v3.
+- Retry installs and flushes the Invocation generation marker, durably clears the
+  old Pending failure, and rebinds its exact inode lease before provider authority
+  returns. Typed terminal intent is itself CASed and flushed before Pending changes,
+  so relaunch preserves the current reason instead of the stale prior failure.
 - Transient rate-limit, network, timeout, and server failures are
   `CoachProviderErrorAutoRetryable`. Automatic retry remains one visible
   `processing` state and uses 5, 10, then 15 seconds, bounded to the initial Attempt

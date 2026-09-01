@@ -178,6 +178,9 @@
                 "profileStatementGeneration": {
                     "$ref": "#/$defs/NonnegativeWholeNumber"
                 },
+                "terminalFailure": {
+                    "$ref": "#/$defs/CoachInvocationTerminalFailure"
+                },
                 "attempts": {
                     "type": "array",
                     "items": {
@@ -251,13 +254,25 @@
             "type": "string",
             "pattern": "^prf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
         },
+        "CoachInvocationTerminalFailure": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "coachResponseInterrupted"
+                },
+                {
+                    "type": "string",
+                    "const": "coachProviderError"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInvalid"
+                }
+            ]
+        },
         "CoachProviderAttempt": {
             "type": "object",
             "properties": {
-                "schemaVersion": {
-                    "type": "number",
-                    "const": 1
-                },
                 "attemptId": {
                     "$ref": "#/$defs/CoachProviderAttemptId"
                 },
@@ -268,16 +283,6 @@
                 },
                 "kind": {
                     "$ref": "#/$defs/CoachProviderAttemptKind"
-                },
-                "providerIdempotencyValue": {
-                    "$ref": "#/$defs/ProviderIdempotencyValue"
-                },
-                "transcriptHandles": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/$defs/CoachProviderTranscriptHandle"
-                    },
-                    "maxItems": 128
                 },
                 "userMessageId": {
                     "$ref": "#/$defs/ChatMessageId"
@@ -290,12 +295,9 @@
                 }
             },
             "required": [
-                "schemaVersion",
                 "attemptId",
                 "ordinal",
                 "kind",
-                "providerIdempotencyValue",
-                "transcriptHandles",
                 "userMessageId",
                 "coachMessageId",
                 "freshDraftId"
@@ -315,10 +317,6 @@
                     "const": "shorterRepair"
                 }
             ]
-        },
-        "CoachProviderTranscriptHandle": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         },
         "ChatMessageId": {
             "type": "string",

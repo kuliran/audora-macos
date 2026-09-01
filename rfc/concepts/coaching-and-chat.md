@@ -112,6 +112,15 @@ Attempt gets a fresh Attempt ID, provider idempotency token, process, transcript
 access capability, and on-demand transcript handles. None is reused by another
 Attempt.
 
+Those provider idempotency values, transcript handles, and bearer capabilities
+exist only in the live Attempt transport authority and are never persisted or
+logged. Portable Invocation schema v3 embeds an ordered bounded Attempt history
+containing only Attempt ID, ordinal/kind, and message/fresh-Draft publication
+authority; nested Attempts inherit v3 and have no `schemaVersion`. Legacy
+Invocation v1/v2 keeps its strict historical flat Attempt fields for read-only
+retirement compatibility. Relaunch never reconstructs live transport authority or
+resumes provider work.
+
 One Invocation may make at most four Attempts. Transient provider failures use
 5-, 10-, and 15-second delays before the remaining Attempts. Automatic retry keeps
 the immutable intent and semantic context frozen, but it creates fresh
@@ -136,6 +145,14 @@ turn it keeps the Draft ID, Draft version, and response position, but reconstruc
 the request from the current Profile, Memory, successful history, and immutable
 attachments. Reconsider Retry likewise reloads current authoritative state. This
 is different from automatic retry, which stays inside one Invocation.
+
+Before a Retry provider launch, the durable Invocation generation marker is
+installed and flushed, then the exact failed Pending is replaced by the same
+identity with no failure while the Chat lock is held. The replacement inode is
+locked and the active liveness lease is rebound before the provider receives
+authority. A terminal Provider or validation reason is first installed and flushed
+as typed Invocation intent, so crash recovery cannot restore the stale pre-Retry
+reason or downgrade a committed current reason to generic interruption.
 
 Stop cancels and reaps the current Attempt after a bounded grace period. A late
 result cannot publish after Stop, Retry, Discard, or another Invocation takes over

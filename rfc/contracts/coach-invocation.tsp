@@ -93,6 +93,7 @@ namespace Audora.Contracts {
     schemaVersion: 3;
     profileRevisionId?: ProfileRevisionId;
     profileStatementGeneration: NonnegativeWholeNumber;
+    terminalFailure?: CoachInvocationTerminalFailure;
 
     @minItems(1)
     @maxItems(4)
@@ -118,7 +119,6 @@ namespace Audora.Contracts {
   }
 
   model CoachProviderAttempt {
-    schemaVersion: 1;
     attemptId: CoachProviderAttemptId;
 
     @minValue(1)
@@ -126,11 +126,6 @@ namespace Audora.Contracts {
     ordinal: integer;
 
     kind: CoachProviderAttemptKind;
-    providerIdempotencyValue: ProviderIdempotencyValue;
-
-    @maxItems(128)
-    transcriptHandles: CoachProviderTranscriptHandle[];
-
     userMessageId: ChatMessageId;
     coachMessageId: ChatMessageId;
     freshDraftId: ChatDraftId;
@@ -139,6 +134,12 @@ namespace Audora.Contracts {
   union CoachProviderAttemptKind {
     standard: "standard",
     shorterRepair: "shorterRepair",
+  }
+
+  union CoachInvocationTerminalFailure {
+    coachResponseInterrupted: "coachResponseInterrupted",
+    coachProviderError: "coachProviderError",
+    coachResponseInvalid: "coachResponseInvalid",
   }
 
   @pattern("^inv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
@@ -151,9 +152,6 @@ namespace Audora.Contracts {
   @maxLength(128)
   @pattern("^[0-9A-Za-z._-]+$")
   scalar ProviderIdempotencyValue extends string;
-
-  @pattern("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-  scalar CoachProviderTranscriptHandle extends string;
 
   @jsonSchema
   @id("InvocationAdmissionLedger.json")

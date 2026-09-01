@@ -59,7 +59,7 @@ final class MachineInvocationAdmissionTests: XCTestCase {
         XCTAssertNoThrow(try ChatMessageID(generated.coachMessageID.rawValue))
         XCTAssertNoThrow(try ChatDraftID(generated.freshDraftID.rawValue))
         XCTAssertNotEqual(generated.userMessageID, generated.coachMessageID)
-        XCTAssertEqual(
+        XCTAssertNotEqual(
             generated.idempotencyValue.rawValue,
             generated.attemptID.rawValue
         )

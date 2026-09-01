@@ -2040,8 +2040,9 @@ final class PortableChatPersistenceTests: XCTestCase {
             let attempts = try XCTUnwrap(object["attempts"] as? [[String: Any]])
             let attempt = try XCTUnwrap(attempts.first)
             object["attemptId"] = attempt["attemptId"]
-            object["providerIdempotencyValue"] =
-                attempt["providerIdempotencyValue"]
+            object["providerIdempotencyValue"] = try XCTUnwrap(
+                fixture.install.invocation.providerIdempotencyValue
+            ).rawValue
             object.removeValue(forKey: "attempts")
             object.removeValue(forKey: "profileRevisionId")
             object.removeValue(forKey: "profileStatementGeneration")
@@ -2089,8 +2090,9 @@ final class PortableChatPersistenceTests: XCTestCase {
             let attempts = try XCTUnwrap(object["attempts"] as? [[String: Any]])
             let attempt = try XCTUnwrap(attempts.first)
             object["attemptId"] = attempt["attemptId"]
-            object["providerIdempotencyValue"] =
-                attempt["providerIdempotencyValue"]
+            object["providerIdempotencyValue"] = try XCTUnwrap(
+                fixture.install.invocation.providerIdempotencyValue
+            ).rawValue
             object.removeValue(forKey: "attempts")
             try JSONSerialization.data(
                 withJSONObject: object,
@@ -2164,7 +2166,9 @@ final class PortableChatPersistenceTests: XCTestCase {
             let identity = InvocationLaunchIdentity(
                 invocationID: original.id,
                 attemptID: original.attemptID,
-                idempotencyValue: original.providerIdempotencyValue,
+                idempotencyValue: try XCTUnwrap(
+                    original.providerIdempotencyValue
+                ),
                 userMessageID: fixture.publication.userMessage.id,
                 coachMessageID: fixture.publication.coachMessage.id,
                 freshDraftID: fixture.publication.freshDraft.draftID
@@ -2267,6 +2271,7 @@ final class PortableChatPersistenceTests: XCTestCase {
                     ),
                     String(describing: point)
                 )
+                try baseline.reconcileInterruptedInvocations(at: root, in: scope)
                 guard case let .readWrite(reopened) = try baseline.load(
                     fixture.locked.chat.id,
                     at: root,

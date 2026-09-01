@@ -90,11 +90,29 @@ public struct CoachProviderTranscriptHandle: Hashable, Sendable {
 }
 
 public enum CoachProviderAttemptError: Error, Equatable, Sendable {
-    case invalidSchemaVersion
     case invalidOrdinal
     case repairMustFollowAnEarlierAttempt
     case duplicateMessageID
     case duplicateTranscriptHandle
+}
+
+/// Process-live provider transport authority. These opaque values are never a
+/// durable part of an Attempt; relaunch retires work instead of reconstructing
+/// or resuming this capability.
+public struct CoachProviderAttemptTransportAuthority: Equatable, Sendable {
+    public let providerIdempotencyValue: ProviderIdempotencyValue
+    public let transcriptHandles: [CoachProviderTranscriptHandle]
+
+    public init(
+        providerIdempotencyValue: ProviderIdempotencyValue,
+        transcriptHandles: [CoachProviderTranscriptHandle]
+    ) throws {
+        guard transcriptHandles.count <= CoachProviderAttempt.maximumTranscriptHandles,
+              Set(transcriptHandles).count == transcriptHandles.count
+        else { throw CoachProviderAttemptError.duplicateTranscriptHandle }
+        self.providerIdempotencyValue = providerIdempotencyValue
+        self.transcriptHandles = transcriptHandles
+    }
 }
 
 /// Fresh authority for the only atomic publication an Attempt may propose.
@@ -121,20 +139,16 @@ public struct CoachProviderAttemptPublicationAuthority: Equatable, Sendable {
 /// publication authority; legacy #22 records omit it because relaunch only
 /// retires those interrupted records and never resumes their provider work.
 public struct CoachProviderAttempt: Equatable, Sendable {
-    public static let schemaVersion: UInt32 = 1
     public static let maximumOrdinal: UInt8 = 4
     public static let maximumTranscriptHandles = 128
 
-    public let persistedSchemaVersion: UInt32
     public let id: CoachProviderAttemptID
     public let ordinal: UInt8
     public let kind: CoachProviderAttemptKind
-    public let providerIdempotencyValue: ProviderIdempotencyValue
-    public let transcriptHandles: [CoachProviderTranscriptHandle]
     public let publicationAuthority: CoachProviderAttemptPublicationAuthority?
+    public let transportAuthority: CoachProviderAttemptTransportAuthority?
 
     public init(
-        schemaVersion: UInt32 = Self.schemaVersion,
         id: CoachProviderAttemptID,
         ordinal: UInt8,
         kind: CoachProviderAttemptKind,
@@ -142,32 +156,45 @@ public struct CoachProviderAttempt: Equatable, Sendable {
         transcriptHandles: [CoachProviderTranscriptHandle],
         publicationAuthority: CoachProviderAttemptPublicationAuthority
     ) throws {
-        try Self.validate(
-            schemaVersion: schemaVersion,
-            ordinal: ordinal,
-            kind: kind,
-            transcriptHandles: transcriptHandles
-        )
-        persistedSchemaVersion = schemaVersion
+        try Self.validate(ordinal: ordinal, kind: kind)
         self.id = id
         self.ordinal = ordinal
         self.kind = kind
-        self.providerIdempotencyValue = providerIdempotencyValue
-        self.transcriptHandles = transcriptHandles
         self.publicationAuthority = publicationAuthority
+        transportAuthority = try CoachProviderAttemptTransportAuthority(
+            providerIdempotencyValue: providerIdempotencyValue,
+            transcriptHandles: transcriptHandles
+        )
+    }
+
+    /// Reconstitutes only the safe durable projection embedded by Invocation
+    /// schema v3. No provider transport authority can be recovered from disk.
+    public init(
+        durableID id: CoachProviderAttemptID,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        publicationAuthority: CoachProviderAttemptPublicationAuthority
+    ) throws {
+        try Self.validate(ordinal: ordinal, kind: kind)
+        self.id = id
+        self.ordinal = ordinal
+        self.kind = kind
+        self.publicationAuthority = publicationAuthority
+        transportAuthority = nil
     }
 
     public init(
         legacyID: CoachProviderAttemptID,
         providerIdempotencyValue: ProviderIdempotencyValue
-    ) {
-        persistedSchemaVersion = Self.schemaVersion
+    ) throws {
         id = legacyID
         ordinal = 1
         kind = .standard
-        self.providerIdempotencyValue = providerIdempotencyValue
-        transcriptHandles = []
         publicationAuthority = nil
+        transportAuthority = try CoachProviderAttemptTransportAuthority(
+            providerIdempotencyValue: providerIdempotencyValue,
+            transcriptHandles: []
+        )
     }
 
     public var userMessageID: ChatMessageID? {
@@ -183,25 +210,29 @@ public struct CoachProviderAttempt: Equatable, Sendable {
     }
 
     private static func validate(
-        schemaVersion: UInt32,
         ordinal: UInt8,
-        kind: CoachProviderAttemptKind,
-        transcriptHandles: [CoachProviderTranscriptHandle]
+        kind: CoachProviderAttemptKind
     ) throws {
-        guard schemaVersion == Self.schemaVersion else {
-            throw CoachProviderAttemptError.invalidSchemaVersion
-        }
         guard (1 ... Self.maximumOrdinal).contains(ordinal) else {
             throw CoachProviderAttemptError.invalidOrdinal
         }
         guard kind != .shorterRepair || ordinal > 1 else {
             throw CoachProviderAttemptError.repairMustFollowAnEarlierAttempt
         }
-        guard transcriptHandles.count <= Self.maximumTranscriptHandles,
-              Set(transcriptHandles).count == transcriptHandles.count
-        else {
-            throw CoachProviderAttemptError.duplicateTranscriptHandle
+    }
+
+    public func removingTransportAuthority() throws -> Self {
+        guard let publicationAuthority else {
+            // Legacy v1/v2 records remain flat at the Invocation root and are
+            // never upgraded by projecting a nested v3 Attempt.
+            return self
         }
+        return try CoachProviderAttempt(
+            durableID: id,
+            ordinal: ordinal,
+            kind: kind,
+            publicationAuthority: publicationAuthority
+        )
     }
 }
 
@@ -303,6 +334,7 @@ public enum CoachInvocationError: Error, Equatable, Sendable {
     case failedPending
     case profileProvenanceMismatch
     case attemptPublicationAuthorityRequired
+    case invalidTerminalFailure
 }
 
 /// Durable top-level authority for one admitted Coach operation. Its identity,
@@ -323,6 +355,7 @@ public struct CoachInvocation: Equatable, Sendable {
     public let preparedProfile: CoachProfileProvenance?
     public let expectedManifestRevision: UInt64
     public let admittedAt: UTCInstant
+    public let terminalFailure: PendingUserTurnFailure?
 
     public init(
         schemaVersion: UInt32 = Self.schemaVersion,
@@ -333,7 +366,8 @@ public struct CoachInvocation: Equatable, Sendable {
         pendingUserTurn: PendingUserTurn,
         preparedProfile: CoachProfileProvenance?,
         expectedManifestRevision: UInt64,
-        admittedAt: UTCInstant
+        admittedAt: UTCInstant,
+        terminalFailure: PendingUserTurnFailure? = nil
     ) throws {
         try self.init(
             schemaVersion: schemaVersion,
@@ -344,7 +378,8 @@ public struct CoachInvocation: Equatable, Sendable {
             pendingUserTurn: pendingUserTurn,
             preparedProfile: preparedProfile,
             expectedManifestRevision: expectedManifestRevision,
-            admittedAt: admittedAt
+            admittedAt: admittedAt,
+            terminalFailure: terminalFailure
         )
     }
 
@@ -357,18 +392,23 @@ public struct CoachInvocation: Equatable, Sendable {
         pendingUserTurn: PendingUserTurn,
         preparedProfile: CoachProfileProvenance?,
         expectedManifestRevision: UInt64,
-        admittedAt: UTCInstant
+        admittedAt: UTCInstant,
+        terminalFailure: PendingUserTurnFailure? = nil
     ) throws {
         guard let attempt = attempts.last else {
             throw CoachInvocationError.attemptPublicationAuthorityRequired
         }
+        let transportAuthorities = attempts.compactMap(\.transportAuthority)
         guard attempts.count <= Int(CoachProviderAttempt.maximumOrdinal),
               attempts.enumerated().allSatisfy({ index, value in
                   value.ordinal == UInt8(index + 1) &&
                       (value.kind == .standard || index == attempts.count - 1)
               }),
               Set(attempts.map(\.id)).count == attempts.count,
-              Set(attempts.map(\.providerIdempotencyValue)).count == attempts.count,
+              transportAuthorities.isEmpty ||
+              transportAuthorities.count == attempts.count,
+              Set(transportAuthorities.map(\.providerIdempotencyValue)).count ==
+              transportAuthorities.count,
               Set(attempts.compactMap(\.userMessageID)).count ==
               attempts.compactMap(\.userMessageID).count,
               Set(attempts.compactMap(\.coachMessageID)).count ==
@@ -380,8 +420,8 @@ public struct CoachInvocation: Equatable, Sendable {
               }).count,
               Set(attempts.compactMap(\.freshDraftID)).count ==
               attempts.compactMap(\.freshDraftID).count,
-              Set(attempts.flatMap(\.transcriptHandles)).count ==
-              attempts.flatMap(\.transcriptHandles).count
+              Set(transportAuthorities.flatMap(\.transcriptHandles)).count ==
+              transportAuthorities.flatMap(\.transcriptHandles).count
         else { throw CoachInvocationError.attemptPublicationAuthorityRequired }
         switch (schemaVersion, preparedProfile, attempt.publicationAuthority) {
         case (1, nil, nil), (2, .some, nil), (Self.schemaVersion, .some, .some):
@@ -398,6 +438,9 @@ public struct CoachInvocation: Equatable, Sendable {
         {
             throw CoachInvocationError.attemptPublicationAuthorityRequired
         }
+        guard terminalFailure != .coachContextCannotFit,
+              schemaVersion == Self.schemaVersion || terminalFailure == nil
+        else { throw CoachInvocationError.invalidTerminalFailure }
         persistedSchemaVersion = schemaVersion
         self.id = id
         self.attempts = attempts
@@ -410,6 +453,7 @@ public struct CoachInvocation: Equatable, Sendable {
         self.preparedProfile = preparedProfile
         self.expectedManifestRevision = expectedManifestRevision
         self.admittedAt = admittedAt
+        self.terminalFailure = terminalFailure
     }
 
     public var attempt: CoachProviderAttempt {
@@ -419,8 +463,8 @@ public struct CoachInvocation: Equatable, Sendable {
 
     public var attemptID: CoachProviderAttemptID { attempt.id }
 
-    public var providerIdempotencyValue: ProviderIdempotencyValue {
-        attempt.providerIdempotencyValue
+    public var providerIdempotencyValue: ProviderIdempotencyValue? {
+        attempt.transportAuthority?.providerIdempotencyValue
     }
 
     /// Returns the same admitted Invocation authority with one newly persisted
@@ -428,14 +472,20 @@ public struct CoachInvocation: Equatable, Sendable {
     /// previous exact value before launching the provider.
     public func installingAttempt(_ next: CoachProviderAttempt) throws -> Self {
         guard persistedSchemaVersion == Self.schemaVersion,
+              terminalFailure == nil,
               preparedProfile != nil,
               next.publicationAuthority != nil,
+              let nextTransport = next.transportAuthority,
+              let currentTransport = attempt.transportAuthority,
+              attempts.allSatisfy({ $0.transportAuthority != nil }),
               attempts.count < Int(CoachProviderAttempt.maximumOrdinal),
               next.ordinal == attempt.ordinal + 1,
               attempt.kind == .standard,
               Set(attempts.map(\.id)).isDisjoint(with: [next.id]),
-              Set(attempts.map(\.providerIdempotencyValue)).isDisjoint(
-                  with: [next.providerIdempotencyValue]
+              Set(attempts.compactMap {
+                  $0.transportAuthority?.providerIdempotencyValue
+              }).isDisjoint(
+                  with: [nextTransport.providerIdempotencyValue]
               ),
               Set(attempts.compactMap(\.userMessageID)).isDisjoint(
                   with: [next.userMessageID].compactMap { $0 }
@@ -452,10 +502,13 @@ public struct CoachInvocation: Equatable, Sendable {
               Set(attempts.compactMap(\.freshDraftID)).isDisjoint(
                   with: [next.freshDraftID].compactMap { $0 }
               ),
-              Set(attempts.flatMap(\.transcriptHandles)).isDisjoint(
-                  with: next.transcriptHandles
+              Set(attempts.compactMap(\.transportAuthority).flatMap(
+                  \.transcriptHandles
+              )).isDisjoint(
+                  with: nextTransport.transcriptHandles
               ),
-              next.transcriptHandles.count == attempt.transcriptHandles.count
+              nextTransport.transcriptHandles.count ==
+              currentTransport.transcriptHandles.count
         else { throw CoachInvocationError.attemptPublicationAuthorityRequired }
         return try CoachInvocation(
             schemaVersion: Self.schemaVersion,
@@ -472,6 +525,65 @@ public struct CoachInvocation: Equatable, Sendable {
             preparedProfile: preparedProfile,
             expectedManifestRevision: expectedManifestRevision,
             admittedAt: admittedAt
+        )
+    }
+
+    /// Safe schema-v3 disk representation. Transport authority intentionally
+    /// disappears; every other immutable binding remains exact.
+    public func durableProjection() throws -> Self {
+        guard persistedSchemaVersion == Self.schemaVersion else { return self }
+        return try CoachInvocation(
+            schemaVersion: persistedSchemaVersion,
+            id: id,
+            attempts: try attempts.map { try $0.removingTransportAuthority() },
+            library: LibraryScope(libraryID: libraryID),
+            chatID: chatID,
+            pendingUserTurn: PendingUserTurn(
+                id: pendingUserTurnID,
+                draftID: draftID,
+                draftVersion: draftVersion,
+                responsePositionID: responsePositionID
+            ),
+            preparedProfile: preparedProfile,
+            expectedManifestRevision: expectedManifestRevision,
+            admittedAt: admittedAt,
+            terminalFailure: terminalFailure
+        )
+    }
+
+    public func hasSameDurableProjection(as other: Self) -> Bool {
+        guard let left = try? durableProjection(),
+              let right = try? other.durableProjection()
+        else { return false }
+        return left == right
+    }
+
+    /// Records the exact typed terminal write that recovery must finish. The
+    /// Invocation remains the durable authority until its Pending mutation and
+    /// retirement are both reconciled.
+    public func recordingTerminalFailure(
+        _ failure: PendingUserTurnFailure
+    ) throws -> Self {
+        guard persistedSchemaVersion == Self.schemaVersion,
+              failure != .coachContextCannotFit,
+              terminalFailure == nil || terminalFailure == failure
+        else { throw CoachInvocationError.invalidTerminalFailure }
+        return try CoachInvocation(
+            schemaVersion: persistedSchemaVersion,
+            id: id,
+            attempts: attempts,
+            library: LibraryScope(libraryID: libraryID),
+            chatID: chatID,
+            pendingUserTurn: PendingUserTurn(
+                id: pendingUserTurnID,
+                draftID: draftID,
+                draftVersion: draftVersion,
+                responsePositionID: responsePositionID
+            ),
+            preparedProfile: preparedProfile,
+            expectedManifestRevision: expectedManifestRevision,
+            admittedAt: admittedAt,
+            terminalFailure: failure
         )
     }
 
@@ -539,6 +651,7 @@ public extension ChatAggregate {
             throw InvocationPublicationError.coachMessageRequired
         }
         guard invocation.persistedSchemaVersion == CoachInvocation.schemaVersion,
+              invocation.terminalFailure == nil,
               let attemptAuthority = invocation.attempt.publicationAuthority,
               attemptAuthority.userMessageID == userMessage.id,
               attemptAuthority.coachMessageID == coachMessage.id,

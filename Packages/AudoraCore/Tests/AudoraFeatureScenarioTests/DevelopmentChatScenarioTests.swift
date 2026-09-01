@@ -1092,6 +1092,20 @@ private actor ScenarioInvocationPersistence: InvocationPersistencePort {
         else {
             return .stale(await store.invocationSnapshot(mutation.invocation.chatID))
         }
+        if mutation.authority.aggregate != mutation.processingAggregate,
+           let base = mutation.authority.aggregate.pendingUserTurn,
+           let replacement = mutation.processingAggregate.pendingUserTurn
+        {
+            guard let processingMutation = try? ReplacePendingUserTurnMutation(
+                library: mutation.authority.request.library,
+                chatID: mutation.authority.request.chatID,
+                base: base,
+                replacement: replacement
+            ) else { return .failed }
+            guard case .committed = await store.replacePendingUserTurn(
+                processingMutation
+            ) else { return .failed }
+        }
         reserved = nil
         active = mutation.invocation
         return .installed(mutation.invocation)
@@ -1256,7 +1270,8 @@ private actor ScenarioPendingInvocationSession: InvocationPendingPersistenceSess
             return .installed(
                 ScenarioActiveInvocationSession(
                     persistence: persistence,
-                    invocation: invocation
+                    invocation: invocation,
+                    processingAggregate: mutation.processingAggregate
                 )
             )
         case .activeExists: return .blockedByActiveInvocation
@@ -1309,15 +1324,18 @@ private actor ScenarioPendingInvocationSession: InvocationPendingPersistenceSess
 
 private actor ScenarioActiveInvocationSession: InvocationActivePersistenceSession {
     nonisolated let invocation: CoachInvocation
+    nonisolated let processingAggregate: ChatAggregate
     private let persistence: ScenarioInvocationPersistence
     private var isActive = true
 
     init(
         persistence: ScenarioInvocationPersistence,
-        invocation: CoachInvocation
+        invocation: CoachInvocation,
+        processingAggregate: ChatAggregate
     ) {
         self.persistence = persistence
         self.invocation = invocation
+        self.processingAggregate = processingAggregate
     }
 
     func installNextAttempt(

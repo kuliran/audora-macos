@@ -15,6 +15,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         )
         case active(
             invocation: CoachInvocation,
+            processingAggregate: ChatAggregate,
             lease: PortableInvocationLivenessLease
         )
 
@@ -22,7 +23,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
             switch self {
             case let .pending(_, lease),
                  let .installing(_, _, lease),
-                 let .active(_, lease):
+                 let .active(_, _, lease):
                 lease
             }
         }
@@ -165,12 +166,13 @@ public actor PortableInvocationStore: InvocationPersistencePort {
             return .failed
         }
         if case let .installed(invocation) = outcome,
-           invocation == mutation.invocation {
+           invocation.hasSameDurableProjection(as: mutation.invocation) {
             invocationLeases[libraryID] = .active(
-                invocation: invocation,
+                invocation: mutation.invocation,
+                processingAggregate: mutation.processingAggregate,
                 lease: lease
             )
-            return outcome
+            return .installed(mutation.invocation)
         }
         invocationLeases[libraryID] = .pending(
             request: request,
@@ -191,19 +193,22 @@ public actor PortableInvocationStore: InvocationPersistencePort {
             holding: lease
         )
         guard let state = invocationLeases[libraryID],
-              case let .active(expected, installedLease) = state,
+              case let .active(expected, processingAggregate, installedLease) = state,
               expected == base,
               installedLease === lease
         else { return .failed }
         switch outcome {
-        case let .installed(replacement) where replacement == mutation.replacement:
+        case let .installed(replacement)
+            where replacement.hasSameDurableProjection(as: mutation.replacement):
             invocationLeases[libraryID] = .active(
-                invocation: replacement,
+                invocation: mutation.replacement,
+                processingAggregate: processingAggregate,
                 lease: lease
             )
             return .installed(PortableActiveInvocationSession(
                 store: self,
-                invocation: replacement
+                invocation: mutation.replacement,
+                processingAggregate: processingAggregate
             ))
         case .installed:
             return .failed
@@ -331,7 +336,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         for invocation: CoachInvocation
     ) -> PortableInvocationLivenessLease? {
         guard let state = invocationLeases[invocation.libraryID],
-              case let .active(candidate, lease) = state,
+              case let .active(candidate, _, lease) = state,
               candidate == invocation
         else { return nil }
         return lease
@@ -346,7 +351,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
         switch state {
         case let .pending(candidate, _), let .installing(candidate, _, _):
             return candidate == request
-        case let .active(invocation, _):
+        case let .active(invocation, _, _):
             return invocation.chatID == request.chatID &&
                 invocation.pendingUserTurnID == request.pendingUserTurnID
         }
@@ -363,7 +368,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
 
     private func releaseActiveLease(for invocation: CoachInvocation) {
         releaseLease(for: invocation.libraryID) { state in
-            guard case let .active(candidate, _) = state else { return false }
+            guard case let .active(candidate, _, _) = state else { return false }
             return candidate == invocation
         }
     }
@@ -458,7 +463,8 @@ private actor PortablePendingInvocationSession: InvocationPendingPersistenceSess
             return .installed(
                 PortableActiveInvocationSession(
                     store: store,
-                    invocation: invocation
+                    invocation: invocation,
+                    processingAggregate: mutation.processingAggregate
                 )
             )
         case .installed:
@@ -534,12 +540,18 @@ private actor PortableActiveInvocationSession: InvocationActivePersistenceSessio
     }
 
     nonisolated let invocation: CoachInvocation
+    nonisolated let processingAggregate: ChatAggregate
     private let store: PortableInvocationStore
     private var state: State = .active
 
-    init(store: PortableInvocationStore, invocation: CoachInvocation) {
+    init(
+        store: PortableInvocationStore,
+        invocation: CoachInvocation,
+        processingAggregate: ChatAggregate
+    ) {
         self.store = store
         self.invocation = invocation
+        self.processingAggregate = processingAggregate
     }
 
     deinit {

@@ -37,8 +37,7 @@ Audora Library.audoralibrary/
 │       └── profile-write.json        # present only while unresolved
 ├── invocations/
 │   └── <invocation-id>/              # the one active Library Invocation
-│       ├── invocation.json
-│       └── attempt.json              # the current Provider Attempt
+│       └── invocation.json            # v3 includes bounded Attempt history
 ├── jobs/
 │   └── job-20260822T160300000Z-1ABC/
 │       ├── job.json
@@ -92,7 +91,7 @@ Nested values inherit their root's version. The current versioned roots are:
 - Profile head and Profile Revisions;
 - Chat manifest, messages, current Memory, Pending User Turn and unresolved
   failure, Proposal, and Profile-write intent;
-- active Invocation and Provider Attempt records;
+- the active Invocation root, whose nested Provider Attempts inherit its version;
 - recording/transcription jobs and staging manifests;
 - the machine-local Library-keyed admission ledger; and
 - the diagnostic-log envelope.
@@ -271,7 +270,7 @@ References are explicit IDs rather than paths or timestamp inference:
 Chat -> immutable Session/Transcript Revision attachments, Draft, current Memory, message tail
 Pending User Turn -> exact locked Draft version and stable response position
 Invocation -> immutable intent and prepared app-owned context
-Provider Attempt -> its Invocation, fresh transcript-read authority, and response position
+Provider Attempt -> its Invocation, ordinal/kind, and one publication authority
 Textual Event -> stable Word range in one Transcript Revision
 Audio Event -> stable Session Time Range
 Evidence-backed Observation -> one or more nested Evidence References
@@ -427,6 +426,26 @@ Automatic retry stays under the Chat's single `processing` state and
 uses delays of 5, 10, then 15 seconds. A user-triggered Retry creates a new
 Invocation and therefore fresh Attempt and transcript-read values.
 
+`invocation.json` schema v3 contains the ordered one-to-four Attempt history
+inside the Invocation root. Nested Attempts carry no `schemaVersion`; they inherit
+v3 and persist only Attempt ID, ordinal/kind, and message/fresh-Draft publication
+authority. Provider idempotency values, transcript handles, and bearer access are
+process-live transport authority: they are independently generated, never written
+to the Library or proof, and never reconstructed after relaunch. Strict legacy
+Invocation v1/v2 records keep their historical flat Attempt ID/idempotency fields
+only for read compatibility and safe retirement; the next valid legacy rewrite is
+v3, and a root newer than v3 freezes without provider resumption.
+
+Retry admission first installs and directory-flushes the Invocation as its
+generation marker. While holding the Chat mutation lock, it then replaces the
+exact failed Pending with the same identity and `failure: nil`, flushes the Chat,
+locks and validates the replacement inode, and atomically rebinds the liveness
+lease before provider authority can escape. A typed terminal outcome first CASes
+and directory-flushes its exact terminal intent into the Invocation; only then may
+it mutate Pending and retire the Invocation. Recovery therefore preserves a
+committed current terminal reason, while an Invocation with no terminal intent
+becomes `coachResponseInterrupted`.
+
 Relaunch converts every active Invocation to an interrupted UserRetryable failure.
 Automatic retry timers do not resume, and a complete provider response that was not
 atomically published is discarded rather than resumed from durable staging.
@@ -437,9 +456,11 @@ For the machine-local ledger, rename is the possible-commit boundary. A failure
 before rename rejects admission and unlocks a provisional new Send; a failed
 parent-directory flush after rename is durability uncertainty, so reconciliation
 preserves the exact Pending User Turn as interrupted and user-retryable. Launch
-identity preflight checks all six bounded namespaces without requiring sibling
-Chat aggregates to decode or become writable; corrupt and newer-schema siblings
-therefore freeze only themselves.
+identity preflight checks every durable public namespace (Invocation and Attempt
+IDs, message IDs, and fresh Draft ID) without requiring sibling Chat aggregates
+to decode or become writable; corrupt and newer-schema siblings therefore freeze
+only themselves. Raw provider idempotency values and transcript handles are
+process-live and are never reconstructed or scanned from sibling Library bytes.
 The Invocation gateway acquires the cross-process Library liveness lease before
 its first exact Pending read and retains that lease through its guarded reread,
 installation, and terminal mutation. Catalog recovery therefore cannot classify
@@ -467,7 +488,9 @@ recovery unavailable.
   atomically install either a coherent Chat or nothing, except for the documented
   context-fit branch that installs a coherent Chat with its local failure.
 - Before provider work, durably lock one Pending User Turn and its stable response
-  position, then admit and persist its Invocation. No Attempt starts earlier.
+  position, then admit and persist its Invocation. Retry additionally completes
+  the durable failure-to-processing Pending transition and inode-lease rebind. No
+  Attempt starts earlier.
 - Hold a complete provider response in process memory while validating it. Stage
   its app-owned messages, optional Memory replacement, and optional Profile effect,
   then switch the Chat manifest by compare-and-swap. A crash before the switch

@@ -83,7 +83,7 @@ struct PortableInvocationEvidenceCodec {
                 : nil,
             providerIdempotencyValue: invocation.persistedSchemaVersion <
                 CoachInvocation.schemaVersion
-                ? invocation.providerIdempotencyValue.rawValue
+                ? invocation.providerIdempotencyValue?.rawValue
                 : nil,
             attempts: invocation.persistedSchemaVersion == CoachInvocation.schemaVersion
                 ? invocation.attempts.map(CoachProviderAttemptDTO.init)
@@ -97,7 +97,8 @@ struct PortableInvocationEvidenceCodec {
             expectedManifestRevision: invocation.expectedManifestRevision,
             profileRevisionId: invocation.preparedProfile?.revisionID?.rawValue,
             profileStatementGeneration: invocation.preparedProfile?.statementGeneration,
-            admittedAt: invocation.admittedAt.rawValue
+            admittedAt: invocation.admittedAt.rawValue,
+            terminalFailure: invocation.terminalFailure?.rawValue
         ))
     }
 
@@ -135,10 +136,19 @@ struct PortableInvocationEvidenceCodec {
         } else {
             let v3 = common.union(["attempts", "profileStatementGeneration"])
             let actualKeys = Set(dictionary.keys)
-            guard actualKeys == v3 || actualKeys == v3.union(["profileRevisionId"])
+            let allowedOptional: Set<String> = [
+                "profileRevisionId", "terminalFailure",
+            ]
+            guard actualKeys.isSuperset(of: v3),
+                  actualKeys.subtracting(v3).isSubset(of: allowedOptional)
             else { throw PortableChatPersistenceError.unknownKey }
             if actualKeys.contains("profileRevisionId"),
                dictionary["profileRevisionId"] is NSNull
+            {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            if actualKeys.contains("terminalFailure"),
+               dictionary["terminalFailure"] is NSNull
             {
                 throw PortableChatPersistenceError.invalidJSON
             }
@@ -148,8 +158,7 @@ struct PortableInvocationEvidenceCodec {
             else { throw PortableChatPersistenceError.invalidJSON }
             for rawAttempt in rawAttempts {
                 try json.requireExactKeys(rawAttempt, [
-                    "schemaVersion", "attemptId", "ordinal", "kind",
-                    "providerIdempotencyValue", "transcriptHandles",
+                    "attemptId", "ordinal", "kind",
                     "userMessageId", "coachMessageId", "freshDraftId",
                 ])
             }
@@ -188,7 +197,7 @@ struct PortableInvocationEvidenceCodec {
                       let idempotencyValue = dto.providerIdempotencyValue,
                       dto.attempts == nil
                 else { throw PortableChatPersistenceError.invalidJSON }
-                attempts = [CoachProviderAttempt(
+                attempts = [try CoachProviderAttempt(
                     legacyID: try CoachProviderAttemptID(attemptID),
                     providerIdempotencyValue: try ProviderIdempotencyValue(
                         idempotencyValue
@@ -204,7 +213,13 @@ struct PortableInvocationEvidenceCodec {
                 pendingUserTurn: pending,
                 preparedProfile: preparedProfile,
                 expectedManifestRevision: dto.expectedManifestRevision,
-                admittedAt: UTCInstant(dto.admittedAt)
+                admittedAt: UTCInstant(dto.admittedAt),
+                terminalFailure: try dto.terminalFailure.map { rawValue in
+                    guard let failure = PendingUserTurnFailure(rawValue: rawValue) else {
+                        throw PortableChatPersistenceError.invalidJSON
+                    }
+                    return failure
+                }
             )
         }
     }
@@ -398,6 +413,7 @@ struct PortableInvocationEvidenceCodec {
                   pending.draftID == invocation.draftID,
                   pending.draftVersion == invocation.draftVersion,
                   pending.responsePositionID == invocation.responsePositionID,
+                  invocation.persistedSchemaVersion < CoachInvocation.schemaVersion ||
                   pending.failure == nil
             else { return false }
         } else if evidence.pendingUserTurn != nil {
@@ -451,15 +467,13 @@ private struct CoachInvocationDTO: Codable {
     let profileRevisionId: String?
     let profileStatementGeneration: UInt64?
     let admittedAt: String
+    let terminalFailure: String?
 }
 
 private struct CoachProviderAttemptDTO: Codable {
-    let schemaVersion: UInt32
     let attemptId: String
     let ordinal: UInt8
     let kind: String
-    let providerIdempotencyValue: String
-    let transcriptHandles: [String]
     let userMessageId: String
     let coachMessageId: String
     let freshDraftId: String
@@ -468,30 +482,21 @@ private struct CoachProviderAttemptDTO: Codable {
         guard let authority = attempt.publicationAuthority else {
             preconditionFailure("current Coach Attempts require publication authority")
         }
-        schemaVersion = attempt.persistedSchemaVersion
         attemptId = attempt.id.rawValue
         ordinal = attempt.ordinal
         kind = attempt.kind.rawValue
-        providerIdempotencyValue = attempt.providerIdempotencyValue.rawValue
-        transcriptHandles = attempt.transcriptHandles.map(\.rawValue)
         userMessageId = authority.userMessageID.rawValue
         coachMessageId = authority.coachMessageID.rawValue
         freshDraftId = authority.freshDraftID.rawValue
     }
 
     func domainValue() throws -> CoachProviderAttempt {
-        guard let parsedKind = CoachProviderAttemptKind(rawValue: kind),
-              transcriptHandles.count <= CoachProviderAttempt.maximumTranscriptHandles
+        guard let parsedKind = CoachProviderAttemptKind(rawValue: kind)
         else { throw PortableChatPersistenceError.invalidJSON }
         return try CoachProviderAttempt(
-            schemaVersion: schemaVersion,
-            id: CoachProviderAttemptID(attemptId),
+            durableID: CoachProviderAttemptID(attemptId),
             ordinal: ordinal,
             kind: parsedKind,
-            providerIdempotencyValue: ProviderIdempotencyValue(
-                providerIdempotencyValue
-            ),
-            transcriptHandles: transcriptHandles.map(CoachProviderTranscriptHandle.init),
             publicationAuthority: CoachProviderAttemptPublicationAuthority(
                 userMessageID: ChatMessageID(userMessageId),
                 coachMessageID: ChatMessageID(coachMessageId),

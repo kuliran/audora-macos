@@ -753,9 +753,15 @@ final class ContractResourcesTests: XCTestCase {
             attempts.last?["coachMessageId"] as? String,
             coach["messageId"] as? String
         )
-        XCTAssertEqual(Set(attempts.compactMap {
-            $0["providerIdempotencyValue"] as? String
-        }).count, 2)
+        for attempt in attempts {
+            XCTAssertEqual(Set(attempt.keys), [
+                "attemptId", "ordinal", "kind", "userMessageId",
+                "coachMessageId", "freshDraftId",
+            ])
+            XCTAssertNil(attempt["providerIdempotencyValue"])
+            XCTAssertNil(attempt["transcriptHandles"])
+            XCTAssertNil(attempt["schemaVersion"])
+        }
         XCTAssertEqual(
             coach["profileRevisionId"] as? String,
             invocation["profileRevisionId"] as? String

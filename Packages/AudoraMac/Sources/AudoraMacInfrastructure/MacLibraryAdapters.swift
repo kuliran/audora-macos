@@ -408,7 +408,9 @@ public struct RandomInvocationIdentityGenerator: InvocationIdentityGenerating {
         let userMessageRaw = RandomPortableIdentifierFormatter.make(.message, at: instant)
         return InvocationAttemptIdentity(
             attemptID: attemptID,
-            idempotencyValue: try! ProviderIdempotencyValue(attemptID.rawValue),
+            idempotencyValue: try! ProviderIdempotencyValue(
+                UUID().uuidString.lowercased()
+            ),
             userMessageID: try! ChatMessageID(userMessageRaw),
             coachMessageID: try! ChatMessageID(
                 RandomPortableIdentifierFormatter.incrementingFinalCrockfordDigit(

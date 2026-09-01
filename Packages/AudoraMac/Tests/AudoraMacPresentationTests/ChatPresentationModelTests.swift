@@ -13,6 +13,26 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    func testRetryableCoachFailureActionsUseCauseNeutralAccessibilityLabels() {
+        for failure in [
+            PendingUserTurnFailure.coachProviderError,
+            .coachResponseInvalid,
+        ] {
+            XCTAssertEqual(
+                CoachResponseFailurePresentation.retryAccessibilityLabel(
+                    for: failure
+                ),
+                "Retry Coach Response"
+            )
+            XCTAssertEqual(
+                CoachResponseFailurePresentation.discardAccessibilityLabel(
+                    for: failure
+                ),
+                "Discard Coach Response"
+            )
+        }
+    }
+
     func testInvocationControlPresentationExposesTheSameUnavailableReasonWithoutHover() throws {
         let reopensAt = try UTCInstant("2026-08-30T12:01:00.000Z")
 

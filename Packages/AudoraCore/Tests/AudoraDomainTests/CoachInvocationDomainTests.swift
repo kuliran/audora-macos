@@ -242,6 +242,50 @@ final class CoachInvocationDomainTests: XCTestCase {
             )
         }
     }
+
+    func testTerminalIntentForbidsAnotherAttemptAndPublication() throws {
+        let fixture = try Fixture()
+        let terminal = try fixture.invocation().recordingTerminalFailure(
+            .coachProviderError
+        )
+        let nextAttempt = try CoachProviderAttempt(
+            id: CoachProviderAttemptID("atm-20260830T120001000Z-7RST"),
+            ordinal: 2,
+            kind: .standard,
+            providerIdempotencyValue: ProviderIdempotencyValue("synthetic-next-7RST"),
+            transcriptHandles: [],
+            publicationAuthority: CoachProviderAttemptPublicationAuthority(
+                userMessageID: ChatMessageID("msg-20260830T120001000Z-8VWX"),
+                coachMessageID: ChatMessageID("msg-20260830T120001000Z-9YZ0"),
+                freshDraftID: ChatDraftID("drf-20260830T120001000Z-0ABC")
+            )
+        )
+
+        XCTAssertThrowsError(try terminal.installingAttempt(nextAttempt))
+
+        let user = try ChatMessage(
+            id: fixture.userMessageID,
+            responsePositionID: fixture.pending.responsePositionID,
+            content: .user(text: fixture.aggregate.chat.draft.text),
+            createdAt: fixture.instant
+        )
+        let coach = try ChatMessage(
+            id: fixture.coachMessageID,
+            responsePositionID: fixture.pending.responsePositionID,
+            content: .coach(markdown: "Synthetic answer"),
+            coachProfile: fixture.profile,
+            createdAt: fixture.instant
+        )
+        XCTAssertThrowsError(
+            try fixture.aggregate.publishingTurn(
+                invocation: terminal,
+                userMessage: user,
+                coachMessage: coach,
+                freshDraft: fixture.freshDraft(),
+                at: fixture.instant
+            )
+        )
+    }
 }
 
 private struct Fixture {

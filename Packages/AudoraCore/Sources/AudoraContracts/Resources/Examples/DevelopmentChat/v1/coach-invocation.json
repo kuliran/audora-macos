@@ -3,23 +3,17 @@
   "invocationId": "inv-20260830T120002000Z-5KMN",
   "attempts": [
     {
-      "schemaVersion": 1,
       "attemptId": "atm-20260830T120002000Z-6PQR",
       "ordinal": 1,
       "kind": "standard",
-      "providerIdempotencyValue": "synthetic-attempt-6PQR",
-      "transcriptHandles": ["01234567-89ab-cdef-0123-456789abcdef"],
       "userMessageId": "msg-20260830T120002000Z-4GHJ",
       "coachMessageId": "msg-20260830T120002000Z-5KMN",
       "freshDraftId": "drf-20260830T120002000Z-6PQR"
     },
     {
-      "schemaVersion": 1,
       "attemptId": "atm-20260830T120002000Z-7STV",
       "ordinal": 2,
       "kind": "shorterRepair",
-      "providerIdempotencyValue": "synthetic-attempt-7STV",
-      "transcriptHandles": ["fedcba98-7654-3210-fedc-ba9876543210"],
       "userMessageId": "msg-20260830T120003000Z-7STV",
       "coachMessageId": "msg-20260830T120003000Z-8WXY",
       "freshDraftId": "drf-20260830T120003000Z-9YZ0"
