@@ -197,6 +197,13 @@ actor CoachContextAuthorityLease {
         releaseAction = nil
         await action()
     }
+
+    /// Transfers cleanup to a task that owns only this one-shot lease. Callers
+    /// can publish their terminal result without inheriting adapter release latency.
+    nonisolated func releaseDetached() {
+        let ownedLease = self
+        Task.detached { await ownedLease.release() }
+    }
 }
 
 enum CoachContextAuthorityLeaseOutcome: Sendable {

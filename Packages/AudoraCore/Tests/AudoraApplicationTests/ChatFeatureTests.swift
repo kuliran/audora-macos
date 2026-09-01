@@ -637,6 +637,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.cancelNewChat(context))
 
         let confirmationCompleted = await confirmation.completesWithinYieldBudget()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
         let releaseCount = await coordinator.creationLeaseReleaseCount
         let cancelledState = await feature.currentState
         let seedsBeforeLateProfile = await store.createSeeds
@@ -649,6 +650,209 @@ final class ChatFeatureTests: XCTestCase {
         _ = await confirmation.completesWithinYieldBudget()
         let seedsAfterLateProfile = await store.createSeeds
         XCTAssertTrue(seedsAfterLateProfile.isEmpty)
+    }
+
+    func testCancelReturnsAndReleasesFeatureBeforeSuspendedLeaseCleanupCompletes()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext(
+            suspendCreationLeaseReleaseNoncooperatively: true
+        )
+        let profile = NoncooperativeProfileReader()
+        let store = RecordingChatStore()
+        var feature: DefaultChatFeature? = makeFeature(
+            store: store,
+            profileReader: profile,
+            coachContext: coordinator
+        )
+        weak let observedFeature = feature
+        let context = Self.context
+        await feature?.send(.start(context))
+        await feature?.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task { [weak feature] in
+            await feature?.send(.confirmNewChat(context))
+            await confirmation.complete(())
+        }
+        await profile.waitUntilReadStarts()
+
+        let cancellation = CompletionProbe<Void>()
+        Task { [weak feature] in
+            await feature?.send(.cancelNewChat(context))
+            await cancellation.complete(())
+        }
+        await coordinator.waitUntilCreationLeaseReleaseStarts()
+
+        let cancellationReturned = await cancellation.completesWithinYieldBudget()
+        let confirmationReturned = await confirmation.completesWithinYieldBudget()
+        let stateBeforeCleanup = await feature?.currentState
+        let seedsBeforeCleanup = await store.createSeeds
+        feature = nil
+        for _ in 0 ..< 10_000 where observedFeature != nil {
+            await Task.yield()
+        }
+        let featureReleasedBeforeCleanup = observedFeature == nil
+
+        await coordinator.resumeCreationLeaseRelease()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        await profile.resume()
+        _ = await cancellation.completesWithinYieldBudget()
+        _ = await confirmation.completesWithinYieldBudget()
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+        let seedsAfterLateProfile = await store.createSeeds
+
+        XCTAssertTrue(cancellationReturned)
+        XCTAssertTrue(confirmationReturned)
+        XCTAssertEqual(stateBeforeCleanup?.newChatPicker, .closed)
+        XCTAssertTrue(seedsBeforeCleanup.isEmpty)
+        XCTAssertTrue(featureReleasedBeforeCleanup)
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertTrue(seedsAfterLateProfile.isEmpty)
+    }
+
+    func testOrderlyTerminationReturnsAndReleasesFeatureBeforeSuspendedLeaseCleanupCompletes()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext(
+            suspendCreationLeaseReleaseNoncooperatively: true
+        )
+        let profile = NoncooperativeProfileReader()
+        let store = RecordingChatStore()
+        var feature: DefaultChatFeature? = makeFeature(
+            store: store,
+            profileReader: profile,
+            coachContext: coordinator
+        )
+        weak let observedFeature = feature
+        let context = Self.context
+        await feature?.send(.start(context))
+        await feature?.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task { [weak feature] in
+            await feature?.send(.confirmNewChat(context))
+            await confirmation.complete(())
+        }
+        await profile.waitUntilReadStarts()
+
+        let termination = CompletionProbe<Void>()
+        Task { [weak feature] in
+            await feature?.beginOrderlyTermination()
+            await termination.complete(())
+        }
+        await coordinator.waitUntilCreationLeaseReleaseStarts()
+
+        let terminationReturned = await termination.completesWithinYieldBudget()
+        let confirmationReturned = await confirmation.completesWithinYieldBudget()
+        let stateBeforeCleanup = await feature?.currentState
+        let seedsBeforeCleanup = await store.createSeeds
+        feature = nil
+        for _ in 0 ..< 10_000 where observedFeature != nil {
+            await Task.yield()
+        }
+        let featureReleasedBeforeCleanup = observedFeature == nil
+
+        await coordinator.resumeCreationLeaseRelease()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        await profile.resume()
+        _ = await termination.completesWithinYieldBudget()
+        _ = await confirmation.completesWithinYieldBudget()
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+        let seedsAfterLateProfile = await store.createSeeds
+
+        XCTAssertTrue(terminationReturned)
+        XCTAssertTrue(confirmationReturned)
+        XCTAssertEqual(stateBeforeCleanup?.newChatPicker, .closed)
+        XCTAssertTrue(seedsBeforeCleanup.isEmpty)
+        XCTAssertTrue(featureReleasedBeforeCleanup)
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertTrue(seedsAfterLateProfile.isEmpty)
+    }
+
+    func testMissingProfilePublishesFailureBeforeSuspendedLeaseCleanupCompletes()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext(
+            suspendCreationLeaseReleaseNoncooperatively: true
+        )
+        let store = RecordingChatStore()
+        let feature = makeFeature(
+            store: store,
+            profileReader: MissingProfileReader(),
+            coachContext: coordinator
+        )
+        let context = Self.context
+        await feature.send(.start(context))
+        await feature.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task {
+            await feature.send(.confirmNewChat(context))
+            await confirmation.complete(())
+        }
+        await coordinator.waitUntilCreationLeaseReleaseStarts()
+
+        let confirmationReturned = await confirmation.completesWithinYieldBudget()
+        let stateBeforeCleanup = await feature.currentState
+        let seedsBeforeCleanup = await store.createSeeds
+
+        await coordinator.resumeCreationLeaseRelease()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        _ = await confirmation.completesWithinYieldBudget()
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+
+        XCTAssertTrue(confirmationReturned)
+        XCTAssertEqual(stateBeforeCleanup.notice, .createFailed)
+        XCTAssertNil(stateBeforeCleanup.activity)
+        XCTAssertTrue(seedsBeforeCleanup.isEmpty)
+        XCTAssertEqual(releaseCount, 1)
+    }
+
+    func testCommittedChatPublishesAndReleasesFeatureBeforeSuspendedLeaseCleanupCompletes()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext(
+            suspendCreationLeaseReleaseNoncooperatively: true
+        )
+        let store = RecordingChatStore()
+        var feature: DefaultChatFeature? = makeFeature(
+            store: store,
+            coachContext: coordinator
+        )
+        weak let observedFeature = feature
+        let context = Self.context
+        await feature?.send(.start(context))
+        await feature?.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task { [weak feature] in
+            await feature?.send(.confirmNewChat(context))
+            await confirmation.complete(())
+        }
+        await coordinator.waitUntilCreationLeaseReleaseStarts()
+
+        let confirmationReturned = await confirmation.completesWithinYieldBudget()
+        let stateBeforeCleanup = await feature?.currentState
+        let seedsBeforeCleanup = await store.createSeeds
+        feature = nil
+        for _ in 0 ..< 10_000 where observedFeature != nil {
+            await Task.yield()
+        }
+        let featureReleasedBeforeCleanup = observedFeature == nil
+
+        await coordinator.resumeCreationLeaseRelease()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        _ = await confirmation.completesWithinYieldBudget()
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+
+        XCTAssertTrue(confirmationReturned)
+        XCTAssertEqual(stateBeforeCleanup?.newChatPicker, .closed)
+        XCTAssertNil(stateBeforeCleanup?.activity)
+        XCTAssertNotNil(stateBeforeCleanup.flatMap(Self.openAggregate(in:)))
+        XCTAssertEqual(seedsBeforeCleanup.count, 1)
+        XCTAssertTrue(featureReleasedBeforeCleanup)
+        XCTAssertEqual(releaseCount, 1)
     }
 
     func testCancelDuringNoncooperativePrecommitClockNeverEntersCreatingOrCreates()
@@ -677,6 +881,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.cancelNewChat(context))
 
         let confirmationCompleted = await confirmation.completesWithinYieldBudget()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
         let releaseCount = await coordinator.creationLeaseReleaseCount
         let cancelledState = await feature.currentState
         let seedsBeforeLateClock = await store.createSeeds
@@ -736,6 +941,7 @@ final class ChatFeatureTests: XCTestCase {
 
         let terminationCompleted = await termination.completesWithinYieldBudget()
         let terminationValue = await termination.value
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
         let releaseCount = await coordinator.creationLeaseReleaseCount
         let terminatedState = await feature.currentState
         let savedDrafts = await store.savedDrafts
@@ -2124,6 +2330,7 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
     private let suspendedQuoteNumber: Int?
     private let rejectsCreationLease: Bool
     private let suspendLeaseAcquisitionNoncooperatively: Bool
+    private let suspendCreationLeaseReleaseNoncooperatively: Bool
     private var resolutionOutcomes: [ChatAttachmentResolutionOutcome]
     private var catalogStarted = false
     private var resolutionStarted = false
@@ -2132,6 +2339,8 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
     private var quoteCount = 0
     private var leaseAcquisitionStarted = false
     private var leaseAcquisitionContinuation: CheckedContinuation<Void, Never>?
+    private var creationLeaseReleaseStarted = false
+    private var creationLeaseReleaseContinuation: CheckedContinuation<Void, Never>?
     private(set) var observedCancellation = false
     private(set) var resolutionCount = 0
     private(set) var creationLeaseReleaseCount = 0
@@ -2144,6 +2353,7 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
         suspendedQuoteNumber: Int? = nil,
         rejectsCreationLease: Bool = false,
         suspendLeaseAcquisitionNoncooperatively: Bool = false,
+        suspendCreationLeaseReleaseNoncooperatively: Bool = false,
         resolutionOutcomes: [ChatAttachmentResolutionOutcome] = []
     ) {
         self.candidates = candidates
@@ -2154,6 +2364,8 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
         self.rejectsCreationLease = rejectsCreationLease
         self.suspendLeaseAcquisitionNoncooperatively =
             suspendLeaseAcquisitionNoncooperatively
+        self.suspendCreationLeaseReleaseNoncooperatively =
+            suspendCreationLeaseReleaseNoncooperatively
         self.resolutionOutcomes = resolutionOutcomes
     }
 
@@ -2231,7 +2443,7 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
         }
         return .acquired(
             CoachContextAuthorityLease { [weak self] in
-                await self?.recordCreationLeaseRelease()
+                await self?.releaseCreationLease()
             }
         )
     }
@@ -2288,7 +2500,22 @@ private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
         while creationLeaseReleaseCount < count { await Task.yield() }
     }
 
-    private func recordCreationLeaseRelease() {
+    func waitUntilCreationLeaseReleaseStarts() async {
+        while !creationLeaseReleaseStarted { await Task.yield() }
+    }
+
+    func resumeCreationLeaseRelease() {
+        creationLeaseReleaseContinuation?.resume()
+        creationLeaseReleaseContinuation = nil
+    }
+
+    private func releaseCreationLease() async {
+        creationLeaseReleaseStarted = true
+        if suspendCreationLeaseReleaseNoncooperatively {
+            await withCheckedContinuation {
+                creationLeaseReleaseContinuation = $0
+            }
+        }
         creationLeaseReleaseCount += 1
     }
 
@@ -3067,6 +3294,10 @@ private actor RecordingChatStore: ChatStorePort {
 
 private struct FixedProfileReader: ProfileStatementGenerationReading {
     func statementGeneration(in library: LibraryScope) async -> UInt64? { 7 }
+}
+
+private struct MissingProfileReader: ProfileStatementGenerationReading {
+    func statementGeneration(in library: LibraryScope) async -> UInt64? { nil }
 }
 
 private actor NoncooperativeProfileReader: ProfileStatementGenerationReading {

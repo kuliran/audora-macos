@@ -78,7 +78,7 @@ private actor CancellationOwnedNewChatPickerOperation<Outcome: Sendable> {
 
     func retain(_ acquiredLease: CoachContextAuthorityLease) async -> Bool {
         guard case .pending = state, lease == nil else {
-            await acquiredLease.release()
+            acquiredLease.releaseDetached()
             return false
         }
         lease = acquiredLease
@@ -108,7 +108,7 @@ private actor CancellationOwnedNewChatPickerOperation<Outcome: Sendable> {
         let pendingWaiters = waiters
         waiters.removeAll()
         pendingWaiters.forEach { $0.resume(returning: nil) }
-        await ownedLease?.release()
+        ownedLease?.releaseDetached()
     }
 
     private func finish(_ outcome: Outcome?) async {
@@ -121,7 +121,7 @@ private actor CancellationOwnedNewChatPickerOperation<Outcome: Sendable> {
             let pendingWaiters = waiters
             waiters.removeAll()
             pendingWaiters.forEach { $0.resume(returning: nil) }
-            await ownedLease?.release()
+            ownedLease?.releaseDetached()
             return
         }
         state = .completed(outcome)
@@ -804,7 +804,7 @@ public actor DefaultChatFeature: ChatFeature {
                 return outcome
             }
         if let unexpectedLease = completed?.lease {
-            await unexpectedLease.release()
+            unexpectedLease.releaseDetached()
         }
         return completed?.outcome
     }
@@ -848,7 +848,7 @@ public actor DefaultChatFeature: ChatFeature {
         guard newChatPickerWork?.id == workID else { return nil }
         let lease = await controller.claimLease()
         guard newChatPickerWork?.id == workID else {
-            await lease?.release()
+            lease?.releaseDetached()
             return nil
         }
         newChatPickerWork = nil
@@ -1082,7 +1082,7 @@ public actor DefaultChatFeature: ChatFeature {
                 )
                 guard await controller.isActive() else {
                     if case let .acquired(lateLease) = leaseOutcome {
-                        await lateLease.release()
+                        lateLease.releaseDetached()
                     }
                     return nil
                 }
@@ -1129,7 +1129,7 @@ public actor DefaultChatFeature: ChatFeature {
         guard case let .prepared(initialSeed) = precommit,
               let lease = completed.lease
         else {
-            await completed.lease?.release()
+            completed.lease?.releaseDetached()
             switch precommit {
             case .configurationChanged, .leaseUnavailable:
                 await requoteNewChatAfterAuthorityChange(
@@ -1156,7 +1156,7 @@ public actor DefaultChatFeature: ChatFeature {
             attachments: attachments,
             quoteAuthority: quoteAuthority
         ) else {
-            await lease.release()
+            lease.releaseDetached()
             return
         }
 
@@ -1203,7 +1203,7 @@ public actor DefaultChatFeature: ChatFeature {
             }
             break
         }
-        await lease.release()
+        lease.releaseDetached()
         guard isActive(context) else { return }
         switch outcome {
         case let .committed(committed):
