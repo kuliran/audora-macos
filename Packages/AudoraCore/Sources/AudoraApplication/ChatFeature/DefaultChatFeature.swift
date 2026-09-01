@@ -31,6 +31,21 @@ private struct CompletedNewChatPickerWork<Outcome: Sendable>: Sendable {
     let lease: CoachContextAuthorityLease?
 }
 
+private struct SessionTranscriptRevisionPair: Hashable, Sendable {
+    let sessionID: SessionID
+    let transcriptRevisionID: TranscriptRevisionID
+
+    init(_ attachment: ChatSessionAttachment) {
+        sessionID = attachment.sessionID
+        transcriptRevisionID = attachment.transcriptRevisionID
+    }
+
+    init(_ candidate: ChatAttachmentCandidate) {
+        sessionID = candidate.sessionID
+        transcriptRevisionID = candidate.transcriptRevisionID
+    }
+}
+
 /// Owns cancellation and any acquired precommit authority independently of the
 /// dependency Task. A child that ignores Task cancellation can finish late, but
 /// it cannot keep a picker command waiting or inherit durable-create authority.
@@ -659,46 +674,23 @@ public actor DefaultChatFeature: ChatFeature {
         guard isCurrent(context), case let .ready(current) = state.newChatPicker,
               current.selectedAttachmentIDs == expected.selectedAttachmentIDs
         else { return }
+        if let authority = outcome.creationAuthority {
+            guard await requireExpectedNewChatQuoteConfiguration(
+                authority,
+                expected: expectedConfiguration,
+                attachments: attachments,
+                context: context,
+                remainingRefreshAttempts: remainingConfigurationRefreshAttempts
+            ) else { return }
+        }
         switch outcome {
         case let .available(quote, authority):
-            guard authority.configuration == expectedConfiguration else {
-                if remainingConfigurationRefreshAttempts > 0 {
-                    await refreshNewChatPickerForConfigurationChange(
-                        preserving: attachments,
-                        context: context,
-                        remainingQuoteRefreshAttempts:
-                            remainingConfigurationRefreshAttempts - 1
-                    )
-                } else {
-                    updatePickerFeasibility(
-                        .unavailable(.staleState),
-                        issue: .contextUnavailable(.staleState)
-                    )
-                }
-                return
-            }
             newChatCreationQuoteAuthority = authority
             updatePickerFeasibility(
                 .available(quote),
                 issue: quote.context.fits ? nil : .contextCannotFit
             )
         case let .providerUnavailable(authority):
-            guard authority.configuration == expectedConfiguration else {
-                if remainingConfigurationRefreshAttempts > 0 {
-                    await refreshNewChatPickerForConfigurationChange(
-                        preserving: attachments,
-                        context: context,
-                        remainingQuoteRefreshAttempts:
-                            remainingConfigurationRefreshAttempts - 1
-                    )
-                } else {
-                    updatePickerFeasibility(
-                        .unavailable(.staleState),
-                        issue: .contextUnavailable(.staleState)
-                    )
-                }
-                return
-            }
             newChatCreationQuoteAuthority = authority
             updatePickerFeasibility(.unavailable(.providerUnavailable), issue: nil)
         case let .unavailable(reason):
@@ -708,6 +700,29 @@ public actor DefaultChatFeature: ChatFeature {
                 issue: .contextUnavailable(reason)
             )
         }
+    }
+
+    private func requireExpectedNewChatQuoteConfiguration(
+        _ authority: ChatCreationQuoteAuthority,
+        expected configuration: CoachContextConfigurationStamp,
+        attachments: ChatAttachments,
+        context: ChatCommandContext,
+        remainingRefreshAttempts: Int
+    ) async -> Bool {
+        if authority.configuration == configuration { return true }
+        if remainingRefreshAttempts > 0 {
+            await refreshNewChatPickerForConfigurationChange(
+                preserving: attachments,
+                context: context,
+                remainingQuoteRefreshAttempts: remainingRefreshAttempts - 1
+            )
+        } else {
+            updatePickerFeasibility(
+                .unavailable(.staleState),
+                issue: .contextUnavailable(.staleState)
+            )
+        }
+        return false
     }
 
     private func authoritativeCreationQuote(
@@ -756,9 +771,11 @@ public actor DefaultChatFeature: ChatFeature {
             )
             return
         }
-        let selectedPairs = Set(attachments.values.map(attachmentPairKey))
+        let selectedPairs = Set(
+            attachments.values.map(SessionTranscriptRevisionPair.init)
+        )
         let selectedIDs = Set(rows.compactMap { row in
-            selectedPairs.contains(attachmentPairKey(row.attachment))
+            selectedPairs.contains(SessionTranscriptRevisionPair(row.attachment))
                 ? row.id
                 : nil
         })
@@ -786,11 +803,6 @@ public actor DefaultChatFeature: ChatFeature {
             remainingConfigurationRefreshAttempts:
                 remainingQuoteRefreshAttempts
         )
-    }
-
-    private func attachmentPairKey(_ attachment: ChatSessionAttachment) -> String {
-        attachment.sessionID.rawValue + "\u{0}" +
-            attachment.transcriptRevisionID.rawValue
     }
 
     private func performNewChatPickerWork<Outcome: Sendable>(
@@ -926,10 +938,9 @@ public actor DefaultChatFeature: ChatFeature {
             }
             return lhs.transcriptRevisionID.rawValue < rhs.transcriptRevisionID.rawValue
         }
-        var seenPairs: Set<String> = []
+        var seenPairs: Set<SessionTranscriptRevisionPair> = []
         return try ordered.enumerated().map { index, candidate in
-            let pairKey = candidate.sessionID.rawValue + "\u{0}" +
-                candidate.transcriptRevisionID.rawValue
+            let pairKey = SessionTranscriptRevisionPair(candidate)
             guard seenPairs.insert(pairKey).inserted else {
                 throw ChatAttachmentsError.duplicateSessionRevision
             }
@@ -2584,5 +2595,17 @@ private func contextForImmediateCommand(
         context
     default:
         nil
+    }
+}
+
+private extension ConfigurationBoundChatCreationQuoteOutcome {
+    var creationAuthority: ChatCreationQuoteAuthority? {
+        switch self {
+        case let .available(_, authority),
+             let .providerUnavailable(authority):
+            authority
+        case .unavailable:
+            nil
+        }
     }
 }
