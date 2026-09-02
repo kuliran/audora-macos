@@ -830,7 +830,9 @@ final class PortableInvocationStoreTests: XCTestCase {
         }
     }
 
-    func testNextAttemptDecodesEscapedFrozenChatPublicIDs() async throws {
+    func testNextAttemptDecodesEscapedFrozenChatPublicIDsWithDocumentWhitespace()
+        async throws
+    {
         let cases: [(String, Bool, InvocationLaunchIdentityCollision)] = [
             ("newer-message", true, .userMessageID),
             ("newer-draft", true, .freshDraftID),
@@ -1151,7 +1153,7 @@ final class PortableInvocationStoreTests: XCTestCase {
         }
     }
 
-    func testNextAttemptScansEscapedFutureInvocationRootDraftIDAndRegenerates()
+    func testNextAttemptScansEscapedFutureInvocationRootDraftIDWithDocumentWhitespaceAndRegenerates()
         async throws
     {
         try await withTemporaryParent { parent in
@@ -1211,7 +1213,7 @@ final class PortableInvocationStoreTests: XCTestCase {
             )
             XCTAssertNotEqual(escapedText, canonicalText)
             XCTAssertFalse(escapedText.contains(candidate.freshDraftID.rawValue))
-            try Data(escapedText.utf8).write(to: futureURL)
+            try Data(("\n\t " + escapedText + " \r\n").utf8).write(to: futureURL)
 
             let store = PortableInvocationStore(workspace: fixture.workspace)
             guard case let .opened(pendingSession) = await store
@@ -2203,12 +2205,17 @@ final class PortableInvocationStoreTests: XCTestCase {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)
             let release = InvocationLivenessReleaseObservation()
+            let diagnostics = RecordingPortableInvocationRetryDiagnostics()
+            let recoveredAt = try UTCInstant("2026-08-30T12:05:00.000Z")
+            let persistence = PortableChatPersistence(
+                fault: { _ in },
+                invocationLivenessReleased: release.didRelease,
+                retryDiagnostics: diagnostics,
+                retryDiagnosticNow: { recoveredAt }
+            )
             do {
                 let store = PortableInvocationStore(
-                    persistence: PortableChatPersistence(
-                        fault: { _ in },
-                        invocationLivenessReleased: release.didRelease
-                    ),
+                    persistence: persistence,
                     workspace: fixture.workspace
                 )
                 let reservation = await store.reserveInvocation(
@@ -2221,7 +2228,10 @@ final class PortableInvocationStoreTests: XCTestCase {
             }
             await release.waitUntilReleased()
 
-            let relaunched = PortableChatStore(workspace: fixture.workspace)
+            let relaunched = PortableChatStore(
+                persistence: persistence,
+                workspace: fixture.workspace
+            )
             guard case let .loaded(reopened) = await relaunched.load(
                 fixture.locked.chat.id,
                 in: fixture.scope
@@ -2238,6 +2248,17 @@ final class PortableInvocationStoreTests: XCTestCase {
             )
             XCTAssertEqual(reopened.chat.draft, fixture.locked.chat.draft)
             XCTAssertEqual(reopened.chat.messageIDs, [])
+            let event = try XCTUnwrap(diagnostics.recordedEvents().first)
+            XCTAssertEqual(diagnostics.recordedEvents().count, 1)
+            XCTAssertEqual(event.reason, .relaunchedInvocationInterrupted)
+            XCTAssertEqual(event.classification, .interruption)
+            XCTAssertEqual(event.disposition, .userRetryableFailure)
+            XCTAssertEqual(event.invocationID, fixture.install.invocation.id)
+            XCTAssertEqual(event.attemptID, fixture.install.invocation.attempt.id)
+            XCTAssertEqual(event.attemptOrdinal, 1)
+            XCTAssertEqual(event.retryNumber, 1)
+            XCTAssertEqual(event.occurredAt, recoveredAt)
+            XCTAssertEqual(event.context, .unavailable)
         }
     }
 
@@ -2253,7 +2274,12 @@ final class PortableInvocationStoreTests: XCTestCase {
                     in: fixture.scope
                 )
             )
-            let persistence = PortableChatPersistence()
+            let diagnostics = RecordingPortableInvocationRetryDiagnostics()
+            let recoveredAt = try UTCInstant("2026-08-30T12:05:00.000Z")
+            let persistence = PortableChatPersistence(
+                retryDiagnostics: diagnostics,
+                retryDiagnosticNow: { recoveredAt }
+            )
             let competing = fixture.competingAuthority.pendingUserTurn
             guard case .committed = try persistence.replacePendingUserTurn(
                 ReplacePendingUserTurnMutation(
@@ -2267,7 +2293,10 @@ final class PortableInvocationStoreTests: XCTestCase {
                 at: fixture.root
             ) else { return XCTFail("failed to install existing recovery state") }
 
-            let relaunched = PortableChatStore(workspace: fixture.workspace)
+            let relaunched = PortableChatStore(
+                persistence: persistence,
+                workspace: fixture.workspace
+            )
             guard case let .loaded(reopened) = await relaunched.load(
                 fixture.locked.chat.id,
                 in: fixture.scope
@@ -2289,6 +2318,16 @@ final class PortableInvocationStoreTests: XCTestCase {
                 competingReopened.pendingUserTurn?.failure,
                 .coachContextCannotFit
             )
+            let event = try XCTUnwrap(diagnostics.recordedEvents().first)
+            XCTAssertEqual(diagnostics.recordedEvents().count, 1)
+            XCTAssertEqual(event.reason, .relaunchedInvocationInterrupted)
+            XCTAssertEqual(event.classification, .interruption)
+            XCTAssertNil(event.invocationID)
+            XCTAssertNil(event.attemptID)
+            XCTAssertNil(event.attemptOrdinal)
+            XCTAssertNil(event.retryNumber)
+            XCTAssertEqual(event.occurredAt, recoveredAt)
+            XCTAssertEqual(event.context, .unavailable)
         }
     }
 
@@ -3675,7 +3714,16 @@ final class PortableInvocationStoreTests: XCTestCase {
                 revealer: RecordingRevealer()
             )
             _ = await relaunchedWorkspace.chooseLibrary()
-            let relaunched = PortableChatStore(workspace: relaunchedWorkspace)
+            let diagnostics = RecordingPortableInvocationRetryDiagnostics()
+            let relaunched = PortableChatStore(
+                persistence: PortableChatPersistence(
+                    retryDiagnostics: diagnostics,
+                    retryDiagnosticNow: {
+                        try! UTCInstant("2026-08-30T12:05:00.000Z")
+                    }
+                ),
+                workspace: relaunchedWorkspace
+            )
 
             let load = await relaunched.load(fixture.locked.chat.id, in: fixture.scope)
             XCTAssertEqual(load, .loaded(fixture.publication.replacement))
@@ -3699,6 +3747,11 @@ final class PortableInvocationStoreTests: XCTestCase {
                             isDirectory: true
                         ).path
                 )
+            )
+            XCTAssertEqual(
+                diagnostics.recordedEvents(),
+                [],
+                "exact publication recovery must not manufacture a Retry event"
             )
         }
     }
@@ -5317,7 +5370,7 @@ final class PortableInvocationStoreTests: XCTestCase {
         )
         XCTAssertNotEqual(escaped, canonical)
         XCTAssertFalse(escaped.contains(rawID))
-        try Data(escaped.utf8).write(to: manifest)
+        try Data(("\n\t " + escaped + " \r\n").utf8).write(to: manifest)
     }
 
     private func writeOpaqueFrozenSiblingChatRoot(
@@ -5711,5 +5764,25 @@ private final class SynchronousInvocationFaultTrace: @unchecked Sendable {
             remaining = remaining.dropFirst()
         }
         return remaining.isEmpty
+    }
+}
+
+private final class RecordingPortableInvocationRetryDiagnostics:
+    @unchecked Sendable,
+    InvocationRetryDiagnostics
+{
+    private let lock = NSLock()
+    private var events: [InvocationRetryDiagnosticEvent] = []
+
+    func enqueue(_ event: InvocationRetryDiagnosticEvent) {
+        lock.lock()
+        events.append(event)
+        lock.unlock()
+    }
+
+    func recordedEvents() -> [InvocationRetryDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
     }
 }

@@ -402,6 +402,11 @@ private func coalesceFrozenChatSnapshot(
 }
 
 public struct PortableChatPersistence: @unchecked Sendable {
+    private struct RetryDiagnosticDependencies: Sendable {
+        let sink: any InvocationRetryDiagnostics
+        let now: @Sendable () -> UTCInstant
+    }
+
     private struct DirectoryIdentity: Equatable {
         let device: dev_t
         let inode: ino_t
@@ -459,12 +464,27 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     private let fault: @Sendable (PortableChatFaultPoint) throws -> Void
     private let invocationLivenessReleased: @Sendable () -> Void
+    private let retryDiagnosticDependencies: RetryDiagnosticDependencies?
 
     public init(
         fault: @escaping @Sendable (PortableChatFaultPoint) throws -> Void = { _ in }
     ) {
         self.fault = fault
         invocationLivenessReleased = {}
+        retryDiagnosticDependencies = nil
+    }
+
+    @_spi(InvocationInfrastructure)
+    public init(
+        retryDiagnostics: any InvocationRetryDiagnostics,
+        retryDiagnosticNow: @escaping @Sendable () -> UTCInstant
+    ) {
+        fault = { _ in }
+        invocationLivenessReleased = {}
+        retryDiagnosticDependencies = RetryDiagnosticDependencies(
+            sink: retryDiagnostics,
+            now: retryDiagnosticNow
+        )
     }
 
     init(
@@ -473,6 +493,21 @@ public struct PortableChatPersistence: @unchecked Sendable {
     ) {
         self.fault = fault
         self.invocationLivenessReleased = invocationLivenessReleased
+        retryDiagnosticDependencies = nil
+    }
+
+    init(
+        fault: @escaping @Sendable (PortableChatFaultPoint) throws -> Void,
+        invocationLivenessReleased: @escaping @Sendable () -> Void,
+        retryDiagnostics: any InvocationRetryDiagnostics,
+        retryDiagnosticNow: @escaping @Sendable () -> UTCInstant
+    ) {
+        self.fault = fault
+        self.invocationLivenessReleased = invocationLivenessReleased
+        retryDiagnosticDependencies = RetryDiagnosticDependencies(
+            sink: retryDiagnostics,
+            now: retryDiagnosticNow
+        )
     }
 
     /// Reserves the one live provider authority for this exact Library. `nil`
@@ -890,13 +925,34 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
 
         for mutation in mutations {
-            _ = try replacePendingUserTurn(
+            let outcome = try replacePendingUserTurn(
                 mutation,
                 at: libraryRoot,
                 livenessAuthority: livenessAuthority,
                 ownsPendingUserTurnLease: false
             )
+            if case .committed = outcome {
+                recordRelaunchInterruption(invocation: nil)
+            }
         }
+    }
+
+    private func recordRelaunchInterruption(invocation: CoachInvocation?) {
+        guard let retryDiagnosticDependencies else { return }
+        retryDiagnosticDependencies.sink.enqueue(
+            InvocationRetryDiagnosticEvent(
+                reason: .relaunchedInvocationInterrupted,
+                classification: .interruption,
+                disposition: .userRetryableFailure,
+                invocationID: invocation?.id,
+                attemptID: invocation?.attempt.id,
+                attemptOrdinal: invocation?.attempt.ordinal,
+                retryNumber: invocation?.attempt.ordinal,
+                occurredAt: retryDiagnosticDependencies.now(),
+                durationMilliseconds: 0,
+                context: .unavailable
+            )
+        )
     }
 
     private var confined: ConfinedPersistencePrimitives<PortableChatPersistenceError> {
@@ -2360,6 +2416,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                         beforeRemoving: revalidateBeforeMutation
                     )
                 }
+                let createdRetry = current.pendingUserTurn?.failure == nil
                 _ = try retireInvocation(
                     invocation,
                     current: current,
@@ -2368,6 +2425,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     chatDescriptor: chatDescriptor,
                     beforeCommitting: revalidateBeforeMutation
                 )
+                if createdRetry {
+                    recordRelaunchInterruption(invocation: invocation)
+                }
             } catch let error as PortableChatPersistenceError {
                 guard frozenChatSnapshot(
                     for: error,
@@ -2475,6 +2535,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         else { return false }
 
         if performRetirement {
+            let createdRetry = current.pendingUserTurn?.failure == nil
             try discardPrePublicationEvidence(
                 from: invocationRoot,
                 beforeRemoving: beforeCommitting
@@ -2487,6 +2548,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 chatDescriptor: chatDescriptor,
                 beforeCommitting: beforeCommitting
             )
+            if createdRetry {
+                recordRelaunchInterruption(invocation: invocation)
+            }
         }
         return true
     }

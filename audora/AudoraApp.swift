@@ -79,13 +79,25 @@ struct AudoraApp: App {
             activityCoordinator: activityCoordinator
         )
         let chatIdentityGenerator = RandomChatIdentityGenerator()
-        let chatStore = PortableChatStore(workspace: workspace)
+        let retryDiagnostics = MachineInvocationRetryDiagnosticsFactory.live()
+        let retryDiagnosticClock = SystemInvocationRetryDiagnosticClock()
+        let chatPersistence = PortableChatPersistence(
+            retryDiagnostics: retryDiagnostics,
+            retryDiagnosticNow: { retryDiagnosticClock.now() }
+        )
+        let chatStore = PortableChatStore(
+            persistence: chatPersistence,
+            workspace: workspace
+        )
         let invocations = DefaultInvocations(
-            persistence: PortableInvocationStore(workspace: workspace),
+            persistence: PortableInvocationStore(
+                persistence: chatPersistence,
+                workspace: workspace
+            ),
             admission: MachineInvocationAdmissionFactory.live(),
             clock: SystemLibraryClock(),
             identities: RandomInvocationIdentityGenerator(),
-            retryDiagnostics: MachineInvocationRetryDiagnosticsFactory.live()
+            retryDiagnostics: retryDiagnostics
         )
         let chatFeature = DefaultChatFeature(
             store: chatStore,

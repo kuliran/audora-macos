@@ -195,10 +195,9 @@ final class DefaultInvocationsTests: XCTestCase {
                     "4-token output allowance.",
                 "Return one complete structured response that fits within the " +
                     "4-token output allowance. The previous Attempt exceeded " +
-                    "the response limit. Return a materially shorter valid " +
-                    "complete response. Preserve the direct answer, remove " +
-                    "repetition and optional detail, and never replay or continue " +
-                    "any partial prior output.",
+                    "the response limit. Return a materially shorter complete " +
+                    "response. Preserve the direct answer, remove repetition and " +
+                    "optional detail, and never return partial JSON.",
             ]
         )
         XCTAssertEqual(
@@ -443,9 +442,9 @@ final class DefaultInvocationsTests: XCTestCase {
             requests[1].control,
             .shorterRepair(
                 instruction: "The previous Attempt exceeded the response limit. " +
-                    "Return a materially shorter valid complete response. Preserve " +
-                    "the direct answer, remove repetition and optional detail, " +
-                    "and never replay or continue any partial prior output."
+                    "Return a materially shorter complete response. Preserve the " +
+                    "direct answer, remove repetition and optional detail, and " +
+                    "never return partial JSON."
             )
         )
         let delays = await fixture.sleeper.recordedDelays()
@@ -708,6 +707,18 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(claimCount, 0)
         XCTAssertEqual(launchCount, 0)
         XCTAssertEqual(publicationCount, 0)
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().first)
+        XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
+        XCTAssertEqual(event.reason.rawValue, "contextCapacityExceeded")
+        XCTAssertEqual(event.classification.rawValue, "contextCapacity")
+        XCTAssertEqual(event.disposition, .userRetryableFailure)
+        XCTAssertNil(event.invocationID)
+        XCTAssertNil(event.attemptID)
+        XCTAssertNil(event.attemptOrdinal)
+        XCTAssertNil(event.retryNumber)
+        XCTAssertEqual(event.context.completeInputTokens, quote.completeInputTokens)
+        XCTAssertEqual(event.context.inputCeilingTokens, quote.inputCeilingTokens)
+        XCTAssertGreaterThan(event.context.memoryUTF8Bytes, 0)
     }
 
     func testCapacityFailureRetryUsesSameIntentAndPublishesThroughFreshInvocation() async throws {
@@ -754,28 +765,107 @@ final class DefaultInvocationsTests: XCTestCase {
         )
         let launchCount = await fixture.provider.launchCount
         XCTAssertEqual(launchCount, 0)
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().first)
+        XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
+        XCTAssertEqual(event.reason.rawValue, "admissionCooldown")
+        XCTAssertEqual(event.classification.rawValue, "admissionRejected")
+        XCTAssertEqual(event.disposition, .userRetryableFailure)
+        XCTAssertNil(event.invocationID)
+        XCTAssertNil(event.attemptID)
+        XCTAssertNil(event.attemptOrdinal)
+        XCTAssertNil(event.retryNumber)
+        XCTAssertGreaterThan(event.context.requestUTF8Bytes, 0)
+        XCTAssertGreaterThan(event.context.completeModelInputUTF8Bytes, 0)
     }
 
-    func testAdmissionRejectionLaunchesNothingAndUnlocksTheSamePopulatedDraft() async throws {
-        let fixture = try InvocationFixture(
-            contextWindow: 100_000,
-            admissionDecision: .cooldown(
-                lastAdmittedAt: UTCInstant("2026-08-30T11:59:30.001Z"),
-                reopensAt: UTCInstant("2026-08-30T12:00:30.001Z")
+    func testOrdinaryAdmissionRejectionsUnlockWithoutFalseRetryDiagnostics() async throws {
+        let cases: [(InvocationAdmissionClaimOutcome, InvocationRejectionReason)] = [
+            (
+                .cooldown(
+                    lastAdmittedAt: try UTCInstant("2026-08-30T11:59:30.001Z"),
+                    reopensAt: try UTCInstant("2026-08-30T12:00:30.001Z")
+                ),
+                .admissionCooldown
+            ),
+            (
+                .clockRollback(
+                    lastAdmittedAt: try UTCInstant("2026-08-30T12:00:01.000Z")
+                ),
+                .clockRollback
+            ),
+            (.ledgerFull, .admissionLedgerFull),
+            (.unavailable, .admissionUnavailable),
+        ]
+
+        for (decision, expectedRejection) in cases {
+            let fixture = try InvocationFixture(
+                contextWindow: 100_000,
+                admissionDecision: decision
             )
-        )
 
-        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+            guard case let .rejected(aggregate, rejection) =
+                await fixture.invocations.tryInvoke(fixture.request)
+            else { return XCTFail("expected an ordinary admission rejection") }
 
-        guard case let .rejected(aggregate, .admissionCooldown) = outcome else {
-            return XCTFail("expected a typed cooldown rejection")
+            XCTAssertEqual(rejection, expectedRejection)
+            XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
+            XCTAssertNil(aggregate?.pendingUserTurn)
+            let launchCount = await fixture.provider.launchCount
+            let publicationCount = await fixture.persistence.publicationCount
+            XCTAssertEqual(launchCount, 0)
+            XCTAssertEqual(publicationCount, 0)
+            XCTAssertEqual(
+                fixture.diagnostics.recordedEvents(),
+                [],
+                "an unlocked Draft has no product Retry/Discard state to diagnose"
+            )
         }
-        XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
-        XCTAssertNil(aggregate?.pendingUserTurn)
-        let launchCount = await fixture.provider.launchCount
-        let publicationCount = await fixture.persistence.publicationCount
-        XCTAssertEqual(launchCount, 0)
-        XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testEveryRetainedRetryAdmissionRejectionRecordsItsClosedReason() async throws {
+        let cases: [(
+            InvocationAdmissionClaimOutcome,
+            InvocationRejectionReason,
+            String
+        )] = [
+            (
+                .cooldown(
+                    lastAdmittedAt: try UTCInstant("2026-08-30T11:59:30.001Z"),
+                    reopensAt: try UTCInstant("2026-08-30T12:00:30.001Z")
+                ),
+                .admissionCooldown,
+                "admissionCooldown"
+            ),
+            (
+                .clockRollback(
+                    lastAdmittedAt: try UTCInstant("2026-08-30T12:00:01.000Z")
+                ),
+                .clockRollback,
+                "admissionClockRollback"
+            ),
+            (.ledgerFull, .admissionLedgerFull, "admissionLedgerFull"),
+            (.unavailable, .admissionUnavailable, "admissionUnavailable"),
+        ]
+
+        for (decision, expectedRejection, expectedDiagnostic) in cases {
+            let fixture = try InvocationFixture(
+                contextWindow: 100_000,
+                admissionDecision: decision,
+                pendingFailure: .coachContextCannotFit
+            )
+
+            guard case let .rejected(_, rejection) =
+                await fixture.invocations.tryInvoke(fixture.request)
+            else { return XCTFail("expected retained admission rejection") }
+
+            XCTAssertEqual(rejection, expectedRejection)
+            let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().first)
+            XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
+            XCTAssertEqual(event.reason.rawValue, expectedDiagnostic)
+            XCTAssertEqual(event.classification, .admissionRejected)
+            XCTAssertNil(event.invocationID)
+            XCTAssertNil(event.attemptID)
+        }
     }
 
     func testAdmissionCommitUncertaintyRetainsExactPendingAsInterrupted() async throws {
@@ -799,6 +889,12 @@ final class DefaultInvocationsTests: XCTestCase {
         let launchCount = await fixture.provider.launchCount
         XCTAssertEqual(claimCount, 1)
         XCTAssertEqual(launchCount, 0)
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().first)
+        XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
+        XCTAssertEqual(event.reason, .admissionCommitUncertain)
+        XCTAssertEqual(event.classification, .interruption)
+        XCTAssertNil(event.invocationID)
+        XCTAssertNil(event.attemptID)
     }
 
     func testFailedInterruptedPendingMutationRecoversAuthoritativeDurableRetrySnapshot() async throws {
@@ -1023,6 +1119,43 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(claimCount, 1)
         XCTAssertEqual(launchCount, 0)
         XCTAssertNil(active)
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().first)
+        XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
+        XCTAssertEqual(event.reason.rawValue, "preparedContextStale")
+        XCTAssertEqual(event.classification.rawValue, "interruption")
+        XCTAssertEqual(event.disposition, .userRetryableFailure)
+        XCTAssertNotNil(event.invocationID)
+        XCTAssertNotNil(event.attemptID)
+        XCTAssertEqual(event.attemptOrdinal, 1)
+        XCTAssertEqual(event.retryNumber, 1)
+    }
+
+    func testChangedExactContextWithStaleAbortRetainsOperationalRetryAndDiagnosesIt() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000, contextIsCurrent: false)
+        await fixture.persistence.scriptNextAbort(.staleWithCurrent)
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .operationallyInterrupted(
+            aggregate,
+            retryRequest,
+            .persistenceUnavailable
+        ) = outcome else {
+            return XCTFail("an unclassified installed Pending must retain Retry authority")
+        }
+        XCTAssertEqual(retryRequest, fixture.request)
+        XCTAssertEqual(aggregate?.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertNil(aggregate?.pendingUserTurn?.failure)
+        XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
+        let launchCount = await fixture.provider.launchCount
+        let activeInvocation = await fixture.persistence.activeInvocation
+        XCTAssertEqual(launchCount, 0)
+        XCTAssertNil(activeInvocation)
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [.preparedContextStale])
+        XCTAssertEqual(events.map(\.classification), [.interruption])
+        XCTAssertEqual(events.map(\.disposition), [.userRetryableFailure])
+        XCTAssertEqual(events.first?.attemptOrdinal, 1)
     }
 
     func testProviderCrashPublishesNeitherSideAndRetiresInvocation() async throws {

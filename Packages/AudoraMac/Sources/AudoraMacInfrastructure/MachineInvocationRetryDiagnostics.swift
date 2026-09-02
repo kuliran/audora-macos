@@ -1,6 +1,19 @@
 @_spi(InvocationInfrastructure) import AudoraApplication
+import AudoraDomain
 import Darwin
 import Foundation
+
+@_silgen_name("flock")
+private func invocationRetryDiagnosticsFlock(
+    _ descriptor: Int32,
+    _ operation: Int32
+) -> Int32
+
+typealias InvocationRetryDiagnosticWriteOperation = @Sendable (
+    Int32,
+    UnsafeRawPointer,
+    Int
+) -> Int
 
 @_spi(InvocationInfrastructure)
 public struct InvocationRetryDiagnosticLogLimits: Equatable, Sendable {
@@ -53,15 +66,32 @@ public final class DispatchInvocationRetryDiagnosticDrainScheduler:
 }
 
 @_spi(InvocationInfrastructure)
+public struct SystemInvocationRetryDiagnosticClock: Sendable {
+    public init() {}
+
+    public func now() -> UTCInstant {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return try! UTCInstant(formatter.string(from: Date()))
+    }
+}
+
+@_spi(InvocationInfrastructure)
 public final class ApplicationSupportInvocationRetryDiagnostics:
     @unchecked Sendable,
     InvocationRetryDiagnostics
 {
     private static let activeFileName = "invocation-retry-current.jsonl"
+    private static let writerLockFileName = ".invocation-retry-diagnostics.lock"
+    /// Darwin advisory locks need an in-process counterpart when independently
+    /// composed adapters open the same lock inode in one process.
+    private static let processPersistenceLock = NSLock()
 
     private let directoryURL: URL
     private let limits: InvocationRetryDiagnosticLogLimits
     private let scheduler: any InvocationRetryDiagnosticDrainScheduling
+    private let writeOperation: InvocationRetryDiagnosticWriteOperation
     private let lock = NSLock()
     private var pending: [InvocationRetryDiagnosticEvent] = []
     private var drainIsScheduled = false
@@ -75,6 +105,22 @@ public final class ApplicationSupportInvocationRetryDiagnostics:
         self.directoryURL = directoryURL
         self.limits = limits
         self.scheduler = scheduler
+        writeOperation = { descriptor, buffer, byteCount in
+            Darwin.write(descriptor, buffer, byteCount)
+        }
+        pending.reserveCapacity(limits.maximumQueuedEvents)
+    }
+
+    init(
+        directoryURL: URL,
+        limits: InvocationRetryDiagnosticLogLimits,
+        scheduler: any InvocationRetryDiagnosticDrainScheduling,
+        writeOperation: @escaping InvocationRetryDiagnosticWriteOperation
+    ) {
+        self.directoryURL = directoryURL
+        self.limits = limits
+        self.scheduler = scheduler
+        self.writeOperation = writeOperation
         pending.reserveCapacity(limits.maximumQueuedEvents)
     }
 
@@ -120,6 +166,14 @@ public final class ApplicationSupportInvocationRetryDiagnostics:
     private func append(_ events: [InvocationRetryDiagnosticEvent]) throws {
         let directory = try openLogDirectory()
         defer { Darwin.close(directory) }
+        Self.processPersistenceLock.lock()
+        defer { Self.processPersistenceLock.unlock() }
+        let writerLock = try acquireWriterLock(under: directory)
+        defer {
+            _ = invocationRetryDiagnosticsFlock(writerLock, LOCK_UN)
+            Darwin.close(writerLock)
+        }
+        try repairTornActiveFileIfNeeded(under: directory)
 
         for event in events {
             let line = try Self.encodedLine(event)
@@ -131,6 +185,176 @@ public final class ApplicationSupportInvocationRetryDiagnostics:
                 under: directory
             ) else { continue }
             try append(line, under: directory)
+        }
+    }
+
+    private func acquireWriterLock(under directory: Int32) throws -> Int32 {
+        var descriptor = Self.writerLockFileName.withCString { pointer -> Int32 in
+            while true {
+                let result = Darwin.openat(
+                    directory,
+                    pointer,
+                    O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                )
+                if result < 0, errno == EINTR { continue }
+                return result
+            }
+        }
+        if descriptor < 0, errno == ENOENT {
+            descriptor = Self.writerLockFileName.withCString { pointer -> Int32 in
+                while true {
+                    let result = Darwin.openat(
+                        directory,
+                        pointer,
+                        O_RDWR | O_NONBLOCK | O_CREAT | O_EXCL | O_NOFOLLOW |
+                            O_CLOEXEC,
+                        0o600
+                    )
+                    if result < 0, errno == EINTR { continue }
+                    return result
+                }
+            }
+            if descriptor < 0, errno == EEXIST {
+                descriptor = Self.writerLockFileName.withCString { pointer -> Int32 in
+                    while true {
+                        let result = Darwin.openat(
+                            directory,
+                            pointer,
+                            O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                        )
+                        if result < 0, errno == EINTR { continue }
+                        return result
+                    }
+                }
+            }
+        }
+        guard descriptor >= 0 else { throw PersistenceError.unsafeTarget }
+        var ownsDescriptor = true
+        defer { if ownsDescriptor { Darwin.close(descriptor) } }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFREG,
+              metadata.st_nlink == 1,
+              metadata.st_size == 0,
+              try nameStillRefersTo(
+                  descriptor,
+                  named: Self.writerLockFileName,
+                  under: directory
+              )
+        else { throw PersistenceError.unsafeTarget }
+
+        while invocationRetryDiagnosticsFlock(descriptor, LOCK_EX) != 0 {
+            if errno == EINTR { continue }
+            throw PersistenceError.unavailable
+        }
+        guard try nameStillRefersTo(
+            descriptor,
+            named: Self.writerLockFileName,
+            under: directory
+        ) else {
+            _ = invocationRetryDiagnosticsFlock(descriptor, LOCK_UN)
+            throw PersistenceError.unsafeTarget
+        }
+        ownsDescriptor = false
+        return descriptor
+    }
+
+    /// A crash may stop after writing only a prefix of one JSONL record. The
+    /// preceding newline is the last durable record boundary; trim only that
+    /// unterminated suffix before a relaunched writer appends another event.
+    private func repairTornActiveFileIfNeeded(under directory: Int32) throws {
+        let descriptor = Self.activeFileName.withCString { pointer -> Int32 in
+            while true {
+                let result = Darwin.openat(
+                    directory,
+                    pointer,
+                    O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
+                )
+                if result < 0, errno == EINTR { continue }
+                return result
+            }
+        }
+        if descriptor < 0, errno == ENOENT { return }
+        guard descriptor >= 0 else { throw PersistenceError.unsafeTarget }
+        defer { Darwin.close(descriptor) }
+
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFREG,
+              metadata.st_nlink == 1,
+              metadata.st_size >= 0,
+              UInt64(metadata.st_size) <= UInt64(limits.maximumTotalBytes),
+              try nameStillRefersTo(
+                  descriptor,
+                  named: Self.activeFileName,
+                  under: directory
+              )
+        else { throw PersistenceError.unsafeTarget }
+        let byteCount = Int(metadata.st_size)
+        guard byteCount > 0 else { return }
+        guard try byte(at: byteCount - 1, in: descriptor) != 0x0A else { return }
+
+        let chunkCapacity = min(4_096, byteCount)
+        var chunk = [UInt8](repeating: 0, count: chunkCapacity)
+        var scanEnd = byteCount
+        var completeByteCount = 0
+        while scanEnd > 0 {
+            let start = max(0, scanEnd - chunkCapacity)
+            let count = scanEnd - start
+            try readExactly(
+                into: &chunk,
+                count: count,
+                at: start,
+                from: descriptor
+            )
+            if let newline = chunk[..<count].lastIndex(of: 0x0A) {
+                completeByteCount = start + newline + 1
+                break
+            }
+            scanEnd = start
+        }
+
+        guard Darwin.ftruncate(descriptor, off_t(completeByteCount)) == 0 else {
+            throw PersistenceError.unavailable
+        }
+        try synchronize(descriptor)
+        guard try nameStillRefersTo(
+            descriptor,
+            named: Self.activeFileName,
+            under: directory
+        ) else { throw PersistenceError.unsafeTarget }
+        try synchronize(directory)
+    }
+
+    private func byte(at offset: Int, in descriptor: Int32) throws -> UInt8 {
+        var value: UInt8 = 0
+        while true {
+            let count = Darwin.pread(descriptor, &value, 1, off_t(offset))
+            if count < 0, errno == EINTR { continue }
+            guard count == 1 else { throw PersistenceError.unavailable }
+            return value
+        }
+    }
+
+    private func readExactly(
+        into bytes: inout [UInt8],
+        count: Int,
+        at offset: Int,
+        from descriptor: Int32
+    ) throws {
+        var readCount = 0
+        while readCount < count {
+            let result = bytes.withUnsafeMutableBytes { buffer in
+                Darwin.pread(
+                    descriptor,
+                    buffer.baseAddress!.advanced(by: readCount),
+                    count - readCount,
+                    off_t(offset + readCount)
+                )
+            }
+            if result < 0, errno == EINTR { continue }
+            guard result > 0 else { throw PersistenceError.unavailable }
+            readCount += result
         }
     }
 
@@ -485,15 +709,72 @@ public final class ApplicationSupportInvocationRetryDiagnostics:
                   Int(metadata.st_size),
                   adding: data.count,
                   limit: limits.maximumActiveFileBytes
+              ),
+              try nameStillRefersTo(
+                  descriptor,
+                  named: Self.activeFileName,
+                  under: directory
               )
         else { throw PersistenceError.unsafeTarget }
-        try write(data, to: descriptor)
-        try synchronize(descriptor)
+
+        do {
+            try write(data, to: descriptor)
+            try synchronize(descriptor)
+            guard try nameStillRefersTo(
+                descriptor,
+                named: Self.activeFileName,
+                under: directory
+            ) else { throw PersistenceError.unsafeTarget }
+        } catch {
+            try rollbackAppend(
+                descriptor,
+                to: metadata,
+                under: directory
+            )
+            throw error
+        }
         guard Darwin.close(descriptor) == 0 else {
+            // The record was completely written and synchronized. A failed
+            // close has ambiguous descriptor ownership, so retrying close or
+            // truncating through that descriptor could damage a reused file.
             closeRequired = false
             throw PersistenceError.unavailable
         }
         closeRequired = false
+        // A directory sync failure cannot leave a torn record: the complete
+        // line was already synchronized before the descriptor was closed.
+        try synchronize(directory)
+    }
+
+    private func rollbackAppend(
+        _ descriptor: Int32,
+        to original: stat,
+        under directory: Int32
+    ) throws {
+        var current = stat()
+        guard fstat(descriptor, &current) == 0,
+              (current.st_mode & S_IFMT) == S_IFREG,
+              current.st_nlink == 1,
+              current.st_dev == original.st_dev,
+              current.st_ino == original.st_ino,
+              current.st_size >= original.st_size,
+              try nameStillRefersTo(
+                  descriptor,
+                  named: Self.activeFileName,
+                  under: directory
+              )
+        else { throw PersistenceError.unsafeTarget }
+
+        while Darwin.ftruncate(descriptor, original.st_size) != 0 {
+            if errno == EINTR { continue }
+            throw PersistenceError.unavailable
+        }
+        try synchronize(descriptor)
+        guard try nameStillRefersTo(
+            descriptor,
+            named: Self.activeFileName,
+            under: directory
+        ) else { throw PersistenceError.unsafeTarget }
         try synchronize(directory)
     }
 
@@ -533,7 +814,7 @@ public final class ApplicationSupportInvocationRetryDiagnostics:
             guard let baseAddress = buffer.baseAddress else { return true }
             var offset = 0
             while offset < buffer.count {
-                let count = Darwin.write(
+                let count = writeOperation(
                     descriptor,
                     baseAddress.advanced(by: offset),
                     buffer.count - offset
@@ -585,14 +866,14 @@ public final class ApplicationSupportInvocationRetryDiagnostics:
 
     private struct Envelope: Encodable {
         let schemaVersion: UInt32
-        let invocationId: String
-        let attemptId: String
+        let invocationId: String?
+        let attemptId: String?
         let occurredAt: String
         let reason: String
         let classification: String
         let disposition: String
-        let attemptOrdinal: UInt8
-        let retryNumber: UInt8
+        let attemptOrdinal: UInt8?
+        let retryNumber: UInt8?
         let durationMilliseconds: UInt64
         let requestUtf8Bytes: Int
         let completeModelInputUtf8Bytes: Int
@@ -602,10 +883,30 @@ public final class ApplicationSupportInvocationRetryDiagnostics:
         let inputCeilingTokens: Int
         let memoryUtf8Bytes: Int
 
+        private enum CodingKeys: String, CodingKey {
+            case schemaVersion
+            case invocationId
+            case attemptId
+            case occurredAt
+            case reason
+            case classification
+            case disposition
+            case attemptOrdinal
+            case retryNumber
+            case durationMilliseconds
+            case requestUtf8Bytes
+            case completeModelInputUtf8Bytes
+            case transcriptReadRequestUtf8Bytes
+            case transcriptReadResponseUtf8Bytes
+            case completeInputTokens
+            case inputCeilingTokens
+            case memoryUtf8Bytes
+        }
+
         init(_ event: InvocationRetryDiagnosticEvent) {
             schemaVersion = 1
-            invocationId = event.invocationID.rawValue
-            attemptId = event.attemptID.rawValue
+            invocationId = event.invocationID?.rawValue
+            attemptId = event.attemptID?.rawValue
             occurredAt = event.occurredAt.rawValue
             reason = event.reason.rawValue
             classification = event.classification.rawValue
@@ -622,6 +923,52 @@ public final class ApplicationSupportInvocationRetryDiagnostics:
             completeInputTokens = event.context.completeInputTokens
             inputCeilingTokens = event.context.inputCeilingTokens
             memoryUtf8Bytes = event.context.memoryUTF8Bytes
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            try values.encode(schemaVersion, forKey: .schemaVersion)
+            if let invocationId {
+                try values.encode(invocationId, forKey: .invocationId)
+            } else {
+                try values.encodeNil(forKey: .invocationId)
+            }
+            if let attemptId {
+                try values.encode(attemptId, forKey: .attemptId)
+            } else {
+                try values.encodeNil(forKey: .attemptId)
+            }
+            try values.encode(occurredAt, forKey: .occurredAt)
+            try values.encode(reason, forKey: .reason)
+            try values.encode(classification, forKey: .classification)
+            try values.encode(disposition, forKey: .disposition)
+            if let attemptOrdinal {
+                try values.encode(attemptOrdinal, forKey: .attemptOrdinal)
+            } else {
+                try values.encodeNil(forKey: .attemptOrdinal)
+            }
+            if let retryNumber {
+                try values.encode(retryNumber, forKey: .retryNumber)
+            } else {
+                try values.encodeNil(forKey: .retryNumber)
+            }
+            try values.encode(durationMilliseconds, forKey: .durationMilliseconds)
+            try values.encode(requestUtf8Bytes, forKey: .requestUtf8Bytes)
+            try values.encode(
+                completeModelInputUtf8Bytes,
+                forKey: .completeModelInputUtf8Bytes
+            )
+            try values.encode(
+                transcriptReadRequestUtf8Bytes,
+                forKey: .transcriptReadRequestUtf8Bytes
+            )
+            try values.encode(
+                transcriptReadResponseUtf8Bytes,
+                forKey: .transcriptReadResponseUtf8Bytes
+            )
+            try values.encode(completeInputTokens, forKey: .completeInputTokens)
+            try values.encode(inputCeilingTokens, forKey: .inputCeilingTokens)
+            try values.encode(memoryUtf8Bytes, forKey: .memoryUtf8Bytes)
         }
     }
 }

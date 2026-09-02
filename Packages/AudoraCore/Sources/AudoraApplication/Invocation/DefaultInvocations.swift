@@ -830,6 +830,14 @@ public struct ContinuousInvocationRetryTiming: InvocationRetryTiming {
 
 @_spi(InvocationInfrastructure)
 public enum InvocationRetryDiagnosticReason: String, Equatable, Sendable {
+    case contextCapacityExceeded
+    case admissionCommitUncertain
+    case admissionCooldown
+    case admissionClockRollback
+    case admissionLedgerFull
+    case admissionUnavailable
+    case preparedContextStale
+    case relaunchedInvocationInterrupted
     case providerAutoRetryable
     case providerUserRetryable
     case automaticRetriesExhausted
@@ -851,6 +859,9 @@ public enum InvocationRetryDiagnosticReason: String, Equatable, Sendable {
 
 @_spi(InvocationInfrastructure)
 public enum InvocationRetryDiagnosticClassification: String, Equatable, Sendable {
+    case contextCapacity
+    case admissionRejected
+    case interruption
     case providerAutoRetryable
     case providerUserRetryable
     case invalidProviderResponse
@@ -870,6 +881,18 @@ public enum InvocationRetryDiagnosticDisposition: String, Equatable, Sendable {
 /// cross the diagnostics seam.
 @_spi(InvocationInfrastructure)
 public struct InvocationRetryDiagnosticContext: Equatable, Sendable {
+    /// Zero denotes a metric that was unavailable at the recovery boundary; it
+    /// never authorizes reconstructing or persisting private request content.
+    public static let unavailable = InvocationRetryDiagnosticContext(
+        requestUTF8Bytes: 0,
+        completeModelInputUTF8Bytes: 0,
+        transcriptReadRequestUTF8Bytes: 0,
+        transcriptReadResponseUTF8Bytes: 0,
+        completeInputTokens: 0,
+        inputCeilingTokens: 0,
+        memoryUTF8Bytes: 0
+    )
+
     public let requestUTF8Bytes: Int
     public let completeModelInputUTF8Bytes: Int
     public let transcriptReadRequestUTF8Bytes: Int
@@ -906,12 +929,14 @@ public struct InvocationRetryDiagnosticEvent: Equatable, Sendable {
     public let reason: InvocationRetryDiagnosticReason
     public let classification: InvocationRetryDiagnosticClassification
     public let disposition: InvocationRetryDiagnosticDisposition
-    public let invocationID: CoachInvocationID
-    public let attemptID: CoachProviderAttemptID
-    public let attemptOrdinal: UInt8
-    /// One-based retry decision cycle, anchored to the Attempt that produced
-    /// the event. Multiple decisions on one Attempt intentionally share it.
-    public let retryNumber: UInt8
+    /// Identity is absent when the product exposes Retry before an Invocation
+    /// or provider Attempt has been durably installed.
+    public let invocationID: CoachInvocationID?
+    public let attemptID: CoachProviderAttemptID?
+    public let attemptOrdinal: UInt8?
+    /// One-based retry decision cycle when an Attempt exists. Multiple
+    /// decisions on one Attempt intentionally share it.
+    public let retryNumber: UInt8?
     public let occurredAt: UTCInstant
     public let durationMilliseconds: UInt64
     public let context: InvocationRetryDiagnosticContext
@@ -920,10 +945,10 @@ public struct InvocationRetryDiagnosticEvent: Equatable, Sendable {
         reason: InvocationRetryDiagnosticReason,
         classification: InvocationRetryDiagnosticClassification,
         disposition: InvocationRetryDiagnosticDisposition,
-        invocationID: CoachInvocationID,
-        attemptID: CoachProviderAttemptID,
-        attemptOrdinal: UInt8,
-        retryNumber: UInt8,
+        invocationID: CoachInvocationID?,
+        attemptID: CoachProviderAttemptID?,
+        attemptOrdinal: UInt8?,
+        retryNumber: UInt8?,
         occurredAt: UTCInstant,
         durationMilliseconds: UInt64,
         context: InvocationRetryDiagnosticContext
@@ -988,8 +1013,8 @@ public actor DefaultInvocations: Invocations {
     static let automaticRetryDelaysMilliseconds: [Int64] = [5_000, 10_000, 15_000]
     static let shorterRepairInstruction = """
     The previous Attempt exceeded the response limit. Return a materially shorter \
-    valid complete response. Preserve the direct answer, remove repetition and \
-    optional detail, and never replay or continue any partial prior output.
+    complete response. Preserve the direct answer, remove repetition and optional \
+    detail, and never return partial JSON.
     """
 
     static func pinnedInstruction(outputTokenCeiling: Int) -> String {
@@ -1177,18 +1202,31 @@ public actor DefaultInvocations: Invocations {
         case let .prepared(value):
             prepared = value
         case let .cannotFit(failure):
-            switch await session.terminate(.contextCapacityFailure) {
+            let outcome: InvocationTryOutcome = switch await session.terminate(
+                .contextCapacityFailure
+            ) {
             case let .committed(aggregate):
-                return .contextCapacityFailure(aggregate, failure.quote)
+                .contextCapacityFailure(aggregate, failure.quote)
             case let .stale(current):
-                return .rejected(current, .eligibilityChanged)
+                .rejected(current, .eligibilityChanged)
             case let .recovered(resolution):
-                return interruptionAfterTerminalRecovery(
+                interruptionAfterTerminalRecovery(
                     resolution,
                     request: firstAuthority.request,
                     fallback: firstAuthority.aggregate
                 )
             }
+            if presentsUserRetry(outcome, request: request) {
+                await recordRetryDiagnostic(
+                    reason: .contextCapacityExceeded,
+                    classification: .contextCapacity,
+                    disposition: .userRetryableFailure,
+                    invocation: nil,
+                    context: diagnosticContext(for: failure.quote),
+                    durationMilliseconds: 0
+                )
+            }
+            return outcome
         case let .messageTooLong(maximumUTF8Bytes):
             return await reject(
                 session,
@@ -1295,19 +1333,58 @@ public actor DefaultInvocations: Invocations {
         case .admitted:
             break
         case .commitUncertain:
-            return await interruptPending(
+            let outcome = await interruptPending(
                 session,
                 fallback: finalAuthority,
                 reason: .persistenceUnavailable
             )
+            if presentsUserRetry(outcome, request: request) {
+                await recordRetryDiagnostic(
+                    reason: .admissionCommitUncertain,
+                    classification: .interruption,
+                    disposition: .userRetryableFailure,
+                    invocation: nil,
+                    context: diagnosticContext(for: prepared),
+                    durationMilliseconds: 0
+                )
+            }
+            return outcome
         case .cooldown:
-            return await reject(session, fallback: finalAuthority, reason: .admissionCooldown)
+            return await rejectAdmission(
+                session,
+                fallback: finalAuthority,
+                request: request,
+                prepared: prepared,
+                reason: .admissionCooldown,
+                diagnosticReason: .admissionCooldown
+            )
         case .clockRollback:
-            return await reject(session, fallback: finalAuthority, reason: .clockRollback)
+            return await rejectAdmission(
+                session,
+                fallback: finalAuthority,
+                request: request,
+                prepared: prepared,
+                reason: .clockRollback,
+                diagnosticReason: .admissionClockRollback
+            )
         case .ledgerFull:
-            return await reject(session, fallback: finalAuthority, reason: .admissionLedgerFull)
+            return await rejectAdmission(
+                session,
+                fallback: finalAuthority,
+                request: request,
+                prepared: prepared,
+                reason: .admissionLedgerFull,
+                diagnosticReason: .admissionLedgerFull
+            )
         case .unavailable:
-            return await reject(session, fallback: finalAuthority, reason: .admissionUnavailable)
+            return await rejectAdmission(
+                session,
+                fallback: finalAuthority,
+                request: request,
+                prepared: prepared,
+                reason: .admissionUnavailable,
+                diagnosticReason: .admissionUnavailable
+            )
         }
 
         let install: InstallCoachInvocationMutation
@@ -1360,18 +1437,34 @@ public actor DefaultInvocations: Invocations {
         }
         let processingAggregate = activeSession.processingAggregate
         guard await coachContext.isPreparedContextCurrent(prepared) else {
-            switch await activeSession.abort() {
+            let invocation = activeSession.invocation
+            let outcome: InvocationTryOutcome = switch await activeSession.abort() {
             case let .committed(aggregate):
-                return .rejected(aggregate, .contextChanged)
+                .rejected(aggregate, .contextChanged)
             case let .stale(current):
-                return .rejected(current, .contextChanged)
+                outcomeAfterStaleContextAbort(
+                    current: current,
+                    fallback: processingAggregate,
+                    invocation: invocation
+                )
             case let .recovered(resolution):
-                return interruptionAfterTerminalRecovery(
+                interruptionAfterTerminalRecovery(
                     resolution,
                     request: finalAuthority.request,
                     fallback: processingAggregate
                 )
             }
+            if presentsUserRetry(outcome, request: request) {
+                await recordRetryDiagnostic(
+                    reason: .preparedContextStale,
+                    classification: .interruption,
+                    disposition: .userRetryableFailure,
+                    invocation: invocation,
+                    context: diagnosticContext(for: prepared),
+                    durationMilliseconds: 0
+                )
+            }
+            return outcome
         }
 
         let completedProviderResponse: (
@@ -1731,33 +1824,110 @@ public actor DefaultInvocations: Invocations {
         prepared: PreparedCoachLaunchContext,
         startedAt: UInt64
     ) async {
-        let exchange = prepared.exchange
-        let quote = prepared.quote
+        await recordRetryDiagnostic(
+            reason: reason,
+            classification: classification,
+            disposition: disposition,
+            invocation: invocation,
+            context: diagnosticContext(for: prepared),
+            durationMilliseconds: elapsedMilliseconds(since: startedAt)
+        )
+    }
+
+    private func recordRetryDiagnostic(
+        reason: InvocationRetryDiagnosticReason,
+        classification: InvocationRetryDiagnosticClassification,
+        disposition: InvocationRetryDiagnosticDisposition,
+        invocation: CoachInvocation?,
+        context: InvocationRetryDiagnosticContext,
+        durationMilliseconds: UInt64
+    ) async {
         let occurredAt = await clock.now()
         retryDiagnostics.enqueue(
             InvocationRetryDiagnosticEvent(
                 reason: reason,
                 classification: classification,
                 disposition: disposition,
-                invocationID: invocation.id,
-                attemptID: invocation.attempt.id,
-                attemptOrdinal: invocation.attempt.ordinal,
-                retryNumber: invocation.attempt.ordinal,
+                invocationID: invocation?.id,
+                attemptID: invocation?.attempt.id,
+                attemptOrdinal: invocation?.attempt.ordinal,
+                retryNumber: invocation?.attempt.ordinal,
                 occurredAt: occurredAt,
-                durationMilliseconds: elapsedMilliseconds(since: startedAt),
-                context: InvocationRetryDiagnosticContext(
-                    requestUTF8Bytes: exchange.request.count,
-                    completeModelInputUTF8Bytes: exchange.completeModelInput.count,
-                    transcriptReadRequestUTF8Bytes:
-                        exchange.transcriptReadRequest?.count ?? 0,
-                    transcriptReadResponseUTF8Bytes:
-                        exchange.transcriptReadResponse?.count ?? 0,
-                    completeInputTokens: quote.completeInputTokens,
-                    inputCeilingTokens: quote.inputCeilingTokens,
-                    memoryUTF8Bytes: quote.categoryCosts[.memory]?.utf8ByteCount ?? 0
-                )
+                durationMilliseconds: durationMilliseconds,
+                context: context
             )
         )
+    }
+
+    private func diagnosticContext(
+        for quote: CoachContextQuote
+    ) -> InvocationRetryDiagnosticContext {
+        InvocationRetryDiagnosticContext(
+            requestUTF8Bytes: 0,
+            completeModelInputUTF8Bytes: 0,
+            transcriptReadRequestUTF8Bytes: 0,
+            transcriptReadResponseUTF8Bytes: 0,
+            completeInputTokens: quote.completeInputTokens,
+            inputCeilingTokens: quote.inputCeilingTokens,
+            memoryUTF8Bytes: quote.categoryCosts[.memory]?.utf8ByteCount ?? 0
+        )
+    }
+
+    private func diagnosticContext(
+        for prepared: PreparedCoachLaunchContext
+    ) -> InvocationRetryDiagnosticContext {
+        let exchange = prepared.exchange
+        let quote = prepared.quote
+        return InvocationRetryDiagnosticContext(
+            requestUTF8Bytes: exchange.request.count,
+            completeModelInputUTF8Bytes: exchange.completeModelInput.count,
+            transcriptReadRequestUTF8Bytes: exchange.transcriptReadRequest?.count ?? 0,
+            transcriptReadResponseUTF8Bytes: exchange.transcriptReadResponse?.count ?? 0,
+            completeInputTokens: quote.completeInputTokens,
+            inputCeilingTokens: quote.inputCeilingTokens,
+            memoryUTF8Bytes: quote.categoryCosts[.memory]?.utf8ByteCount ?? 0
+        )
+    }
+
+    private func rejectAdmission(
+        _ session: any InvocationPendingPersistenceSession,
+        fallback: InvocationPendingAuthority,
+        request: PendingCoachInvocationRequest,
+        prepared: PreparedCoachLaunchContext,
+        reason: InvocationRejectionReason,
+        diagnosticReason: InvocationRetryDiagnosticReason
+    ) async -> InvocationTryOutcome {
+        let outcome = await reject(session, fallback: fallback, reason: reason)
+        guard presentsUserRetry(outcome, request: request) else { return outcome }
+        await recordRetryDiagnostic(
+            reason: diagnosticReason,
+            classification: .admissionRejected,
+            disposition: .userRetryableFailure,
+            invocation: nil,
+            context: diagnosticContext(for: prepared),
+            durationMilliseconds: 0
+        )
+        return outcome
+    }
+
+    private func presentsUserRetry(
+        _ outcome: InvocationTryOutcome,
+        request: PendingCoachInvocationRequest
+    ) -> Bool {
+        switch outcome {
+        case let .contextCapacityFailure(current, _):
+            return current.chat.id == request.chatID &&
+                current.pendingUserTurn?.id == request.pendingUserTurnID &&
+                current.pendingUserTurn?.failure != nil
+        case let .rejected(current, _), let .interrupted(current, _):
+            return current?.chat.id == request.chatID &&
+                current?.pendingUserTurn?.id == request.pendingUserTurnID &&
+                current?.pendingUserTurn?.failure != nil
+        case let .operationallyInterrupted(_, retryRequest, _):
+            return retryRequest == request
+        case .published:
+            return false
+        }
     }
 
     private func elapsedMilliseconds(since startedAt: UInt64) -> UInt64 {
@@ -1969,6 +2139,25 @@ public actor DefaultInvocations: Invocations {
               pending.id == request.pendingUserTurnID,
               pending.failure == nil
         else { return .interrupted(observed, reason) }
+        return retainOperationalRetry(
+            request: request,
+            fallback: observed,
+            publication: nil
+        )
+    }
+
+    private func outcomeAfterStaleContextAbort(
+        current: ChatAggregate?,
+        fallback: ChatAggregate,
+        invocation: CoachInvocation
+    ) -> InvocationTryOutcome {
+        let observed = current ?? fallback
+        let request = pendingRequest(for: invocation)
+        guard observed.chat.id == request.chatID,
+              let pending = observed.pendingUserTurn,
+              pending.id == request.pendingUserTurnID,
+              pending.failure == nil
+        else { return .rejected(current, .contextChanged) }
         return retainOperationalRetry(
             request: request,
             fallback: observed,
