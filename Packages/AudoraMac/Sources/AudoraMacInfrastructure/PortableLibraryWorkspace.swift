@@ -316,6 +316,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     public func createLibrary(_ seed: NewLibrarySeed) async -> LibraryOpenOutcome {
         guard reserveOperation() else { return .failed(.createFailed) }
         defer { operationInFlight = false }
+        guard workspaceGeneration < .max else { return .failed(.createFailed) }
         guard let destination = await locations.chooseCreateDestination() else {
             return .cancelled
         }
@@ -338,7 +339,10 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
                 loaded: .readWrite(authority),
                 rootIdentity: rootIdentity
             )
-            replaceActiveScope(with: scope)
+            guard replaceActiveScope(with: scope) else {
+                candidateLease.release()
+                return .failed(.createFailed)
+            }
             let locatorResult = await persistLocator(
                 root: destination,
                 libraryID: authority.manifest.libraryID,
@@ -400,14 +404,14 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     public func closeActiveLibrary() async -> LibraryActionOutcome {
         guard reserveOperation() else { return .failed(.closeFailed) }
         defer { operationInFlight = false }
+        guard workspaceGeneration < .max else { return .failed(.closeFailed) }
         guard let activeScope else {
             self.activeScope = nil
-            workspaceGeneration &+= 1
             return .succeeded(recentAvailable: false)
         }
         guard let libraryID = activeScope.libraryID else {
             self.activeScope = nil
-            workspaceGeneration &+= 1
+            workspaceGeneration += 1
             activeScope.lease.release()
             return .succeeded(recentAvailable: false)
         }
@@ -419,7 +423,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
             return .failed(.closeFailed)
         }
         self.activeScope = nil
-        workspaceGeneration &+= 1
+        workspaceGeneration += 1
         activeScope.lease.release()
         return .succeeded(recentAvailable: true)
     }
@@ -555,7 +559,10 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
 
         // Candidate parsing and locator identity checks complete before the old
         // scope is replaced. From this point the selected candidate is coherent.
-        replaceActiveScope(with: candidate)
+        guard replaceActiveScope(with: candidate) else {
+            candidateLease.release()
+            return .failed(.candidateUnavailable)
+        }
         var locatorNotice: LibraryNotice?
         if let libraryID = candidate.libraryID,
            !(await persistLocator(
@@ -579,11 +586,13 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         }
     }
 
-    private func replaceActiveScope(with candidate: ActiveScope) {
+    private func replaceActiveScope(with candidate: ActiveScope) -> Bool {
+        guard workspaceGeneration < .max else { return false }
         let previous = activeScope
         activeScope = candidate
-        workspaceGeneration &+= 1
+        workspaceGeneration += 1
         previous?.lease.release()
+        return true
     }
 
     private func reserveOperation() -> Bool {

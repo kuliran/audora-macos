@@ -4,11 +4,64 @@ import "@typespec/json-schema";
 using TypeSpec.JsonSchema;
 
 namespace Audora.Contracts {
+  /** Authoritative per-Session attempt order and exact current-Job pointer. */
+  @jsonSchema
+  @id("SessionProcessingAttemptIndex.json")
+  model SessionProcessingAttemptIndex {
+    schemaVersion: 1;
+
+    @maxItems(10000)
+    sessions: SessionProcessingSessionAttempts[];
+  }
+
+  model SessionProcessingSessionAttempts {
+    sessionId: SessionId;
+
+    @maxItems(10000)
+    legacyJobIds: TranscriptionJobId[];
+
+    @maxItems(10000)
+    attempts: SessionProcessingAttemptPointer[];
+
+    currentJobId: TranscriptionJobId | null;
+    pendingAttempt: SessionProcessingAttemptPointer | null;
+  }
+
+  model SessionProcessingAttemptPointer {
+    sequence: SessionProcessingAttemptSequence;
+    jobId: TranscriptionJobId;
+  }
+
   /** Minimal durable state for one Session transcription job. */
   @jsonSchema
   @id("TranscriptionJobManifest.json")
-  model TranscriptionJobManifest {
+  union TranscriptionJobManifest {
+    legacyV1: LegacyTranscriptionJobManifest,
+    controlledV2: ControlledTranscriptionJobManifest,
+    sequencedV3: SequencedTranscriptionJobManifest,
+  }
+
+  model LegacyTranscriptionJobManifest extends TranscriptionJobManifestBody {
     schemaVersion: 1;
+  }
+
+  model ControlledTranscriptionJobManifest
+    extends TranscriptionJobManifestBody {
+    schemaVersion: 2;
+    expectedSelectedRevisionId: TranscriptRevisionId | null;
+    cancellationAuthorityId: TranscriptionCancellationAuthorityId;
+    cancellationRequestedAt?: UTCInstant;
+  }
+
+  model SequencedTranscriptionJobManifest extends TranscriptionJobManifestBody {
+    schemaVersion: 3;
+    attemptSequence: SessionProcessingAttemptSequence;
+    expectedSelectedRevisionId: TranscriptRevisionId | null;
+    cancellationAuthorityId: TranscriptionCancellationAuthorityId;
+    cancellationRequestedAt?: UTCInstant;
+  }
+
+  model TranscriptionJobManifestBody {
     jobId: TranscriptionJobId;
     sessionId: SessionId;
     revisionId: TranscriptRevisionId;
@@ -83,6 +136,15 @@ namespace Audora.Contracts {
   model SessionProcessingFeatureScenario {
     schemaVersion: 1;
     scenarioId: SessionProcessingScenarioId;
+
+    /** Deterministic arbitration proof for a concurrent terminal race. */
+    race?: SessionProcessingScenarioRace;
+
+    /** Durable Job summaries present before the first command, when relevant. */
+    @minItems(1)
+    @maxItems(10000)
+    initialJobs?: SessionProcessingScenarioDurableJob[];
+
     initialState: SessionProcessingScenarioState;
 
     @minItems(1)
@@ -91,8 +153,34 @@ namespace Audora.Contracts {
     dependencyTrace: SessionProcessingScenarioDependencyEvent[];
     expectedState: SessionProcessingScenarioState;
 
+    /** Durable Job summaries after all commands and dependency effects. */
+    @minItems(1)
+    @maxItems(10000)
+    expectedJobs?: SessionProcessingScenarioDurableJob[];
+
     @minItems(1)
     expectedEffects: SessionProcessingScenarioEffect[];
+  }
+
+  /** Observable durable outcome without conflating it with feature UI state. */
+  model SessionProcessingScenarioDurableJob {
+    jobId: TranscriptionJobId;
+    revisionId: TranscriptRevisionId;
+    state: TranscriptionJobState;
+    failure?: SessionProcessingFailure;
+  }
+
+  model SessionProcessingScenarioRace {
+    kind:
+      | "candidateVsCancel"
+      | "engineFailureVsCancel"
+      | "candidateRejectionVsCancel";
+    firstDurableWinner:
+      | "candidate"
+      | "engineFailure"
+      | "candidateRejection"
+      | "cancellation";
+    losingCompareAndSwap: "stale";
   }
 
   enum TranscriptionJobState {
@@ -114,12 +202,23 @@ namespace Audora.Contracts {
     candidateRejected,
     publicationFailed,
     installedNeedsRefresh,
+    canonicalRevisionIntegrityFailed,
+    staleSelection,
   }
 
   @minLength(1)
   @maxLength(128)
   @pattern("^[0-9A-Za-z._-]+$")
   scalar TranscriptionProfileId extends string;
+
+  @minLength(1)
+  @maxLength(128)
+  @pattern("^[0-9A-Za-z_-]+$")
+  scalar TranscriptionCancellationAuthorityId extends string;
+
+  @minValue(1)
+  @maxValue(9007199254740991)
+  scalar SessionProcessingAttemptSequence extends integer;
 
   model CandidateSourceFingerprint {
     audioSourceId: TranscriptAudioSourceId;
@@ -283,7 +382,8 @@ namespace Audora.Contracts {
     etaSeconds?: integer;
   }
 
-  model TranscriptionWorkerCandidateReady extends TranscriptionWorkerMessageBase {
+  model TranscriptionWorkerCandidateReady
+    extends TranscriptionWorkerMessageBase {
     type: "candidate_ready";
     result: "result.json";
     sha256: Sha256Hex;
@@ -308,14 +408,25 @@ namespace Audora.Contracts {
   union SessionProcessingScenarioState {
     unavailable: SessionProcessingScenarioUnavailableState,
     ready: SessionProcessingScenarioReadyState,
+    queued: SessionProcessingScenarioQueuedState,
+    running: SessionProcessingScenarioRunningState,
+    cancelling: SessionProcessingScenarioCancellingState,
+    validating: SessionProcessingScenarioValidatingState,
     completed: SessionProcessingScenarioCompletedState,
     failed: SessionProcessingScenarioFailedState,
+    cancelled: SessionProcessingScenarioCancelledState,
+    interrupted: SessionProcessingScenarioInterruptedState,
+    recoveryRequired: SessionProcessingScenarioRecoveryRequiredState,
   }
 
   model SessionProcessingScenarioUnavailableState {
     status: "unavailable";
     reason:
       | "noSession"
+      | "jobIndexSchemaNewer"
+      | "jobIndexUnavailable"
+      | "jobIndexIntegrityMismatch"
+      | "jobIndexIncomplete"
       | "qualificationBlocked"
       | "runtimeMissing"
       | "runtimeLockMismatch"
@@ -330,9 +441,39 @@ namespace Audora.Contracts {
     status: "ready";
   }
 
+  model SessionProcessingScenarioQueuedState {
+    status: "queued";
+    jobId: TranscriptionJobId;
+    actions: SessionProcessingRecoveryAction[];
+  }
+
+  model SessionProcessingScenarioRunningState {
+    status: "running";
+    jobId: TranscriptionJobId;
+    phase: "preparing" | "loadingModel" | "transcribing";
+    progress?: SessionProcessingScenarioProgress;
+    actions: SessionProcessingControlAction[];
+  }
+
+  model SessionProcessingScenarioCancellingState {
+    status: "cancelling";
+    jobId: TranscriptionJobId;
+    actions: SessionProcessingControlAction[];
+  }
+
+  model SessionProcessingScenarioValidatingState {
+    status: "validating";
+    jobId: TranscriptionJobId;
+  }
+
   model SessionProcessingScenarioCompletedState {
     status: "completed";
-    selectedRevisionId: TranscriptRevisionId;
+
+    /** Exact immutable Revision owned by the completed Job. */
+    revisionId: TranscriptRevisionId;
+
+    /** Current Session selection, which may be absent or point at another Revision. */
+    selectedRevisionId: TranscriptRevisionId | null;
   }
 
   model SessionProcessingScenarioFailedState {
@@ -341,14 +482,55 @@ namespace Audora.Contracts {
     actions: SessionProcessingRecoveryAction[];
   }
 
+  model SessionProcessingScenarioCancelledState {
+    status: "cancelled";
+    jobId: TranscriptionJobId;
+    actions: SessionProcessingRecoveryAction[];
+  }
+
+  model SessionProcessingScenarioInterruptedState {
+    status: "interrupted";
+    jobId: TranscriptionJobId;
+    actions: SessionProcessingRecoveryAction[];
+  }
+
+  model SessionProcessingScenarioRecoveryRequiredState {
+    status: "recoveryRequired";
+    jobId: TranscriptionJobId;
+    actions: SessionProcessingRecoveryAction[];
+  }
+
+  model SessionProcessingScenarioProgress {
+    @minValue(0)
+    completedWindows: integer;
+
+    @minValue(1)
+    totalWindows: integer;
+
+    @minValue(0)
+    approximateEtaSeconds?: integer;
+  }
+
   enum SessionProcessingRecoveryAction {
     prepare,
     reinstall,
     retry,
   }
 
+  enum SessionProcessingControlAction {
+    cancel,
+  }
+
   model SessionProcessingScenarioCommand {
-    kind: "selectSession" | "clearSelection" | "start" | "prepare" | "reinstall" | "retry";
+    kind:
+      | "activateLibrary"
+      | "selectSession"
+      | "clearSelection"
+      | "start"
+      | "cancel"
+      | "prepare"
+      | "reinstall"
+      | "retry";
   }
 
   model SessionProcessingScenarioDependencyEvent {
@@ -364,20 +546,30 @@ namespace Audora.Contracts {
       | "publisher";
     effect:
       | "load"
+      | "inventory"
       | "latest"
+      | "loadExact"
       | "resolve"
       | "prepare"
       | "verify"
       | "now"
       | "generateJobId"
       | "generateRevisionId"
+      | "generateCancellationAuthorityId"
       | "create"
       | "transitionRunning"
+      | "persistCancellationRequest"
+      | "cancelAndReap"
+      | "workerPresence"
+      | "recoverCandidate"
       | "transcribe"
       | "transitionValidating"
       | "publish"
+      | "reopenRevision"
       | "transitionCompleted"
-      | "transitionFailed";
+      | "transitionFailed"
+      | "transitionCancelled"
+      | "transitionInterrupted";
 
     @minLength(1)
     @maxLength(128)
@@ -394,6 +586,23 @@ namespace Audora.Contracts {
       | "noJobCreated"
       | "noEngineLaunch"
       | "noPublication"
-      | "noFallback";
+      | "noFallback"
+      | "cancellationAuthorityPersisted"
+      | "workerReaped"
+      | "lateCandidateRejected"
+      | "sessionRetained"
+      | "processAbsenceConfirmed"
+      | "queuedInterrupted"
+      | "stagedCandidateRevalidated"
+      | "publicationIdempotent"
+      | "canonicalRevisionReopened"
+      | "allDurableJobsReconciled"
+      | "startSelectionBaselinePreserved"
+      | "staleSelectionRejected"
+      | "progressMonotonic"
+      | "etaApproximate"
+      | "firstDurableWinnerPreserved"
+      | "noAutomaticRerun"
+      | "noWorkerCancellation";
   }
 }

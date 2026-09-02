@@ -13,7 +13,6 @@ struct AudoraApp: App {
     private let feature: DefaultLibraryFeature
     private let audioImportFeature: DefaultAudioImportFeature
     private let recordingFeature: DefaultRecordingFeature
-    private let sessionProcessingFeature: DefaultSessionProcessingFeature
     private let reviewFeature: DefaultReviewFeature
     private let applicationCommands: DefaultApplicationCommandFeature
     private let chatDispatcher: ChatCommandDispatcher
@@ -69,14 +68,6 @@ struct AudoraApp: App {
             identifiers: RandomSessionProcessingIDGenerator()
         )
         let reviewWorkspace = PortableReviewWorkspace(scopes: workspace)
-        let reviewFeature = DefaultReviewFeature(
-            sessions: reviewWorkspace,
-            playback: AVFoundationReviewPlaybackAdapter(resolver: reviewWorkspace),
-            retranscriber: SessionProcessingReviewRetranscriber(
-                feature: sessionProcessingFeature
-            ),
-            annotationVisibility: workspace
-        )
         let audioImportWorkspace = PortableAudioImportWorkspace(
             workspace: workspace,
             chooser: AppKitAudioFileChooser(),
@@ -127,7 +118,16 @@ struct AudoraApp: App {
         )
         let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,
-            chat: chatFeature
+            chat: chatFeature,
+            sessionProcessing: sessionProcessingFeature
+        )
+        let reviewFeature = DefaultReviewFeature(
+            sessions: reviewWorkspace,
+            playback: AVFoundationReviewPlaybackAdapter(resolver: reviewWorkspace),
+            retranscriber: SessionProcessingReviewRetranscriber(
+                feature: applicationCommands
+            ),
+            annotationVisibility: workspace
         )
         let chatDispatcher = ChatCommandDispatcher(feature: applicationCommands)
         let librarySelectionDispatcher = LibrarySelectionCommandDispatcher(
@@ -140,7 +140,6 @@ struct AudoraApp: App {
         self.feature = feature
         self.audioImportFeature = audioImportFeature
         self.recordingFeature = recordingFeature
-        self.sessionProcessingFeature = sessionProcessingFeature
         self.reviewFeature = reviewFeature
         self.applicationCommands = applicationCommands
         self.chatDispatcher = chatDispatcher
@@ -161,7 +160,7 @@ struct AudoraApp: App {
                 feature: feature,
                 audioImportFeature: audioImportFeature,
                 recordingFeature: recordingFeature,
-                sessionProcessingFeature: sessionProcessingFeature,
+                sessionProcessingFeature: applicationCommands,
                 reviewFeature: reviewFeature,
                 chatDispatcher: chatDispatcher,
                 librarySelectionDispatcher: librarySelectionDispatcher,

@@ -52,6 +52,10 @@ execution profile.
   carry no persistence version.
 - Each supported old root migrates atomically and idempotently. Unknown newer roots
   open read-only.
+- The authoritative `jobs/.attempts.json` root has a generated TypeSpec schema,
+  one accepted packaged example, and rejected newer-version, zero-sequence, and
+  unknown-key fixtures. Contract checks validate every fixture and the portable
+  repository emits the accepted shape.
 - Relaunch interrupts an in-flight turn. Retry rebuilds the current provider DTO
   from the immutable app records, so no old provider envelope is migrated.
 - If historical Chat data cannot be migrated without changing meaning, the Chat is
@@ -74,6 +78,16 @@ execution profile.
 - Trash survives relaunch and closed-app copying. No UI or maintenance job removes
   Trash content.
 - Every durable recording/transcription job passes restart reconciliation.
+- Every writable Library activation, including a same-ID reopen, installs a new
+  process-local processing fence. Only complete reconciliation for that exact
+  activation clears it; a newer activation supersedes suspended older work.
+- Processing source, Job, and publication capabilities are bound to the exact
+  active workspace generation, retained root lease, and root device/inode. Close,
+  switch, and same-path or same-ID root replacement fixtures prove that stale
+  operations fail closed.
+- An unknown newer installed or partial `jobs/.attempts.json` keeps ordinary
+  Library content readable while every processing read/recovery/mutation fails.
+  The attempt root, partials, Job manifests, and staging tree remain byte-identical.
 - Resolved Failure Descriptors, Invocations, Provider Attempts, Proposals, and
   Profile-write intents are deleted. At most their non-content diagnostic metadata
   remains until log rotation.

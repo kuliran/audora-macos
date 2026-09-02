@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.relaunch-running-absent-interrupted",
+  "initialJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "running"
+    }
+  ],
+  "initialState": {
+    "status": "unavailable",
+    "reason": "noSession",
+    "actions": []
+  },
+  "commands": [
+    { "kind": "activateLibrary" }
+  ],
+  "dependencyTrace": [
+    { "port": "jobs", "effect": "inventory", "outcome": "all-durable-jobs-bounded" },
+    { "port": "engine", "effect": "workerPresence", "outcome": "absent" },
+    { "port": "jobs", "effect": "transitionInterrupted", "outcome": "written" },
+    { "port": "source", "effect": "load", "outcome": "available" }
+  ],
+  "expectedState": {
+    "status": "interrupted",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "actions": ["retry"]
+  },
+  "expectedJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "interrupted"
+    }
+  ],
+  "expectedEffects": [
+    { "kind": "allDurableJobsReconciled" },
+    { "kind": "processAbsenceConfirmed" },
+    { "kind": "sessionRetained" },
+    { "kind": "noEngineLaunch" },
+    { "kind": "noPublication" }
+  ]
+}

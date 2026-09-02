@@ -34,7 +34,22 @@ public struct ApplicationCommandReceipt<Outcome: Sendable>: Sendable {
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 @MainActor
-public protocol ApplicationCommandFeature: AnyObject, Sendable {
+public protocol ApplicationSessionProcessingFeature: AnyObject, Sendable {
+    var sessionProcessingStates: AsyncStream<SessionProcessingFeatureState> { get }
+
+    func currentSessionProcessingState() async -> SessionProcessingFeatureState?
+
+    func isSessionProcessingCommandAdmitted(
+        _ command: SessionProcessingCommand
+    ) -> Bool
+
+    @discardableResult
+    func send(_ command: SessionProcessingCommand) async -> Bool
+}
+
+@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+@MainActor
+public protocol ApplicationCommandFeature: ApplicationSessionProcessingFeature {
     var admissionState: ApplicationCommandAdmissionState { get }
     var admissionStates: AsyncStream<ApplicationCommandAdmissionState> { get }
     var chatStates: AsyncStream<ChatFeatureState> { get }
@@ -56,19 +71,26 @@ public protocol ApplicationCommandFeature: AnyObject, Sendable {
 @MainActor
 public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
     private nonisolated let chat: any ChatFeature
+    private nonisolated let sessionProcessing: (any SessionProcessingFeature)?
     private let library: any LibraryFeature
     public private(set) var admissionState = ApplicationCommandAdmissionState.idle
 
     private var commandTail: Task<Void, Never>?
     private var admittedCommandCount = 0
+    private var pendingLibraryNavigationCount = 0
     private var deferredStarts: [(ChatCommand, DeferredApplicationCommandCompletion)] = []
     private var admissionContinuations:
         [Int: AsyncStream<ApplicationCommandAdmissionState>.Continuation] = [:]
     private var nextAdmissionContinuationID = 0
 
-    public init(library: any LibraryFeature, chat: any ChatFeature) {
+    public init(
+        library: any LibraryFeature,
+        chat: any ChatFeature,
+        sessionProcessing: (any SessionProcessingFeature)? = nil
+    ) {
         self.library = library
         self.chat = chat
+        self.sessionProcessing = sessionProcessing
     }
 
     public var admissionStates: AsyncStream<ApplicationCommandAdmissionState> {
@@ -85,12 +107,50 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
 
     public var chatStates: AsyncStream<ChatFeatureState> { chat.states }
 
+    public var sessionProcessingStates: AsyncStream<SessionProcessingFeatureState> {
+        guard let sessionProcessing else {
+            return AsyncStream { continuation in continuation.finish() }
+        }
+        return sessionProcessing.states
+    }
+
+    public func currentSessionProcessingState() async
+        -> SessionProcessingFeatureState?
+    {
+        await sessionProcessing?.currentState
+    }
+
     public func currentChatState() async -> ChatFeatureState {
         await chat.currentState
     }
 
     public func currentChatState(in scope: LibraryScope) async -> ChatFeatureState? {
         await chat.currentState(in: scope)
+    }
+
+    public func isSessionProcessingCommandAdmitted(
+        _ command: SessionProcessingCommand
+    ) -> Bool {
+        guard sessionProcessing != nil,
+              command.isApplicationIngress,
+              !admissionState.isLibraryNavigationPending,
+              !admissionState.isOrderlyTerminationPending
+        else {
+            return false
+        }
+        return !admissionState.isChatBoundaryPending ||
+            command.isAdmittedDuringChatBoundary
+    }
+
+    @discardableResult
+    public func send(_ command: SessionProcessingCommand) async -> Bool {
+        guard isSessionProcessingCommandAdmitted(command),
+              let sessionProcessing
+        else {
+            return false
+        }
+        await sessionProcessing.send(command)
+        return true
     }
 
     @discardableResult
@@ -118,23 +178,47 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
     public func enqueue(
         _ intent: LibrarySelectionIntent
     ) -> ApplicationCommandReceipt<Bool> {
-        guard admissionState == .idle else {
+        guard !admissionState.isOrderlyTerminationPending,
+              !admissionState.isChatBoundaryPending
+        else {
             return completedReceipt(false)
         }
+        if admissionState.isLibraryNavigationPending {
+            guard case .openExternal = intent else {
+                return completedReceipt(false)
+            }
+        }
+        pendingLibraryNavigationCount += 1
         updateAdmissionState(isLibraryNavigationPending: true)
         admittedCommandCount += 1
         let predecessor = commandTail
         let chat = chat
         let library = library
+        let sessionProcessing = sessionProcessing
         let operation = Task<Bool, Never> {
             await predecessor?.value
-            guard await chat.flushForOrderlyTermination() else {
+            if let sessionProcessing,
+               !(await sessionProcessing.reserveLibraryNavigation())
+            {
                 finishLibraryNavigation()
                 return false
             }
-            await library.send(intent.command)
+            guard await chat.flushForOrderlyTermination() else {
+                await sessionProcessing?.finishLibraryNavigation(
+                    didMutateLibrary: false
+                )
+                finishLibraryNavigation()
+                return false
+            }
+            let result = await library.send(intent.command)
+            if let activation = result.activation {
+                await sessionProcessing?.activateLibrary(activation)
+            }
+            await sessionProcessing?.finishLibraryNavigation(
+                didMutateLibrary: result.didMutateSelection
+            )
             finishLibraryNavigation()
-            return true
+            return result.didMutateSelection
         }
         commandTail = Task { _ = await operation.value }
         return ApplicationCommandReceipt(task: operation)
@@ -190,6 +274,9 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
     }
 
     private func finishLibraryNavigation() {
+        precondition(pendingLibraryNavigationCount > 0)
+        pendingLibraryNavigationCount -= 1
+        guard pendingLibraryNavigationCount == 0 else { return }
         updateAdmissionState(isLibraryNavigationPending: false)
         releaseDeferredStartsIfPossible()
     }
@@ -287,6 +374,28 @@ private extension ChatCommand {
              .toggleNewChatAttachment, .cancelNewChat,
              .rename, .setFilter, .editDraft, .refreshContextQuote,
              .createNewChatFromCapacityFailure, .discardPendingUserTurn:
+            false
+        }
+    }
+}
+
+private extension SessionProcessingCommand {
+    var isApplicationIngress: Bool {
+        switch self {
+        case .activateLibrary, .activateLibraryAuthority:
+            false
+        case .selectSession, .clearSelection, .start, .cancel, .prepare,
+             .reinstall, .retry:
+            true
+        }
+    }
+
+    var isAdmittedDuringChatBoundary: Bool {
+        switch self {
+        case .selectSession, .clearSelection, .cancel:
+            true
+        case .activateLibrary, .activateLibraryAuthority, .start, .prepare,
+             .reinstall, .retry:
             false
         }
     }

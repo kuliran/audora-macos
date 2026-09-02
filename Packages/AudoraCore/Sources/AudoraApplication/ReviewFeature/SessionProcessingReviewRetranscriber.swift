@@ -5,9 +5,9 @@ import AudoraDomain
 /// by SessionProcessingFeature.
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 public struct SessionProcessingReviewRetranscriber: ReviewRetranscriptionPort {
-    private let feature: any SessionProcessingFeature
+    private let feature: any ApplicationSessionProcessingFeature
 
-    public init(feature: any SessionProcessingFeature) {
+    public init(feature: any ApplicationSessionProcessingFeature) {
         self.feature = feature
     }
 
@@ -18,24 +18,42 @@ public struct SessionProcessingReviewRetranscriber: ReviewRetranscriptionPort {
             scope: selection.scope,
             sessionID: selection.sessionID
         )
-        await feature.send(.selectSession(processingSelection))
-        switch await feature.currentState {
-        case .ready, .failed:
-            break
+        guard await feature.send(.selectSession(processingSelection)) else {
+            return .failed
+        }
+        guard let selectedState = await feature.currentSessionProcessingState()
+        else {
+            return .unavailable
+        }
+        let launchCommand: SessionProcessingCommand
+        switch selectedState {
+        case .ready, .completed:
+            launchCommand = .start
+        case let .failed(snapshot):
+            guard snapshot.actions.contains(.retry) else { return .failed }
+            launchCommand = .retry
+        case let .cancelled(snapshot), let .interrupted(snapshot):
+            guard snapshot.actions.contains(.retry) else { return .failed }
+            launchCommand = .retry
         case .unavailable:
             return .unavailable
-        case .preparing, .running, .validating, .completed, .recoveryRequired:
+        case .preparing, .queued, .running, .cancelling, .validating,
+             .recoveryRequired:
             return .failed
         }
 
-        await feature.send(.start)
-        switch await feature.currentState {
+        guard await feature.send(launchCommand) else { return .failed }
+        guard let completedState = await feature.currentSessionProcessingState()
+        else {
+            return .unavailable
+        }
+        switch completedState {
         case let .completed(snapshot) where snapshot.sessionID == selection.sessionID:
             return .completed
         case .unavailable:
             return .unavailable
-        case .ready, .preparing, .running, .validating, .completed, .failed,
-             .recoveryRequired:
+        case .ready, .preparing, .queued, .running, .cancelling, .validating,
+             .completed, .failed, .cancelled, .interrupted, .recoveryRequired:
             return .failed
         }
     }

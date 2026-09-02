@@ -14,7 +14,11 @@ final class LibraryPresentationModelTests: XCTestCase {
                 ),
             ]
         )
-        let model = LibraryPresentationModel(feature: feature)
+        let dispatcher = LibrarySelectionDispatcherProbe()
+        let model = LibraryPresentationModel(
+            feature: feature,
+            librarySelection: dispatcher
+        )
 
         await model.start()
         await model.start()
@@ -26,7 +30,8 @@ final class LibraryPresentationModelTests: XCTestCase {
             )
         )
         let commands = await feature.commands
-        XCTAssertEqual(commands, [.start])
+        XCTAssertEqual(commands, [])
+        XCTAssertEqual(dispatcher.intents, [.start])
     }
 
     func testRepeatedOpenFocusesAndReopensTheSameSingletonWindowIdentity() {
@@ -92,6 +97,91 @@ final class LibraryPresentationModelTests: XCTestCase {
         XCTAssertFalse(duringImport.canUseRecordingControls)
     }
 
+    func testRootInteractionPolicyBlocksLibrarySwitchForEveryProcessingAuthority()
+        throws
+    {
+        let libraryID = try LibraryID("lib-20260830T120000000Z-1ABC")
+        let library = LibraryFeatureState(
+            selection: .active(
+                ActiveLibrarySnapshot(
+                    libraryID: libraryID,
+                    preferences: .defaults,
+                    profile: .nullProfile(statementCount: 0)
+                )
+            )
+        )
+        let authority = try makeProcessingAuthority(libraryID: libraryID)
+        let active = SessionProcessingActiveSnapshot(
+            source: authority.source,
+            job: authority.job
+        )
+        let recoverable = SessionProcessingRecoverableSnapshot(
+            source: authority.source,
+            job: authority.job,
+            actions: []
+        )
+        let processingStates: [SessionProcessingFeatureState] = [
+            .preparing(SessionProcessingReadySnapshot(source: authority.source), .prepare),
+            .queued(recoverable),
+            .running(active),
+            .cancelling(active),
+            .validating(active),
+            .recoveryRequired(authority.job),
+        ]
+
+        for state in processingStates {
+            let availability = LibraryInteractionPolicy.availability(
+                library: library,
+                audioImport: AudioImportFeatureState(status: .idle),
+                recording: .idle,
+                sessionProcessing: state
+            )
+            XCTAssertFalse(
+                availability.canMutateLibrarySelection,
+                "processing state: \(state)"
+            )
+            XCTAssertTrue(availability.canRevealLibrary)
+        }
+    }
+
+}
+
+private func makeProcessingAuthority(
+    libraryID: LibraryID
+) throws -> (source: SessionTranscriptionSource, job: SessionProcessingJob) {
+    let sessionID = try SessionID("ses-20260830T120100000Z-2CDE")
+    let selection = SessionProcessingSelection(
+        scope: LibraryScope(libraryID: libraryID),
+        sessionID: sessionID
+    )
+    let fingerprint = try AudioFingerprint(
+        sha256: String(repeating: "1", count: 64)
+    )
+    let source = SessionTranscriptionSource(
+        selection: selection,
+        audioCapabilityID: try SessionTranscriptionAudioCapabilityID("cap-policy"),
+        durationMilliseconds: 1_000,
+        audioFingerprint: fingerprint,
+        sourceFingerprints: [
+            TranscriptSourceFingerprint(
+                audioSourceID: try AudioSourceID("src-0001"),
+                fingerprint: fingerprint
+            ),
+        ],
+        expectedSelectedRevisionID: nil
+    )
+    let job = SessionProcessingJob(
+        jobID: try TranscriptionJobID("job-20260830T120200000Z-3DEF"),
+        sessionID: sessionID,
+        revisionID: try TranscriptRevisionID("trv-20260830T120300000Z-4FGH"),
+        profileID: "synthetic-qualified-v1",
+        createdAt: try UTCInstant("2026-08-30T12:03:00.000Z"),
+        state: .running,
+        cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+            "cancel-policy"
+        )
+    )
+    return (source, job)
 }
 
 private actor ScriptedLibraryFeature: LibraryFeature {
@@ -114,8 +204,19 @@ private actor ScriptedLibraryFeature: LibraryFeature {
         state
     }
 
-    func send(_ command: LibraryCommand) async {
+    func send(_ command: LibraryCommand) async -> LibraryCommandResult {
         commands.append(command)
+        return .noSelectionMutation
+    }
+}
+
+@MainActor
+private final class LibrarySelectionDispatcherProbe: LibrarySelectionCommandDispatching {
+    private(set) var intents: [LibrarySelectionIntent] = []
+
+    func sendAndWait(_ intent: LibrarySelectionIntent) async -> Bool {
+        intents.append(intent)
+        return true
     }
 }
 

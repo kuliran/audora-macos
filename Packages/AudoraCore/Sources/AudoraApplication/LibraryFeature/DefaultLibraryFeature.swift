@@ -4,7 +4,7 @@ import AudoraDomain
 public actor DefaultLibraryFeature: LibraryFeature {
     private struct QueuedExternalOpen {
         let token: LibraryOpenRequestToken
-        let completion: CheckedContinuation<Void, Never>
+        let completion: CheckedContinuation<LibraryCommandResult, Never>
     }
 
     private let workspace: any LibraryWorkspacePort
@@ -13,6 +13,7 @@ public actor DefaultLibraryFeature: LibraryFeature {
     private let activityCoordinator: any LibraryActivityCoordinating
     private var state = LibraryFeatureReducer.initialState
     private var hasStarted = false
+    private var activationGeneration: UInt64 = 0
     private var queuedExternalOpen: QueuedExternalOpen?
     private var continuations: [Int: AsyncStream<LibraryFeatureState>.Continuation] = [:]
     private var nextSubscriberID = 0
@@ -45,7 +46,8 @@ public actor DefaultLibraryFeature: LibraryFeature {
         }
     }
 
-    public func send(_ command: LibraryCommand) async {
+    @discardableResult
+    public func send(_ command: LibraryCommand) async -> LibraryCommandResult {
         if command == .rejectMultipleExternalOpenRequests {
             state = LibraryFeatureState(
                 selection: state.selection,
@@ -53,27 +55,29 @@ public actor DefaultLibraryFeature: LibraryFeature {
                 notice: .multipleExternalOpenRequests
             )
             publish(state)
-            return
+            return .noSelectionMutation
         }
 
         guard state.activity == nil else {
             if case let .openExternal(token) = command {
-                await queueExternalOpen(token)
+                return await queueExternalOpen(token)
             }
-            return
+            return .noSelectionMutation
         }
 
         switch command {
         case .start:
-            guard !hasStarted, case .awaitingBootstrap = state.selection else { return }
+            guard !hasStarted, case .awaitingBootstrap = state.selection else {
+                return .noSelectionMutation
+            }
             hasStarted = true
-            await performOpen(activity: .restoring) {
+            return await performOpen(activity: .restoring) {
                 await workspace.restoreActiveLibrary()
             }
 
         case .create:
-            guard !isAwaitingBootstrap else { return }
-            await performOpen(activity: .creating) {
+            guard !isAwaitingBootstrap else { return .noSelectionMutation }
+            return await performOpen(activity: .creating) {
                 let instant = await clock.now()
                 let libraryID = await idGenerator.generateLibraryID(at: instant)
                 let seed = NewLibrarySeed(
@@ -91,36 +95,36 @@ public actor DefaultLibraryFeature: LibraryFeature {
             }
 
         case .chooseExisting:
-            guard !isAwaitingBootstrap else { return }
-            await performOpen(activity: .opening) {
+            guard !isAwaitingBootstrap else { return .noSelectionMutation }
+            return await performOpen(activity: .opening) {
                 await workspace.chooseLibrary()
             }
 
         case .reopenRecent:
-            guard !isAwaitingBootstrap else { return }
-            await performOpen(activity: .opening) {
+            guard !isAwaitingBootstrap else { return .noSelectionMutation }
+            return await performOpen(activity: .opening) {
                 await workspace.reopenRecentLibrary()
             }
 
         case let .openExternal(token):
-            await performOpen(activity: .opening) {
+            return await performOpen(activity: .opening) {
                 await workspace.openExternalRequest(token)
             }
 
         case .reveal:
-            guard hasSelectedLibrary else { return }
-            await performAction(activity: .revealing, close: false) {
+            guard hasSelectedLibrary else { return .noSelectionMutation }
+            return await performAction(activity: .revealing, close: false) {
                 await workspace.revealActiveLibrary()
             }
 
         case .close:
-            guard hasSelectedLibrary else { return }
-            await performAction(activity: .closing, close: true) {
+            guard hasSelectedLibrary else { return .noSelectionMutation }
+            return await performAction(activity: .closing, close: true) {
                 await workspace.closeActiveLibrary()
             }
 
         case .rejectMultipleExternalOpenRequests:
-            break
+            return .noSelectionMutation
         }
     }
 
@@ -142,21 +146,26 @@ public actor DefaultLibraryFeature: LibraryFeature {
     // one continuation here lets Launch Services callbacks survive a suspended
     // restore without expanding the workspace's one-capability bound. A newer
     // callback supersedes the older one and releases its caller immediately.
-    private func queueExternalOpen(_ token: LibraryOpenRequestToken) async {
+    private func queueExternalOpen(
+        _ token: LibraryOpenRequestToken
+    ) async -> LibraryCommandResult {
         await withCheckedContinuation { continuation in
             let superseded = queuedExternalOpen
             queuedExternalOpen = QueuedExternalOpen(
                 token: token,
                 completion: continuation
             )
-            superseded?.completion.resume()
+            superseded?.completion.resume(returning: .noSelectionMutation)
         }
     }
 
     private func performOpen(
         activity: LibraryFeatureState.Activity,
         operation: () async -> LibraryOpenOutcome
-    ) async {
+    ) async -> LibraryCommandResult {
+        guard let reservedActivationGeneration = reserveActivationGeneration() else {
+            return .noSelectionMutation
+        }
         let previous = state.selection
         state = LibraryFeatureReducer.begin(activity, from: state)
         publish(state)
@@ -166,21 +175,24 @@ public actor DefaultLibraryFeature: LibraryFeature {
                 notice: .libraryActivityInProgress
             )
             publish(state)
-            await replayQueuedExternalOpens()
-            return
+            return await replayQueuedExternalOpens() ?? .noSelectionMutation
         }
         let outcome = await operation()
         await activityCoordinator.release(lease)
         state = LibraryFeatureReducer.completeOpen(outcome, previous: previous)
         publish(state)
-        await replayQueuedExternalOpens()
+        let result = commandResult(
+            for: outcome,
+            reservedActivationGeneration: reservedActivationGeneration
+        )
+        return await replayQueuedExternalOpens() ?? result
     }
 
     private func performAction(
         activity: LibraryFeatureState.Activity,
         close: Bool,
         operation: () async -> LibraryActionOutcome
-    ) async {
+    ) async -> LibraryCommandResult {
         let previous = state.selection
         state = LibraryFeatureReducer.begin(activity, from: state)
         publish(state)
@@ -192,8 +204,7 @@ public actor DefaultLibraryFeature: LibraryFeature {
                     notice: .libraryActivityInProgress
                 )
                 publish(state)
-                await replayQueuedExternalOpens()
-                return
+                return await replayQueuedExternalOpens() ?? .noSelectionMutation
             }
             lease = acquired
         } else {
@@ -207,12 +218,23 @@ public actor DefaultLibraryFeature: LibraryFeature {
             ? LibraryFeatureReducer.completeClose(outcome, previous: previous)
             : LibraryFeatureReducer.completeReveal(outcome, previous: previous)
         publish(state)
-        await replayQueuedExternalOpens()
+        let result: LibraryCommandResult
+        if close, case .succeeded = outcome {
+            result = .deactivated
+        } else {
+            result = .noSelectionMutation
+        }
+        return await replayQueuedExternalOpens() ?? result
     }
 
-    private func replayQueuedExternalOpens() async {
+    private func replayQueuedExternalOpens() async -> LibraryCommandResult? {
+        var latestMutation: LibraryCommandResult?
         while let queued = queuedExternalOpen {
             queuedExternalOpen = nil
+            guard let reservedActivationGeneration = reserveActivationGeneration() else {
+                queued.completion.resume(returning: .noSelectionMutation)
+                continue
+            }
             let previous = state.selection
             state = LibraryFeatureReducer.begin(.opening, from: state)
             publish(state)
@@ -222,15 +244,46 @@ public actor DefaultLibraryFeature: LibraryFeature {
                     notice: .libraryActivityInProgress
                 )
                 publish(state)
-                queued.completion.resume()
+                queued.completion.resume(returning: .noSelectionMutation)
                 continue
             }
             let outcome = await workspace.openExternalRequest(queued.token)
             await activityCoordinator.release(lease)
             state = LibraryFeatureReducer.completeOpen(outcome, previous: previous)
             publish(state)
-            queued.completion.resume()
+            let result = commandResult(
+                for: outcome,
+                reservedActivationGeneration: reservedActivationGeneration
+            )
+            if result.didMutateSelection { latestMutation = result }
+            queued.completion.resume(returning: result)
         }
+        return latestMutation
+    }
+
+    private func commandResult(
+        for outcome: LibraryOpenOutcome,
+        reservedActivationGeneration: UInt64
+    ) -> LibraryCommandResult {
+        switch outcome {
+        case let .opened(snapshot, _):
+            return .activated(
+                LibraryActivation(
+                    scope: LibraryScope(libraryID: snapshot.libraryID),
+                    generation: reservedActivationGeneration
+                )
+            )
+        case .noLibrarySelected, .readOnly:
+            return .deactivated
+        case .cancelled, .failed:
+            return .noSelectionMutation
+        }
+    }
+
+    private func reserveActivationGeneration() -> UInt64? {
+        guard activationGeneration < .max else { return nil }
+        activationGeneration += 1
+        return activationGeneration
     }
 
     private func addSubscriber(

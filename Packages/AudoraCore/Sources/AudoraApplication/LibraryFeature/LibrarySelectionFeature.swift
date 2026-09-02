@@ -1,4 +1,5 @@
 public enum LibrarySelectionIntent: Equatable, Sendable {
+    case start
     case create
     case chooseExisting
     case reopenRecent
@@ -7,6 +8,7 @@ public enum LibrarySelectionIntent: Equatable, Sendable {
 
     var command: LibraryCommand {
         switch self {
+        case .start: .start
         case .create: .create
         case .chooseExisting: .chooseExisting
         case .reopenRecent: .reopenRecent

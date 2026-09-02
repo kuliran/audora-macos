@@ -192,6 +192,44 @@ dependency event/outcome trace, expected next state, and expected effects. Durab
 job, admission, cancellation, and recovery behavior therefore does not live only in
 SwiftUI presentation models.
 
+### Library activation and processing authority
+
+Application treats a successful writable Library open as a new authority event,
+not merely as a `LibraryID` selection. `DefaultLibraryFeature` attaches a
+strictly increasing, process-local generation to the resulting
+`LibraryActivation`. Generations may contain gaps after cancelled or failed opens;
+they are ordering tokens for the current process, never a persisted schema
+generation or a value reconstructed across launch. Reopening or refreshing the
+same Library ID still produces a newer activation.
+
+`SessionProcessingFeature` observes each activation before it performs inventory
+and immediately installs a Library-wide processing fence. The fence prevents
+Start, Retry, model mutation, and processing-backed navigation until a bounded,
+complete inventory for that exact activation has reconciled every durable Job and
+left no unresolved worker authority or invalid completed publication. Partial,
+corrupt, unavailable, or unknown-newer attempt coordination keeps the fence in
+place. Equality includes both Library scope and activation generation: a newer
+activation supersedes suspended reconciliation, and an older result cannot clear
+the newer fence even when both activations name the same `LibraryID`.
+
+Infrastructure supplies a separate process-local replacement fence. Each active
+processing capability retains a Library access lease and captures
+`(LibraryID, workspaceGeneration, root device, root inode)`. The workspace
+generation advances whenever the active root is installed, replaced, or closed;
+filesystem identity detects a root swapped beneath the same path. Inventory
+creates one reconciliation capability bound to that exact retained scope, and
+subsequent source loads and Job transitions must present its opaque reconciliation
+ID. Selected-Session reads, Job mutations, canonical audio capabilities, and
+Transcript publication all verify the scope before and after work, while the
+synchronous filesystem mutation itself executes under the workspace actor's
+current-scope check. Any close, switch, lease loss, or same-ID root replacement
+therefore makes the old capability fail closed without mixing roots.
+
+These two generations serve different layers and must not be collapsed:
+`LibraryActivation.generation` orders Application reconciliation, while
+`workspaceGeneration` plus root identity confines Infrastructure authority. Neither
+is serialized into the portable Library.
+
 External providers never return authoritative Domain entities. Infrastructure
 first confines and reads transport artifacts, verifies their declared hashes and
 size limits, and parses their DTO shape. Transcription returns

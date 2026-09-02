@@ -461,7 +461,10 @@ final class ReviewFeatureTests: XCTestCase {
         XCTAssertEqual(retranscriptionSelections, [selection])
     }
 
-    func testProcessingRetranscriberSelectsSessionThenStartsExistingFeature() async throws {
+    @MainActor
+    func testProcessingRetranscriberSelectsSessionThenRetriesRecoverableFeature()
+        async throws
+    {
         let selection = ReviewSelection(
             scope: LibraryScope(libraryID: revisionFixtureLibraryID),
             sessionID: try SessionID("ses-20260830T120000000Z-2ABC")
@@ -476,7 +479,7 @@ final class ReviewFeatureTests: XCTestCase {
         let result = await retranscriber.retranscribe(selection)
 
         XCTAssertEqual(result, .completed)
-        let commands = await processing.commands
+        let commands = processing.commands
         XCTAssertEqual(
             commands,
             [
@@ -486,7 +489,58 @@ final class ReviewFeatureTests: XCTestCase {
                         sessionID: selection.sessionID
                     )
                 ),
-                .start,
+                .retry,
+            ]
+        )
+    }
+
+    @MainActor
+    func testProcessingRetranscriberHonorsApplicationLaunchAdmission()
+        async throws
+    {
+        let selection = ReviewSelection(
+            scope: LibraryScope(libraryID: revisionFixtureLibraryID),
+            sessionID: try SessionID("ses-20260830T120000000Z-2ABC")
+        )
+        let processing = SessionProcessingFeatureStub(
+            completedRevisionID: try TranscriptRevisionID(
+                "trv-20260830T121100000Z-5GHJ"
+            ),
+            admittedCommands: [
+                .selectSession(
+                    SessionProcessingSelection(
+                        scope: selection.scope,
+                        sessionID: selection.sessionID
+                    )
+                ),
+            ]
+        )
+        let retranscriber = SessionProcessingReviewRetranscriber(feature: processing)
+
+        let result = await retranscriber.retranscribe(selection)
+
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(
+            processing.attemptedCommands,
+            [
+                .selectSession(
+                    SessionProcessingSelection(
+                        scope: selection.scope,
+                        sessionID: selection.sessionID
+                    )
+                ),
+                .retry,
+            ]
+        )
+        XCTAssertEqual(
+            processing.commands,
+            [
+                .selectSession(
+                    SessionProcessingSelection(
+                        scope: selection.scope,
+                        sessionID: selection.sessionID
+                    )
+                ),
             ]
         )
     }
@@ -1196,8 +1250,12 @@ private actor SuspendedReviewAnnotationReadStub: ReviewAnnotationVisibilityPort 
     }
 }
 
-private actor SessionProcessingFeatureStub: SessionProcessingFeature {
+@MainActor
+private final class SessionProcessingFeatureStub:
+    ApplicationSessionProcessingFeature
+{
     private let completedRevisionID: TranscriptRevisionID
+    private let admittedCommands: [SessionProcessingCommand]?
     private var state: SessionProcessingFeatureState = .unavailable(
         SessionProcessingUnavailableSnapshot(
             selection: nil,
@@ -1206,18 +1264,33 @@ private actor SessionProcessingFeatureStub: SessionProcessingFeature {
         )
     )
     private(set) var commands: [SessionProcessingCommand] = []
+    private(set) var attemptedCommands: [SessionProcessingCommand] = []
 
-    init(completedRevisionID: TranscriptRevisionID) {
+    init(
+        completedRevisionID: TranscriptRevisionID,
+        admittedCommands: [SessionProcessingCommand]? = nil
+    ) {
         self.completedRevisionID = completedRevisionID
+        self.admittedCommands = admittedCommands
     }
 
-    var currentState: SessionProcessingFeatureState { state }
-
-    nonisolated var states: AsyncStream<SessionProcessingFeatureState> {
+    var sessionProcessingStates: AsyncStream<SessionProcessingFeatureState> {
         AsyncStream { $0.finish() }
     }
 
-    func send(_ command: SessionProcessingCommand) async {
+    func currentSessionProcessingState() async -> SessionProcessingFeatureState? {
+        state
+    }
+
+    func isSessionProcessingCommandAdmitted(
+        _ command: SessionProcessingCommand
+    ) -> Bool {
+        admittedCommands?.contains(command) ?? true
+    }
+
+    func send(_ command: SessionProcessingCommand) async -> Bool {
+        attemptedCommands.append(command)
+        guard isSessionProcessingCommandAdmitted(command) else { return false }
         commands.append(command)
         switch command {
         case let .selectSession(selection):
@@ -1229,19 +1302,22 @@ private actor SessionProcessingFeatureStub: SessionProcessingFeature {
                 )
             )
             precondition(selection.sessionID.rawValue.hasPrefix("ses-"))
-        case .start:
+        case .start, .retry:
             state = .completed(
                 SessionProcessingCompletedSnapshot(
                     sessionID: try! SessionID("ses-20260830T120000000Z-2ABC"),
                     jobID: try! TranscriptionJobID(
                         "job-20260830T121000000Z-4FGH"
                     ),
+                    revisionID: completedRevisionID,
                     selectedRevisionID: completedRevisionID
                 )
             )
-        case .clearSelection, .prepare, .reinstall, .retry:
+        case .activateLibrary, .activateLibraryAuthority, .clearSelection, .cancel,
+             .prepare, .reinstall:
             break
         }
+        return true
     }
 }
 

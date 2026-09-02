@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "sessions": [
+    {
+      "sessionId": "ses-20260830T120100000Z-2CDE",
+      "legacyJobIds": [],
+      "attempts": [
+        {
+          "sequence": 1,
+          "jobId": "job-20260830T120500000Z-5GHJ"
+        }
+      ],
+      "currentJobId": "job-20260830T120500000Z-5GHJ",
+      "pendingAttempt": null
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.race-candidate-wins-cancel",
+  "race": {
+    "kind": "candidateVsCancel",
+    "firstDurableWinner": "candidate",
+    "losingCompareAndSwap": "stale"
+  },
+  "initialJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "running"
+    }
+  ],
+  "initialState": {
+    "status": "running",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "phase": "transcribing",
+    "actions": ["cancel"]
+  },
+  "commands": [{ "kind": "cancel" }],
+  "dependencyTrace": [
+    { "port": "engine", "effect": "transcribe", "outcome": "candidate" },
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:07:00.000Z" },
+    { "port": "jobs", "effect": "transitionValidating", "outcome": "written-first" },
+    { "port": "jobs", "effect": "persistCancellationRequest", "outcome": "stale-lost" },
+    { "port": "jobs", "effect": "loadExact", "outcome": "first-durable-winner" },
+    { "port": "publisher", "effect": "publish", "outcome": "staleSelection" },
+    { "port": "jobs", "effect": "transitionFailed", "outcome": "written" }
+  ],
+  "expectedState": {
+    "status": "failed",
+    "reason": "staleSelection",
+    "actions": ["retry"]
+  },
+  "expectedJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "failed",
+      "failure": "staleSelection"
+    }
+  ],
+  "expectedEffects": [
+    { "kind": "firstDurableWinnerPreserved" },
+    { "kind": "noWorkerCancellation" },
+    { "kind": "noAutomaticRerun" },
+    { "kind": "sessionRetained" },
+    { "kind": "noPublication" }
+  ]
+}

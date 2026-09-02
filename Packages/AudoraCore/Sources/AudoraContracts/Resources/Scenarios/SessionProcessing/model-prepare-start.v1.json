@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "scenarioId": "session-processing.model-prepare-retry",
+  "scenarioId": "session-processing.model-prepare-start",
   "initialState": {
     "status": "unavailable",
     "reason": "noSession",
@@ -10,11 +10,11 @@
     { "kind": "selectSession" },
     { "kind": "start" },
     { "kind": "prepare" },
-    { "kind": "retry" }
+    { "kind": "start" }
   ],
   "dependencyTrace": [
-    { "port": "source", "effect": "load", "outcome": "available" },
     { "port": "jobs", "effect": "latest", "outcome": "none" },
+    { "port": "source", "effect": "load", "outcome": "available" },
     { "port": "runtime", "effect": "resolve", "outcome": "qualified" },
     { "port": "model", "effect": "verify", "outcome": "missing" },
     { "port": "runtime", "effect": "prepare", "outcome": "qualified" },
@@ -25,6 +25,7 @@
     { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:06:00.000Z" },
     { "port": "identifiers", "effect": "generateJobId", "outcome": "job-20260830T120500000Z-5GHJ" },
     { "port": "identifiers", "effect": "generateRevisionId", "outcome": "trv-20260830T120600000Z-6JKM" },
+    { "port": "identifiers", "effect": "generateCancellationAuthorityId", "outcome": "cancel-synthetic-authority" },
     { "port": "jobs", "effect": "create", "outcome": "written" },
     { "port": "jobs", "effect": "transitionRunning", "outcome": "written" },
     { "port": "engine", "effect": "transcribe", "outcome": "candidate" },
@@ -34,6 +35,7 @@
   ],
   "expectedState": {
     "status": "completed",
+    "revisionId": "trv-20260830T120600000Z-6JKM",
     "selectedRevisionId": "trv-20260830T120600000Z-6JKM"
   },
   "expectedEffects": [

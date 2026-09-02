@@ -10,6 +10,143 @@ import XCTest
 private func attachmentFenceTestFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 
 final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
+    func testProcessingScopeRootReplacementRejectsAudioExactReopenAndPublication()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let initial = try transcriptRevision(for: receipt)
+            let writer = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await writer.publishAndSelect(
+                initial,
+                expectedSelectedRevisionID: nil
+            )
+            let expectedRootIdentity = try XCTUnwrap(
+                SessionProcessingRootIdentity.capture(root)
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID,
+                expectedRootIdentity: expectedRootIdentity
+            )
+            let parent = root.deletingLastPathComponent()
+            let replacement = parent.appendingPathComponent(
+                "Replacement.audoralibrary",
+                isDirectory: true
+            )
+            let displaced = parent.appendingPathComponent(
+                "Displaced.audoralibrary",
+                isDirectory: true
+            )
+            try FileManager.default.copyItem(at: root, to: replacement)
+            try FileManager.default.moveItem(at: root, to: displaced)
+            try FileManager.default.moveItem(at: replacement, to: root)
+            let selection = SessionProcessingSelection(
+                scope: LibraryScope(libraryID: receipt.libraryID),
+                sessionID: receipt.sessionID
+            )
+
+            guard case .integrityMismatch = await repository.loadTranscriptionAudio(
+                for: selection
+            ) else {
+                return XCTFail("replacement must not receive retained source authority")
+            }
+            do {
+                _ = try await repository.reopenRevision(
+                    sessionID: receipt.sessionID,
+                    revisionID: initial.revisionID
+                )
+                XCTFail("replacement must not receive retained exact-reopen authority")
+            } catch {
+                XCTAssertEqual(
+                    error as? TranscriptRevisionRepositoryFailure,
+                    .sessionIntegrityMismatch
+                )
+            }
+            do {
+                _ = try await repository.publishAndSelect(
+                    transcriptRevision(
+                        for: receipt,
+                        revisionID: "trv-20260830T121100000Z-5GHJ"
+                    ),
+                    expectedSelectedRevisionID: initial.revisionID
+                )
+                XCTFail("replacement must not receive retained publication authority")
+            } catch {
+                XCTAssertEqual(
+                    error as? TranscriptRevisionRepositoryFailure,
+                    .sessionIntegrityMismatch
+                )
+            }
+            let replacementSession = try sessionJSONObject(
+                root: root,
+                sessionID: receipt.sessionID
+            )
+            XCTAssertEqual(
+                replacementSession["transcriptRevisionIds"] as? [String],
+                [initial.revisionID.rawValue]
+            )
+        }
+    }
+
+    func testProcessingScopeRootSwapAtPublicationPrecommitCannotCommitEitherRoot()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let expectedRootIdentity = try XCTUnwrap(
+                SessionProcessingRootIdentity.capture(root)
+            )
+            let parent = root.deletingLastPathComponent()
+            let replacement = parent.appendingPathComponent(
+                "Replacement.audoralibrary",
+                isDirectory: true
+            )
+            let displaced = parent.appendingPathComponent(
+                "Displaced.audoralibrary",
+                isDirectory: true
+            )
+            try FileManager.default.copyItem(at: root, to: replacement)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID,
+                expectedRootIdentity: expectedRootIdentity,
+                fault: { point in
+                    guard point == .afterSessionManifestPartialFlush else { return }
+                    try FileManager.default.moveItem(at: root, to: displaced)
+                    try FileManager.default.moveItem(at: replacement, to: root)
+                }
+            )
+
+            do {
+                _ = try await repository.publishAndSelect(
+                    transcriptRevision(for: receipt),
+                    expectedSelectedRevisionID: nil
+                )
+                XCTFail("precommit root swap must fail closed")
+            } catch {
+                XCTAssertEqual(
+                    error as? TranscriptRevisionRepositoryFailure,
+                    .sessionIntegrityMismatch
+                )
+            }
+            XCTAssertEqual(
+                try sessionJSONObject(root: root, sessionID: receipt.sessionID)[
+                    "transcriptRevisionIds"
+                ] as? [String],
+                []
+            )
+            XCTAssertEqual(
+                try sessionJSONObject(
+                    root: displaced,
+                    sessionID: receipt.sessionID
+                )["transcriptRevisionIds"] as? [String],
+                []
+            )
+        }
+    }
+
     func testChatCreateRejectsAttachmentMovedToTrashAtFinalInstallBoundary()
         async throws
     {
@@ -1390,6 +1527,96 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 sessionID: receipt.sessionID
             )
             XCTAssertEqual(reopened.selectedRevision, selected)
+        }
+    }
+
+    func testReopensInventoriedRevisionByIDWithoutChangingNewerSelection()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revisionA = try transcriptRevision(for: receipt)
+            let revisionB = try transcriptRevision(
+                for: receipt,
+                revisionID: "trv-20260830T121100000Z-6HJK"
+            )
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revisionA,
+                expectedSelectedRevisionID: nil
+            )
+            _ = try await repository.publishAndSelect(
+                revisionB,
+                expectedSelectedRevisionID: revisionA.revisionID
+            )
+
+            let reopenedA = try await repository.reopenRevision(
+                sessionID: receipt.sessionID,
+                revisionID: revisionA.revisionID
+            )
+            let selected = try await repository.reopenSelected(
+                sessionID: receipt.sessionID
+            )
+
+            XCTAssertEqual(reopenedA, revisionA)
+            XCTAssertEqual(selected.selectedRevision, revisionB)
+            XCTAssertEqual(
+                selected.revisionIDs,
+                [revisionA.revisionID, revisionB.revisionID]
+            )
+        }
+    }
+
+    func testExactReopenRejectsMissingAndCorruptRetainedRevision() async throws {
+        for corruptInsteadOfRemove in [false, true] {
+            try await withRecordedSession { root, receipt in
+                let revisionA = try transcriptRevision(for: receipt)
+                let revisionB = try transcriptRevision(
+                    for: receipt,
+                    revisionID: "trv-20260830T121100000Z-6HJK"
+                )
+                let repository = PortableTranscriptRevisionRepository(
+                    root: root,
+                    libraryID: receipt.libraryID
+                )
+                _ = try await repository.publishAndSelect(
+                    revisionA,
+                    expectedSelectedRevisionID: nil
+                )
+                _ = try await repository.publishAndSelect(
+                    revisionB,
+                    expectedSelectedRevisionID: revisionA.revisionID
+                )
+                let retainedRoot = root.appendingPathComponent(
+                    "sessions/\(receipt.sessionID.rawValue)/transcripts/\(revisionA.revisionID.rawValue)"
+                )
+                if corruptInsteadOfRemove {
+                    try Data("{}".utf8).write(
+                        to: retainedRoot.appendingPathComponent("revision.json")
+                    )
+                } else {
+                    try FileManager.default.removeItem(at: retainedRoot)
+                }
+
+                do {
+                    _ = try await repository.reopenRevision(
+                        sessionID: receipt.sessionID,
+                        revisionID: revisionA.revisionID
+                    )
+                    XCTFail("expected invalid retained Revision rejection")
+                } catch {
+                    XCTAssertEqual(
+                        error as? TranscriptRevisionRepositoryFailure,
+                        .sessionIntegrityMismatch
+                    )
+                }
+                let selected = try await repository.reopenSelected(
+                    sessionID: receipt.sessionID
+                )
+                XCTAssertEqual(selected.selectedRevision, revisionB)
+            }
         }
     }
 

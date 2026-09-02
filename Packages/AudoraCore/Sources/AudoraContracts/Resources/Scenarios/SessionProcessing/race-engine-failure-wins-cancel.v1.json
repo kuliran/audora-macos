@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "session-processing.race-engine-failure-wins-cancel",
+  "race": {
+    "kind": "engineFailureVsCancel",
+    "firstDurableWinner": "engineFailure",
+    "losingCompareAndSwap": "stale"
+  },
+  "initialJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "running"
+    }
+  ],
+  "initialState": {
+    "status": "running",
+    "jobId": "job-20260830T120500000Z-5GHJ",
+    "phase": "transcribing",
+    "actions": ["cancel"]
+  },
+  "commands": [{ "kind": "cancel" }],
+  "dependencyTrace": [
+    { "port": "engine", "effect": "transcribe", "outcome": "engineFailed" },
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:07:00.000Z" },
+    { "port": "jobs", "effect": "transitionFailed", "outcome": "written-first" },
+    { "port": "jobs", "effect": "persistCancellationRequest", "outcome": "stale-lost" },
+    { "port": "jobs", "effect": "loadExact", "outcome": "first-durable-winner" }
+  ],
+  "expectedState": {
+    "status": "failed",
+    "reason": "engineFailed",
+    "actions": ["retry"]
+  },
+  "expectedJobs": [
+    {
+      "jobId": "job-20260830T120500000Z-5GHJ",
+      "revisionId": "trv-20260830T120600000Z-6JKM",
+      "state": "failed",
+      "failure": "engineFailed"
+    }
+  ],
+  "expectedEffects": [
+    { "kind": "firstDurableWinnerPreserved" },
+    { "kind": "noWorkerCancellation" },
+    { "kind": "noAutomaticRerun" },
+    { "kind": "sessionRetained" },
+    { "kind": "noPublication" }
+  ]
+}

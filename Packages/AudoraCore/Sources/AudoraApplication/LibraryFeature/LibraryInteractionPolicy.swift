@@ -31,7 +31,8 @@ public enum LibraryInteractionPolicy {
     public static func availability(
         library: LibraryFeatureState?,
         audioImport: AudioImportFeatureState?,
-        recording: RecordingFeatureState
+        recording: RecordingFeatureState,
+        sessionProcessing: SessionProcessingFeatureState? = nil
     ) -> LibraryInteractionAvailability {
         guard let library, library.activity == nil else { return .unavailable }
 
@@ -51,12 +52,26 @@ public enum LibraryInteractionPolicy {
 
         let importOwnsMutation = audioImport?.isImporting == true
         let recordingOwnsMutation = recording.ownsLibraryMutationAuthority
+        let processingOwnsMutation = sessionProcessing?.ownsLibraryMutationAuthority == true
         return LibraryInteractionAvailability(
             canRevealLibrary: hasSelectedLibrary,
-            canMutateLibrarySelection: !importOwnsMutation && !recordingOwnsMutation,
+            canMutateLibrarySelection: !importOwnsMutation && !recordingOwnsMutation &&
+                !processingOwnsMutation,
             canUseAudioImportControls: hasWritableLibrary && !recordingOwnsMutation,
             canUseRecordingControls: hasWritableLibrary && !importOwnsMutation
         )
+    }
+}
+
+public extension SessionProcessingFeatureState {
+    var ownsLibraryMutationAuthority: Bool {
+        switch self {
+        case .preparing, .queued, .running, .cancelling, .validating,
+             .recoveryRequired:
+            true
+        case .unavailable, .ready, .completed, .failed, .cancelled, .interrupted:
+            false
+        }
     }
 }
 

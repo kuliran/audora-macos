@@ -7,6 +7,37 @@ import Foundation
 import XCTest
 
 final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
+    func testConcurrentCanonicalAudioDuplicatesHaveIndependentOpenDescriptions()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let input = try ConfinedCanonicalAudioInput(
+            copyingVerifiedCanonicalWAV: fixture.canonicalAudio,
+            capabilityID: fixture.request.audioCapabilityID,
+            fingerprint: fixture.request.audioFingerprint
+        )
+        let descriptors = try await withThrowingTaskGroup(of: Int32.self) { group in
+            for _ in 0..<2 {
+                group.addTask {
+                    try input.duplicateReadOnlyFileDescriptor()
+                }
+            }
+            var values: [Int32] = []
+            for try await descriptor in group { values.append(descriptor) }
+            return values
+        }
+        XCTAssertEqual(descriptors.count, 2)
+        defer { descriptors.forEach { Darwin.close($0) } }
+        let first = try XCTUnwrap(descriptors.first)
+        let second = try XCTUnwrap(descriptors.last)
+
+        XCTAssertEqual(lseek(first, 17, SEEK_SET), 17)
+        XCTAssertEqual(lseek(second, 0, SEEK_CUR), 0)
+        XCTAssertEqual(try readToEnd(first), fixture.canonicalAudio)
+        XCTAssertEqual(lseek(second, 0, SEEK_CUR), 0)
+        XCTAssertEqual(try readToEnd(second), fixture.canonicalAudio)
+    }
+
     func testExactHandshakeAndSingleHashVerifiedCandidateAreReturnedOffline() async throws {
         let fixture = try WorkerFixture()
         let artifact = try fixture.candidateArtifact()
@@ -97,6 +128,49 @@ final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
         XCTAssertEqual(request["qualificationProfileId"] as? String, fixture.profile.profileID)
         let closeCount = await host.closeCount
         XCTAssertEqual(closeCount, 1)
+    }
+
+    func testPhaseIsValidatedAndDeliveredBeforeWorkerExecutionCompletes() async throws {
+        let fixture = try WorkerFixture()
+        let artifact = try fixture.candidateArtifact()
+        let hash = sha256(artifact)
+        let phase = try line([
+            "v": 1, "type": "phase",
+            "jobId": fixture.request.jobID.rawValue,
+            "phase": "loading_model",
+        ])
+        let terminal = try fixture.candidateReady(hash: hash)
+        let host = LiveStreamingWorkerHostProbe(
+            helloLine: try fixture.hello(),
+            phaseLine: phase,
+            terminalLine: terminal,
+            artifact: ConfinedTranscriptionWorkerArtifact(
+                relativePath: "result.json",
+                data: artifact
+            )
+        )
+        let events = WorkerEventProbe()
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+        let run = Task {
+            try await engine.transcribe(fixture.request) { event in
+                await events.append(event)
+            }
+        }
+
+        await host.waitUntilPhaseWasDelivered()
+        let liveEvents = await events.values
+        let executionReturned = await host.executionReturned()
+        XCTAssertEqual(liveEvents, [.phase(.loadingModel)])
+        XCTAssertFalse(executionReturned)
+
+        await host.releaseExecution()
+        let verified = try await run.value
+        XCTAssertEqual(verified.artifactFingerprint.sha256, hash)
     }
 
     func testHandshakeRuntimeSubstitutionFailsBeforePrivateCapabilitiesAreGranted()
@@ -207,6 +281,310 @@ final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
             )
         }
     }
+
+    func testCancelCooperatesThenReapsOnceAndRejectsLateCandidate() async throws {
+        let fixture = try WorkerFixture()
+        let artifact = try fixture.candidateArtifact()
+        let host = SuspendingWorkerHostProbe(
+            helloLine: try fixture.hello(),
+            lateResult: ConfinedTranscriptionWorkerResult(
+                stdoutLines: [
+                    try fixture.candidateReady(hash: sha256(artifact)),
+                ],
+                candidateArtifact: ConfinedTranscriptionWorkerArtifact(
+                    relativePath: "result.json",
+                    data: artifact
+                ),
+                exitStatus: 0
+            )
+        )
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+        let run = Task {
+            do {
+                _ = try await engine.transcribe(fixture.request) { _ in }
+                return nil as TranscriptionEngineFailure?
+            } catch {
+                return error as? TranscriptionEngineFailure
+            }
+        }
+        await host.waitUntilExecutionStarts()
+
+        async let first = engine.cancel(fixture.request.execution)
+        async let duplicate = engine.cancel(fixture.request.execution)
+        let outcomes = await [first, duplicate]
+        let failure = await run.value
+        let cancelCount = await host.cancelCountValue()
+        let closeCount = await host.closeCountValue()
+        let graceValues = await host.graceValues()
+
+        XCTAssertEqual(outcomes, [.reaped, .reaped])
+        XCTAssertEqual(failure, .cancelled)
+        XCTAssertEqual(cancelCount, 1)
+        XCTAssertEqual(closeCount, 1)
+        XCTAssertEqual(
+            graceValues,
+            [ConfinedTranscriptionWorkerLimits.versionOne.terminationGraceMilliseconds]
+        )
+    }
+
+    func testCancelReapsAuthorityWhileStartupIsSuspendedAndRejectsLateHello()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let host = SuspendedStartupWorkerHostProbe(
+            helloLine: try fixture.hello()
+        )
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+        let run = Task {
+            do {
+                _ = try await engine.transcribe(fixture.request) { _ in }
+                return nil as TranscriptionEngineFailure?
+            } catch {
+                return error as? TranscriptionEngineFailure
+            }
+        }
+        await host.waitUntilStartupSuspends()
+
+        let cancellation = Task {
+            await engine.cancel(fixture.request.execution)
+        }
+        var reapedBeforeHello = false
+        for _ in 0..<1_000 {
+            if await host.startupCancellationCount() == 1 {
+                reapedBeforeHello = true
+                break
+            }
+            await Task.yield()
+        }
+        await host.releaseLateHello()
+
+        let cancellationOutcome = await cancellation.value
+        let runFailure = await run.value
+        let cancelledExecutions = await host.cancelledExecutionReferences()
+        let startupExecution = await host.startupExecutionReference()
+        let executionCount = await host.executionCount()
+        let closeCount = await host.closeCountValue()
+        XCTAssertTrue(reapedBeforeHello)
+        XCTAssertEqual(cancellationOutcome, .reaped)
+        XCTAssertEqual(runFailure, .cancelled)
+        XCTAssertEqual(cancelledExecutions, [fixture.request.execution])
+        XCTAssertEqual(startupExecution, fixture.request.execution)
+        XCTAssertEqual(executionCount, 0)
+        XCTAssertEqual(closeCount, 1)
+    }
+
+    func testUnconfirmedCancellationIsRetriedUntilHostProvesWorkerReaped()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let host = SequencedCancellationWorkerHostProbe(
+            outcomes: [.unableToConfirm, .reaped]
+        )
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+
+        let first = await engine.cancel(fixture.request.execution)
+        let second = await engine.cancel(fixture.request.execution)
+        let presence = await engine.workerPresence(for: fixture.request.execution)
+        let cancelCount = await host.cancelCountValue()
+
+        XCTAssertEqual(first, .unableToConfirm)
+        XCTAssertEqual(second, .reaped)
+        XCTAssertEqual(presence, .absent)
+        XCTAssertEqual(cancelCount, 2)
+    }
+
+    func testHostStartThatSpawnsThenThrowsIsReapedBeforeLaunchFailureReturns()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let host = SpawnThenThrowWorkerHostProbe(outcomes: [.reaped])
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+
+        await XCTAssertThrowsErrorAsync(
+            try await engine.transcribe(fixture.request) { _ in }
+        ) { error in
+            XCTAssertEqual(error as? TranscriptionEngineFailure, .launchFailed)
+        }
+
+        let cancellations = await host.cancelledExecutions
+        let presence = await engine.workerPresence(for: fixture.request.execution)
+        XCTAssertEqual(cancellations, [fixture.request.execution])
+        XCTAssertEqual(presence, .absent)
+    }
+
+    func testUnconfirmedSpawnThenThrowRetainsAuthorityAndNeverStartsSecondWorker()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let host = SpawnThenThrowWorkerHostProbe(
+            outcomes: [.unableToConfirm, .reaped]
+        )
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+
+        await XCTAssertThrowsErrorAsync(
+            try await engine.transcribe(fixture.request) { _ in }
+        ) { error in
+            XCTAssertEqual(
+                error as? TranscriptionEngineFailure,
+                .workerAbsenceUnconfirmed
+            )
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await engine.transcribe(fixture.request) { _ in }
+        ) { error in
+            XCTAssertEqual(error as? TranscriptionEngineFailure, .cancelled)
+        }
+
+        let startCount = await host.startCount
+        let retainedPresence = await engine.workerPresence(
+            for: fixture.request.execution
+        )
+        XCTAssertEqual(startCount, 1)
+        XCTAssertEqual(retainedPresence, .present)
+        let finalCancellation = await engine.cancel(fixture.request.execution)
+        XCTAssertEqual(finalCancellation, .reaped)
+    }
+
+    func testQualificationBlockedHostProvesItsNeverLaunchedAuthorityAbsent()
+        async throws
+    {
+        let execution = try WorkerFixture().request.execution
+        let host = QualificationBlockedTranscriptionWorkerHost()
+
+        let presence = await host.workerPresence(for: execution)
+        let cancellation = await host.cancelAndReap(
+            execution,
+            graceMilliseconds: 50
+        )
+
+        XCTAssertEqual(presence, .absent)
+        XCTAssertEqual(cancellation, .alreadyAbsent)
+    }
+
+    func testCancelWhileLiveEventIsObservedStillRejectsLaterCandidate() async throws {
+        let fixture = try WorkerFixture()
+        let artifact = try fixture.candidateArtifact()
+        let host = WorkerHostProbe(
+            helloLine: try fixture.hello(),
+            result: .success(
+                ConfinedTranscriptionWorkerResult(
+                    stdoutLines: [
+                        try line([
+                            "v": 1, "type": "phase",
+                            "jobId": fixture.request.jobID.rawValue,
+                            "phase": "transcribing",
+                        ]),
+                        try fixture.candidateReady(hash: sha256(artifact)),
+                    ],
+                    candidateArtifact: ConfinedTranscriptionWorkerArtifact(
+                        relativePath: "result.json",
+                        data: artifact
+                    ),
+                    exitStatus: 0
+                )
+            )
+        )
+        let events = SuspendedWorkerEventProbe()
+        let engine = ConfinedJSONLTranscriptionEngine(
+            host: host,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+        let run = Task {
+            do {
+                _ = try await engine.transcribe(fixture.request) { event in
+                    await events.receive(event)
+                }
+                return nil as TranscriptionEngineFailure?
+            } catch {
+                return error as? TranscriptionEngineFailure
+            }
+        }
+        await events.waitUntilReceived()
+
+        let outcome = await engine.cancel(fixture.request.execution)
+        await events.release()
+        let failure = await run.value
+        let closeCount = await host.closeCount
+
+        XCTAssertEqual(outcome, .reaped)
+        XCTAssertEqual(failure, .cancelled)
+        XCTAssertEqual(closeCount, 1)
+    }
+
+    func testRelaunchRecoveryRejectsEscapingAndCorruptCandidateArtifacts()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let artifact = try fixture.candidateArtifact()
+        let hash = sha256(artifact)
+        let escaping = RecoveryWorkerHostProbe(
+            resolution: .available(
+                ConfinedTranscriptionWorkerArtifact(
+                    relativePath: "../result.json",
+                    data: artifact
+                )
+            )
+        )
+        let escapingEngine = ConfinedJSONLTranscriptionEngine(
+            host: escaping,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+
+        let escapingResult = await escapingEngine.recoverCandidate(
+            for: fixture.validatingJob(candidateArtifactSHA256: hash)
+        )
+        XCTAssertEqual(escapingResult, .integrityMismatch)
+
+        var corrupt = artifact
+        corrupt[corrupt.startIndex] ^= 0x01
+        let corruptHost = RecoveryWorkerHostProbe(
+            resolution: .available(
+                ConfinedTranscriptionWorkerArtifact(
+                    relativePath: "result.json",
+                    data: corrupt
+                )
+            )
+        )
+        let corruptEngine = ConfinedJSONLTranscriptionEngine(
+            host: corruptHost,
+            audio: try WorkerAudioProbe(fixture: fixture),
+            runtime: WorkerRuntimeProbe(fixture: fixture),
+            model: WorkerModelProbe(fixture: fixture)
+        )
+        let corruptResult = await corruptEngine.recoverCandidate(
+            for: fixture.validatingJob(candidateArtifactSHA256: hash)
+        )
+        XCTAssertEqual(corruptResult, .integrityMismatch)
+    }
 }
 
 private func readToEnd(_ descriptor: Int32) throws -> Data {
@@ -256,10 +634,15 @@ private actor WorkerHostProbe:
     }
 
     func execute(
-        _ execution: ConfinedTranscriptionWorkerExecution
+        _ execution: ConfinedTranscriptionWorkerExecution,
+        receiveStandardOutputLine: @escaping @Sendable (Data) async throws -> Void
     ) async throws -> ConfinedTranscriptionWorkerResult {
         executions.append(execution)
-        return try result.get()
+        let value = try result.get()
+        for line in value.stdoutLines {
+            try await receiveStandardOutputLine(line)
+        }
+        return value
     }
 
     func close() async {
@@ -267,12 +650,333 @@ private actor WorkerHostProbe:
         closed = true
         closeCount += 1
     }
+
+    func cancelAndReap(
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome {
+        await close()
+        return .reaped
+    }
+}
+
+private actor SuspendingWorkerHostProbe:
+    ConfinedTranscriptionWorkerHost,
+    ConfinedTranscriptionWorkerSession
+{
+    private let helloLine: Data
+    private let lateResult: ConfinedTranscriptionWorkerResult
+    private var executionContinuation: CheckedContinuation<Void, Never>?
+    private var executionStarted = false
+    private var cancelCount = 0
+    private var closeCount = 0
+    private var terminationGraces: [UInt32] = []
+
+    init(helloLine: Data, lateResult: ConfinedTranscriptionWorkerResult) {
+        self.helloLine = helloLine
+        self.lateResult = lateResult
+    }
+
+    func start(
+        _ invocation: ConfinedTranscriptionWorkerInvocation
+    ) async throws -> ConfinedTranscriptionWorkerStarted {
+        ConfinedTranscriptionWorkerStarted(helloLine: helloLine, session: self)
+    }
+
+    func execute(
+        _ execution: ConfinedTranscriptionWorkerExecution,
+        receiveStandardOutputLine: @escaping @Sendable (Data) async throws -> Void
+    ) async throws -> ConfinedTranscriptionWorkerResult {
+        executionStarted = true
+        await withCheckedContinuation { continuation in
+            executionContinuation = continuation
+        }
+        for line in lateResult.stdoutLines {
+            try await receiveStandardOutputLine(line)
+        }
+        return lateResult
+    }
+
+    func cancelAndReap(
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome {
+        cancelCount += 1
+        terminationGraces.append(graceMilliseconds)
+        executionContinuation?.resume()
+        executionContinuation = nil
+        return .reaped
+    }
+
+    func close() async {
+        closeCount += 1
+        executionContinuation?.resume()
+        executionContinuation = nil
+    }
+
+    func waitUntilExecutionStarts() async {
+        while !executionStarted { await Task.yield() }
+    }
+
+    func cancelCountValue() -> Int { cancelCount }
+    func closeCountValue() -> Int { closeCount }
+    func graceValues() -> [UInt32] { terminationGraces }
+}
+
+private actor SuspendedStartupWorkerHostProbe:
+    ConfinedTranscriptionWorkerHost,
+    ConfinedTranscriptionWorkerSession
+{
+    private let helloLine: Data
+    private var startupContinuation: CheckedContinuation<Void, Never>?
+    private var startupSuspended = false
+    private var startupExecution: TranscriptionExecutionReference?
+    private var cancelledExecutions: [TranscriptionExecutionReference] = []
+    private var executions = 0
+    private var closeCount = 0
+
+    init(helloLine: Data) {
+        self.helloLine = helloLine
+    }
+
+    func start(
+        _ invocation: ConfinedTranscriptionWorkerInvocation
+    ) async throws -> ConfinedTranscriptionWorkerStarted {
+        startupExecution = invocation.execution
+        startupSuspended = true
+        await withCheckedContinuation { continuation in
+            startupContinuation = continuation
+        }
+        return ConfinedTranscriptionWorkerStarted(
+            helloLine: helloLine,
+            session: self
+        )
+    }
+
+    func cancelAndReap(
+        _ execution: TranscriptionExecutionReference,
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome {
+        cancelledExecutions.append(execution)
+        return .reaped
+    }
+
+    func execute(
+        _ execution: ConfinedTranscriptionWorkerExecution,
+        receiveStandardOutputLine: @escaping @Sendable (Data) async throws -> Void
+    ) async throws -> ConfinedTranscriptionWorkerResult {
+        executions += 1
+        throw TranscriptionEngineFailure.cancelled
+    }
+
+    func cancelAndReap(
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome { .reaped }
+
+    func close() async { closeCount += 1 }
+
+    func waitUntilStartupSuspends() async {
+        while !startupSuspended { await Task.yield() }
+    }
+
+    func releaseLateHello() {
+        startupContinuation?.resume()
+        startupContinuation = nil
+    }
+
+    func startupCancellationCount() -> Int { cancelledExecutions.count }
+    func cancelledExecutionReferences() -> [TranscriptionExecutionReference] {
+        cancelledExecutions
+    }
+    func startupExecutionReference() -> TranscriptionExecutionReference? {
+        startupExecution
+    }
+    func executionCount() -> Int { executions }
+    func closeCountValue() -> Int { closeCount }
+}
+
+private actor SequencedCancellationWorkerHostProbe:
+    ConfinedTranscriptionWorkerHost
+{
+    private var outcomes: [TranscriptionCancellationOutcome]
+    private(set) var cancelCount = 0
+
+    init(outcomes: [TranscriptionCancellationOutcome]) {
+        self.outcomes = outcomes
+    }
+
+    func start(
+        _ invocation: ConfinedTranscriptionWorkerInvocation
+    ) async throws -> ConfinedTranscriptionWorkerStarted {
+        throw TranscriptionEngineFailure.launchFailed
+    }
+
+    func cancelAndReap(
+        _ execution: TranscriptionExecutionReference,
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome {
+        cancelCount += 1
+        guard !outcomes.isEmpty else { return .unableToConfirm }
+        return outcomes.removeFirst()
+    }
+
+    func workerPresence(
+        for execution: TranscriptionExecutionReference
+    ) async -> TranscriptionWorkerPresence {
+        .unknown
+    }
+
+    func cancelCountValue() -> Int { cancelCount }
+}
+
+private actor SpawnThenThrowWorkerHostProbe: ConfinedTranscriptionWorkerHost {
+    private var outcomes: [TranscriptionCancellationOutcome]
+    private(set) var startCount = 0
+    private(set) var cancelledExecutions: [TranscriptionExecutionReference] = []
+
+    init(outcomes: [TranscriptionCancellationOutcome]) {
+        self.outcomes = outcomes
+    }
+
+    func start(
+        _ invocation: ConfinedTranscriptionWorkerInvocation
+    ) async throws -> ConfinedTranscriptionWorkerStarted {
+        startCount += 1
+        throw TranscriptionEngineFailure.launchFailed
+    }
+
+    func cancelAndReap(
+        _ execution: TranscriptionExecutionReference,
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome {
+        cancelledExecutions.append(execution)
+        guard !outcomes.isEmpty else { return .unableToConfirm }
+        return outcomes.removeFirst()
+    }
+
+    func workerPresence(
+        for execution: TranscriptionExecutionReference
+    ) async -> TranscriptionWorkerPresence {
+        .unknown
+    }
+}
+
+private actor LiveStreamingWorkerHostProbe:
+    ConfinedTranscriptionWorkerHost,
+    ConfinedTranscriptionWorkerSession
+{
+    private let helloLine: Data
+    private let phaseLine: Data
+    private let terminalLine: Data
+    private let artifact: ConfinedTranscriptionWorkerArtifact
+    private var phaseWasDelivered = false
+    private var didReturn = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(
+        helloLine: Data,
+        phaseLine: Data,
+        terminalLine: Data,
+        artifact: ConfinedTranscriptionWorkerArtifact
+    ) {
+        self.helloLine = helloLine
+        self.phaseLine = phaseLine
+        self.terminalLine = terminalLine
+        self.artifact = artifact
+    }
+
+    func start(
+        _ invocation: ConfinedTranscriptionWorkerInvocation
+    ) async throws -> ConfinedTranscriptionWorkerStarted {
+        ConfinedTranscriptionWorkerStarted(helloLine: helloLine, session: self)
+    }
+
+    func execute(
+        _ execution: ConfinedTranscriptionWorkerExecution,
+        receiveStandardOutputLine: @escaping @Sendable (Data) async throws -> Void
+    ) async throws -> ConfinedTranscriptionWorkerResult {
+        try await receiveStandardOutputLine(phaseLine)
+        phaseWasDelivered = true
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+        try await receiveStandardOutputLine(terminalLine)
+        didReturn = true
+        return ConfinedTranscriptionWorkerResult(
+            stdoutLines: [phaseLine, terminalLine],
+            candidateArtifact: artifact,
+            exitStatus: 0
+        )
+    }
+
+    func cancelAndReap(
+        graceMilliseconds: UInt32
+    ) async -> TranscriptionCancellationOutcome {
+        continuation?.resume()
+        continuation = nil
+        return .reaped
+    }
+
+    func close() async {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func waitUntilPhaseWasDelivered() async {
+        while !phaseWasDelivered { await Task.yield() }
+    }
+
+    func releaseExecution() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func executionReturned() -> Bool { didReturn }
+}
+
+private actor RecoveryWorkerHostProbe: ConfinedTranscriptionWorkerHost {
+    private let resolution: ConfinedStagedCandidateResolution
+
+    init(resolution: ConfinedStagedCandidateResolution) {
+        self.resolution = resolution
+    }
+
+    func start(
+        _ invocation: ConfinedTranscriptionWorkerInvocation
+    ) async throws -> ConfinedTranscriptionWorkerStarted {
+        throw TranscriptionEngineFailure.launchFailed
+    }
+
+    func recoverCandidate(
+        _ request: ConfinedTranscriptionCandidateRecoveryRequest
+    ) async -> ConfinedStagedCandidateResolution {
+        resolution
+    }
 }
 
 private actor WorkerEventProbe {
     private(set) var values: [TranscriptionEvent] = []
 
     func append(_ event: TranscriptionEvent) { values.append(event) }
+}
+
+private actor SuspendedWorkerEventProbe {
+    private var hasReceived = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func receive(_ event: TranscriptionEvent) async {
+        hasReceived = true
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func waitUntilReceived() async {
+        while !hasReceived { await Task.yield() }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
 }
 
 private actor WorkerAudioProbe: ConfinedTranscriptionAudioResolving {
@@ -454,7 +1158,10 @@ private struct WorkerFixture {
             createdAt: try UTCInstant("2026-08-30T12:06:00.000Z"),
             profile: profile,
             runtimeCapability: runtimeCapability,
-            modelCapability: modelCapability
+            modelCapability: modelCapability,
+            cancellationAuthorityID: try TranscriptionCancellationAuthorityID(
+                "cancel-engine-fixture"
+            )
         )
     }
 
@@ -537,6 +1244,19 @@ private struct WorkerFixture {
             ],
             "audioEvents": [],
         ])
+    }
+
+    func validatingJob(candidateArtifactSHA256: String) -> SessionProcessingJob {
+        SessionProcessingJob(
+            jobID: request.jobID,
+            sessionID: request.selection.sessionID,
+            revisionID: request.revisionID,
+            profileID: profile.profileID,
+            createdAt: request.createdAt,
+            state: .validating,
+            cancellationAuthorityID: request.execution.cancellationAuthorityID!,
+            candidateArtifactSHA256: candidateArtifactSHA256
+        )
     }
 }
 

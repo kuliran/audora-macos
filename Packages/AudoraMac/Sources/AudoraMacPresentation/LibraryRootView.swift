@@ -17,13 +17,18 @@ public struct LibraryRootView: View {
         feature: any LibraryFeature,
         audioImportFeature: any AudioImportFeature,
         recordingFeature: any RecordingFeature,
-        sessionProcessingFeature: any SessionProcessingFeature,
+        sessionProcessingFeature: any ApplicationSessionProcessingFeature,
         reviewFeature: any ReviewFeature,
         chatDispatcher: ChatCommandDispatcher,
         librarySelectionDispatcher: LibrarySelectionCommandDispatcher,
         windowCoordinator: MainWindowCoordinator
     ) {
-        _model = StateObject(wrappedValue: LibraryPresentationModel(feature: feature))
+        _model = StateObject(
+            wrappedValue: LibraryPresentationModel(
+                feature: feature,
+                librarySelection: librarySelectionDispatcher
+            )
+        )
         _audioImportModel = StateObject(
             wrappedValue: AudioImportPresentationModel(feature: audioImportFeature)
         )
@@ -59,12 +64,19 @@ public struct LibraryRootView: View {
                     )
                 )
                 HStack {
-                    Button("Create Library") { model.send(.create) }
-                    Button("Choose Library…") { model.send(.chooseExisting) }
+                    Button("Create Library") {
+                        librarySelectionDispatcher.enqueue(.create)
+                    }
+                    Button("Choose Library…") {
+                        librarySelectionDispatcher.enqueue(.chooseExisting)
+                    }
                     if recentAvailable {
-                        Button("Reopen Recent") { model.send(.reopenRecent) }
+                        Button("Reopen Recent") {
+                            librarySelectionDispatcher.enqueue(.reopenRecent)
+                        }
                     }
                 }
+                .disabled(chatDispatcher.isChatBoundaryPending)
 
             case let .some(.active(library)):
                 Image(systemName: "waveform.circle.fill")
@@ -78,10 +90,17 @@ public struct LibraryRootView: View {
                 Text(profileDescription(library.profile))
                     .foregroundStyle(.secondary)
                 libraryActions
+                    .disabled(chatDispatcher.isChatBoundaryPending)
                 audioImportActions
-                    .disabled(!interactionAvailability.canUseAudioImportControls)
+                    .disabled(
+                        !interactionAvailability.canUseAudioImportControls ||
+                            chatDispatcher.isChatBoundaryPending
+                    )
                 RecordingView(model: recordingModel)
-                    .disabled(!interactionAvailability.canUseRecordingControls)
+                    .disabled(
+                        !interactionAvailability.canUseRecordingControls ||
+                            chatDispatcher.isChatBoundaryPending
+                    )
                 SessionProcessingView(model: sessionProcessingModel)
                 ReviewView(model: reviewModel)
                 Divider()
@@ -90,6 +109,7 @@ public struct LibraryRootView: View {
                     scope: LibraryScope(libraryID: library.libraryID)
                 )
                 .id(library.libraryID.rawValue)
+                .disabled(chatDispatcher.isChatBoundaryPending)
 
             case .some(.readOnly):
                 ContentUnavailableView(
@@ -100,6 +120,7 @@ public struct LibraryRootView: View {
                     )
                 )
                 libraryActions
+                    .disabled(chatDispatcher.isChatBoundaryPending)
             }
 
             if let notice = model.snapshot?.notice {
@@ -118,7 +139,6 @@ public struct LibraryRootView: View {
         .disabled(
             model.snapshot?.activity != nil ||
                 chatDispatcher.isLibraryNavigationPending ||
-                chatDispatcher.isChatBoundaryPending ||
                 chatDispatcher.isOrderlyTerminationPending
         )
         .task {
@@ -141,12 +161,14 @@ public struct LibraryRootView: View {
         }
         .onChange(of: activeLibraryID) {
             audioImportModel.send(.clearResult)
+            reviewModel.clearSelection()
         }
         .onChange(of: model.snapshot?.selection, initial: true) { _, selection in
             switch selection {
             case let .active(library):
+                let scope = LibraryScope(libraryID: library.libraryID)
                 recordingModel.selectLibrary(
-                    .writable(LibraryScope(libraryID: library.libraryID))
+                    .writable(scope)
                 )
             case .readOnly:
                 recordingModel.selectLibrary(.readOnly)
@@ -163,10 +185,10 @@ public struct LibraryRootView: View {
                         sessionID: selection.sessionID
                     )
                 )
-            } else {
-                sessionProcessingModel.clearSelection()
-                reviewModel.clearSelection()
             }
+            // A nil transient receipt does not mean there is no durable
+            // processing route. Library navigation owns clearing old context;
+            // activation recovery may have selected a persisted Session.
         }
         .onChange(of: sessionProcessingModel.state?.status) { _, status in
             if status == .completed { reviewModel.refresh() }
@@ -175,7 +197,7 @@ public struct LibraryRootView: View {
 
     private var libraryActions: some View {
         HStack {
-            Button("Reveal Library") { model.send(.reveal) }
+            Button("Reveal Library") { model.reveal() }
                 .disabled(!interactionAvailability.canRevealLibrary)
             Button("Choose Another…") {
                 librarySelectionDispatcher.enqueue(.chooseExisting)
@@ -252,7 +274,8 @@ public struct LibraryRootView: View {
         LibraryInteractionPolicy.availability(
             library: model.snapshot,
             audioImport: audioImportModel.snapshot,
-            recording: recordingModel.featureState
+            recording: recordingModel.featureState,
+            sessionProcessing: sessionProcessingModel.featureState
         )
     }
 

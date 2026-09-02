@@ -25,6 +25,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case recordingStagingIdentityManifestSchema
     case recordingStagingManifestSchema
     case sessionManifestSchema
+    case sessionProcessingAttemptIndexSchema
     case sessionProcessingFeatureScenarioSchema
     case speechAnnotationFixtureSchema
     case transcriptRevisionSchema
@@ -87,7 +88,24 @@ public enum ContractResource: CaseIterable, Sendable {
     case sessionProcessingQualifiedSuccessScenario
     case sessionProcessingQualificationBlockedScenario
     case sessionProcessingCandidateRejectedScenario
-    case sessionProcessingModelPrepareRetryScenario
+    case sessionProcessingModelPrepareStartScenario
+    case sessionProcessingCancellationScenario
+    case sessionProcessingRelaunchQueuedInterruptedScenario
+    case sessionProcessingRelaunchInterruptedScenario
+    case sessionProcessingRelaunchValidationScenario
+    case sessionProcessingRelaunchStaleSelectionScenario
+    case sessionProcessingProgressScenario
+    case sessionProcessingRaceCandidateWinsCancelScenario
+    case sessionProcessingRaceCancelWinsCandidateScenario
+    case sessionProcessingRaceEngineFailureWinsCancelScenario
+    case sessionProcessingRaceCancelWinsEngineFailureScenario
+    case sessionProcessingRaceCandidateRejectionWinsCancelScenario
+    case sessionProcessingRaceCancelWinsCandidateRejectionScenario
+
+    case sessionProcessingAttemptIndexExample
+    case rejectedNewerSessionProcessingAttemptIndex
+    case rejectedZeroSessionProcessingAttemptSequence
+    case rejectedUnknownSessionProcessingAttemptIndexKey
 
     case portableLibraryManifestExample
     case portableLibraryPreferencesExample
@@ -211,6 +229,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "RecordingStagingManifest.json"
         case .sessionManifestSchema:
             "SessionManifest.json"
+        case .sessionProcessingAttemptIndexSchema:
+            "SessionProcessingAttemptIndex.json"
         case .sessionProcessingFeatureScenarioSchema:
             "SessionProcessingFeatureScenario.json"
         case .speechAnnotationFixtureSchema:
@@ -333,8 +353,40 @@ public enum ContractResource: CaseIterable, Sendable {
             "qualification-blocked-no-fallback.v1.json"
         case .sessionProcessingCandidateRejectedScenario:
             "candidate-rejected-no-publication.v1.json"
-        case .sessionProcessingModelPrepareRetryScenario:
-            "model-prepare-retry.v1.json"
+        case .sessionProcessingModelPrepareStartScenario:
+            "model-prepare-start.v1.json"
+        case .sessionProcessingCancellationScenario:
+            "cancel-reaps-retains-session.v1.json"
+        case .sessionProcessingRelaunchQueuedInterruptedScenario:
+            "relaunch-queued-interrupted.v1.json"
+        case .sessionProcessingRelaunchInterruptedScenario:
+            "relaunch-running-absent-interrupted.v1.json"
+        case .sessionProcessingRelaunchValidationScenario:
+            "relaunch-validating-resumes-idempotently.v1.json"
+        case .sessionProcessingRelaunchStaleSelectionScenario:
+            "relaunch-validating-stale-selection.v1.json"
+        case .sessionProcessingProgressScenario:
+            "progress-monotonic-eta-approximate.v1.json"
+        case .sessionProcessingRaceCandidateWinsCancelScenario:
+            "race-candidate-wins-cancel.v1.json"
+        case .sessionProcessingRaceCancelWinsCandidateScenario:
+            "race-cancel-wins-candidate.v1.json"
+        case .sessionProcessingRaceEngineFailureWinsCancelScenario:
+            "race-engine-failure-wins-cancel.v1.json"
+        case .sessionProcessingRaceCancelWinsEngineFailureScenario:
+            "race-cancel-wins-engine-failure.v1.json"
+        case .sessionProcessingRaceCandidateRejectionWinsCancelScenario:
+            "race-candidate-rejection-wins-cancel.v1.json"
+        case .sessionProcessingRaceCancelWinsCandidateRejectionScenario:
+            "race-cancel-wins-candidate-rejection.v1.json"
+        case .sessionProcessingAttemptIndexExample:
+            "attempts.json"
+        case .rejectedNewerSessionProcessingAttemptIndex:
+            "attempts-newer-schema.json"
+        case .rejectedZeroSessionProcessingAttemptSequence:
+            "attempts-zero-sequence.json"
+        case .rejectedUnknownSessionProcessingAttemptIndexKey:
+            "attempts-unknown-key.json"
         case .portableLibraryManifestExample:
             "library.json"
         case .portableLibraryPreferencesExample:
@@ -480,6 +532,7 @@ public enum ContractResource: CaseIterable, Sendable {
              .readSessionTranscriptsRequestSchema, .readSessionTranscriptsResponseSchema,
              .recordingFeatureScenarioSchema, .recordingStagingIdentityManifestSchema,
              .recordingStagingManifestSchema, .sessionManifestSchema,
+             .sessionProcessingAttemptIndexSchema,
              .sessionProcessingFeatureScenarioSchema,
              .speechAnnotationFixtureSchema, .transcriptRevisionSchema,
              .transcriptionCandidateArtifactSchema, .transcriptionJobManifestSchema,
@@ -523,8 +576,26 @@ public enum ContractResource: CaseIterable, Sendable {
         case .sessionProcessingQualifiedSuccessScenario,
              .sessionProcessingQualificationBlockedScenario,
              .sessionProcessingCandidateRejectedScenario,
-             .sessionProcessingModelPrepareRetryScenario:
+             .sessionProcessingModelPrepareStartScenario,
+             .sessionProcessingCancellationScenario,
+             .sessionProcessingRelaunchQueuedInterruptedScenario,
+             .sessionProcessingRelaunchInterruptedScenario,
+             .sessionProcessingRelaunchValidationScenario,
+             .sessionProcessingRelaunchStaleSelectionScenario,
+             .sessionProcessingProgressScenario,
+             .sessionProcessingRaceCandidateWinsCancelScenario,
+             .sessionProcessingRaceCancelWinsCandidateScenario,
+             .sessionProcessingRaceEngineFailureWinsCancelScenario,
+             .sessionProcessingRaceCancelWinsEngineFailureScenario,
+             .sessionProcessingRaceCandidateRejectionWinsCancelScenario,
+             .sessionProcessingRaceCancelWinsCandidateRejectionScenario:
             "Scenarios/SessionProcessing"
+        case .sessionProcessingAttemptIndexExample:
+            "Examples/SessionProcessing/v1"
+        case .rejectedNewerSessionProcessingAttemptIndex,
+             .rejectedZeroSessionProcessingAttemptSequence,
+             .rejectedUnknownSessionProcessingAttemptIndexKey:
+            "Examples/SessionProcessing/v1/rejected"
         case .portableLibraryManifestExample, .portableLibraryPreferencesExample,
              .portableProfileNullExample, .portableProfileSelectedExample:
             "Examples/PortableLibrary/v1"

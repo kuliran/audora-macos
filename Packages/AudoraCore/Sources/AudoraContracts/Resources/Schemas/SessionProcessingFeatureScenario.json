@@ -10,6 +10,19 @@
         "scenarioId": {
             "$ref": "#/$defs/SessionProcessingScenarioId"
         },
+        "race": {
+            "$ref": "#/$defs/SessionProcessingScenarioRace",
+            "description": "Deterministic arbitration proof for a concurrent terminal race."
+        },
+        "initialJobs": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SessionProcessingScenarioDurableJob"
+            },
+            "minItems": 1,
+            "maxItems": 10000,
+            "description": "Durable Job summaries present before the first command, when relevant."
+        },
         "initialState": {
             "$ref": "#/$defs/SessionProcessingScenarioState"
         },
@@ -28,6 +41,15 @@
         },
         "expectedState": {
             "$ref": "#/$defs/SessionProcessingScenarioState"
+        },
+        "expectedJobs": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/SessionProcessingScenarioDurableJob"
+            },
+            "minItems": 1,
+            "maxItems": 10000,
+            "description": "Durable Job summaries after all commands and dependency effects."
         },
         "expectedEffects": {
             "type": "array",
@@ -55,6 +77,85 @@
             "type": "string",
             "pattern": "^session-processing\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
         },
+        "SessionProcessingScenarioRace": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "candidateVsCancel"
+                        },
+                        {
+                            "type": "string",
+                            "const": "engineFailureVsCancel"
+                        },
+                        {
+                            "type": "string",
+                            "const": "candidateRejectionVsCancel"
+                        }
+                    ]
+                },
+                "firstDurableWinner": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "candidate"
+                        },
+                        {
+                            "type": "string",
+                            "const": "engineFailure"
+                        },
+                        {
+                            "type": "string",
+                            "const": "candidateRejection"
+                        },
+                        {
+                            "type": "string",
+                            "const": "cancellation"
+                        }
+                    ]
+                },
+                "losingCompareAndSwap": {
+                    "type": "string",
+                    "const": "stale"
+                }
+            },
+            "required": [
+                "kind",
+                "firstDurableWinner",
+                "losingCompareAndSwap"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioDurableJob": {
+            "type": "object",
+            "properties": {
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "revisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId"
+                },
+                "state": {
+                    "$ref": "#/$defs/TranscriptionJobState"
+                },
+                "failure": {
+                    "$ref": "#/$defs/SessionProcessingFailure"
+                }
+            },
+            "required": [
+                "jobId",
+                "revisionId",
+                "state"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "Observable durable outcome without conflating it with feature UI state."
+        },
         "SessionProcessingScenarioState": {
             "anyOf": [
                 {
@@ -64,10 +165,31 @@
                     "$ref": "#/$defs/SessionProcessingScenarioReadyState"
                 },
                 {
+                    "$ref": "#/$defs/SessionProcessingScenarioQueuedState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioRunningState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioCancellingState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioValidatingState"
+                },
+                {
                     "$ref": "#/$defs/SessionProcessingScenarioCompletedState"
                 },
                 {
                     "$ref": "#/$defs/SessionProcessingScenarioFailedState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioCancelledState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioInterruptedState"
+                },
+                {
+                    "$ref": "#/$defs/SessionProcessingScenarioRecoveryRequiredState"
                 }
             ]
         },
@@ -76,6 +198,10 @@
             "properties": {
                 "kind": {
                     "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "activateLibrary"
+                        },
                         {
                             "type": "string",
                             "const": "selectSession"
@@ -87,6 +213,10 @@
                         {
                             "type": "string",
                             "const": "start"
+                        },
+                        {
+                            "type": "string",
+                            "const": "cancel"
                         },
                         {
                             "type": "string",
@@ -161,7 +291,15 @@
                         },
                         {
                             "type": "string",
+                            "const": "inventory"
+                        },
+                        {
+                            "type": "string",
                             "const": "latest"
+                        },
+                        {
+                            "type": "string",
+                            "const": "loadExact"
                         },
                         {
                             "type": "string",
@@ -189,11 +327,31 @@
                         },
                         {
                             "type": "string",
+                            "const": "generateCancellationAuthorityId"
+                        },
+                        {
+                            "type": "string",
                             "const": "create"
                         },
                         {
                             "type": "string",
                             "const": "transitionRunning"
+                        },
+                        {
+                            "type": "string",
+                            "const": "persistCancellationRequest"
+                        },
+                        {
+                            "type": "string",
+                            "const": "cancelAndReap"
+                        },
+                        {
+                            "type": "string",
+                            "const": "workerPresence"
+                        },
+                        {
+                            "type": "string",
+                            "const": "recoverCandidate"
                         },
                         {
                             "type": "string",
@@ -209,11 +367,23 @@
                         },
                         {
                             "type": "string",
+                            "const": "reopenRevision"
+                        },
+                        {
+                            "type": "string",
                             "const": "transitionCompleted"
                         },
                         {
                             "type": "string",
                             "const": "transitionFailed"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transitionCancelled"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transitionInterrupted"
                         }
                     ]
                 },
@@ -272,6 +442,74 @@
                         {
                             "type": "string",
                             "const": "noFallback"
+                        },
+                        {
+                            "type": "string",
+                            "const": "cancellationAuthorityPersisted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "workerReaped"
+                        },
+                        {
+                            "type": "string",
+                            "const": "lateCandidateRejected"
+                        },
+                        {
+                            "type": "string",
+                            "const": "sessionRetained"
+                        },
+                        {
+                            "type": "string",
+                            "const": "processAbsenceConfirmed"
+                        },
+                        {
+                            "type": "string",
+                            "const": "queuedInterrupted"
+                        },
+                        {
+                            "type": "string",
+                            "const": "stagedCandidateRevalidated"
+                        },
+                        {
+                            "type": "string",
+                            "const": "publicationIdempotent"
+                        },
+                        {
+                            "type": "string",
+                            "const": "canonicalRevisionReopened"
+                        },
+                        {
+                            "type": "string",
+                            "const": "allDurableJobsReconciled"
+                        },
+                        {
+                            "type": "string",
+                            "const": "startSelectionBaselinePreserved"
+                        },
+                        {
+                            "type": "string",
+                            "const": "staleSelectionRejected"
+                        },
+                        {
+                            "type": "string",
+                            "const": "progressMonotonic"
+                        },
+                        {
+                            "type": "string",
+                            "const": "etaApproximate"
+                        },
+                        {
+                            "type": "string",
+                            "const": "firstDurableWinnerPreserved"
+                        },
+                        {
+                            "type": "string",
+                            "const": "noAutomaticRerun"
+                        },
+                        {
+                            "type": "string",
+                            "const": "noWorkerCancellation"
                         }
                     ]
                 }
@@ -282,6 +520,41 @@
             "unevaluatedProperties": {
                 "not": {}
             }
+        },
+        "TranscriptionJobId": {
+            "type": "string",
+            "pattern": "^job-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "TranscriptRevisionId": {
+            "type": "string",
+            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "TranscriptionJobState": {
+            "type": "string",
+            "enum": [
+                "queued",
+                "preparing",
+                "running",
+                "validating",
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted"
+            ]
+        },
+        "SessionProcessingFailure": {
+            "type": "string",
+            "enum": [
+                "sourceUnavailable",
+                "jobPersistenceFailed",
+                "engineUnavailable",
+                "engineFailed",
+                "candidateRejected",
+                "publicationFailed",
+                "installedNeedsRefresh",
+                "canonicalRevisionIntegrityFailed",
+                "staleSelection"
+            ]
         },
         "SessionProcessingScenarioUnavailableState": {
             "type": "object",
@@ -295,6 +568,22 @@
                         {
                             "type": "string",
                             "const": "noSession"
+                        },
+                        {
+                            "type": "string",
+                            "const": "jobIndexSchemaNewer"
+                        },
+                        {
+                            "type": "string",
+                            "const": "jobIndexUnavailable"
+                        },
+                        {
+                            "type": "string",
+                            "const": "jobIndexIntegrityMismatch"
+                        },
+                        {
+                            "type": "string",
+                            "const": "jobIndexIncomplete"
                         },
                         {
                             "type": "string",
@@ -357,6 +646,123 @@
                 "not": {}
             }
         },
+        "SessionProcessingScenarioQueuedState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "queued"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingRecoveryAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioRunningState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "running"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "phase": {
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "const": "preparing"
+                        },
+                        {
+                            "type": "string",
+                            "const": "loadingModel"
+                        },
+                        {
+                            "type": "string",
+                            "const": "transcribing"
+                        }
+                    ]
+                },
+                "progress": {
+                    "$ref": "#/$defs/SessionProcessingScenarioProgress"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingControlAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "phase",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioCancellingState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "cancelling"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingControlAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioValidatingState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "validating"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                }
+            },
+            "required": [
+                "status",
+                "jobId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "SessionProcessingScenarioCompletedState": {
             "type": "object",
             "properties": {
@@ -364,12 +770,25 @@
                     "type": "string",
                     "const": "completed"
                 },
+                "revisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId",
+                    "description": "Exact immutable Revision owned by the completed Job."
+                },
                 "selectedRevisionId": {
-                    "$ref": "#/$defs/TranscriptRevisionId"
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/TranscriptRevisionId"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "description": "Current Session selection, which may be absent or point at another Revision."
                 }
             },
             "required": [
                 "status",
+                "revisionId",
                 "selectedRevisionId"
             ],
             "unevaluatedProperties": {
@@ -402,6 +821,84 @@
                 "not": {}
             }
         },
+        "SessionProcessingScenarioCancelledState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "cancelled"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingRecoveryAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioInterruptedState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "interrupted"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingRecoveryAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionProcessingScenarioRecoveryRequiredState": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "const": "recoveryRequired"
+                },
+                "jobId": {
+                    "$ref": "#/$defs/TranscriptionJobId"
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/SessionProcessingRecoveryAction"
+                    }
+                }
+            },
+            "required": [
+                "status",
+                "jobId",
+                "actions"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "SessionProcessingRecoveryAction": {
             "type": "string",
             "enum": [
@@ -410,20 +907,34 @@
                 "retry"
             ]
         },
-        "TranscriptRevisionId": {
-            "type": "string",
-            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        "SessionProcessingScenarioProgress": {
+            "type": "object",
+            "properties": {
+                "completedWindows": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "totalWindows": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "approximateEtaSeconds": {
+                    "type": "integer",
+                    "minimum": 0
+                }
+            },
+            "required": [
+                "completedWindows",
+                "totalWindows"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
         },
-        "SessionProcessingFailure": {
+        "SessionProcessingControlAction": {
             "type": "string",
             "enum": [
-                "sourceUnavailable",
-                "jobPersistenceFailed",
-                "engineUnavailable",
-                "engineFailed",
-                "candidateRejected",
-                "publicationFailed",
-                "installedNeedsRefresh"
+                "cancel"
             ]
         }
     }

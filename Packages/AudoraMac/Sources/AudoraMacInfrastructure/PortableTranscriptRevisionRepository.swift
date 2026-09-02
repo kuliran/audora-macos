@@ -73,6 +73,7 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
     private let root: URL
     private let libraryID: LibraryID
     private let chatEvidenceRevisionByteLimit: Int
+    private let expectedRootIdentity: SessionProcessingRootIdentity?
     private let fault: @Sendable (TranscriptRevisionPersistenceFaultPoint) throws -> Void
 
     public init(
@@ -82,10 +83,30 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             _ in
         }
     ) {
-        self.root = root
-        self.libraryID = libraryID
-        chatEvidenceRevisionByteLimit = Self.maximumChatEvidenceRevisionBytes
-        self.fault = fault
+        self.init(
+            root: root,
+            libraryID: libraryID,
+            expectedRootIdentity: nil,
+            chatEvidenceRevisionByteLimit: Self.maximumChatEvidenceRevisionBytes,
+            fault: fault
+        )
+    }
+
+    init(
+        root: URL,
+        libraryID: LibraryID,
+        expectedRootIdentity: SessionProcessingRootIdentity,
+        fault: @escaping @Sendable (TranscriptRevisionPersistenceFaultPoint) throws -> Void = {
+            _ in
+        }
+    ) {
+        self.init(
+            root: root,
+            libraryID: libraryID,
+            expectedRootIdentity: expectedRootIdentity,
+            chatEvidenceRevisionByteLimit: Self.maximumChatEvidenceRevisionBytes,
+            fault: fault
+        )
     }
 
     init(
@@ -96,8 +117,25 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             _ in
         }
     ) {
+        self.init(
+            root: root,
+            libraryID: libraryID,
+            expectedRootIdentity: nil,
+            chatEvidenceRevisionByteLimit: chatEvidenceRevisionByteLimit,
+            fault: fault
+        )
+    }
+
+    private init(
+        root: URL,
+        libraryID: LibraryID,
+        expectedRootIdentity: SessionProcessingRootIdentity?,
+        chatEvidenceRevisionByteLimit: Int,
+        fault: @escaping @Sendable (TranscriptRevisionPersistenceFaultPoint) throws -> Void
+    ) {
         self.root = root
         self.libraryID = libraryID
+        self.expectedRootIdentity = expectedRootIdentity
         self.chatEvidenceRevisionByteLimit = max(
             0,
             min(chatEvidenceRevisionByteLimit, Self.maximumRevisionBytes)
@@ -351,6 +389,36 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     ? TranscriptRevisionRepositoryFailure.installedNeedsRefresh
                     : TranscriptRevisionRepositoryFailure.writeFailed
             }
+        }
+    }
+
+    public func reopenRevision(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID
+    ) async throws -> TranscriptRevision {
+        try reopenRevisionSynchronously(
+            sessionID: sessionID,
+            revisionID: revisionID
+        )
+    }
+
+    func reopenRevisionSynchronously(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID
+    ) throws -> TranscriptRevision {
+        try withLockedSession(sessionID: sessionID, exclusive: false) {
+            let loaded = try loadSession(
+                sessionID: sessionID,
+                sessionDescriptor: $0.sessionDescriptor
+            )
+            let revision = try reopenRevisionLocked(
+                sessionID: sessionID,
+                revisionID: revisionID,
+                loaded: loaded,
+                sessionDescriptor: $0.sessionDescriptor
+            )
+            try revalidate($0, expectedSessionID: sessionID)
+            return revision
         }
     }
 
@@ -996,24 +1064,50 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         guard let selected = loaded.manifest.selectedTranscriptRevision else {
             throw TranscriptRevisionRepositoryFailure.sessionUnavailable
         }
+        let revision = try reopenRevisionLocked(
+            sessionID: sessionID,
+            revisionID: selected.revisionID,
+            loaded: loaded,
+            sessionDescriptor: sessionDescriptor
+        )
+        return ReopenedTranscriptRevisionSnapshot(
+            revisionIDs: loaded.manifest.transcriptRevisionIDs,
+            selectedRevisionID: selected.revisionID,
+            selectedRevision: revision
+        )
+    }
+
+    private func reopenRevisionLocked(
+        sessionID: SessionID,
+        revisionID: TranscriptRevisionID,
+        loaded: LoadedSession,
+        sessionDescriptor: Int32
+    ) throws -> TranscriptRevision {
+        guard loaded.manifest.transcriptRevisionIDs.contains(revisionID) else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
         let transcriptsDescriptor = try readConfined.openDirectory(
             named: "transcripts",
             under: sessionDescriptor
         )
         defer { Darwin.close(transcriptsDescriptor) }
+        let expectedSHA256: String?
+        if let selected = loaded.manifest.selectedTranscriptRevision,
+           selected.revisionID == revisionID
+        {
+            expectedSHA256 = selected.revisionSHA256
+        } else {
+            expectedSHA256 = nil
+        }
         let installed = try loadInstalledRevision(
-            revisionID: selected.revisionID,
-            expectedSHA256: selected.revisionSHA256,
+            revisionID: revisionID,
+            expectedSHA256: expectedSHA256,
             sessionID: sessionID,
             audio: loaded.audio,
             under: transcriptsDescriptor
         )
         defer { Darwin.close(installed.authority.descriptor) }
-        return ReopenedTranscriptRevisionSnapshot(
-            revisionIDs: loaded.manifest.transcriptRevisionIDs,
-            selectedRevisionID: selected.revisionID,
-            selectedRevision: installed.revision
-        )
+        return installed.revision
     }
 
     private func withLockedSession<T>(
@@ -1102,11 +1196,15 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             throw TranscriptRevisionRepositoryFailure.sessionUnavailable
         }
         do {
+            let identity = try Self.identity(of: rootDescriptor)
+            guard matchesExpectedRootIdentity(identity) else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
             return OpenedRootAuthority(
                 parentDescriptor: parentDescriptor,
                 rootDescriptor: rootDescriptor,
                 name: name,
-                identity: try Self.identity(of: rootDescriptor),
+                identity: identity,
                 validatesConfiguredPath: true
             )
         } catch {
@@ -1344,6 +1442,9 @@ private extension PortableTranscriptRevisionRepository {
         _ authority: LockedSessionAuthority,
         expectedSessionID: SessionID
     ) throws {
+        guard matchesExpectedRootIdentity(authority.root.identity) else {
+            throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+        }
         if authority.root.validatesConfiguredPath {
             guard try Self.identity(
                 named: authority.root.name,
@@ -1383,6 +1484,12 @@ private extension PortableTranscriptRevisionRepository {
         } catch {
             throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
         }
+    }
+
+    func matchesExpectedRootIdentity(_ identity: EntryIdentity) -> Bool {
+        guard let expectedRootIdentity else { return true }
+        return identity.device == expectedRootIdentity.device &&
+            identity.inode == expectedRootIdentity.inode
     }
 
     func configuredRootIdentity() throws -> EntryIdentity {
