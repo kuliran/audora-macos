@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "scenarioId": "draft-send-discard",
   "libraryId": "lib-20260830T100000000Z-1ABC",
+  "providerAvailability": "unavailable",
   "initialChats": [{
     "chatId": "cht-20260830T120000000Z-2ABC",
     "draftId": "drf-20260830T120000000Z-3DEF",
@@ -50,6 +51,11 @@
     },
     {
       "port": "chatStore",
+      "effect": "replacePendingUserTurn",
+      "outcome": "committed"
+    },
+    {
+      "port": "chatStore",
       "effect": "discardPendingUserTurn",
       "outcome": "committed"
     }
@@ -64,7 +70,7 @@
     "selectedDraftVersion": 1,
     "composerStatus": "editable"
   },
-  "expectedProviderCalls": 0,
-  "expectedInvocationCalls": 0,
-  "expectedAdmissionCalls": 0
+  "expectedProviderCalls": 1,
+  "expectedInvocationCalls": 1,
+  "expectedAdmissionCalls": 1
 }

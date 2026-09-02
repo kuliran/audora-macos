@@ -67,11 +67,12 @@ final class ChatContextCapacityTransitionTests: XCTestCase {
         XCTAssertEqual(pendingResolutionCount, 0)
     }
 
-    func testCapacityFailureRecoveryPreservesPendingIdentityAndUnlocksSameDraft() async throws {
+    func testCapacityFailureRetryReentersGatewayWithExactPendingIntent() async throws {
         let aggregate = try Self.aggregate(draftText: "Keep this exact Draft")
         let store = CapacityChatStore(aggregate: aggregate)
         let source = DynamicCapacitySnapshotPort(pendingWindows: [64, 100_000])
-        let feature = makeFeature(store: store, source: source)
+        let gateway = CapacityOnlyInvocationGateway(store: store, source: source)
+        let feature = makeFeature(store: store, source: source, invocations: gateway)
 
         await feature.send(.start(Self.context))
         await feature.send(.open(Self.context, aggregate.chat.id))
@@ -106,10 +107,12 @@ final class ChatContextCapacityTransitionTests: XCTestCase {
         XCTAssertEqual(retriedPending.draftID, failedPending.draftID)
         XCTAssertEqual(retriedPending.draftVersion, failedPending.draftVersion)
         XCTAssertEqual(retriedPending.responsePositionID, failedPending.responsePositionID)
-        XCTAssertNil(retriedPending.failure)
+        XCTAssertEqual(retriedPending.failure, .coachContextCannotFit)
         XCTAssertNil(retriedState.createNewChatRecoveryIntent)
         let pendingReplacementCount = await store.pendingReplacementCount
         XCTAssertEqual(pendingReplacementCount, 1)
+        let invocationCount = await gateway.invocationCount
+        XCTAssertEqual(invocationCount, 2, "Send and Retry must cross the same gateway")
 
         await feature.send(.discardPendingUserTurn(Self.context, retriedPending.id))
 
@@ -122,9 +125,45 @@ final class ChatContextCapacityTransitionTests: XCTestCase {
         XCTAssertEqual(pendingDrafts, [failedDraft, failedDraft])
     }
 
+    func testSendLocksPendingBeforeSingleInvocationGatewayAndProjectsCooldownUnlock() async throws {
+        let aggregate = try Self.aggregate(draftText: "Keep this populated Draft")
+        let store = CapacityChatStore(aggregate: aggregate)
+        let gateway = CooldownInvocationGateway(store: store)
+        let source = DynamicCapacitySnapshotPort(pendingWindows: [100_000])
+        let feature = makeFeature(store: store, source: source, invocations: gateway)
+
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(.sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft))
+
+        let state = await feature.currentState
+        guard case let .editable(draft, false) = state.composer else {
+            return XCTFail("ordinary Invocation rejection must unlock the Draft")
+        }
+        XCTAssertEqual(draft, aggregate.chat.draft)
+        XCTAssertEqual(state.notice, .coachAdmissionLimited)
+        let observedPending = await gateway.observedPending
+        XCTAssertEqual(observedPending?.draftID, aggregate.chat.draft.draftID)
+        XCTAssertEqual(observedPending?.draftVersion, aggregate.chat.draft.version)
+        let lockCount = await store.pendingLockCount
+        XCTAssertEqual(lockCount, 1)
+    }
+
     private func makeFeature(
         store: CapacityChatStore,
         source: DynamicCapacitySnapshotPort
+    ) -> DefaultChatFeature {
+        makeFeature(
+            store: store,
+            source: source,
+            invocations: CapacityOnlyInvocationGateway(store: store, source: source)
+        )
+    }
+
+    private func makeFeature(
+        store: CapacityChatStore,
+        source: DynamicCapacitySnapshotPort,
+        invocations: any Invocations
     ) -> DefaultChatFeature {
         DefaultChatFeature(
             store: store,
@@ -136,7 +175,9 @@ final class ChatContextCapacityTransitionTests: XCTestCase {
             pendingUserTurnIDGenerator: CapacityIDs(),
             responsePositionIDGenerator: CapacityIDs(),
             autosaveScheduler: CapacityAutosaveScheduler(),
-            coachContext: DefaultCoachContextFeature(source: source)
+            admissionRefreshScheduler: CapacityAdmissionRefreshScheduler(),
+            coachContext: DefaultCoachContextFeature(source: source),
+            invocations: invocations
         )
     }
 
@@ -159,6 +200,173 @@ final class ChatContextCapacityTransitionTests: XCTestCase {
             chat: base.chat.replacingDraft(with: draft),
             memory: base.memory
         )
+    }
+}
+
+/// Issue #21 fixtures exercise capacity recovery while still crossing the one
+/// Invocation gateway required by Send. A fitting request intentionally stops
+/// at that boundary because provider execution belongs to #22 tests.
+private actor CapacityOnlyInvocationGateway: Invocations {
+    private let store: CapacityChatStore
+    private let context: DefaultCoachContextFeature
+    private(set) var invocationCount = 0
+
+    init(store: CapacityChatStore, source: DynamicCapacitySnapshotPort) {
+        self.store = store
+        context = DefaultCoachContextFeature(source: source)
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        switch await store.lockPendingUserTurn(request.lockMutation) {
+        case .committed:
+            return .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+        case let .stale(current): return .stale(current)
+        case let .frozen(frozen): return .frozen(frozen)
+        case .readOnlyLibrary: return .readOnlyLibrary
+        default: return .failed
+        }
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        invocationCount += 1
+        guard case let .loaded(locked) = await store.load(request.chatID, in: request.library),
+              let pending = locked.pendingUserTurn,
+              pending.id == request.pendingUserTurnID,
+              let contextRequest = try? CoachContextPendingTurnRequest(
+                  library: request.library,
+                  chatID: request.chatID,
+                  draft: locked.chat.draft,
+                  pendingUserTurn: pending
+              )
+        else { return .rejected(nil, .eligibilityChanged) }
+
+        switch await context.preparePendingUserTurn(contextRequest) {
+        case .prepared:
+            return .interrupted(locked, .providerFailed)
+        case let .cannotFit(failure):
+            let failed = pending.replacingFailure(.coachContextCannotFit)
+            guard let mutation = try? ReplacePendingUserTurnMutation(
+                library: request.library,
+                chatID: request.chatID,
+                base: pending,
+                replacement: failed
+            ) else { return .interrupted(locked, .persistenceUnavailable) }
+            let outcome = await store.replacePendingUserTurn(
+                mutation
+            )
+            guard case let .committed(aggregate) = outcome else {
+                return .interrupted(locked, .persistenceUnavailable)
+            }
+            return .contextCapacityFailure(aggregate, failure.quote)
+        case let .messageTooLong(maximumUTF8Bytes):
+            return await reject(
+                locked,
+                pending: pending,
+                request: request,
+                reason: .messageMustBeShortened(maximumUTF8Bytes: maximumUTF8Bytes)
+            )
+        case let .unavailable(reason):
+            return await reject(
+                locked,
+                pending: pending,
+                request: request,
+                reason: .contextUnavailable(reason)
+            )
+        }
+    }
+
+    private func reject(
+        _ locked: ChatAggregate,
+        pending: PendingUserTurn,
+        request: PendingCoachInvocationRequest,
+        reason: InvocationRejectionReason
+    ) async -> InvocationTryOutcome {
+        let outcome = await store.discardPendingUserTurn(
+            DiscardPendingUserTurnMutation(
+                library: request.library,
+                chatID: request.chatID,
+                pendingUserTurn: pending
+            )
+        )
+        guard case let .committed(unlocked) = outcome else {
+            return .interrupted(locked, .persistenceUnavailable)
+        }
+        return .rejected(unlocked, reason)
+    }
+}
+
+private actor CooldownInvocationGateway: Invocations {
+    private let store: CapacityChatStore
+    private(set) var observedPending: PendingUserTurn?
+
+    init(store: CapacityChatStore) { self.store = store }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        switch await store.lockPendingUserTurn(request.lockMutation) {
+        case .committed:
+            return .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+        case let .stale(current): return .stale(current)
+        case let .frozen(frozen): return .frozen(frozen)
+        case .readOnlyLibrary: return .readOnlyLibrary
+        default: return .failed
+        }
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        guard case let .loaded(locked) = await store.load(request.chatID, in: request.library),
+              let pending = locked.pendingUserTurn,
+              pending.id == request.pendingUserTurnID
+        else {
+            return .rejected(nil, .eligibilityChanged)
+        }
+        observedPending = pending
+        let outcome = await store.discardPendingUserTurn(
+            DiscardPendingUserTurnMutation(
+                library: request.library,
+                chatID: request.chatID,
+                pendingUserTurn: pending
+            )
+        )
+        guard case let .committed(unlocked) = outcome else {
+            return .interrupted(locked, .persistenceUnavailable)
+        }
+        return .rejected(unlocked, .admissionCooldown)
     }
 }
 
@@ -270,7 +478,11 @@ private actor DynamicCapacitySnapshotPort: CoachContextSnapshotPort {
                     authority: CoachContextSnapshotAuthority(
                         binding: binding,
                         contextGeneration: contextGeneration,
-                        configurationGeneration: configurationGeneration
+                        configurationGeneration: configurationGeneration,
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
                     )
                 )
             )
@@ -392,4 +604,8 @@ private struct CapacityIDs: ChatIDGenerator, ChatDraftIDGenerator,
 
 private struct CapacityAutosaveScheduler: ChatAutosaveScheduling {
     func sleep(forNanoseconds nanoseconds: UInt64) async throws {}
+}
+
+private struct CapacityAdmissionRefreshScheduler: ChatAdmissionRefreshScheduling {
+    func sleep(until deadline: UTCInstant) async throws {}
 }

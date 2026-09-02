@@ -137,6 +137,37 @@ does not change the Codex result above: the real CLI/model exercise remains not 
 for this gate and production coaching remains blocked on the shipping-provider
 evidence.
 
+The executable Send slice crosses one Application-owned Invocation coordinator.
+It revalidates the locked Pending User Turn and exact prepared context, claims the
+machine-local Library rolling window, and durably installs one portable Invocation
+before its deterministic synthetic Provider can run. One stable Invocation may
+install at most four durable Provider Attempts, waiting exactly 5, 10, and 15
+seconds before transient retries and requesting at most one materially shorter
+complete response after overflow. Each Attempt has fresh Provider and publication
+authority while the prepared semantic exchange remains frozen. Its only successful
+effect is one atomic user/Coach message pair plus a fresh Draft; pre-commit
+interruption, exhausted retries, an invalid complete response, or CAS conflict
+publishes neither message. Live composition still fails closed because the
+shipping Provider descriptor is not qualified. Stop, transcript tools, and Profile
+or Memory effects remain outside this slice.
+If the machine-local ledger rename succeeds but its parent-directory flush cannot
+prove durability, Audora treats the debit as possibly committed and preserves the
+exact Pending User Turn as interrupted and user-retryable; it never unlocks that
+Draft as a pre-admission rejection.
+Invocation liveness is acquired atomically with the first exact Pending
+resolution, so concurrent catalog recovery cannot interrupt a live Send between
+resolution and reservation. Pending User Turn schema v3 persists context-fit,
+interrupted, Provider-error, and invalid-response failures. Strict v1 compatibility
+permits only no failure or the context-fit failure; v2 additionally permits the
+interrupted failure. Valid legacy Pending state upgrades to v3 when it is next
+written; a root newer than v3 freezes only its own Chat.
+If response publication commits but immediate reconciliation is interrupted,
+Infrastructure proves the exact immutable user/Coach message pair, response
+position, consumed Pending, and fresh-Draft lineage before reporting success. A
+later valid Chat rename or edit of that fresh Draft may advance the manifest
+without erasing the publication proof; an unrelated tail or message-ID impostor
+never satisfies it.
+
 Version one accepts exactly one transcribable mono source per Session. A possible
 later extension adds dual-track capture: the Speaker's microphone plus a
 separately retained, aligned system or application-audio source. Storage and
@@ -210,7 +241,9 @@ The native application has a reduced set of states:
   failure. Discard hides the card and unlocks the same populated Draft without
   provider work; a stale Retry after Discard fails against the removed Pending User
   Turn. Corrupt Chat data freezes that Chat permanently and directs the Speaker to
-  create another.
+  create another. Catalog recovery and launch-identity checks isolate that failure
+  per Chat, so a corrupt or newer-schema sibling does not hide healthy Chats or
+  block their Send path.
 - **Coach context:** a subtle `X / max` text beside Send shows the latest
   provider-specific context quote, where `max` is usable input capacity after the
   current-response reserve and safety margin, and expands to Profile, Coach Memory,
@@ -298,7 +331,8 @@ Dependency direction points inward. Domain and Application do not import SwiftUI
 AppKit, AVFoundation, Convex, Crisper, Codex, or concrete filesystem code.
 Presentation sends intents to application use cases and renders application state;
 it never launches a process or edits storage directly. A composition root in the
-macOS target selects and wires concrete adapters.
+macOS target selects and wires concrete adapters, including the wall-clock
+admission-refresh scheduler.
 
 The first implementation can use Swift packages or Xcode targets for these
 boundaries:

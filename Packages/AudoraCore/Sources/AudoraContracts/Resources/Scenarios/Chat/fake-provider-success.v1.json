@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "fake-provider-success",
+  "libraryId": "lib-20260830T100000000Z-1ABC",
+  "providerAvailability": "available",
+  "initialChats": [
+    {
+      "chatId": "cht-20260830T120000000Z-2ABC",
+      "draftId": "drf-20260830T120000000Z-3DEF",
+      "memoryId": "mem-20260830T120000000Z-4GHJ",
+      "manifestRevision": 0,
+      "title": "New Chat",
+      "createdAt": "2026-08-30T12:00:00.000Z",
+      "updatedAt": "2026-08-30T12:00:00.000Z",
+      "creationKind": "newChat",
+      "attachments": [],
+      "draftText": "",
+      "draftVersion": 0,
+      "messageIds": [],
+      "memoryGeneralNotes": "",
+      "memorySessionSummaries": []
+    }
+  ],
+  "commands": [
+    { "kind": "open", "chatId": "cht-20260830T120000000Z-2ABC" },
+    { "kind": "editDraft", "text": "Publish one exact synthetic turn." },
+    { "kind": "sendDraft" }
+  ],
+  "dependencyTrace": [
+    { "port": "chatStore", "effect": "loadCatalog", "outcome": "loaded" },
+    { "port": "chatStore", "effect": "load", "outcome": "loaded" },
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:01:00.000Z" },
+    { "port": "chatStore", "effect": "saveDraft", "outcome": "committed" },
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:02:00.000Z" },
+    {
+      "port": "pendingUserTurnIdGenerator",
+      "effect": "next",
+      "outcome": "ptu-20260830T120002000Z-5KMN"
+    },
+    {
+      "port": "chatResponsePositionIdGenerator",
+      "effect": "next",
+      "outcome": "rsp-20260830T120002000Z-6PQR"
+    },
+    { "port": "chatStore", "effect": "lockPendingUserTurn", "outcome": "committed" }
+  ],
+  "expectedState": {
+    "allChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "visibleChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "selectedChatId": "cht-20260830T120000000Z-2ABC",
+    "selectedTitle": "New Chat",
+    "selectedRevision": 2,
+    "selectedDraftText": "",
+    "selectedDraftVersion": 0,
+    "selectedMessageIds": [
+      "msg-20260830T120003000Z-7STV",
+      "msg-20260830T120003000Z-8WXY"
+    ],
+    "composerStatus": "editable"
+  },
+  "expectedProviderCalls": 1,
+  "expectedInvocationCalls": 1,
+  "expectedAdmissionCalls": 1
+}

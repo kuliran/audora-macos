@@ -313,7 +313,11 @@ private actor RecordingCoachContextSnapshotPort: CoachContextSnapshotPort {
                             creation: request.creation
                         ),
                         contextGeneration: 1,
-                        configurationGeneration: 1
+                        configurationGeneration: 1,
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
                     )
                 )
             )
@@ -377,7 +381,11 @@ private actor RecordingCoachContextSnapshotPort: CoachContextSnapshotPort {
                     authority: CoachContextSnapshotAuthority(
                         binding: binding,
                         contextGeneration: 1,
-                        configurationGeneration: 1
+                        configurationGeneration: 1,
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
                     )
                 )
             )
@@ -449,7 +457,11 @@ private actor SuspendingAuthoritySnapshotPort: CoachContextSnapshotPort {
                             responsePositionID: request.pendingUserTurn.responsePositionID
                         ),
                         contextGeneration: contextGeneration,
-                        configurationGeneration: configurationGeneration
+                        configurationGeneration: configurationGeneration,
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
                     )
                 )
             )
@@ -541,7 +553,11 @@ private actor WrongBindingSnapshotPort: CoachContextSnapshotPort {
                             responsePositionID: request.pendingUserTurn.responsePositionID
                         ),
                         contextGeneration: 99,
-                        configurationGeneration: 99
+                        configurationGeneration: 99,
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
                     )
                 )
             )

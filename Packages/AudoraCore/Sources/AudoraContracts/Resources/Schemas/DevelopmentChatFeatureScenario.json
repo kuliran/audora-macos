@@ -35,16 +35,13 @@
             "$ref": "#/$defs/DevelopmentChatScenarioState"
         },
         "expectedProviderCalls": {
-            "type": "number",
-            "const": 0
+            "$ref": "#/$defs/NonnegativeWholeNumber"
         },
         "expectedInvocationCalls": {
-            "type": "number",
-            "const": 0
+            "$ref": "#/$defs/NonnegativeWholeNumber"
         },
         "expectedAdmissionCalls": {
-            "type": "number",
-            "const": 0
+            "$ref": "#/$defs/NonnegativeWholeNumber"
         },
         "providerAvailability": {
             "$ref": "#/$defs/DevelopmentChatScenarioProviderAvailability"
@@ -290,6 +287,12 @@
                 "selectedDraftVersion": {
                     "$ref": "#/$defs/NonnegativeWholeNumber"
                 },
+                "selectedMessageIds": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatMessageId"
+                    }
+                },
                 "composerStatus": {
                     "$ref": "#/$defs/DevelopmentChatScenarioComposerStatus"
                 },
@@ -313,6 +316,10 @@
             "unevaluatedProperties": {
                 "not": {}
             }
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
         },
         "DevelopmentChatScenarioProviderAvailability": {
             "anyOf": [
@@ -357,10 +364,6 @@
         "CoachMemoryId": {
             "type": "string",
             "pattern": "^mem-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
-        },
-        "NonnegativeWholeNumber": {
-            "type": "integer",
-            "minimum": 0
         },
         "ChatTitleText": {
             "type": "string",
@@ -1183,6 +1186,18 @@
                 {
                     "type": "string",
                     "const": "coachContextCannotFit"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInterrupted"
+                },
+                {
+                    "type": "string",
+                    "const": "coachProviderError"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInvalid"
                 }
             ]
         },

@@ -601,6 +601,7 @@ final class ContractResourcesTests: XCTestCase {
             pending["responsePositionId"] as? String,
             "rsp-20260830T120001000Z-6PQR"
         )
+        XCTAssertEqual((pending["schemaVersion"] as? NSNumber)?.uint32Value, 3)
         XCTAssertNil(pending["failure"])
 
         let failed = try jsonObject(.pendingUserTurnCapacityFailureExample)
@@ -612,6 +613,35 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(failed["responsePositionId"] as? String,
                        pending["responsePositionId"] as? String)
         XCTAssertEqual(failed["failure"] as? String, "coachContextCannotFit")
+        XCTAssertEqual((failed["schemaVersion"] as? NSNumber)?.uint32Value, 3)
+
+        let interrupted = try jsonObject(.pendingUserTurnInterruptedExample)
+        XCTAssertEqual(
+            interrupted["failure"] as? String,
+            "coachResponseInterrupted"
+        )
+        XCTAssertEqual(
+            (interrupted["schemaVersion"] as? NSNumber)?.uint32Value,
+            3
+        )
+
+        let providerFailure = try jsonObject(.pendingUserTurnProviderFailureExample)
+        XCTAssertEqual(providerFailure["failure"] as? String, "coachProviderError")
+        XCTAssertEqual(
+            (providerFailure["schemaVersion"] as? NSNumber)?.uint32Value,
+            3
+        )
+
+        let invalid = try jsonObject(.pendingUserTurnInvalidResponseExample)
+        XCTAssertEqual(invalid["failure"] as? String, "coachResponseInvalid")
+        XCTAssertEqual(
+            (invalid["schemaVersion"] as? NSNumber)?.uint32Value,
+            3
+        )
+
+        let legacy = try jsonObject(.pendingUserTurnLegacyV1Example)
+        XCTAssertEqual((legacy["schemaVersion"] as? NSNumber)?.uint32Value, 1)
+        XCTAssertEqual(legacy["failure"] as? String, "coachContextCannotFit")
 
         let schema = try XCTUnwrap(
             String(
@@ -622,14 +652,18 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(schema.contains("PendingUserTurnId"))
         XCTAssertTrue(schema.contains("ChatResponsePositionId"))
         XCTAssertTrue(schema.contains("coachContextCannotFit"))
+        XCTAssertTrue(schema.contains("coachResponseInterrupted"))
+        XCTAssertTrue(schema.contains("coachProviderError"))
+        XCTAssertTrue(schema.contains("coachResponseInvalid"))
         XCTAssertTrue(schema.contains("unevaluatedProperties"))
     }
 
-    func testEveryDevelopmentChatScenarioForbidsProviderAndAdmissionEffects() throws {
+    func testDevelopmentChatScenariosDeclareExactInvocationProviderAndAdmissionCalls() throws {
         let resources: [ContractResource] = [
             .createDevelopmentChatScenario,
             .draftSendDiscardDevelopmentChatScenario,
             .contextCapacityRecoveryDevelopmentChatScenario,
+            .fakeProviderSuccessDevelopmentChatScenario,
             .renameDevelopmentChatScenario,
             .filterDevelopmentChatsScenario,
             .relaunchDevelopmentChatScenario,
@@ -647,9 +681,112 @@ final class ContractResourcesTests: XCTestCase {
                     with: ContractResources.data(for: resource)
                 ) as? [String: Any]
             )
-            XCTAssertEqual((object["expectedProviderCalls"] as? NSNumber)?.intValue, 0)
-            XCTAssertEqual((object["expectedInvocationCalls"] as? NSNumber)?.intValue, 0)
-            XCTAssertEqual((object["expectedAdmissionCalls"] as? NSNumber)?.intValue, 0)
+            let executesProviderAttempt = [
+                ContractResource.draftSendDiscardDevelopmentChatScenario,
+                .contextCapacityRecoveryDevelopmentChatScenario,
+                .fakeProviderSuccessDevelopmentChatScenario,
+            ].contains(resource)
+            XCTAssertEqual(
+                (object["expectedProviderCalls"] as? NSNumber)?.intValue,
+                executesProviderAttempt ? 1 : 0
+            )
+            let expectedInvocationCalls = if resource ==
+                .contextCapacityRecoveryDevelopmentChatScenario
+            {
+                2
+            } else if [
+                ContractResource.draftSendDiscardDevelopmentChatScenario,
+                .fakeProviderSuccessDevelopmentChatScenario,
+            ].contains(resource) {
+                1
+            } else {
+                0
+            }
+            XCTAssertEqual(
+                (object["expectedInvocationCalls"] as? NSNumber)?.intValue,
+                expectedInvocationCalls
+            )
+            XCTAssertEqual(
+                (object["expectedAdmissionCalls"] as? NSNumber)?.intValue,
+                executesProviderAttempt ? 1 : 0
+            )
+            if resource == .fakeProviderSuccessDevelopmentChatScenario {
+                XCTAssertEqual(object["providerAvailability"] as? String, "available")
+            } else if [
+                ContractResource.draftSendDiscardDevelopmentChatScenario,
+                .contextCapacityRecoveryDevelopmentChatScenario,
+            ].contains(resource) {
+                XCTAssertEqual(object["providerAvailability"] as? String, "unavailable")
+            }
+        }
+    }
+
+    func testInvocationGoldensBindOneResponsePositionAndMachineLocalDebit() throws {
+        let user = try jsonObject(.developmentChatUserMessageExample)
+        let coach = try jsonObject(.developmentChatCoachMessageExample)
+        let invocation = try jsonObject(.developmentChatCoachInvocationExample)
+        XCTAssertEqual(user["role"] as? String, "user")
+        XCTAssertEqual(coach["role"] as? String, "coach")
+        XCTAssertEqual(
+            user["responsePositionId"] as? String,
+            coach["responsePositionId"] as? String
+        )
+        XCTAssertEqual(
+            invocation["responsePositionId"] as? String,
+            user["responsePositionId"] as? String
+        )
+        XCTAssertEqual(invocation["draftVersion"] as? Int, 1)
+        XCTAssertEqual(invocation["expectedManifestRevision"] as? Int, 1)
+        XCTAssertEqual(user["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(coach["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(invocation["schemaVersion"] as? Int, 3)
+        let attempts = try XCTUnwrap(invocation["attempts"] as? [[String: Any]])
+        XCTAssertEqual(attempts.map { $0["ordinal"] as? Int }, [1, 2])
+        XCTAssertEqual(attempts.map { $0["kind"] as? String }, [
+            "standard", "shorterRepair",
+        ])
+        XCTAssertEqual(
+            attempts.last?["userMessageId"] as? String,
+            user["messageId"] as? String
+        )
+        XCTAssertEqual(
+            attempts.last?["coachMessageId"] as? String,
+            coach["messageId"] as? String
+        )
+        for attempt in attempts {
+            XCTAssertEqual(Set(attempt.keys), [
+                "attemptId", "ordinal", "kind", "userMessageId",
+                "coachMessageId", "freshDraftId",
+            ])
+            XCTAssertNil(attempt["providerIdempotencyValue"])
+            XCTAssertNil(attempt["transcriptHandles"])
+            XCTAssertNil(attempt["schemaVersion"])
+        }
+        XCTAssertEqual(
+            coach["profileRevisionId"] as? String,
+            invocation["profileRevisionId"] as? String
+        )
+        XCTAssertEqual(
+            coach["profileStatementGeneration"] as? Int,
+            invocation["profileStatementGeneration"] as? Int
+        )
+
+        let ledger = try jsonObject(.invocationAdmissionLedgerExample)
+        let entries = try XCTUnwrap(ledger["entries"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(
+            entries[0]["libraryId"] as? String,
+            invocation["libraryId"] as? String
+        )
+        for resource in [
+            ContractResource.chatMessageSchema,
+            .coachInvocationSchema,
+            .invocationAdmissionLedgerSchema,
+        ] {
+            let schema = try XCTUnwrap(
+                String(data: ContractResources.data(for: resource), encoding: .utf8)
+            )
+            XCTAssertTrue(schema.contains("unevaluatedProperties"), resource.bundlePath)
         }
     }
 

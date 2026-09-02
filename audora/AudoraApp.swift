@@ -1,6 +1,6 @@
 import AppKit
-import AudoraApplication
-import AudoraMacInfrastructure
+@_spi(InvocationInfrastructure) import AudoraApplication
+@_spi(InvocationInfrastructure) import AudoraMacInfrastructure
 import AudoraMacPresentation
 import SwiftUI
 
@@ -89,8 +89,28 @@ struct AudoraApp: App {
             activityCoordinator: activityCoordinator
         )
         let chatIdentityGenerator = RandomChatIdentityGenerator()
+        let retryDiagnostics = MachineInvocationRetryDiagnosticsFactory.live()
+        let retryDiagnosticClock = SystemInvocationRetryDiagnosticClock()
+        let chatPersistence = PortableChatPersistence(
+            retryDiagnostics: retryDiagnostics,
+            retryDiagnosticNow: { retryDiagnosticClock.now() }
+        )
+        let chatStore = PortableChatStore(
+            persistence: chatPersistence,
+            workspace: workspace
+        )
+        let invocations = DefaultInvocations(
+            persistence: PortableInvocationStore(
+                persistence: chatPersistence,
+                workspace: workspace
+            ),
+            admission: MachineInvocationAdmissionFactory.live(),
+            clock: SystemLibraryClock(),
+            identities: RandomInvocationIdentityGenerator(),
+            retryDiagnostics: retryDiagnostics
+        )
         let chatFeature = DefaultChatFeature(
-            store: PortableChatStore(workspace: workspace),
+            store: chatStore,
             profileReader: ActiveLibraryProfileStatementGenerationReader(
                 workspace: workspace
             ),
@@ -99,7 +119,9 @@ struct AudoraApp: App {
             draftIDGenerator: chatIdentityGenerator,
             memoryIDGenerator: chatIdentityGenerator,
             pendingUserTurnIDGenerator: chatIdentityGenerator,
-            responsePositionIDGenerator: chatIdentityGenerator
+            responsePositionIDGenerator: chatIdentityGenerator,
+            admissionRefreshScheduler: SystemChatAdmissionRefreshScheduler(),
+            invocations: invocations
         )
         let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,

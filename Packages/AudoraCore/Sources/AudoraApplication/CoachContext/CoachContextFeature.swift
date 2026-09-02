@@ -112,15 +112,18 @@ struct CoachContextSnapshotAuthority: Equatable, Sendable {
     let binding: CoachContextSnapshotBinding
     let contextGeneration: UInt64
     let configurationGeneration: UInt64
+    let profile: CoachProfileProvenance
 
     init(
         binding: CoachContextSnapshotBinding,
         contextGeneration: UInt64,
-        configurationGeneration: UInt64
+        configurationGeneration: UInt64,
+        profile: CoachProfileProvenance
     ) {
         self.binding = binding
         self.contextGeneration = contextGeneration
         self.configurationGeneration = configurationGeneration
+        self.profile = profile
     }
 }
 
@@ -257,6 +260,12 @@ protocol CoachContextPendingPreparing: Sendable {
     func preparePendingUserTurn(
         _ request: CoachContextPendingTurnRequest
     ) async -> CoachContextPendingPreparationOutcome
+
+    /// Final generation fence used after durable admission/Invocation install and
+    /// immediately before provider launch.
+    func isPreparedContextCurrent(
+        _ prepared: PreparedCoachLaunchContext
+    ) async -> Bool
 }
 
 typealias CoachContextCoordinating = CoachContextFeature & CoachContextPendingPreparing
@@ -397,6 +406,12 @@ public struct DefaultCoachContextFeature: CoachContextFeature, CoachContextPendi
         case .staleState:
             return .unavailable(.staleState)
         }
+    }
+
+    func isPreparedContextCurrent(
+        _ prepared: PreparedCoachLaunchContext
+    ) async -> Bool {
+        await source.isCurrent(prepared.authority)
     }
 }
 

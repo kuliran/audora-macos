@@ -1,7 +1,39 @@
 import Darwin
 import Foundation
 
-/// Descriptor-relative mechanics shared by portable aggregate persistence.
+enum ConfinedAtomicReplaceOutcome: Equatable, Sendable {
+    case committed
+    case commitUncertain
+}
+
+/// The descriptor boundary used by confined atomic replacement. Production
+/// defaults are POSIX operations; tests can inject one failing boundary without
+/// reimplementing the persistence transaction.
+struct ConfinedPersistenceDescriptorOperations: Sendable {
+    let write: @Sendable (Int32, UnsafeRawPointer, Int) -> Int
+    let close: @Sendable (Int32) -> Int32
+    let synchronizeDirectory: @Sendable (Int32) -> Bool
+
+    init(
+        write: @escaping @Sendable (Int32, UnsafeRawPointer, Int) -> Int = {
+            Darwin.write($0, $1, $2)
+        },
+        close: @escaping @Sendable (Int32) -> Int32 = { Darwin.close($0) },
+        synchronizeDirectory: @escaping @Sendable (Int32) -> Bool = { descriptor in
+            while Darwin.fsync(descriptor) != 0 {
+                if errno == EINTR { continue }
+                return false
+            }
+            return true
+        }
+    ) {
+        self.write = write
+        self.close = close
+        self.synchronizeDirectory = synchronizeDirectory
+    }
+}
+
+/// Descriptor-relative mechanics shared by confined aggregate persistence.
 /// Callers retain ownership of layout rules and translate failures through the
 /// concrete error values supplied at construction.
 struct ConfinedPersistencePrimitives<Failure: Error> {
@@ -12,6 +44,27 @@ struct ConfinedPersistencePrimitives<Failure: Error> {
     let invalidJSON: Failure
     let invalidSchemaVersion: Failure
     let unknownKey: Failure
+    private let descriptorOperations: ConfinedPersistenceDescriptorOperations
+
+    init(
+        ioFailure: Failure,
+        invalidLayout: Failure,
+        expectedPathIsSymlink: Failure,
+        rootTooLarge: Failure,
+        invalidJSON: Failure,
+        invalidSchemaVersion: Failure,
+        unknownKey: Failure,
+        descriptorOperations: ConfinedPersistenceDescriptorOperations = .init()
+    ) {
+        self.ioFailure = ioFailure
+        self.invalidLayout = invalidLayout
+        self.expectedPathIsSymlink = expectedPathIsSymlink
+        self.rootTooLarge = rootTooLarge
+        self.invalidJSON = invalidJSON
+        self.invalidSchemaVersion = invalidSchemaVersion
+        self.unknownKey = unknownKey
+        self.descriptorOperations = descriptorOperations
+    }
 
     func writeExclusive(
         _ data: Data,
@@ -33,12 +86,12 @@ struct ConfinedPersistencePrimitives<Failure: Error> {
         }
         guard descriptor >= 0 else { throw ioFailure }
         var closeRequired = true
-        defer { if closeRequired { Darwin.close(descriptor) } }
+        defer { if closeRequired { _ = descriptorOperations.close(descriptor) } }
         let success = data.withUnsafeBytes { buffer -> Bool in
             guard let base = buffer.baseAddress else { return data.isEmpty }
             var offset = 0
             while offset < buffer.count {
-                let count = Darwin.write(
+                let count = descriptorOperations.write(
                     descriptor,
                     base.advanced(by: offset),
                     buffer.count - offset
@@ -54,11 +107,64 @@ struct ConfinedPersistencePrimitives<Failure: Error> {
         }
         guard success else { throw ioFailure }
         if flushBeforeClose { try flush(descriptor) }
-        guard Darwin.close(descriptor) == 0 else {
+        guard descriptorOperations.close(descriptor) == 0 else {
             closeRequired = false
             throw ioFailure
         }
         closeRequired = false
+    }
+
+    /// Durably writes a sibling partial, closes it, atomically replaces the
+    /// destination, and then reports whether the parent-directory switch was
+    /// proven durable. A failure before the rename removes the partial and is
+    /// never reported as a possible commit.
+    func replaceAtomically(
+        _ data: Data,
+        named destinationName: String,
+        via partialName: String,
+        under parent: Int32
+    ) throws -> ConfinedAtomicReplaceOutcome {
+        guard destinationName != partialName else { throw invalidLayout }
+        try removeReplacePartialIfPresent(named: partialName, under: parent)
+        var ownsPartial = true
+        defer {
+            if ownsPartial { _ = unlinkat(parent, partialName, 0) }
+        }
+
+        try writeExclusive(
+            data,
+            named: partialName,
+            under: parent,
+            flushBeforeClose: true
+        )
+        let renameStatus = partialName.withCString { source in
+            destinationName.withCString { destination in
+                Darwin.renameat(parent, source, parent, destination)
+            }
+        }
+        guard renameStatus == 0 else { throw ioFailure }
+        ownsPartial = false
+        return descriptorOperations.synchronizeDirectory(parent)
+            ? .committed
+            : .commitUncertain
+    }
+
+    private func removeReplacePartialIfPresent(
+        named name: String,
+        under parent: Int32
+    ) throws {
+        var metadata = stat()
+        let status = name.withCString {
+            Darwin.fstatat(parent, $0, &metadata, AT_SYMLINK_NOFOLLOW)
+        }
+        if status == 0 {
+            guard (metadata.st_mode & S_IFMT) == S_IFREG,
+                  metadata.st_nlink == 1
+            else { throw invalidLayout }
+            guard unlinkat(parent, name, 0) == 0 else { throw ioFailure }
+        } else if errno != ENOENT {
+            throw ioFailure
+        }
     }
 
     func renameNoReplace(
@@ -88,7 +194,8 @@ struct ConfinedPersistencePrimitives<Failure: Error> {
     func boundedData(
         named name: String,
         under parent: Int32,
-        maximumBytes: Int
+        maximumBytes: Int,
+        requireSingleLink: Bool = false
     ) throws -> Data {
         let descriptor = name.withCString { pointer -> Int32 in
             while true {
@@ -109,6 +216,7 @@ struct ConfinedPersistencePrimitives<Failure: Error> {
         var metadata = stat()
         guard fstat(descriptor, &metadata) == 0,
               (metadata.st_mode & S_IFMT) == S_IFREG,
+              !requireSingleLink || metadata.st_nlink == 1,
               maximumBytes >= 0,
               metadata.st_size >= 0,
               UInt64(metadata.st_size) <= UInt64(maximumBytes),

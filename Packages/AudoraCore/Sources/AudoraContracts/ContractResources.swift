@@ -5,6 +5,8 @@ public enum ContractResource: CaseIterable, Sendable {
     case audioManifestSchema
     case audioNormalizationVectorsSchema
     case chatManifestSchema
+    case chatMessageSchema
+    case coachInvocationSchema
     case pendingUserTurnSchema
     case coachMemoryEnvelopeSchema
     case coachContextQuoteSchema
@@ -12,6 +14,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case coachRequestSchema
     case coachResponseSchema
     case developmentChatFeatureScenarioSchema
+    case invocationAdmissionLedgerSchema
     case libraryFeatureScenarioSchema
     case libraryManifestSchema
     case libraryPreferencesSchema
@@ -40,6 +43,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case createDevelopmentChatScenario
     case draftSendDiscardDevelopmentChatScenario
     case contextCapacityRecoveryDevelopmentChatScenario
+    case fakeProviderSuccessDevelopmentChatScenario
     case renameDevelopmentChatScenario
     case filterDevelopmentChatsScenario
     case relaunchDevelopmentChatScenario
@@ -96,8 +100,16 @@ public enum ContractResource: CaseIterable, Sendable {
 
     case developmentChatExample
     case developmentChatMemoryExample
+    case developmentChatUserMessageExample
+    case developmentChatCoachMessageExample
+    case developmentChatCoachInvocationExample
+    case invocationAdmissionLedgerExample
     case pendingUserTurnExample
     case pendingUserTurnCapacityFailureExample
+    case pendingUserTurnInterruptedExample
+    case pendingUserTurnProviderFailureExample
+    case pendingUserTurnInvalidResponseExample
+    case pendingUserTurnLegacyV1Example
     case coachContextQuoteExample
     case renamedDevelopmentChatExample
     case sessionAnalysisChatExample
@@ -155,6 +167,10 @@ public enum ContractResource: CaseIterable, Sendable {
             "AudioNormalizationVectors.json"
         case .chatManifestSchema:
             "ChatManifest.json"
+        case .chatMessageSchema:
+            "ChatMessage.json"
+        case .coachInvocationSchema:
+            "CoachInvocation.json"
         case .pendingUserTurnSchema:
             "PendingUserTurn.json"
         case .coachMemoryEnvelopeSchema:
@@ -169,6 +185,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "CoachResponse.json"
         case .developmentChatFeatureScenarioSchema:
             "DevelopmentChatFeatureScenario.json"
+        case .invocationAdmissionLedgerSchema:
+            "InvocationAdmissionLedger.json"
         case .libraryFeatureScenarioSchema:
             "LibraryFeatureScenario.json"
         case .libraryManifestSchema:
@@ -223,6 +241,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "draft-send-discard.v1.json"
         case .contextCapacityRecoveryDevelopmentChatScenario:
             "context-capacity-recovery.v1.json"
+        case .fakeProviderSuccessDevelopmentChatScenario:
+            "fake-provider-success.v1.json"
         case .renameDevelopmentChatScenario:
             "rename-preserves-identity.v1.json"
         case .filterDevelopmentChatsScenario:
@@ -331,10 +351,26 @@ public enum ContractResource: CaseIterable, Sendable {
             "chat.json"
         case .developmentChatMemoryExample:
             "memory.json"
+        case .developmentChatUserMessageExample:
+            "user-message.json"
+        case .developmentChatCoachMessageExample:
+            "coach-message.json"
+        case .developmentChatCoachInvocationExample:
+            "coach-invocation.json"
+        case .invocationAdmissionLedgerExample:
+            "admission-ledger.json"
         case .pendingUserTurnExample:
             "pending-user-turn.json"
         case .pendingUserTurnCapacityFailureExample:
             "pending-user-turn-capacity-failure.json"
+        case .pendingUserTurnInterruptedExample:
+            "pending-user-turn-interrupted.json"
+        case .pendingUserTurnProviderFailureExample:
+            "pending-user-turn-provider-failure.json"
+        case .pendingUserTurnInvalidResponseExample:
+            "pending-user-turn-invalid-response.json"
+        case .pendingUserTurnLegacyV1Example:
+            "pending-user-turn-legacy-v1.json"
         case .coachContextQuoteExample:
             "quote.json"
         case .renamedDevelopmentChatExample:
@@ -421,12 +457,13 @@ public enum ContractResource: CaseIterable, Sendable {
     public var subdirectory: String {
         switch self {
         case .audioImportFeatureScenarioSchema, .audioManifestSchema,
-             .audioNormalizationVectorsSchema, .chatManifestSchema,
+             .audioNormalizationVectorsSchema, .chatManifestSchema, .chatMessageSchema,
              .pendingUserTurnSchema,
-             .coachMemoryEnvelopeSchema, .coachContextQuoteSchema,
+             .coachMemoryEnvelopeSchema, .coachContextQuoteSchema, .coachInvocationSchema,
              .coachProviderDescriptorSchema,
              .coachRequestSchema, .coachResponseSchema,
-             .developmentChatFeatureScenarioSchema, .libraryFeatureScenarioSchema,
+             .developmentChatFeatureScenarioSchema, .invocationAdmissionLedgerSchema,
+             .libraryFeatureScenarioSchema,
              .libraryManifestSchema, .libraryPreferencesSchema, .profileHeadSchema,
              .readSessionTranscriptsRequestSchema, .readSessionTranscriptsResponseSchema,
              .recordingFeatureScenarioSchema, .recordingStagingIdentityManifestSchema,
@@ -443,6 +480,7 @@ public enum ContractResource: CaseIterable, Sendable {
             "Scenarios/AudioImport"
         case .createDevelopmentChatScenario, .draftSendDiscardDevelopmentChatScenario,
              .contextCapacityRecoveryDevelopmentChatScenario,
+             .fakeProviderSuccessDevelopmentChatScenario,
              .renameDevelopmentChatScenario,
              .filterDevelopmentChatsScenario, .relaunchDevelopmentChatScenario,
              .staleRenameDevelopmentChatScenario, .wrongLibraryDevelopmentChatScenario,
@@ -482,9 +520,17 @@ public enum ContractResource: CaseIterable, Sendable {
              .rejectedNegativeProfileGeneration, .newerPreferencesExample:
             "Examples/PortableLibrary/v1/rejected"
         case .developmentChatExample, .developmentChatMemoryExample,
+             .developmentChatUserMessageExample, .developmentChatCoachMessageExample,
+             .developmentChatCoachInvocationExample,
              .pendingUserTurnExample, .pendingUserTurnCapacityFailureExample,
+             .pendingUserTurnInterruptedExample,
+             .pendingUserTurnProviderFailureExample,
+             .pendingUserTurnInvalidResponseExample,
+             .pendingUserTurnLegacyV1Example,
              .renamedDevelopmentChatExample, .sessionAnalysisChatExample:
             "Examples/DevelopmentChat/v1"
+        case .invocationAdmissionLedgerExample:
+            "Examples/Invocation/v1"
         case .coachContextQuoteExample:
             "Examples/CoachContext/v1"
         case .rejectedChatExplicitNullOrigin, .rejectedChatMissingAttachments,

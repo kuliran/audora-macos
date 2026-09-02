@@ -51,17 +51,51 @@ namespace Audora.Contracts {
 
   @jsonSchema
   @id("PendingUserTurn.json")
-  model PendingUserTurn {
+  union PendingUserTurn {
+    legacyV1: PendingUserTurnV1,
+    legacyV2: PendingUserTurnV2,
+    current: PendingUserTurnV3,
+  }
+
+  model PendingUserTurnV1 {
+    ...PendingUserTurnFields;
     schemaVersion: 1;
+    failure?: PendingUserTurnFailureV1;
+  }
+
+  model PendingUserTurnV2 {
+    ...PendingUserTurnFields;
+    schemaVersion: 2;
+    failure?: PendingUserTurnFailureV2;
+  }
+
+  model PendingUserTurnV3 {
+    ...PendingUserTurnFields;
+    schemaVersion: 3;
+    failure?: PendingUserTurnFailure;
+  }
+
+  model PendingUserTurnFields {
     pendingUserTurnId: PendingUserTurnId;
     draftId: ChatDraftId;
     draftVersion: NonnegativeWholeNumber;
     responsePositionId: ChatResponsePositionId;
-    failure?: PendingUserTurnFailure;
+  }
+
+  union PendingUserTurnFailureV1 {
+    coachContextCannotFit: "coachContextCannotFit",
   }
 
   union PendingUserTurnFailure {
     coachContextCannotFit: "coachContextCannotFit",
+    coachResponseInterrupted: "coachResponseInterrupted",
+    coachProviderError: "coachProviderError",
+    coachResponseInvalid: "coachResponseInvalid",
+  }
+
+  union PendingUserTurnFailureV2 {
+    coachContextCannotFit: "coachContextCannotFit",
+    coachResponseInterrupted: "coachResponseInterrupted",
   }
 
   @pattern("^cht-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
@@ -125,9 +159,9 @@ namespace Audora.Contracts {
     commands: DevelopmentChatScenarioCommand[];
     dependencyTrace: DevelopmentChatDependencyEvent[];
     expectedState: DevelopmentChatScenarioState;
-    expectedProviderCalls: 0;
-    expectedInvocationCalls: 0;
-    expectedAdmissionCalls: 0;
+    expectedProviderCalls: NonnegativeWholeNumber;
+    expectedInvocationCalls: NonnegativeWholeNumber;
+    expectedAdmissionCalls: NonnegativeWholeNumber;
     providerAvailability?: DevelopmentChatScenarioProviderAvailability;
     contextCapacityMode?: DevelopmentChatScenarioContextCapacityMode;
     suspendedEffect?: DevelopmentChatScenarioSuspendedEffect;
@@ -199,6 +233,7 @@ namespace Audora.Contracts {
     selectedFrozenReason?: DevelopmentChatScenarioFrozenReason;
     selectedDraftText?: ChatDraftText;
     selectedDraftVersion?: NonnegativeWholeNumber;
+    selectedMessageIds?: ChatMessageId[];
     composerStatus?: DevelopmentChatScenarioComposerStatus;
     pendingUserTurnId?: PendingUserTurnId;
     responsePositionId?: ChatResponsePositionId;

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 3,
+  "invocationId": "inv-20260830T120002000Z-5KMN",
+  "attempts": [
+    {
+      "attemptId": "atm-20260830T120002000Z-6PQR",
+      "ordinal": 1,
+      "kind": "standard",
+      "userMessageId": "msg-20260830T120002000Z-4GHJ",
+      "coachMessageId": "msg-20260830T120002000Z-5KMN",
+      "freshDraftId": "drf-20260830T120002000Z-6PQR"
+    },
+    {
+      "attemptId": "atm-20260830T120002000Z-7STV",
+      "ordinal": 2,
+      "kind": "shorterRepair",
+      "userMessageId": "msg-20260830T120003000Z-7STV",
+      "coachMessageId": "msg-20260830T120003000Z-8WXY",
+      "freshDraftId": "drf-20260830T120003000Z-9YZ0"
+    }
+  ],
+  "libraryId": "lib-20260830T115900000Z-2ABC",
+  "chatId": "cht-20260830T120000000Z-2ABC",
+  "pendingUserTurnId": "ptu-20260830T120001000Z-5KMN",
+  "draftId": "drf-20260830T120000000Z-3DEF",
+  "draftVersion": 1,
+  "responsePositionId": "rsp-20260830T120001000Z-6PQR",
+  "expectedManifestRevision": 1,
+  "profileRevisionId": "prf-20260830T120100000Z-3DEF",
+  "profileStatementGeneration": 1,
+  "admittedAt": "2026-08-30T12:00:02.000Z"
+}

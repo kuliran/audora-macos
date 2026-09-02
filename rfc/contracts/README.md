@@ -34,6 +34,12 @@ TypeSpec compilation emits committed JSON Schemas into the `AudoraContracts`
 package resources. Application and scenario runners do not need Node or TypeSpec
 at runtime.
 
+`PendingUserTurn.json` is a versioned union: strict legacy v1 permits no failure
+or `coachContextCannotFit`; legacy v2 additionally permits
+`coachResponseInterrupted`; current v3 also distinguishes retryable Provider
+failure from an invalid complete response. The committed examples cover the
+current terminal reasons and legacy v1.
+
 - [`AudioImportFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioImportFeatureScenario.json)
 - [`AudioManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json)
 - [`AudioNormalizationVectors.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioNormalizationVectors.json)
@@ -91,7 +97,7 @@ at runtime.
 | `TranscriptionWorkerMessage` | Confined worker -> adapter JSONL | No |
 | `TranscriptionWorkerRequest` | Adapter -> confined worker JSON | No |
 
-Invocation and Attempt identities, provider idempotency, admission state, token
+Invocation and Attempt identities, admission state, token
 estimator identity, Profile integrity hashes, and persisted-record schema versions
 remain outside these provider DTOs.
 
@@ -249,10 +255,11 @@ local Draft without invoking a provider.
 Checked-in fixtures cover create, rename, filter, relaunch, stale rename, and the
 Draft lock-and-discard lifecycle in
 [`draft-send-discard.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/Chat/draft-send-discard.v1.json).
-Each scenario declares zero provider, Invocation, and admission calls. Rejected
-examples cover ambiguous creation shapes, unknown keys, missing attachments,
-dangling Memory summaries, and newer schemas that must remain byte-identical
-while frozen.
+Each scenario declares exact provider, Invocation, and admission call totals. The
+three scenarios containing Send cross the single Invocation gateway, while
+non-Send scenarios declare zero calls. Rejected examples cover ambiguous creation
+shapes, unknown keys, missing attachments, dangling Memory summaries, and newer
+schemas that must remain byte-identical while frozen.
 
 `CoachContextQuote.json` is the app-only advisory projection. Its golden locks the
 16,384 UTF-8-byte Send limit and exactly nine explanatory cost categories:
@@ -260,7 +267,27 @@ Profile, Memory, history, Draft, framing, attachments, one complete transcript
 exchange, response reserve, and safety margin. It deliberately contains no
 canonical provider bytes. `context-capacity-recovery.v1.json` exercises an exact
 local miss, typed Create New Chat intent, identity-preserving Retry, and Discard;
-it declares zero provider, Invocation, and admission calls.
+its Send and Retry declare exactly two Invocation-gateway calls, one Provider call,
+and one admission call.
+
+`ChatMessage.json` seals the mutually exclusive stored user-text and Coach-Markdown
+shapes. `CoachInvocation.json` is the portable launch authority bound to one
+Library, Chat, Pending User Turn, Draft version, response position, and expected
+manifest revision. Its current v3 record contains one to four durable Provider
+Attempts; each inherits v3 and carries only a fresh Attempt ID, ordinal/kind, and
+message/Draft publication authority. Provider idempotency values and opaque
+transcript handles are live transport authority and occur in neither this root nor
+its publication proof. Legacy v1/v2 records retain their strict historical flat
+single-Attempt shape only for safe relaunch retirement. `InvocationAdmissionLedger.json` is machine-local rather than
+portable Library content; it permits at most 4,096 Library debits and stores the
+last admitted UTC instant used by the conservative rolling-window policy. The
+Application additionally enforces UTF-8 byte ceilings and exact aggregate
+identity checks that JSON Schema cannot express.
+
+`fake-provider-success.v1.json` crosses the real Application Invocation
+coordinator with synthetic context, admission, identity, and provider fixtures. It
+locks one Draft, records one admission and provider launch, then projects the
+atomic two-message publication and fresh Draft while retaining the Chat identity.
 
 `CoachProviderDescriptor` is app-only configuration. JSON Schema validates each
 field's shape. `displayName` is a bounded Presentation label for provider health
@@ -319,14 +346,19 @@ A Chat freezes its Session attachment set at creation. A request may contain no
 Session attachments. Each attachment has a stable Chat-scoped
 `sessionAttachmentId`; Library Session and revision identities stay local.
 
-For each Provider Attempt, Application projects every attachment as either:
+Application projects every attachment as either:
 
 - `inline`, with its complete immutable transcript; or
 - `onDemand`, with a fresh Attempt-scoped `SessionTranscriptHandle`.
 
-The projection may change between Attempts without changing attachment identity.
-Application chooses it from the exact serialized context and provider limits. The
-coach receives no estimates or admission inputs.
+Automatic Attempts inside one Invocation freeze the semantic exchange, including
+the exact `inline`/`onDemand` selection. Only live Attempt transport authority
+rotates: the process, provider idempotency value, transcript-read capability,
+and `SessionTranscriptHandle` values are fresh. An explicit user Retry creates a
+new Invocation and rebuilds the current Profile, Memory, successful history, and
+attachment projection around the same immutable Draft and Chat attachment set;
+that new Invocation may choose a different delivery projection without changing
+attachment identity. The coach receives no estimates or admission inputs.
 
 `ProfileContext` is a structured projection of the current Profile. Each
 `ProfileStatement` exposes its stable target ID, kind, wording, total distinct

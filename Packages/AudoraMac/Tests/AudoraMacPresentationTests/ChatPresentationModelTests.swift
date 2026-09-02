@@ -6,6 +6,149 @@ import XCTest
 
 @MainActor
 final class ChatPresentationModelTests: XCTestCase {
+    func testCanonicalCoachFailureCardsProjectExactHeadingsAndBodies() {
+        XCTAssertEqual(
+            CoachResponseFailurePresentation.card(for: .coachProviderError),
+            CoachResponseFailureCardPresentation(
+                heading: "Coach provider error",
+                body: "The coach could not complete the request."
+            )
+        )
+        XCTAssertEqual(
+            CoachResponseFailurePresentation.card(for: .coachResponseInvalid),
+            CoachResponseFailureCardPresentation(
+                heading: "Coach response couldn't be used",
+                body: "The coach returned an incomplete or invalid response."
+            )
+        )
+        XCTAssertEqual(
+            CoachResponseFailurePresentation.card(
+                for: .coachResponseInterrupted
+            ),
+            CoachResponseFailureCardPresentation(
+                heading: "Coach response was interrupted",
+                body: nil
+            )
+        )
+        XCTAssertEqual(
+            CoachResponseFailurePresentation.card(for: nil),
+            CoachResponseFailureCardPresentation(
+                heading: "Coach response was interrupted",
+                body: nil
+            )
+        )
+    }
+
+    func testRetryableCoachFailureActionsUseCauseNeutralAccessibilityLabels() {
+        for failure in [
+            PendingUserTurnFailure.coachProviderError,
+            .coachResponseInvalid,
+        ] {
+            XCTAssertEqual(
+                CoachResponseFailurePresentation.retryAccessibilityLabel(
+                    for: failure
+                ),
+                "Retry Coach Response"
+            )
+            XCTAssertEqual(
+                CoachResponseFailurePresentation.discardAccessibilityLabel(
+                    for: failure
+                ),
+                "Discard Coach Response"
+            )
+        }
+    }
+
+    func testRejectedRetryNoticeSaysTheDraftRemainsLockedAndNamesRecoveryActions()
+    {
+        let recoveryText =
+            "The Coach could not accept this Retry. " +
+            "Your Draft remains locked; Retry or Discard."
+
+        XCTAssertEqual(
+            ChatNoticePresentation.recoveryText(for: .coachRetryUnavailable),
+            recoveryText
+        )
+        XCTAssertEqual(
+            ChatNoticePresentation.accessibilityLabel(
+                for: .coachRetryUnavailable
+            ),
+            "Chat notice: \(recoveryText)"
+        )
+        XCTAssertEqual(
+            ChatNoticePresentation.recoveryText(for: .coachSendUnavailable),
+            "The Coach could not accept this Send. Your Draft is still editable."
+        )
+    }
+
+    func testProcessingPendingTurnExposesNoRecoveryOrAccessibilityActions() throws {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260830T120000000Z-2ABC",
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "Processing Retry"
+        )
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: base.chat.draft.draftID,
+            draftVersion: base.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            )
+        )
+        let processing = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            pendingUserTurn: pending
+        )
+        let row = ChatRowSnapshot(aggregate: processing)
+        let state = ChatFeatureState(
+            catalog: .ready(
+                ChatCatalogSnapshot(allRows: [row], visibleRows: [row])
+            ),
+            selection: .open(processing),
+            composer: .locked(processing.chat.draft, pending),
+            admissionAvailability: .unavailable,
+            activity: .invokingCoach(processing.chat.id)
+        )
+
+        let presentation = PendingUserTurnPresentation.project(
+            pending,
+            state: state
+        )
+
+        XCTAssertEqual(presentation, .processing)
+        XCTAssertFalse(presentation.showsAdmissionUnavailableReason)
+        XCTAssertEqual(presentation.recoveryActions, [])
+        XCTAssertEqual(
+            presentation.recoveryActions.map(\.accessibilityLabel),
+            [],
+            "processing must expose zero terminal accessibility actions"
+        )
+    }
+
+    func testInvocationControlPresentationExposesTheSameUnavailableReasonWithoutHover() throws {
+        let reopensAt = try UTCInstant("2026-08-30T12:01:00.000Z")
+
+        XCTAssertEqual(
+            ChatInvocationAdmissionPresentation.unavailableReason(
+                for: .cooldown(reopensAt: reopensAt)
+            ),
+            "Coach admission reopens at 2026-08-30T12:01:00.000Z."
+        )
+        XCTAssertEqual(
+            ChatInvocationAdmissionPresentation.unavailableReason(for: .unavailable),
+            "Coach admission availability could not be checked."
+        )
+        XCTAssertNil(
+            ChatInvocationAdmissionPresentation.unavailableReason(for: .available)
+        )
+    }
+
     func testStartScopesTheFeatureAndPublishesItsInitialSnapshot() async throws {
         let state = ChatFeatureState(catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])))
         let feature = RecordingPresentationChatFeature(initial: state)

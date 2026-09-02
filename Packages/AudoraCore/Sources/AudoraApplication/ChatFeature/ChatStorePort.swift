@@ -1,4 +1,5 @@
 import AudoraDomain
+import Foundation
 
 public protocol ChatStorePort: Sendable {
     func loadCatalog(in library: LibraryScope) async -> ChatCatalogOutcome
@@ -51,6 +52,10 @@ public struct SystemChatAutosaveScheduler: ChatAutosaveScheduling {
     public func sleep(forNanoseconds nanoseconds: UInt64) async throws {
         try await Task.sleep(nanoseconds: nanoseconds)
     }
+}
+
+public protocol ChatAdmissionRefreshScheduling: Sendable {
+    func sleep(until deadline: UTCInstant) async throws
 }
 
 public protocol ProfileStatementGenerationReading: Sendable {

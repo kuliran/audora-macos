@@ -24,6 +24,18 @@ Send rejects the independent 16,384-byte message limit before resolving provider
 state, and exact snapshots are fenced by stable Draft/Pending identity plus current
 context and configuration generations.
 
+Send now crosses one `Invocations.tryInvoke` coordinator. It re-resolves the
+locked Draft and exact context, enforces one active Invocation per Library, and
+claims a machine-local Library-keyed rolling 60-second ledger. The debit and
+portable Invocation authority are durable before the deterministic synthetic
+provider can start. Successful fake turns publish one exact user message and one
+Markdown Coach message behind a single Chat-manifest CAS; pre-commit crashes and
+CAS conflicts publish neither. The current live composition still fails closed at
+context qualification because no production provider descriptor is qualified. The
+synthetic vertical slice owns the exact bounded 5/10/15-second Attempt schedule
+and one shorter complete repair; real provider adapters, Stop, transcript tools,
+and Profile or Memory effects remain later vertical slices.
+
 ## Requirements
 
 - Apple Silicon Mac

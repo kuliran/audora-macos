@@ -29,6 +29,25 @@ final class PortableLibraryDomainTests: XCTestCase {
         XCTAssertThrowsError(try UTCInstant("2026-08-30T12:00:00Z"))
     }
 
+    func testInstantArithmeticCrossesLeapDayAndPreservesChronologicalOrdering() throws {
+        let lastLeapMillisecond = try UTCInstant("2024-02-29T23:59:59.999Z")
+        let march = try UTCInstant("2024-03-01T00:00:00.000Z")
+
+        XCTAssertEqual(lastLeapMillisecond.adding(milliseconds: 1), march)
+        XCTAssertEqual(march.adding(milliseconds: -1), lastLeapMillisecond)
+        XCTAssertLessThan(lastLeapMillisecond, march)
+    }
+
+    func testInstantArithmeticFailsClosedOutsideRepresentableYearsAndOnOverflow() throws {
+        let minimum = try UTCInstant("0001-01-01T00:00:00.000Z")
+        let maximum = try UTCInstant("9999-12-31T23:59:59.999Z")
+
+        XCTAssertNil(minimum.adding(milliseconds: -1))
+        XCTAssertNil(maximum.adding(milliseconds: 1))
+        XCTAssertNil(minimum.adding(milliseconds: .min))
+        XCTAssertNil(maximum.adding(milliseconds: .max))
+    }
+
     func testRelativePathRejectsEveryEscapeAndKeepsPortableComponents() throws {
         XCTAssertEqual(
             try LibraryRelativePath("profile/revisions/item.json").components,

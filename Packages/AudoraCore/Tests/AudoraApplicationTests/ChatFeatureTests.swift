@@ -4,6 +4,316 @@ import XCTest
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 final class ChatFeatureTests: XCTestCase {
+    func testAdmissionCooldownBlocksSendUntilItsExactDeadlineRefreshes() async throws {
+        let aggregate = try Self.aggregate(draftText: "Coach this exact Draft.")
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let reopensAt = try UTCInstant("2026-08-30T12:01:00.000Z")
+        let gateway = ProjectedAdmissionInvocationGateway(
+            availability: .cooldown(reopensAt: reopensAt)
+        )
+        let scheduler = ControlledAdmissionRefreshScheduler()
+        let feature = makeFeature(
+            store: store,
+            admissionRefreshScheduler: scheduler,
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        await feature.send(.sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft))
+
+        let blockedRequests = await gateway.requests
+        let blockedLocks = await store.pendingLocks
+        let cooldownState = await feature.currentState
+        XCTAssertEqual(blockedRequests, [])
+        XCTAssertEqual(blockedLocks, [])
+        XCTAssertEqual(
+            cooldownState.admissionAvailability,
+            .cooldown(reopensAt: reopensAt)
+        )
+        await scheduler.waitUntilScheduled()
+        let deadlines = await scheduler.deadlines
+        XCTAssertEqual(deadlines, [reopensAt])
+
+        await gateway.setAvailability(.available)
+        await scheduler.resume()
+        while await feature.currentState.admissionAvailability != .available {
+            await Task.yield()
+        }
+        await feature.send(.sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft))
+
+        let reopenedRequests = await gateway.requests
+        let reopenedLocks = await store.pendingLocks
+        XCTAssertEqual(reopenedRequests.count, 1)
+        XCTAssertEqual(
+            reopenedLocks,
+            [],
+            "the Invocation gateway, not ChatStore, owns Pending installation"
+        )
+    }
+
+    func testAdmissionCooldownRetainsFailedPendingTurnWithoutLaunchingRetry() async throws {
+        let aggregate = try Self.aggregate(draftText: "Retry this exact Draft.")
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            ),
+            failure: .coachContextCannotFit
+        )
+        let locked = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: pending
+        )
+        let store = RecordingChatStore(catalog: [.available(locked)])
+        let gateway = ProjectedAdmissionInvocationGateway(
+            availability: .cooldown(
+                reopensAt: try UTCInstant("2026-08-30T12:01:00.000Z")
+            )
+        )
+        let feature = makeFeature(
+            store: store,
+            admissionRefreshScheduler: ControlledAdmissionRefreshScheduler(),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, locked.chat.id))
+
+        await feature.send(.retryPendingUserTurn(Self.context, pending.id))
+
+        let requests = await gateway.requests
+        let state = await feature.currentState
+        XCTAssertEqual(requests, [])
+        XCTAssertEqual(Self.openAggregate(in: state)?.pendingUserTurn, pending)
+        XCTAssertEqual(state.composer, .locked(locked.chat.draft, pending))
+    }
+
+    func testRetryProjectsTheExactPendingAsFailureFreeWhileInvocationIsSuspended() async throws {
+        let aggregate = try Self.aggregate(draftText: "Retry this exact Draft.")
+        let failedPending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            ),
+            failure: .coachProviderError
+        )
+        let failedAggregate = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: failedPending
+        )
+        let processingPending = failedPending.replacingFailure(nil)
+        let processingAggregate = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: processingPending
+        )
+        let gateway = SuspendedRetryInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failedAggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        let failedState = await feature.currentState
+        XCTAssertEqual(
+            Self.openAggregate(in: failedState)?.pendingUserTurn?.failure,
+            .coachProviderError
+        )
+        XCTAssertTrue(failedState.isCoachResponseRetryableFailure(failedPending))
+
+        async let retry: Void = feature.send(
+            .retryPendingUserTurn(Self.context, failedPending.id)
+        )
+        await gateway.waitUntilRetryIsSuspended()
+
+        let state = await feature.currentState
+        XCTAssertEqual(state.selection, .open(processingAggregate))
+        XCTAssertEqual(
+            state.composer,
+            .locked(processingAggregate.chat.draft, processingPending)
+        )
+        XCTAssertEqual(state.activity, .invokingCoach(aggregate.chat.id))
+        XCTAssertNil(state.notice)
+        XCTAssertNil(state.operationallyInterruptedInvocation)
+        XCTAssertFalse(state.isCoachResponseRetryableFailure(processingPending))
+
+        await gateway.resume(
+            with: .interrupted(failedAggregate, .providerFailed)
+        )
+        await retry
+
+        let terminalState = await feature.currentState
+        XCTAssertEqual(terminalState.selection, .open(failedAggregate))
+        XCTAssertEqual(
+            terminalState.composer,
+            .locked(failedAggregate.chat.draft, failedPending)
+        )
+        XCTAssertNil(terminalState.activity)
+    }
+
+    func testRetryInterruptedWithoutSnapshotRestoresExactFailedPendingAndActions()
+        async throws
+    {
+        let aggregate = try Self.aggregate(draftText: "Keep this failed Draft.")
+        let failedPending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            ),
+            failure: .coachProviderError
+        )
+        let failedAggregate = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: failedPending
+        )
+        let gateway = SuspendedRetryInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failedAggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        async let retry: Void = feature.send(
+            .retryPendingUserTurn(Self.context, failedPending.id)
+        )
+        await gateway.waitUntilRetryIsSuspended()
+        await gateway.resume(with: .interrupted(nil, .providerFailed))
+        await retry
+
+        let state = await feature.currentState
+        XCTAssertEqual(state.selection, .open(failedAggregate))
+        XCTAssertEqual(
+            state.composer,
+            .locked(failedAggregate.chat.draft, failedPending)
+        )
+        XCTAssertTrue(state.isCoachResponseRetryableFailure(failedPending))
+        XCTAssertNil(state.operationallyInterruptedInvocation)
+        XCTAssertNil(
+            state.notice,
+            "the restored typed failure card is the terminal copy"
+        )
+        XCTAssertNil(state.activity)
+    }
+
+    func testRejectedRetryRestoresTheAuthoritativeFailedPending() async throws {
+        let aggregate = try Self.aggregate(draftText: "Preserve this failed Retry.")
+        let failedPending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            ),
+            failure: .coachProviderError
+        )
+        let failedAggregate = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: failedPending
+        )
+        let gateway = SuspendedRetryInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failedAggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        async let retry: Void = feature.send(
+            .retryPendingUserTurn(Self.context, failedPending.id)
+        )
+        await gateway.waitUntilRetryIsSuspended()
+        await gateway.resume(
+            with: .rejected(nil, .activeInvocation)
+        )
+        await retry
+
+        let state = await feature.currentState
+        XCTAssertEqual(state.selection, .open(failedAggregate))
+        XCTAssertEqual(
+            state.composer,
+            .locked(failedAggregate.chat.draft, failedPending)
+        )
+        XCTAssertEqual(state.notice, .coachBusy)
+        XCTAssertNil(state.activity)
+    }
+
+    func testUnavailableRejectedRetryKeepsFailedPendingLockedAndUsesRetryCopy()
+        async throws
+    {
+        let reasons: [InvocationRejectionReason] = [
+            .admissionUnavailable,
+            .contextChanged,
+            .persistenceUnavailable,
+            .identityCollisionExhausted(lastCollision: .freshDraftID),
+        ]
+        for reason in reasons {
+            let aggregate = try Self.aggregate(
+                draftText: "Keep this failed Retry locked."
+            )
+            let failedPending = PendingUserTurn(
+                id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+                draftID: aggregate.chat.draft.draftID,
+                draftVersion: aggregate.chat.draft.version,
+                responsePositionID: try ChatResponsePositionID(
+                    "rsp-20260830T120000000Z-6PQR"
+                ),
+                failure: .coachProviderError
+            )
+            let failedAggregate = try ChatAggregate(
+                chat: aggregate.chat,
+                memory: aggregate.memory,
+                pendingUserTurn: failedPending
+            )
+            let gateway = SuspendedRetryInvocationGateway()
+            let feature = makeFeature(
+                store: RecordingChatStore(catalog: [.available(failedAggregate)]),
+                invocations: gateway
+            )
+            await feature.send(.start(Self.context))
+            await feature.send(.open(Self.context, aggregate.chat.id))
+
+            async let retry: Void = feature.send(
+                .retryPendingUserTurn(Self.context, failedPending.id)
+            )
+            await gateway.waitUntilRetryIsSuspended()
+            let rejectedCurrent = reason == .contextChanged
+                ? failedAggregate
+                : nil
+            await gateway.resume(with: .rejected(rejectedCurrent, reason))
+            await retry
+
+            let state = await feature.currentState
+            XCTAssertEqual(
+                state.selection,
+                .open(failedAggregate),
+                String(describing: reason)
+            )
+            XCTAssertEqual(
+                state.composer,
+                .locked(failedAggregate.chat.draft, failedPending),
+                String(describing: reason)
+            )
+            XCTAssertEqual(
+                state.notice,
+                .coachRetryUnavailable,
+                String(describing: reason)
+            )
+            XCTAssertNil(state.activity, String(describing: reason))
+        }
+    }
+
     func testDelayedCreateFromPreviousLibraryContextIsRejectedAfterSwitch() async {
         let store = RecordingChatStore()
         let feature = makeFeature(store: store)
@@ -696,7 +1006,12 @@ final class ChatFeatureTests: XCTestCase {
         let aggregate = try Self.aggregate()
         let store = RecordingChatStore(catalog: [.available(aggregate)])
         let scheduler = ControlledChatAutosaveScheduler()
-        let feature = makeFeature(store: store, autosaveScheduler: scheduler)
+        let gateway = RecordingInterruptedInvocationGateway()
+        let feature = makeFeature(
+            store: store,
+            autosaveScheduler: scheduler,
+            invocations: gateway
+        )
         await feature.send(.start(Self.context))
         await feature.send(.open(Self.context, aggregate.chat.id))
         await feature.send(
@@ -726,7 +1041,383 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(lockedAggregate.pendingUserTurn, pending)
         XCTAssertEqual(lockedAggregate.chat.messageIDs, [])
         let calls = await store.calls
-        XCTAssertEqual(calls, [.loadCatalog, .load, .saveDraft, .lockPendingUserTurn])
+        XCTAssertEqual(calls, [.loadCatalog, .load, .saveDraft])
+        let preparations = await gateway.preparations
+        XCTAssertEqual(preparations.count, 1)
+        XCTAssertEqual(preparations.first?.observedAggregate.chat.draft, lockedDraft)
+        XCTAssertEqual(preparations.first?.pendingUserTurn, pending)
+    }
+
+    func testSendLeavesDraftEditableWhenAnotherInvocationOwnsTheLibrary() async throws {
+        let aggregate = try Self.aggregate(draftText: "Keep this Draft editable.")
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let gateway = BusyPreparingInvocationGateway()
+        let feature = makeFeature(store: store, invocations: gateway)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), aggregate)
+        XCTAssertEqual(state.composer, .editable(aggregate.chat.draft, isDirty: false))
+        XCTAssertEqual(state.notice, .coachBusy)
+        XCTAssertNil(state.activity)
+        let locks = await store.pendingLocks
+        XCTAssertEqual(locks, [])
+    }
+
+    func testSupersedingLibraryAbandonsPreparedPendingBeforeInvocationStarts() async throws {
+        let aggregate = try Self.aggregate(draftText: "Do not outlive this Library.")
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let gateway = SuspendedPreparingInvocationGateway()
+        let feature = makeFeature(store: store, invocations: gateway)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        async let send: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        await gateway.waitUntilPreparationStarts()
+        await feature.send(.start(Self.secondContext))
+        await gateway.resumePreparation()
+        await send
+
+        let abandoned = await gateway.abandoned
+        let invocationCount = await gateway.invocationCount
+        let loadedScopes = await store.loadedScopes
+        XCTAssertEqual(abandoned.count, 1)
+        XCTAssertEqual(invocationCount, 0)
+        XCTAssertEqual(loadedScopes, [Self.scope, Self.secondScope])
+    }
+
+    func testOperationalInterruptionProjectsRetryForTheExactUnchangedPendingIntent() async throws {
+        let aggregate = try Self.aggregate(draftText: "Retry this exact Draft.")
+        let expectedPending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            )
+        )
+        let staleGatewaySnapshot = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: expectedPending
+        )
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let gateway = OperationallyInterruptedInvocationGateway(
+            fallback: staleGatewaySnapshot
+        )
+        let feature = makeFeature(store: store, invocations: gateway)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let interruptedState = await feature.currentState
+        guard case let .open(locked) = interruptedState.selection,
+              let pending = locked.pendingUserTurn
+        else { return XCTFail("the exact Pending must remain selected") }
+        let expectedRequest = PendingCoachInvocationRequest(
+            library: Self.scope,
+            chatID: aggregate.chat.id,
+            pendingUserTurnID: pending.id
+        )
+        XCTAssertNil(pending.failure, "the Application must not fake a durable write")
+        XCTAssertEqual(
+            interruptedState.operationallyInterruptedInvocation,
+            expectedRequest
+        )
+        XCTAssertTrue(interruptedState.isCoachResponseInterrupted(pending))
+
+        await feature.send(
+            .rename(
+                Self.context,
+                aggregate.chat.id,
+                title: "Renamed while Retry remains exact",
+                expectedRevision: locked.chat.manifestRevision
+            )
+        )
+        let renamedState = await feature.currentState
+        XCTAssertEqual(
+            renamedState.operationallyInterruptedInvocation,
+            expectedRequest,
+            "an unrelated authoritative rename does not resolve terminal uncertainty"
+        )
+        XCTAssertTrue(renamedState.isCoachResponseInterrupted(pending))
+
+        await feature.send(.retryPendingUserTurn(Self.context, pending.id))
+
+        let requests = await gateway.requests
+        let retryState = await feature.currentState
+        XCTAssertEqual(requests, [expectedRequest, expectedRequest])
+        XCTAssertEqual(
+            Self.openAggregate(in: retryState)?.chat.title,
+            try ChatTitle("Renamed while Retry remains exact"),
+            "an older operational fallback cannot regress newer Application state"
+        )
+    }
+
+    func testOperationalRetryClearsTransientAuthorityWhileInvocationIsSuspended() async throws {
+        let aggregate = try Self.aggregate(draftText: "Retry this uncertain Draft.")
+        let gateway = OperationalInterruptionThenSuspendedRetryGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let interrupted = await feature.currentState
+        guard case let .open(locked) = interrupted.selection,
+              let pending = locked.pendingUserTurn,
+              let interruption = interrupted.operationallyInterruptedInvocation
+        else { return XCTFail("expected an operationally interrupted Pending") }
+        XCTAssertTrue(interrupted.isCoachResponseRetryableFailure(pending))
+
+        async let retry: Void = feature.send(
+            .retryPendingUserTurn(Self.context, pending.id)
+        )
+        await gateway.waitUntilRetryIsSuspended()
+
+        let processing = await feature.currentState
+        XCTAssertNil(processing.operationallyInterruptedInvocation)
+        XCTAssertEqual(
+            Self.openAggregate(in: processing)?.pendingUserTurn,
+            pending.replacingFailure(nil)
+        )
+        XCTAssertEqual(processing.activity, .invokingCoach(aggregate.chat.id))
+        XCTAssertFalse(
+            processing.isCoachResponseRetryableFailure(
+                pending.replacingFailure(nil)
+            )
+        )
+
+        await gateway.resume(
+            with: .rejected(nil, .activeInvocation)
+        )
+        await retry
+
+        let rejected = await feature.currentState
+        XCTAssertEqual(rejected.operationallyInterruptedInvocation, interruption)
+        XCTAssertEqual(
+            Self.openAggregate(in: rejected)?.pendingUserTurn,
+            pending
+        )
+        XCTAssertTrue(rejected.isCoachResponseRetryableFailure(pending))
+        XCTAssertEqual(rejected.notice, .coachBusy)
+    }
+
+    func testOperationalRetryInterruptedWithoutSnapshotRestoresExactAuthorityAndFallback()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Keep this uncertain Draft locked."
+        )
+        let gateway = OperationalInterruptionThenSuspendedRetryGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let interrupted = await feature.currentState
+        guard case let .open(fallback) = interrupted.selection,
+              let pending = fallback.pendingUserTurn,
+              let authority = interrupted.operationallyInterruptedInvocation
+        else { return XCTFail("expected the exact operational Retry authority") }
+
+        async let retry: Void = feature.send(
+            .retryPendingUserTurn(Self.context, pending.id)
+        )
+        await gateway.waitUntilRetryIsSuspended()
+        await gateway.resume(
+            with: .interrupted(nil, .persistenceUnavailable)
+        )
+        await retry
+
+        let state = await feature.currentState
+        XCTAssertEqual(state.selection, .open(fallback))
+        XCTAssertEqual(
+            state.composer,
+            .locked(fallback.chat.draft, pending)
+        )
+        XCTAssertEqual(state.operationallyInterruptedInvocation, authority)
+        XCTAssertTrue(state.isCoachResponseRetryableFailure(pending))
+        XCTAssertEqual(state.notice, .coachResponseInterrupted)
+        XCTAssertNil(state.activity)
+    }
+
+    func testOperationalRetryRestoresAuthorityFromFailureFreeRejectedCurrent() async throws {
+        let aggregate = try Self.aggregate(draftText: "Retry this returned current Draft.")
+        let gateway = OperationalInterruptionThenSuspendedRetryGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let interrupted = await feature.currentState
+        guard case let .open(locked) = interrupted.selection,
+              let pending = locked.pendingUserTurn,
+              let interruption = interrupted.operationallyInterruptedInvocation
+        else { return XCTFail("expected an operationally interrupted Pending") }
+
+        async let retry: Void = feature.send(
+            .retryPendingUserTurn(Self.context, pending.id)
+        )
+        await gateway.waitUntilRetryIsSuspended()
+        let processing = await feature.currentState
+        let processingAggregate = try XCTUnwrap(
+            Self.openAggregate(in: processing)
+        )
+
+        await gateway.resume(
+            with: .rejected(processingAggregate, .persistenceUnavailable)
+        )
+        await retry
+
+        let rejected = await feature.currentState
+        XCTAssertEqual(rejected.selection, .open(processingAggregate))
+        XCTAssertEqual(rejected.operationallyInterruptedInvocation, interruption)
+        XCTAssertTrue(rejected.isCoachResponseRetryableFailure(pending))
+        XCTAssertEqual(rejected.notice, .coachRetryUnavailable)
+        XCTAssertNil(rejected.activity)
+    }
+
+    func testTypedProviderFailuresRemainRetryableCoachResponseFailures() throws {
+        for failure in [
+            PendingUserTurnFailure.coachProviderError,
+            .coachResponseInvalid,
+            .coachResponseInterrupted,
+        ] {
+            let pending = PendingUserTurn(
+                id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+                draftID: try ChatDraftID("drf-20260830T120000000Z-4GHJ"),
+                draftVersion: 1,
+                responsePositionID: try ChatResponsePositionID(
+                    "rsp-20260830T120000000Z-6PQR"
+                ),
+                failure: failure
+            )
+            XCTAssertTrue(
+                ChatFeatureState().isCoachResponseRetryableFailure(pending),
+                failure.rawValue
+            )
+        }
+    }
+
+    func testTypedInvocationFailureCardSuppressesRedundantInterruptionNotice() async throws {
+        for (failure, reason) in [
+            (
+                PendingUserTurnFailure.coachProviderError,
+                InvocationInterruptionReason.providerFailed
+            ),
+            (
+                PendingUserTurnFailure.coachResponseInvalid,
+                InvocationInterruptionReason.invalidProviderResponse
+            ),
+        ] {
+            let aggregate = try Self.aggregate(
+                draftText: "Keep this synthetic Draft locked."
+            )
+            let store = RecordingChatStore(catalog: [.available(aggregate)])
+            let gateway = TypedTerminalInvocationGateway(
+                failure: failure,
+                reason: reason
+            )
+            let feature = makeFeature(store: store, invocations: gateway)
+            await feature.send(.start(Self.context))
+            await feature.send(.open(Self.context, aggregate.chat.id))
+
+            await feature.send(
+                .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+            )
+
+            let state = await feature.currentState
+            XCTAssertEqual(
+                Self.openAggregate(in: state)?.pendingUserTurn?.failure,
+                failure,
+                failure.rawValue
+            )
+            XCTAssertNil(
+                state.notice,
+                "the authoritative \(failure.rawValue) card must not be contradicted"
+            )
+        }
+    }
+
+    func testGenericInterruptionStillProjectsInterruptionNotice() async throws {
+        let aggregate = try Self.aggregate(
+            draftText: "Keep this interrupted synthetic Draft locked."
+        )
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let gateway = TypedTerminalInvocationGateway(
+            failure: .coachResponseInterrupted,
+            reason: .persistenceUnavailable
+        )
+        let feature = makeFeature(store: store, invocations: gateway)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let state = await feature.currentState
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        XCTAssertEqual(state.notice, .coachResponseInterrupted)
+    }
+
+    func testOperationalRetryClearsItsProjectionWhenThePendingHasVanished() async throws {
+        let aggregate = try Self.aggregate(draftText: "Retry this exact Draft.")
+        let store = RecordingChatStore(
+            catalog: [.available(aggregate)],
+            loadOutcomes: [.loaded(aggregate), .missing]
+        )
+        let gateway = VanishingOperationalRetryInvocationGateway()
+        let feature = makeFeature(store: store, invocations: gateway)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        guard case let .open(locked) = await feature.currentState.selection,
+              let pending = locked.pendingUserTurn
+        else { return XCTFail("the first interruption must retain the exact Pending") }
+
+        await feature.send(.retryPendingUserTurn(Self.context, pending.id))
+
+        let refreshed = await feature.currentState
+        XCTAssertNil(refreshed.operationallyInterruptedInvocation)
+        XCTAssertEqual(refreshed.selection, .none)
+        XCTAssertNil(refreshed.composer)
+        XCTAssertEqual(refreshed.notice, .chatMissing)
+
+        await feature.send(.retryPendingUserTurn(Self.context, pending.id))
+        let requests = await gateway.requests
+        XCTAssertEqual(requests.count, 2, "a vanished Pending cannot retain Retry authority")
     }
 
     func testCanceledAutosaveReconciliationNeverClearsSendLockingActivity() async throws {
@@ -1201,7 +1892,10 @@ final class ChatFeatureTests: XCTestCase {
         store: any ChatStorePort,
         clock: any ChatClock = FixedChatClock(),
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator = FixedChatIDs(),
-        autosaveScheduler: any ChatAutosaveScheduling = ImmediateChatAutosaveScheduler()
+        autosaveScheduler: any ChatAutosaveScheduling = ImmediateChatAutosaveScheduler(),
+        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling =
+            ImmediateAdmissionRefreshScheduler(),
+        invocations: any Invocations = RecordingInterruptedInvocationGateway()
     ) -> DefaultChatFeature {
         DefaultChatFeature(
             store: store,
@@ -1213,9 +1907,11 @@ final class ChatFeatureTests: XCTestCase {
             pendingUserTurnIDGenerator: pendingUserTurnIDGenerator,
             responsePositionIDGenerator: FixedChatIDs(),
             autosaveScheduler: autosaveScheduler,
+            admissionRefreshScheduler: admissionRefreshScheduler,
             coachContext: DefaultCoachContextFeature(
                 source: AlwaysFitCoachContextSnapshotPort()
-            )
+            ),
+            invocations: invocations
         )
     }
 
@@ -1302,6 +1998,371 @@ final class ChatFeatureTests: XCTestCase {
             throw TestError.unexpectedState
         }
         return draft
+    }
+}
+
+/// Legacy Chat feature fixtures stop at the single typed Invocation boundary.
+/// The feature retains its already-installed lock while this recorder reports
+/// an interruption without fabricating provider execution in these tests.
+private actor RecordingInterruptedInvocationGateway: Invocations {
+    private(set) var preparations: [NewPendingCoachInvocationRequest] = []
+    private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        preparations.append(request)
+        return .prepared(
+            try! PreparedPendingCoachInvocation(preparing: request)
+        )
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        requests.append(request)
+        return .interrupted(nil, .providerFailed)
+    }
+}
+
+private actor TypedTerminalInvocationGateway: Invocations {
+    private let failure: PendingUserTurnFailure
+    private let reason: InvocationInterruptionReason
+
+    init(
+        failure: PendingUserTurnFailure,
+        reason: InvocationInterruptionReason
+    ) {
+        self.failure = failure
+        self.reason = reason
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        guard let pending = prepared.aggregate.pendingUserTurn else {
+            return .interrupted(nil, reason)
+        }
+        let terminal = try! ChatAggregate(
+            chat: prepared.aggregate.chat,
+            memory: prepared.aggregate.memory,
+            pendingUserTurn: pending.replacingFailure(failure)
+        )
+        return .interrupted(terminal, reason)
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        .interrupted(nil, reason)
+    }
+}
+
+private actor BusyPreparingInvocationGateway: Invocations {
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .activeInvocation
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        .rejected(prepared.aggregate, .activeInvocation)
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        .rejected(nil, .activeInvocation)
+    }
+}
+
+private actor SuspendedPreparingInvocationGateway: Invocations {
+    private var preparation: NewPendingCoachInvocationRequest?
+    private var preparationContinuation: CheckedContinuation<Void, Never>?
+    private(set) var abandoned: [PreparedPendingCoachInvocation] = []
+    private(set) var invocationCount = 0
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        preparation = request
+        await withCheckedContinuation { preparationContinuation = $0 }
+        return .prepared(
+            try! PreparedPendingCoachInvocation(preparing: request)
+        )
+    }
+
+    func waitUntilPreparationStarts() async {
+        while preparation == nil { await Task.yield() }
+    }
+
+    func resumePreparation() {
+        preparationContinuation?.resume()
+        preparationContinuation = nil
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {
+        abandoned.append(prepared)
+    }
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        invocationCount += 1
+        return .interrupted(prepared.aggregate, .providerFailed)
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        invocationCount += 1
+        return .interrupted(nil, .providerFailed)
+    }
+}
+
+private actor SuspendedRetryInvocationGateway: Invocations {
+    private var request: PendingCoachInvocationRequest?
+    private var continuation: CheckedContinuation<InvocationTryOutcome, Never>?
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        self.request = request
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilRetryIsSuspended() async {
+        while request == nil || continuation == nil { await Task.yield() }
+    }
+
+    func resume(with outcome: InvocationTryOutcome) {
+        continuation?.resume(returning: outcome)
+        continuation = nil
+    }
+}
+
+private actor OperationallyInterruptedInvocationGateway: Invocations {
+    private let fallback: ChatAggregate?
+    private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    init(fallback: ChatAggregate? = nil) {
+        self.fallback = fallback
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        requests.append(request)
+        return .operationallyInterrupted(fallback, request, .persistenceUnavailable)
+    }
+}
+
+private actor OperationalInterruptionThenSuspendedRetryGateway: Invocations {
+    private var retryRequest: PendingCoachInvocationRequest?
+    private var continuation: CheckedContinuation<InvocationTryOutcome, Never>?
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        .operationallyInterrupted(
+            prepared.aggregate,
+            prepared.request,
+            .persistenceUnavailable
+        )
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        retryRequest = request
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilRetryIsSuspended() async {
+        while retryRequest == nil || continuation == nil { await Task.yield() }
+    }
+
+    func resume(with outcome: InvocationTryOutcome) {
+        continuation?.resume(returning: outcome)
+        continuation = nil
+    }
+}
+
+private actor VanishingOperationalRetryInvocationGateway: Invocations {
+    private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        requests.append(request)
+        if requests.count == 1 {
+            return .operationallyInterrupted(nil, request, .persistenceUnavailable)
+        }
+        return .rejected(nil, .eligibilityChanged)
+    }
+}
+
+private actor ProjectedAdmissionInvocationGateway: Invocations {
+    private var availability: InvocationAdmissionAvailability
+    private(set) var requests: [PendingCoachInvocationRequest] = []
+
+    init(availability: InvocationAdmissionAvailability) {
+        self.availability = availability
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared.request)
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        availability
+    }
+
+    func setAvailability(_ value: InvocationAdmissionAvailability) {
+        availability = value
+    }
+
+    func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
+        requests.append(request)
+        return .interrupted(nil, .providerFailed)
     }
 }
 
@@ -1457,7 +2518,11 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
                     authority: CoachContextSnapshotAuthority(
                         binding: binding,
                         contextGeneration: 1,
-                        configurationGeneration: 1
+                        configurationGeneration: 1,
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
                     )
                 )
             )
@@ -1713,6 +2778,38 @@ private struct FixedChatIDs:
 
 private struct ImmediateChatAutosaveScheduler: ChatAutosaveScheduling {
     func sleep(forNanoseconds nanoseconds: UInt64) async throws {}
+}
+
+private struct ImmediateAdmissionRefreshScheduler: ChatAdmissionRefreshScheduling {
+    func sleep(until deadline: UTCInstant) async throws {}
+}
+
+private actor ControlledAdmissionRefreshScheduler: ChatAdmissionRefreshScheduling {
+    private(set) var deadlines: [UTCInstant] = []
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    func sleep(until deadline: UTCInstant) async throws {
+        deadlines.append(deadline)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation = $0 }
+        } onCancel: {
+            Task { await self.cancel() }
+        }
+    }
+
+    func waitUntilScheduled() async {
+        while deadlines.isEmpty { await Task.yield() }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    private func cancel() {
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
 }
 
 private actor ControlledChatAutosaveScheduler: ChatAutosaveScheduling {

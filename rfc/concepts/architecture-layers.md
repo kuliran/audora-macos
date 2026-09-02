@@ -64,6 +64,9 @@ The Application layer coordinates use cases and owns state transitions:
 - atomically publish the successful user/coach turn, optional complete `newMemory`,
   and exactly one classified Profile effect; only pure staged evidence proceeds to
   the separate recoverable idempotent set-union transaction;
+- consume Infrastructure's typed exact-publication recovery result after commit
+  uncertainty instead of inferring success from whole-aggregate equality; later
+  valid rename and fresh-Draft revisions therefore remain ordinary Chat changes;
 - resolve successful evidence append silently; on local failure retain its exact
   Retry/Discard state while keeping the response and Memory published;
 - assign new Profile Statement IDs and local Evidence References rather than
@@ -211,6 +214,8 @@ Infrastructure implements ports with replaceable adapters:
 - the ChatGPT-authenticated Codex CLI provider;
 - the attempt-scoped Audora transcript MCP broker used by the Codex adapter for
   large attached transcripts;
+- the wall-clock adapter that suspends admission refresh until a persisted UTC
+  cooldown deadline;
 - constrained process execution for transcription and coaching;
 - derived search indexes when introduced.
 
@@ -249,8 +254,8 @@ authoritative only after the relevant use case succeeds.
 
 The executable target is the only place that knows all concrete types. It creates
 the repository, capture, player, worker, acoustic-evidence, coach, execution-host,
-and clock adapters and injects them into application services and presentation
-models.
+clock, and admission-refresh scheduling adapters and injects them into application
+services and presentation models.
 
 Tests use in-memory repositories, deterministic clocks/IDs, fake workers, and fake
 coach providers. No Domain or Application test should need microphone permission,

@@ -44,6 +44,14 @@ Attempts, cancellation, and terminal failure creation. Chat, Proposal, and futur
 maintenance use cases submit stable entity IDs and an `InvocationIntent`; they do
 not duplicate these checks or construct provider DTOs.
 
+The current #23 vertical slice implements `answerPendingUserTurn` with a bounded
+deterministic synthetic provider. It durably claims the rolling ledger, installs
+one portable Invocation, persists each fresh Provider Attempt before launch,
+retries transient failures on the 5/10/15-second schedule, permits at most one
+shorter complete repair, and atomically publishes the two-message fake turn. Real
+provider adapters, Stop, transcript tools, Reconsider, and Profile or Memory
+effects remain owned by their later slices.
+
 ```text
 InvocationIntent
   answerPendingUserTurn
@@ -74,7 +82,10 @@ exception: it keeps the Pending User Turn under
 `CoachContextCannotFitUserRetryable`. A rare failure after the admission ledger is
 committed but before the Invocation is installed may waste one admission unit and
 leaves the underlying intent interrupted and user-retryable; it must never launch
-unrecorded provider work.
+unrecorded provider work. The ledger rename is the possible-commit boundary:
+failure before it is a pre-admission rejection, while failure to flush the parent
+directory afterward is durability uncertainty and preserves the exact Pending
+intent for Retry/Discard.
 
 Only one Invocation may process at a time across the active Library. At most one
 new Invocation is admitted in a rolling 60-second window. The ledger is stored in
@@ -101,6 +112,15 @@ Attempt gets a fresh Attempt ID, provider idempotency token, process, transcript
 access capability, and on-demand transcript handles. None is reused by another
 Attempt.
 
+Those provider idempotency values, transcript handles, and bearer capabilities
+exist only in the live Attempt transport authority and are never persisted or
+logged. Portable Invocation schema v3 embeds an ordered bounded Attempt history
+containing only Attempt ID, ordinal/kind, and message/fresh-Draft publication
+authority; nested Attempts inherit v3 and have no `schemaVersion`. Legacy
+Invocation v1/v2 keeps its strict historical flat Attempt fields for read-only
+retirement compatibility. Relaunch never reconstructs live transport authority or
+resumes provider work.
+
 One Invocation may make at most four Attempts. Transient provider failures use
 5-, 10-, and 15-second delays before the remaining Attempts. Automatic retry keeps
 the immutable intent and semantic context frozen, but it creates fresh
@@ -125,6 +145,14 @@ turn it keeps the Draft ID, Draft version, and response position, but reconstruc
 the request from the current Profile, Memory, successful history, and immutable
 attachments. Reconsider Retry likewise reloads current authoritative state. This
 is different from automatic retry, which stays inside one Invocation.
+
+Before a Retry provider launch, the durable Invocation generation marker is
+installed and flushed, then the exact failed Pending is replaced by the same
+identity with no failure while the Chat lock is held. The replacement inode is
+locked and the active liveness lease is rebound before the provider receives
+authority. A terminal Provider or validation reason is first installed and flushed
+as typed Invocation intent, so crash recovery cannot restore the stale pre-Retry
+reason or downgrade a committed current reason to generic interruption.
 
 Stop cancels and reaps the current Attempt after a bounded grace period. A late
 result cannot publish after Stop, Retry, Discard, or another Invocation takes over
@@ -234,11 +262,32 @@ If the first Invocation preflight instead loses an eligibility, concurrency, or
 admission race, the provisional Pending User Turn is removed and the Draft is
 immediately unlocked; the fleeting notice is not a Failure Descriptor.
 
+The persisted Pending User Turn is currently schema v3. Legacy v1 may omit a
+failure or carry only `coachContextCannotFit`; v2 additionally accepts
+`coachResponseInterrupted`. Current v3 adds `coachProviderError` when the Provider
+cannot complete the response, including an immediate Provider-declared
+UserRetryable result or exhausted bounded retries, and `coachResponseInvalid` for
+an invalid complete response or failed shorter-response repair. All four failure
+descriptors are UserRetryable and publish no partial turn. If persistence cannot
+prove the terminal v3 write, Application may display Retry for the exact Pending
+identity as transient operational state, but it does not rewrite the last
+observed aggregate in memory as though that durable failure had committed.
+
 Only a valid complete Coach Response publishes a turn. One atomic Chat commit
 appends the user and coach messages, applies optional `newMemory`, installs at most
 one unresolved Proposal or evidence-publication operation, and removes the Pending
 User Turn and consumed Draft. A one-sided user message or coach message is
 forbidden.
+
+Publication recovery is an Infrastructure proof rather than Application comparing
+an old whole-Chat snapshot. It verifies the intended response position, the exact
+appended message IDs and order, the immutable canonical bytes and Profile
+provenance of both message records, consumption of the Pending User Turn, and the
+identity of the fresh Draft. It permits only ordinary later title/manifest changes
+and version advances of that same fresh Draft. A later unrelated message tail,
+ID-only message replacement, or different Draft lineage is not the intended
+publication. The typed proof remains available after abort cleanup by reacquiring
+the Library Invocation namespace only when no live owner holds it.
 
 Provider output and streaming events are transient until that commit. Audora does
 not durably stage a complete response for crash resumption. On relaunch every
@@ -460,7 +509,9 @@ Memory compaction is backlog work.
 
 If persisted Chat data, including Memory, fails structural or integrity validation,
 Audora freezes that Chat and instructs the Speaker to create a new one. It does not
-silently replace damaged state with empty Memory.
+silently replace damaged state with empty Memory. Catalog recovery and launch
+identity checks isolate independent Chat roots, so a frozen sibling remains visible
+without preventing a healthy Chat from reconciling or sending.
 
 ## Structured Coach Response
 
