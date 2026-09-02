@@ -33,6 +33,56 @@ final class ChatPresentationModelTests: XCTestCase {
         }
     }
 
+    func testProcessingPendingTurnExposesNoRecoveryOrAccessibilityActions() throws {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260830T120000000Z-2ABC",
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "Processing Retry"
+        )
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: base.chat.draft.draftID,
+            draftVersion: base.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            )
+        )
+        let processing = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            pendingUserTurn: pending
+        )
+        let row = ChatRowSnapshot(aggregate: processing)
+        let state = ChatFeatureState(
+            catalog: .ready(
+                ChatCatalogSnapshot(allRows: [row], visibleRows: [row])
+            ),
+            selection: .open(processing),
+            composer: .locked(processing.chat.draft, pending),
+            admissionAvailability: .unavailable,
+            activity: .invokingCoach(processing.chat.id)
+        )
+
+        let presentation = PendingUserTurnPresentation.project(
+            pending,
+            state: state
+        )
+
+        XCTAssertEqual(presentation, .processing)
+        XCTAssertFalse(presentation.showsAdmissionUnavailableReason)
+        XCTAssertEqual(presentation.recoveryActions, [])
+        XCTAssertEqual(
+            presentation.recoveryActions.map(\.accessibilityLabel),
+            [],
+            "processing must expose zero terminal accessibility actions"
+        )
+    }
+
     func testInvocationControlPresentationExposesTheSameUnavailableReasonWithoutHover() throws {
         let reopensAt = try UTCInstant("2026-08-30T12:01:00.000Z")
 

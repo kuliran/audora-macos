@@ -111,6 +111,85 @@ enum CoachResponseFailurePresentation {
     }
 }
 
+enum PendingUserTurnRecoveryAction: Hashable {
+    case retryPendingUserTurn
+    case discardPendingUserTurn
+    case createNewChatFromCapacityFailure
+    case retryCoachResponse
+    case discardCoachResponse
+
+    var title: String {
+        switch self {
+        case .retryPendingUserTurn, .retryCoachResponse: "Retry"
+        case .discardPendingUserTurn, .discardCoachResponse: "Discard"
+        case .createNewChatFromCapacityFailure: "Create New Chat"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .retryPendingUserTurn: "Retry Pending User Turn"
+        case .discardPendingUserTurn: "Discard Pending User Turn"
+        case .createNewChatFromCapacityFailure:
+            "Create New Chat from capacity failure"
+        case .retryCoachResponse:
+            CoachResponseFailurePresentation.retryAccessibilityLabel(for: nil)
+        case .discardCoachResponse:
+            CoachResponseFailurePresentation.discardAccessibilityLabel(for: nil)
+        }
+    }
+}
+
+enum PendingUserTurnPresentation: Equatable {
+    case processing
+    case contextCapacityFailure
+    case coachResponseFailure
+    case locked
+
+    static func project(
+        _ pending: PendingUserTurn,
+        state: ChatFeatureState
+    ) -> PendingUserTurnPresentation {
+        if case let .open(aggregate) = state.selection,
+           aggregate.pendingUserTurn == pending,
+           state.composer == .locked(aggregate.chat.draft, pending),
+           state.activity == .invokingCoach(aggregate.chat.id),
+           state.operationallyInterruptedInvocation == nil,
+           pending.failure == nil
+        {
+            return .processing
+        }
+        if pending.failure == .coachContextCannotFit {
+            return .contextCapacityFailure
+        }
+        if state.isCoachResponseRetryableFailure(pending) {
+            return .coachResponseFailure
+        }
+        return .locked
+    }
+
+    var showsAdmissionUnavailableReason: Bool {
+        self != .processing
+    }
+
+    var recoveryActions: [PendingUserTurnRecoveryAction] {
+        switch self {
+        case .processing:
+            []
+        case .contextCapacityFailure:
+            [
+                .retryPendingUserTurn,
+                .discardPendingUserTurn,
+                .createNewChatFromCapacityFailure,
+            ]
+        case .coachResponseFailure:
+            [.retryCoachResponse, .discardCoachResponse]
+        case .locked:
+            [.discardPendingUserTurn]
+        }
+    }
+}
+
 private struct CoachInvocationControlModifier: ViewModifier {
     let disabled: Bool
     let unavailableReason: String?
@@ -386,8 +465,17 @@ public struct ChatRootView: View {
                     Text("This exact Draft is locked outside successful history.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    admissionUnavailableReason
-                    if pending.failure == .coachContextCannotFit {
+                    let presentation = PendingUserTurnPresentation.project(
+                        pending,
+                        state: model.snapshot
+                    )
+                    if presentation.showsAdmissionUnavailableReason {
+                        admissionUnavailableReason
+                    }
+                    switch presentation {
+                    case .processing:
+                        EmptyView()
+                    case .contextCapacityFailure:
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Chat size exceeded. Please create a new one.")
                                 .font(.callout.weight(.semibold))
@@ -396,33 +484,13 @@ public struct ChatRootView: View {
                                 )
                             contextDetails
                             HStack {
-                                Button("Retry") {
-                                    model.retryPendingUserTurn(pending.id)
-                                }
-                                .accessibilityLabel("Retry Pending User Turn")
-                                .coachInvocationControl(
-                                    disabled: !allowsNavigationAndMutation ||
-                                        !ChatInteractionPolicy.allowsCoachInvocation(
-                                            in: model.snapshot
-                                        ),
-                                    admissionAvailability: model.snapshot
-                                        .admissionAvailability
+                                pendingRecoveryButtons(
+                                    presentation.recoveryActions,
+                                    pending: pending
                                 )
-                                Button("Discard") {
-                                    model.discardPendingUserTurn(pending.id)
-                                }
-                                .accessibilityLabel("Discard Pending User Turn")
-                                .disabled(!allowsNavigationAndMutation)
-                                Button("Create New Chat") {
-                                    model.createNewChatFromCapacityFailure(pending.id)
-                                }
-                                .accessibilityLabel(
-                                    "Create New Chat from capacity failure"
-                                )
-                                .disabled(!allowsNavigationAndMutation)
                             }
                         }
-                    } else if model.snapshot.isCoachResponseRetryableFailure(pending) {
+                    case .coachResponseFailure:
                         VStack(alignment: .leading, spacing: 8) {
                             Text(
                                 CoachResponseFailurePresentation.text(
@@ -436,39 +504,19 @@ public struct ChatRootView: View {
                                     )
                                 )
                             HStack {
-                                Button("Retry") {
-                                    model.retryPendingUserTurn(pending.id)
-                                }
-                                .accessibilityLabel(
-                                    CoachResponseFailurePresentation
-                                        .retryAccessibilityLabel(for: pending.failure)
+                                pendingRecoveryButtons(
+                                    presentation.recoveryActions,
+                                    pending: pending
                                 )
-                                .coachInvocationControl(
-                                    disabled: !allowsNavigationAndMutation ||
-                                        !ChatInteractionPolicy.allowsCoachInvocation(
-                                            in: model.snapshot
-                                        ),
-                                    admissionAvailability: model.snapshot
-                                        .admissionAvailability
-                                )
-                                Button("Discard") {
-                                    model.discardPendingUserTurn(pending.id)
-                                }
-                                .accessibilityLabel(
-                                    CoachResponseFailurePresentation
-                                        .discardAccessibilityLabel(for: pending.failure)
-                                )
-                                .disabled(!allowsNavigationAndMutation)
                             }
                         }
-                    } else {
+                    case .locked:
                         HStack {
                             Spacer()
-                            Button("Discard") {
-                                model.discardPendingUserTurn(pending.id)
-                            }
-                            .accessibilityLabel("Discard Pending User Turn")
-                            .disabled(!allowsNavigationAndMutation)
+                            pendingRecoveryButtons(
+                                presentation.recoveryActions,
+                                pending: pending
+                            )
                         }
                     }
                 }
@@ -495,6 +543,41 @@ public struct ChatRootView: View {
             ProgressView("Unlocking Draft…")
         case nil:
             EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func pendingRecoveryButtons(
+        _ actions: [PendingUserTurnRecoveryAction],
+        pending: PendingUserTurn
+    ) -> some View {
+        ForEach(actions, id: \.self) { action in
+            switch action {
+            case .retryPendingUserTurn, .retryCoachResponse:
+                Button(action.title) {
+                    model.retryPendingUserTurn(pending.id)
+                }
+                .accessibilityLabel(action.accessibilityLabel)
+                .coachInvocationControl(
+                    disabled: !allowsNavigationAndMutation ||
+                        !ChatInteractionPolicy.allowsCoachInvocation(
+                            in: model.snapshot
+                        ),
+                    admissionAvailability: model.snapshot.admissionAvailability
+                )
+            case .discardPendingUserTurn, .discardCoachResponse:
+                Button(action.title) {
+                    model.discardPendingUserTurn(pending.id)
+                }
+                .accessibilityLabel(action.accessibilityLabel)
+                .disabled(!allowsNavigationAndMutation)
+            case .createNewChatFromCapacityFailure:
+                Button(action.title) {
+                    model.createNewChatFromCapacityFailure(pending.id)
+                }
+                .accessibilityLabel(action.accessibilityLabel)
+                .disabled(!allowsNavigationAndMutation)
+            }
         }
     }
 

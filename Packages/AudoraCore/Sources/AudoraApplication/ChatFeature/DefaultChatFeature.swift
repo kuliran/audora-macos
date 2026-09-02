@@ -928,7 +928,10 @@ public actor DefaultChatFeature: ChatFeature {
         await refreshAdmissionAvailability(in: context)
     }
 
-    private func applyInvocationOutcome(_ outcome: InvocationTryOutcome) {
+    private func applyInvocationOutcome(
+        _ outcome: InvocationTryOutcome,
+        rejectedOperationalInterruption: PendingCoachInvocationRequest? = nil
+    ) {
         switch outcome {
         case let .published(current, quote):
             state = replacing(
@@ -966,7 +969,13 @@ public actor DefaultChatFeature: ChatFeature {
                 )
             }
             if let current {
-                install(current, selection: .open(current), notice: notice)
+                install(
+                    current,
+                    selection: .open(current),
+                    notice: notice,
+                    operationallyInterruptedInvocation:
+                        rejectedOperationalInterruption
+                )
             } else {
                 state = replacing(
                     operationallyInterruptedInvocation: nil,
@@ -1119,8 +1128,25 @@ public actor DefaultChatFeature: ChatFeature {
         else {
             return
         }
+        let retryOperationalInterruption =
+            state.operationallyInterruptedInvocation
+        let processingPending = pending.replacingFailure(nil)
+        guard let processingAggregate = try? ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: processingPending
+        ) else {
+            state = replacing(activity: nil, notice: .pendingUserTurnFailed)
+            publish()
+            return
+        }
         state = replacing(
+            selection: .open(processingAggregate),
+            composer: .locked(draft, processingPending),
+            replacesComposer: true,
             clearsRecoveryIntent: true,
+            operationallyInterruptedInvocation: nil,
+            replacesOperationallyInterruptedInvocation: true,
             activity: .invokingCoach(aggregate.chat.id),
             notice: nil
         )
@@ -1132,7 +1158,22 @@ public actor DefaultChatFeature: ChatFeature {
         )
         let outcome = await invocations.tryInvoke(request)
         guard isActive(context) else { return }
-        applyInvocationOutcome(outcome)
+        let presentedOutcome: InvocationTryOutcome
+        if case let .rejected(nil, reason) = outcome {
+            presentedOutcome = .rejected(aggregate, reason)
+        } else {
+            presentedOutcome = outcome
+        }
+        let rejectedOperationalInterruption: PendingCoachInvocationRequest? =
+            switch outcome {
+            case .rejected(_, .eligibilityChanged): nil
+            case .rejected: retryOperationalInterruption
+            default: nil
+            }
+        applyInvocationOutcome(
+            presentedOutcome,
+            rejectedOperationalInterruption: rejectedOperationalInterruption
+        )
         await refreshSelectionIfInvocationEligibilityVanished(
             outcome,
             request: request,

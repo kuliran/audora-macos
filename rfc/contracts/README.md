@@ -239,11 +239,10 @@ Checked-in fixtures cover create, rename, filter, relaunch, stale rename, and th
 Draft lock-and-discard lifecycle in
 [`draft-send-discard.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/Chat/draft-send-discard.v1.json).
 Each scenario declares exact provider, Invocation, and admission call totals. The
-two Send scenarios cross the single Invocation gateway once while their #21-only
-fixtures intentionally stop before provider/admission; non-Send scenarios declare
-zero. Rejected examples cover ambiguous creation shapes, unknown keys, missing
-attachments, dangling Memory summaries, and newer schemas that must remain
-byte-identical while frozen.
+three scenarios containing Send cross the single Invocation gateway, while
+non-Send scenarios declare zero calls. Rejected examples cover ambiguous creation
+shapes, unknown keys, missing attachments, dangling Memory summaries, and newer
+schemas that must remain byte-identical while frozen.
 
 `CoachContextQuote.json` is the app-only advisory projection. Its golden locks the
 16,384 UTF-8-byte Send limit and exactly nine explanatory cost categories:
@@ -251,7 +250,8 @@ Profile, Memory, history, Draft, framing, attachments, one complete transcript
 exchange, response reserve, and safety margin. It deliberately contains no
 canonical provider bytes. `context-capacity-recovery.v1.json` exercises an exact
 local miss, typed Create New Chat intent, identity-preserving Retry, and Discard;
-it declares one Invocation-gateway call and zero provider or admission calls.
+its Send and Retry declare exactly two Invocation-gateway calls, one Provider call,
+and one admission call.
 
 `ChatMessage.json` seals the mutually exclusive stored user-text and Coach-Markdown
 shapes. `CoachInvocation.json` is the portable launch authority bound to one
@@ -329,14 +329,19 @@ A Chat freezes its Session attachment set at creation. A request may contain no
 Session attachments. Each attachment has a stable Chat-scoped
 `sessionAttachmentId`; Library Session and revision identities stay local.
 
-For each Provider Attempt, Application projects every attachment as either:
+Application projects every attachment as either:
 
 - `inline`, with its complete immutable transcript; or
 - `onDemand`, with a fresh Attempt-scoped `SessionTranscriptHandle`.
 
-The projection may change between Attempts without changing attachment identity.
-Application chooses it from the exact serialized context and provider limits. The
-coach receives no estimates or admission inputs.
+Automatic Attempts inside one Invocation freeze the semantic exchange, including
+the exact `inline`/`onDemand` selection. Only live Attempt transport authority
+rotates: the process, provider idempotency value, transcript-read capability,
+and `SessionTranscriptHandle` values are fresh. An explicit user Retry creates a
+new Invocation and rebuilds the current Profile, Memory, successful history, and
+attachment projection around the same immutable Draft and Chat attachment set;
+that new Invocation may choose a different delivery projection without changing
+attachment identity. The coach receives no estimates or admission inputs.
 
 `ProfileContext` is a structured projection of the current Profile. Each
 `ProfileStatement` exposes its stable target ID, kind, wording, total distinct

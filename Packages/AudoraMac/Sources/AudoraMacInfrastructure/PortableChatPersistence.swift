@@ -283,6 +283,7 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
     case afterPendingRemovalDirectoryFlush
     case beforeInvocationReconciliation
     case beforeInvocationReconciliationCommit
+    case beforeInvocationIdentityRead
     case beforeInvocationPartialWrite
     case afterInvocationPartialWrite
     case afterInvocationFileFlush
@@ -2047,11 +2048,20 @@ public struct PortableChatPersistence: @unchecked Sendable {
         var frozenChatIDs: Set<ChatID> = []
         var availableCount = 0
         for name in candidates {
-            let invocation = try loadInvocationIdentity(
+            let body = try inspectInvocationBody(
                 named: name,
                 expectedLibraryID: scope.libraryID,
                 under: invocationsDescriptor
             )
+            guard case let .available(bodyIdentity) = body else {
+                if case let .frozen(common, _) = body {
+                    guard frozenChatIDs.insert(common.chatID).inserted else {
+                        throw PortableChatPersistenceError.invalidLayout
+                    }
+                }
+                continue
+            }
+            let invocation = bodyIdentity.invocation
             do {
                 if try retireExactPrePublicationInvocationIfPresent(
                     invocation,
@@ -2083,8 +2093,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 beforeRemoving: revalidateBeforeMutation
             )
             guard case let .available(record) = inspection else {
-                if case let .frozen(invocation, _) = inspection {
-                    guard frozenChatIDs.insert(invocation.chatID).inserted else {
+                if case let .frozen(common, _) = inspection {
+                    guard frozenChatIDs.insert(common.chatID).inserted else {
                         throw PortableChatPersistenceError.invalidLayout
                     }
                 }
@@ -2263,10 +2273,11 @@ public struct PortableChatPersistence: @unchecked Sendable {
             under: invocationsDescriptor
         )
         defer { Darwin.close(invocationRoot) }
-        guard isRegularFile(named: "invocation.json", under: invocationRoot),
-              try decodeInvocation(
-                  boundedData(named: "invocation.json", under: invocationRoot)
-              ).hasSameDurableProjection(as: invocation)
+        guard try loadInvocationBodyIdentity(
+            expectedInvocationID: invocation.id,
+            expectedLibraryID: scope.libraryID,
+            under: invocationRoot
+        ).invocation.hasSameDurableProjection(as: invocation)
         else { throw PortableChatPersistenceError.invalidLayout }
 
         let chatDescriptor = try openDirectory(
@@ -2391,27 +2402,59 @@ public struct PortableChatPersistence: @unchecked Sendable {
             under: invocationsDescriptor,
             beforeRemoving: revalidateLiveness
         ) {
-            let existing = try inspectInvocationDirectory(
+            let inspection = try inspectInvocationDirectory(
                 named: invocationName,
                 expectedLibraryID: authority.request.library.libraryID,
                 under: invocationsDescriptor,
                 reconcileProofPartial: false
-            ).invocation
-            if existing.attempts.contains(where: { $0.id == identity.attemptID }) {
-                recordCollision(.attemptID)
-            }
-            if existing.attempts.contains(where: {
-                $0.transportAuthority?.providerIdempotencyValue ==
-                    identity.idempotencyValue
-            }) {
-                recordCollision(.providerIdempotencyValue)
-            }
-            if !Set(existing.attempts.compactMap(\.transportAuthority).flatMap(
-                \.transcriptHandles
-            )).isDisjoint(
-                with: identity.transcriptHandles
-            ) {
-                recordCollision(.transcriptHandle)
+            )
+            switch inspection {
+            case let .available(record):
+                let attempts = record.invocation.attempts
+                if attempts.contains(where: { $0.id == identity.attemptID }) {
+                    recordCollision(.attemptID)
+                }
+                if attempts.contains(where: {
+                    $0.userMessageID == identity.userMessageID ||
+                        $0.coachMessageID == identity.userMessageID
+                }) {
+                    recordCollision(.userMessageID)
+                }
+                if attempts.contains(where: {
+                    $0.userMessageID == identity.coachMessageID ||
+                        $0.coachMessageID == identity.coachMessageID
+                }) {
+                    recordCollision(.coachMessageID)
+                }
+                if attempts.contains(where: {
+                    $0.freshDraftID == identity.freshDraftID
+                }) {
+                    recordCollision(.freshDraftID)
+                }
+                if attempts.contains(where: {
+                    $0.transportAuthority?.providerIdempotencyValue ==
+                        identity.idempotencyValue
+                }) {
+                    recordCollision(.providerIdempotencyValue)
+                }
+                if !Set(attempts.compactMap(\.transportAuthority).flatMap(
+                    \.transcriptHandles
+                )).isDisjoint(with: identity.transcriptHandles) {
+                    recordCollision(.transcriptHandle)
+                }
+            case let .frozen(common, _):
+                if common.contains(identity.attemptID) {
+                    recordCollision(.attemptID)
+                }
+                if common.contains(identity.userMessageID) {
+                    recordCollision(.userMessageID)
+                }
+                if common.contains(identity.coachMessageID) {
+                    recordCollision(.coachMessageID)
+                }
+                if common.contains(identity.freshDraftID) {
+                    recordCollision(.freshDraftID)
+                }
             }
         }
         if identity.userMessageID == identity.coachMessageID {
@@ -2941,9 +2984,12 @@ public struct PortableChatPersistence: @unchecked Sendable {
             else { throw PortableChatPersistenceError.invalidLayout }
             partialExists = false
             try fault(.afterRetryProcessingPendingInstall)
-            try flushDescriptor(chatDescriptor)
-            try fault(.afterRetryProcessingPendingDirectoryFlush)
         }
+        // Observing the exact processing bytes proves the rename, not that its
+        // directory entry survived a crash. Reconciliation must establish the
+        // same durability checkpoint before rebinding live provider authority.
+        try flushDescriptor(chatDescriptor)
+        try fault(.afterRetryProcessingPendingDirectoryFlush)
 
         guard let processingPending = mutation.processingAggregate.pendingUserTurn else {
             throw PortableChatPersistenceError.invalidLayout
@@ -3191,21 +3237,37 @@ public struct PortableChatPersistence: @unchecked Sendable {
             under: invocationsDescriptor,
             beforeRemoving: beforeDestructiveMutation
         ) {
-            let existing = try inspectInvocationDirectory(
+            let inspection = try inspectInvocationDirectory(
                 named: invocationName,
                 expectedLibraryID: expectedLibraryID,
                 under: invocationsDescriptor,
                 reconcileProofPartial: false
-            ).invocation
-            for attempt in existing.attempts {
-                if attempt.id == candidate.id { return .attemptID }
-                if attempt.userMessageID == authority.userMessageID ||
-                    attempt.coachMessageID == authority.userMessageID
-                { return .userMessageID }
-                if attempt.userMessageID == authority.coachMessageID ||
-                    attempt.coachMessageID == authority.coachMessageID
-                { return .coachMessageID }
-                if attempt.freshDraftID == authority.freshDraftID {
+            )
+            switch inspection {
+            case let .available(record):
+                for attempt in record.invocation.attempts {
+                    if attempt.id == candidate.id { return .attemptID }
+                    if attempt.userMessageID == authority.userMessageID ||
+                        attempt.coachMessageID == authority.userMessageID
+                    { return .userMessageID }
+                    if attempt.userMessageID == authority.coachMessageID ||
+                        attempt.coachMessageID == authority.coachMessageID
+                    { return .coachMessageID }
+                    if attempt.freshDraftID == authority.freshDraftID {
+                        return .freshDraftID
+                    }
+                }
+            case let .frozen(common, _):
+                if common.contains(candidate.id) {
+                    return .attemptID
+                }
+                if common.contains(authority.userMessageID) {
+                    return .userMessageID
+                }
+                if common.contains(authority.coachMessageID) {
+                    return .coachMessageID
+                }
+                if common.contains(authority.freshDraftID) {
                     return .freshDraftID
                 }
             }
@@ -5025,6 +5087,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         expectedInvocationID: CoachInvocationID,
         expectedLibraryID: LibraryID,
         under invocationRoot: Int32,
+        validatedBody: InvocationBodyIdentity? = nil,
         reconcileProofPartial: Bool = true,
         beforeRemoving: () throws -> Void = {}
     ) throws -> InvocationDirectoryRecord {
@@ -5055,12 +5118,15 @@ public struct PortableChatPersistence: @unchecked Sendable {
         guard entries.contains("invocation.json"),
               isRegularFile(named: "invocation.json", under: invocationRoot)
         else { throw PortableChatPersistenceError.invalidLayout }
-        let invocation = try decodeInvocation(
-            boundedData(named: "invocation.json", under: invocationRoot)
+        let body = try validatedBody ?? loadInvocationBodyIdentity(
+            expectedInvocationID: expectedInvocationID,
+            expectedLibraryID: expectedLibraryID,
+            under: invocationRoot
         )
-        guard invocation.id == expectedInvocationID,
-              invocation.libraryID == expectedLibraryID
+        guard body.common.invocationID == expectedInvocationID,
+              body.common.libraryID == expectedLibraryID
         else { throw PortableChatPersistenceError.invalidLayout }
+        let invocation = body.invocation
         let proof: InvocationPublicationProof?
         if entries.contains("publication-proof.json") {
             guard isRegularFile(named: "publication-proof.json", under: invocationRoot) else {
@@ -5106,15 +5172,46 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
     }
 
-    /// Reads the immutable Invocation identity first so permanent corruption in
-    /// its publication evidence can be isolated to the bound Chat. Transient
-    /// I/O and an unreadable identity remain Library-level failures because no
-    /// trustworthy target exists to freeze.
-    private func loadInvocationIdentity(
+    /// Reads the immutable common identity before any version-specific body.
+    /// Transient I/O and an unreadable or ambiguous identity remain
+    /// Library-level failures because no trustworthy Chat exists to freeze.
+    private func loadInvocationCommonIdentity(
+        expectedInvocationID: CoachInvocationID,
+        expectedLibraryID: LibraryID,
+        under invocationRoot: Int32
+    ) throws -> PortableInvocationCommonIdentityEnvelope {
+        guard isRegularFile(named: "invocation.json", under: invocationRoot) else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        try fault(.beforeInvocationIdentityRead)
+        return try invocationEvidenceCodec.decodeCommonInvocationIdentity(
+            boundedData(named: "invocation.json", under: invocationRoot),
+            expectedInvocationID: expectedInvocationID,
+            expectedLibraryID: expectedLibraryID
+        )
+    }
+
+    private func loadInvocationBodyIdentity(
+        expectedInvocationID: CoachInvocationID,
+        expectedLibraryID: LibraryID,
+        under invocationRoot: Int32
+    ) throws -> InvocationBodyIdentity {
+        let common = try loadInvocationCommonIdentity(
+            expectedInvocationID: expectedInvocationID,
+            expectedLibraryID: expectedLibraryID,
+            under: invocationRoot
+        )
+        return InvocationBodyIdentity(
+            common: common,
+            invocation: try invocationEvidenceCodec.decodeSupportedInvocation(common)
+        )
+    }
+
+    private func inspectInvocationBody(
         named name: String,
         expectedLibraryID: LibraryID,
         under invocationsDescriptor: Int32
-    ) throws -> CoachInvocation {
+    ) throws -> InvocationBodyInspection {
         guard let invocationID = try? CoachInvocationID(name) else {
             throw PortableChatPersistenceError.invalidLayout
         }
@@ -5123,16 +5220,41 @@ public struct PortableChatPersistence: @unchecked Sendable {
             under: invocationsDescriptor
         )
         defer { Darwin.close(invocationRoot) }
-        guard isRegularFile(named: "invocation.json", under: invocationRoot) else {
-            throw PortableChatPersistenceError.invalidLayout
-        }
-        let invocation = try decodeInvocation(
-            boundedData(named: "invocation.json", under: invocationRoot)
+        return try inspectInvocationBody(
+            expectedInvocationID: invocationID,
+            expectedLibraryID: expectedLibraryID,
+            under: invocationRoot
         )
-        guard invocation.id == invocationID,
-              invocation.libraryID == expectedLibraryID
-        else { throw PortableChatPersistenceError.invalidLayout }
-        return invocation
+    }
+
+    private func inspectInvocationBody(
+        expectedInvocationID: CoachInvocationID,
+        expectedLibraryID: LibraryID,
+        under invocationRoot: Int32
+    ) throws -> InvocationBodyInspection {
+        let common = try loadInvocationCommonIdentity(
+            expectedInvocationID: expectedInvocationID,
+            expectedLibraryID: expectedLibraryID,
+            under: invocationRoot
+        )
+        guard common.hasSupportedBody else {
+            return .frozen(
+                common,
+                FrozenChatSnapshot(chatID: common.chatID, reason: .newerSchema)
+            )
+        }
+        do {
+            return .available(InvocationBodyIdentity(
+                common: common,
+                invocation: try invocationEvidenceCodec.decodeSupportedInvocation(common)
+            ))
+        } catch let error as PortableChatPersistenceError {
+            guard let snapshot = frozenChatSnapshot(
+                for: error,
+                chatID: common.chatID
+            ) else { throw error }
+            return .frozen(common, snapshot)
+        }
     }
 
     private func inspectInvocationDirectory(
@@ -5142,30 +5264,40 @@ public struct PortableChatPersistence: @unchecked Sendable {
         reconcileProofPartial: Bool,
         beforeRemoving: () throws -> Void = {}
     ) throws -> InvocationDirectoryInspection {
-        let invocation = try loadInvocationIdentity(
-            named: name,
-            expectedLibraryID: expectedLibraryID,
-            under: invocationsDescriptor
-        )
+        guard let invocationID = try? CoachInvocationID(name) else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
         let invocationRoot = try openDirectory(
             named: name,
             under: invocationsDescriptor
         )
         defer { Darwin.close(invocationRoot) }
+        let body = try inspectInvocationBody(
+            expectedInvocationID: invocationID,
+            expectedLibraryID: expectedLibraryID,
+            under: invocationRoot
+        )
+        guard case let .available(validatedBody) = body else {
+            if case let .frozen(common, snapshot) = body {
+                return .frozen(common, snapshot)
+            }
+            throw PortableChatPersistenceError.invalidLayout
+        }
         do {
             return .available(try loadInvocationDirectoryRecord(
-                expectedInvocationID: invocation.id,
+                expectedInvocationID: validatedBody.invocation.id,
                 expectedLibraryID: expectedLibraryID,
                 under: invocationRoot,
+                validatedBody: validatedBody,
                 reconcileProofPartial: reconcileProofPartial,
                 beforeRemoving: beforeRemoving
             ))
         } catch let error as PortableChatPersistenceError {
             guard let snapshot = frozenChatSnapshot(
                 for: error,
-                chatID: invocation.chatID
+                chatID: validatedBody.invocation.chatID
             ) else { throw error }
-            return .frozen(invocation, snapshot)
+            return .frozen(validatedBody.common, snapshot)
         }
     }
 
@@ -6654,16 +6786,19 @@ private struct InvocationDirectoryRecord {
     let publicationProof: InvocationPublicationProof?
 }
 
+private struct InvocationBodyIdentity {
+    let common: PortableInvocationCommonIdentityEnvelope
+    let invocation: CoachInvocation
+}
+
+private enum InvocationBodyInspection {
+    case available(InvocationBodyIdentity)
+    case frozen(PortableInvocationCommonIdentityEnvelope, FrozenChatSnapshot)
+}
+
 private enum InvocationDirectoryInspection {
     case available(InvocationDirectoryRecord)
-    case frozen(CoachInvocation, FrozenChatSnapshot)
-
-    var invocation: CoachInvocation {
-        switch self {
-        case let .available(record): record.invocation
-        case let .frozen(invocation, _): invocation
-        }
-    }
+    case frozen(PortableInvocationCommonIdentityEnvelope, FrozenChatSnapshot)
 }
 
 private struct InvocationStableChatDTO: Codable {

@@ -2115,7 +2115,7 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testMalformedV3InvocationWithNullProfileGenerationIsRejectedWithoutTrap() throws {
+    func testMalformedV3InvocationWithValidCommonIdentityFreezesOnlyItsChat() throws {
         try withCreatedLibrary { root, scope in
             let persistence = PortableChatPersistence()
             let fixture = try makeInvocationFixture(
@@ -2135,14 +2135,28 @@ final class PortableChatPersistenceTests: XCTestCase {
                     as? [String: Any]
             )
             object["profileStatementGeneration"] = NSNull()
-            try JSONSerialization.data(
+            let corruptBytes = try JSONSerialization.data(
                 withJSONObject: object,
                 options: [.sortedKeys]
-            ).write(to: url, options: .atomic)
+            )
+            try corruptBytes.write(to: url, options: .atomic)
 
-            XCTAssertThrowsError(
+            XCTAssertNoThrow(
                 try persistence.reconcileInterruptedInvocations(at: root, in: scope)
             )
+            XCTAssertEqual(
+                try persistence.load(
+                    fixture.locked.chat.id,
+                    at: root,
+                    in: scope
+                ),
+                .frozen(FrozenChatSnapshot(
+                    chatID: fixture.locked.chat.id,
+                    reason: .corrupt
+                ))
+            )
+            XCTAssertEqual(try Data(contentsOf: url), corruptBytes)
+            XCTAssertFalse(try persistence.hasActiveInvocation(at: root, in: scope))
         }
     }
 

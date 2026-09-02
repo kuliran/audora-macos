@@ -32,6 +32,57 @@ struct PortableInvocationPublicationCurrentEvidence {
     let coachMessage: ChatMessage
 }
 
+/// The schema-stable identity shared by every supported and future Invocation
+/// root. Its bounded bytes and narrowly indexed durable public IDs support
+/// conservative collision checks when the version-specific body cannot decode.
+/// Unknown body strings, including provider transport values, are never retained.
+struct PortableInvocationCommonIdentityEnvelope {
+    let schemaVersion: UInt64
+    let invocationID: CoachInvocationID
+    let libraryID: LibraryID
+    let chatID: ChatID
+    let rawBytes: Data
+    private let attemptIDs: Set<CoachProviderAttemptID>
+    private let messageIDs: Set<ChatMessageID>
+    private let draftIDs: Set<ChatDraftID>
+
+    init(
+        schemaVersion: UInt64,
+        invocationID: CoachInvocationID,
+        libraryID: LibraryID,
+        chatID: ChatID,
+        rawBytes: Data,
+        attemptIDs: Set<CoachProviderAttemptID>,
+        messageIDs: Set<ChatMessageID>,
+        draftIDs: Set<ChatDraftID>
+    ) {
+        self.schemaVersion = schemaVersion
+        self.invocationID = invocationID
+        self.libraryID = libraryID
+        self.chatID = chatID
+        self.rawBytes = rawBytes
+        self.attemptIDs = attemptIDs
+        self.messageIDs = messageIDs
+        self.draftIDs = draftIDs
+    }
+
+    var hasSupportedBody: Bool {
+        schemaVersion <= UInt64(CoachInvocation.schemaVersion)
+    }
+
+    func contains(_ attemptID: CoachProviderAttemptID) -> Bool {
+        attemptIDs.contains(attemptID)
+    }
+
+    func contains(_ messageID: ChatMessageID) -> Bool {
+        messageIDs.contains(messageID)
+    }
+
+    func contains(_ draftID: ChatDraftID) -> Bool {
+        draftIDs.contains(draftID)
+    }
+}
+
 struct InvocationPublicationProof: Equatable {
     static let schemaVersion: UInt32 = 1
 
@@ -102,11 +153,65 @@ struct PortableInvocationEvidenceCodec {
         ))
     }
 
+    func decodeCommonInvocationIdentity(
+        _ data: Data,
+        expectedInvocationID: CoachInvocationID,
+        expectedLibraryID: LibraryID
+    ) throws -> PortableInvocationCommonIdentityEnvelope {
+        guard data.count <= maximumRootBytes else {
+            throw PortableChatPersistenceError.rootTooLarge
+        }
+        let publicIDs = try scanInvocationJSON(
+            in: data,
+            duplicatePolicy: .commonIdentityRoot
+        )
+        let dto = try json.decode(CoachInvocationCommonIdentityDTO.self, from: data)
+        guard dto.schemaVersion >= 1 else {
+            throw PortableChatPersistenceError.invalidSchemaVersion
+        }
+        return try mapPersistedDomainValidation {
+            let invocationID = try CoachInvocationID(dto.invocationId)
+            let libraryID = try LibraryID(dto.libraryId)
+            let chatID = try ChatID(dto.chatId)
+            guard invocationID == expectedInvocationID,
+                  libraryID == expectedLibraryID
+            else { throw PortableChatPersistenceError.invalidLayout }
+            return PortableInvocationCommonIdentityEnvelope(
+                schemaVersion: dto.schemaVersion,
+                invocationID: invocationID,
+                libraryID: libraryID,
+                chatID: chatID,
+                rawBytes: data,
+                attemptIDs: publicIDs.attemptIDs,
+                messageIDs: publicIDs.messageIDs,
+                draftIDs: publicIDs.draftIDs
+            )
+        }
+    }
+
+    func decodeSupportedInvocation(
+        _ identity: PortableInvocationCommonIdentityEnvelope
+    ) throws -> CoachInvocation {
+        guard identity.hasSupportedBody else {
+            throw PortableChatPersistenceError.invalidSchemaVersion
+        }
+        let invocation = try decodeInvocation(identity.rawBytes)
+        guard invocation.id == identity.invocationID,
+              invocation.libraryID == identity.libraryID,
+              invocation.chatID == identity.chatID
+        else { throw PortableChatPersistenceError.invalidLayout }
+        return invocation
+    }
+
     func decodeInvocation(_ data: Data) throws -> CoachInvocation {
         guard data.count <= maximumRootBytes else {
             throw PortableChatPersistenceError.rootTooLarge
         }
         let dictionary = try json.jsonDictionary(data)
+        _ = try scanInvocationJSON(
+            in: data,
+            duplicatePolicy: .allObjects
+        )
         let dto = try json.decode(CoachInvocationDTO.self, from: data)
         let common: Set<String> = [
             "schemaVersion", "invocationId", "libraryId", "chatId",
@@ -430,6 +535,21 @@ struct PortableInvocationEvidenceCodec {
         return data
     }
 
+    /// Foundation accepts duplicate object keys. The common pass rejects only
+    /// duplicate root routing keys, while a supported body rejects duplicates
+    /// at every object depth. The bounded walk decodes values only under the
+    /// four durable-public-ID field names; all unknown body values are skipped.
+    private func scanInvocationJSON(
+        in data: Data,
+        duplicatePolicy: PortableInvocationJSONDuplicatePolicy
+    ) throws -> PortableInvocationDurablePublicIDs {
+        var scanner = PortableInvocationJSONScanner(
+            data: data,
+            duplicatePolicy: duplicatePolicy
+        )
+        return try scanner.scan()
+    }
+
     private func mapPersistedDomainValidation<T>(_ operation: () throws -> T) throws -> T {
         do {
             return try operation()
@@ -451,6 +571,250 @@ struct PortableInvocationEvidenceCodec {
     }
 }
 
+private enum PortableInvocationJSONDuplicatePolicy {
+    case commonIdentityRoot
+    case allObjects
+}
+
+private struct PortableInvocationDurablePublicIDs {
+    var attemptIDs: Set<CoachProviderAttemptID> = []
+    var messageIDs: Set<ChatMessageID> = []
+    var draftIDs: Set<ChatDraftID> = []
+
+    mutating func insert(_ value: String, for key: String) {
+        switch key {
+        case "attemptId":
+            if let id = try? CoachProviderAttemptID(value) {
+                attemptIDs.insert(id)
+            }
+        case "userMessageId", "coachMessageId":
+            if let id = try? ChatMessageID(value) {
+                messageIDs.insert(id)
+            }
+        case "draftId", "freshDraftId":
+            if let id = try? ChatDraftID(value) {
+                draftIDs.insert(id)
+            }
+        default:
+            break
+        }
+    }
+}
+
+/// A syntax-bounded routing scanner. It materializes object keys so duplicate
+/// policy can be enforced, but materializes a string value only when its key is
+/// one of the durable public-ID fields. In particular, values below future
+/// provider transport keys are advanced over without creating a Swift String.
+private struct PortableInvocationJSONScanner {
+    private static let commonIdentityKeys: Set<String> = [
+        "schemaVersion", "invocationId", "libraryId", "chatId",
+    ]
+    private static let durablePublicIDKeys: Set<String> = [
+        "attemptId", "userMessageId", "coachMessageId", "draftId", "freshDraftId",
+    ]
+    private static let maximumContainerDepth = 128
+
+    private let bytes: [UInt8]
+    private let duplicatePolicy: PortableInvocationJSONDuplicatePolicy
+    private var index = 0
+    private var publicIDs = PortableInvocationDurablePublicIDs()
+
+    init(data: Data, duplicatePolicy: PortableInvocationJSONDuplicatePolicy) {
+        bytes = Array(data)
+        self.duplicatePolicy = duplicatePolicy
+    }
+
+    mutating func scan() throws -> PortableInvocationDurablePublicIDs {
+        skipWhitespace()
+        try parseObject(depth: 0)
+        skipWhitespace()
+        guard index == bytes.count else {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        return publicIDs
+    }
+
+    private mutating func parseObject(depth: Int) throws {
+        guard depth < Self.maximumContainerDepth,
+              index < bytes.count,
+              bytes[index] == 0x7B
+        else { throw PortableChatPersistenceError.invalidJSON }
+        index += 1
+        skipWhitespace()
+        if consume(0x7D) { return }
+
+        var keys: Set<String> = []
+        while true {
+            let key = try parseJSONString(materialize: true)
+            guard let key else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            if !keys.insert(key).inserted, rejectsDuplicate(key, depth: depth) {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            skipWhitespace()
+            guard consume(0x3A) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            skipWhitespace()
+            try parseValue(
+                depth: depth + 1,
+                publicIDKey: Self.durablePublicIDKeys.contains(key) ? key : nil
+            )
+            skipWhitespace()
+            if consume(0x7D) { return }
+            guard consume(0x2C) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            skipWhitespace()
+            guard index < bytes.count, bytes[index] != 0x7D else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        }
+    }
+
+    private mutating func parseArray(depth: Int) throws {
+        guard depth < Self.maximumContainerDepth,
+              index < bytes.count,
+              bytes[index] == 0x5B
+        else { throw PortableChatPersistenceError.invalidJSON }
+        index += 1
+        skipWhitespace()
+        if consume(0x5D) { return }
+
+        while true {
+            try parseValue(depth: depth + 1, publicIDKey: nil)
+            skipWhitespace()
+            if consume(0x5D) { return }
+            guard consume(0x2C) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            skipWhitespace()
+            guard index < bytes.count, bytes[index] != 0x5D else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        }
+    }
+
+    private mutating func parseValue(
+        depth: Int,
+        publicIDKey: String?
+    ) throws {
+        guard index < bytes.count else {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        switch bytes[index] {
+        case 0x22:
+            let value = try parseJSONString(materialize: publicIDKey != nil)
+            if let publicIDKey, let value {
+                publicIDs.insert(value, for: publicIDKey)
+            }
+        case 0x7B:
+            try parseObject(depth: depth)
+        case 0x5B:
+            try parseArray(depth: depth)
+        default:
+            try parsePrimitive()
+        }
+    }
+
+    private mutating func parseJSONString(materialize: Bool) throws -> String? {
+        guard index < bytes.count, bytes[index] == 0x22 else {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        let start = index
+        index += 1
+        while index < bytes.count {
+            let byte = bytes[index]
+            if byte == 0x22 {
+                index += 1
+                guard materialize else { return nil }
+                do {
+                    return try JSONDecoder().decode(
+                        String.self,
+                        from: Data(bytes[start ..< index])
+                    )
+                } catch {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+            }
+            if byte == 0x5C {
+                index += 1
+                guard index < bytes.count else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                switch bytes[index] {
+                case 0x22, 0x2F, 0x5C, 0x62, 0x66, 0x6E, 0x72, 0x74:
+                    index += 1
+                case 0x75:
+                    guard index + 4 < bytes.count,
+                          bytes[(index + 1) ... (index + 4)].allSatisfy(Self.isHex)
+                    else { throw PortableChatPersistenceError.invalidJSON }
+                    index += 5
+                default:
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                continue
+            }
+            guard byte >= 0x20 else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            index += 1
+        }
+        throw PortableChatPersistenceError.invalidJSON
+    }
+
+    private mutating func parsePrimitive() throws {
+        let start = index
+        while index < bytes.count {
+            switch bytes[index] {
+            case 0x20, 0x09, 0x0A, 0x0D, 0x2C, 0x5D, 0x7D:
+                guard index > start else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                return
+            default:
+                index += 1
+            }
+        }
+        guard index > start else {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+    }
+
+    private func rejectsDuplicate(_ key: String, depth: Int) -> Bool {
+        switch duplicatePolicy {
+        case .commonIdentityRoot:
+            depth == 0 && Self.commonIdentityKeys.contains(key)
+        case .allObjects:
+            true
+        }
+    }
+
+    private mutating func skipWhitespace() {
+        while index < bytes.count {
+            switch bytes[index] {
+            case 0x20, 0x09, 0x0A, 0x0D:
+                index += 1
+            default:
+                return
+            }
+        }
+    }
+
+    private mutating func consume(_ byte: UInt8) -> Bool {
+        guard index < bytes.count, bytes[index] == byte else { return false }
+        index += 1
+        return true
+    }
+
+    private static func isHex(_ byte: UInt8) -> Bool {
+        (48 ... 57).contains(byte) ||
+            (65 ... 70).contains(byte) ||
+            (97 ... 102).contains(byte)
+    }
+}
+
 private struct CoachInvocationDTO: Codable {
     let schemaVersion: UInt32
     let invocationId: String
@@ -468,6 +832,13 @@ private struct CoachInvocationDTO: Codable {
     let profileStatementGeneration: UInt64?
     let admittedAt: String
     let terminalFailure: String?
+}
+
+private struct CoachInvocationCommonIdentityDTO: Decodable {
+    let schemaVersion: UInt64
+    let invocationId: String
+    let libraryId: String
+    let chatId: String
 }
 
 private struct CoachProviderAttemptDTO: Codable {
