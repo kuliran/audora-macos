@@ -6,10 +6,36 @@ import XCTest
 
 @MainActor
 final class ChatPresentationModelTests: XCTestCase {
-    func testProviderFailureCopyDoesNotClaimAutomaticRetriesOccurred() {
+    func testCanonicalCoachFailureCardsProjectExactHeadingsAndBodies() {
         XCTAssertEqual(
-            CoachResponseFailurePresentation.text(for: .coachProviderError),
-            "The Coach provider could not complete the response. Nothing was published."
+            CoachResponseFailurePresentation.card(for: .coachProviderError),
+            CoachResponseFailureCardPresentation(
+                heading: "Coach provider error",
+                body: "The coach could not complete the request."
+            )
+        )
+        XCTAssertEqual(
+            CoachResponseFailurePresentation.card(for: .coachResponseInvalid),
+            CoachResponseFailureCardPresentation(
+                heading: "Coach response couldn't be used",
+                body: "The coach returned an incomplete or invalid response."
+            )
+        )
+        XCTAssertEqual(
+            CoachResponseFailurePresentation.card(
+                for: .coachResponseInterrupted
+            ),
+            CoachResponseFailureCardPresentation(
+                heading: "Coach response was interrupted",
+                body: nil
+            )
+        )
+        XCTAssertEqual(
+            CoachResponseFailurePresentation.card(for: nil),
+            CoachResponseFailureCardPresentation(
+                heading: "Coach response was interrupted",
+                body: nil
+            )
         )
     }
 

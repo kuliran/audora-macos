@@ -1160,7 +1160,17 @@ public actor DefaultChatFeature: ChatFeature {
         let outcome = await invocations.tryInvoke(request)
         guard isActive(context) else { return }
         let presentedOutcome: InvocationTryOutcome
-        if case let .rejected(nil, reason) = outcome {
+        if case let .interrupted(nil, reason) = outcome,
+           let retryOperationalInterruption
+        {
+            presentedOutcome = .operationallyInterrupted(
+                aggregate,
+                retryOperationalInterruption,
+                reason
+            )
+        } else if case let .interrupted(nil, reason) = outcome {
+            presentedOutcome = .interrupted(aggregate, reason)
+        } else if case let .rejected(nil, reason) = outcome {
             presentedOutcome = .rejected(aggregate, reason)
         } else {
             presentedOutcome = outcome

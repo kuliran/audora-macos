@@ -166,6 +166,48 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(claimCount, 1)
     }
 
+    func testEveryProviderAttemptCarriesTheReservedOutputCeilingAndPinnedInstruction()
+        async throws
+    {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .responseOverflow,
+                .complete(markdown: "Short complete response."),
+            ]
+        )
+
+        guard case .published = await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("the shorter repair must publish") }
+
+        let requests = await fixture.provider.requests
+        XCTAssertEqual(requests.map(\.attempt.kind), [
+            .standard, .standard, .shorterRepair,
+        ])
+        XCTAssertEqual(requests.map(\.outputTokenCeiling), [4, 4, 4])
+        XCTAssertEqual(
+            requests.map(\.pinnedInstruction),
+            [
+                "Return one complete structured response that fits within the " +
+                    "4-token output allowance.",
+                "Return one complete structured response that fits within the " +
+                    "4-token output allowance.",
+                "Return one complete structured response that fits within the " +
+                    "4-token output allowance. The previous Attempt exceeded " +
+                    "the response limit. Return a materially shorter valid " +
+                    "complete response. Preserve the direct answer, remove " +
+                    "repetition and optional detail, and never replay or continue " +
+                    "any partial prior output.",
+            ]
+        )
+        XCTAssertEqual(
+            requests.map { $0.exchange.request },
+            Array(repeating: requests[0].exchange.request, count: 3),
+            "Attempt controls must not alter the frozen semantic request bytes"
+        )
+    }
+
     func testAutomaticRetriesRecordMetadataOnlyDiagnostics() async throws {
         let timing = ScriptedInvocationRetryTiming(
             milliseconds: [0, 7, 100, 111, 200, 213, 300]
@@ -401,9 +443,9 @@ final class DefaultInvocationsTests: XCTestCase {
             requests[1].control,
             .shorterRepair(
                 instruction: "The previous Attempt exceeded the response limit. " +
-                    "Return a materially shorter complete response. Preserve the " +
-                    "direct answer, remove repetition and optional detail, and " +
-                    "never return partial JSON."
+                    "Return a materially shorter valid complete response. Preserve " +
+                    "the direct answer, remove repetition and optional detail, " +
+                    "and never replay or continue any partial prior output."
             )
         )
         let delays = await fixture.sleeper.recordedDelays()
@@ -930,6 +972,10 @@ final class DefaultInvocationsTests: XCTestCase {
         )
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         XCTAssertNil(activeInvocation)
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [.publicationConflict])
+        XCTAssertEqual(events.map(\.classification), [.publicationConflict])
+        XCTAssertEqual(events.map(\.disposition), [.userRetryableFailure])
     }
 
     func testOversizedLockedMessageUsesLocalLimitBeforeContextAdmissionOrProvider() async throws {
@@ -1053,6 +1099,40 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         let active = await fixture.persistence.activeInvocation
         XCTAssertNil(active)
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(
+            events.map(\.reason),
+            [.publicationPersistenceUnavailable]
+        )
+        XCTAssertEqual(events.map(\.classification), [.persistenceUnavailable])
+        XCTAssertEqual(events.map(\.disposition), [.userRetryableFailure])
+    }
+
+    func testPublicationAbortStaleFailureFreePendingBecomesOperationalRetry()
+        async throws
+    {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        await fixture.persistence.scriptNextPublication(.failedWithoutCommit)
+        await fixture.persistence.scriptNextAbort(.staleWithCurrent)
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .operationallyInterrupted(
+            fallback,
+            request,
+            .persistenceUnavailable
+        ) = outcome else {
+            return XCTFail(
+                "an exact failure-free Pending must retain operational Retry authority"
+            )
+        }
+        XCTAssertEqual(fallback, fixture.initial)
+        XCTAssertEqual(request, fixture.request)
+        XCTAssertNil(fallback?.pendingUserTurn?.failure)
+        XCTAssertEqual(
+            fixture.diagnostics.recordedEvents().map(\.reason),
+            [.publicationPersistenceUnavailable]
+        )
     }
 
     func testCommittedPublicationSurvivesFailedImmediateReconciliationWithExactQuote() async throws {
@@ -1077,6 +1157,11 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertNil(aggregate.pendingUserTurn)
         XCTAssertTrue(quote.fits)
         XCTAssertNil(activeInvocation)
+        XCTAssertEqual(
+            fixture.diagnostics.recordedEvents(),
+            [],
+            "a recovered publication must not create a false Retry event"
+        )
     }
 
     func testCommittedPublicationSurvivesAbortFailureAndRecoveryReread() async throws {
@@ -1143,6 +1228,11 @@ final class DefaultInvocationsTests: XCTestCase {
         else { return XCTFail("unproven publication must retain operational Retry") }
         XCTAssertEqual(fallback, fixture.initial)
         XCTAssertEqual(retryRequest, fixture.request)
+        XCTAssertEqual(
+            fixture.diagnostics.recordedEvents().map(\.reason),
+            [.publicationPersistenceUnavailable],
+            "a surfaced operational Retry/Discard outcome must be diagnosed"
+        )
 
         await fixture.persistence.scriptNextPendingRecovery(.current)
         let retry = await fixture.invocations.tryInvoke(fixture.request)
@@ -1162,6 +1252,11 @@ final class DefaultInvocationsTests: XCTestCase {
         let recoveryCount = await fixture.persistence.publicationRecoveryCount
         XCTAssertEqual(claimCount, 1)
         XCTAssertEqual(recoveryCount, 3)
+        XCTAssertEqual(
+            fixture.diagnostics.recordedEvents().map(\.reason),
+            [.publicationPersistenceUnavailable],
+            "later proof must not duplicate the already-visible Retry event"
+        )
     }
 
     func testTypedPublicationRejectionOverridesShallowReplacementEquality() async throws {
@@ -1465,6 +1560,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     enum AbortDirective: Sendable {
         case committed
         case failedWithoutCommit
+        case staleWithCurrent
     }
 
     enum PublicationEvolution: Sendable {
@@ -1862,6 +1958,9 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         case .failedWithoutCommit:
             activeInvocation = nil
             return .failed
+        case .staleWithCurrent:
+            activeInvocation = nil
+            return .stale(aggregate)
         }
         if lastPublication?.replacement == aggregate {
             activeInvocation = nil

@@ -89,15 +89,31 @@ enum ChatInvocationAdmissionPresentation {
     }
 }
 
+struct CoachResponseFailureCardPresentation: Equatable {
+    let heading: String
+    let body: String?
+}
+
 enum CoachResponseFailurePresentation {
-    static func text(for failure: PendingUserTurnFailure?) -> String {
+    static func card(
+        for failure: PendingUserTurnFailure?
+    ) -> CoachResponseFailureCardPresentation {
         switch failure {
         case .coachProviderError:
-            "The Coach provider could not complete the response. Nothing was published."
+            CoachResponseFailureCardPresentation(
+                heading: "Coach provider error",
+                body: "The coach could not complete the request."
+            )
         case .coachResponseInvalid:
-            "The Coach returned an invalid complete response. Nothing was published."
+            CoachResponseFailureCardPresentation(
+                heading: "Coach response couldn't be used",
+                body: "The coach returned an incomplete or invalid response."
+            )
         case .coachResponseInterrupted, .none, .coachContextCannotFit:
-            "The Coach response was interrupted. Nothing was published."
+            CoachResponseFailureCardPresentation(
+                heading: "Coach response was interrupted",
+                body: nil
+            )
         }
     }
 
@@ -495,17 +511,17 @@ public struct ChatRootView: View {
                         }
                     case .coachResponseFailure:
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(
-                                CoachResponseFailurePresentation.text(
-                                    for: pending.failure
-                                )
+                            let failureCard = CoachResponseFailurePresentation.card(
+                                for: pending.failure
                             )
+                            Text(failureCard.heading)
                                 .font(.callout.weight(.semibold))
-                                .accessibilityLabel(
-                                    CoachResponseFailurePresentation.text(
-                                        for: pending.failure
-                                    )
-                                )
+                                .accessibilityLabel(failureCard.heading)
+                            if let body = failureCard.body {
+                                Text(body)
+                                    .font(.callout)
+                                    .accessibilityLabel(body)
+                            }
                             HStack {
                                 pendingRecoveryButtons(
                                     presentation.recoveryActions,

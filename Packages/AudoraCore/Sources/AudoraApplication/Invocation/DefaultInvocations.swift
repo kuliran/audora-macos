@@ -769,6 +769,8 @@ struct SyntheticCoachProviderRequest: Sendable {
     let attempt: CoachProviderAttempt
     let exchange: CanonicalCoachExchange
     let transcriptAccess: ProviderAttemptTranscriptAccess
+    let outputTokenCeiling: Int
+    let pinnedInstruction: String
     let control: CoachProviderAttemptControl
 }
 
@@ -843,6 +845,8 @@ public enum InvocationRetryDiagnosticReason: String, Equatable, Sendable {
     case nextAttemptInstallationFailed
     case nextAttemptBecameStale
     case invalidCompleteResponse
+    case publicationConflict
+    case publicationPersistenceUnavailable
 }
 
 @_spi(InvocationInfrastructure)
@@ -851,6 +855,8 @@ public enum InvocationRetryDiagnosticClassification: String, Equatable, Sendable
     case providerUserRetryable
     case invalidProviderResponse
     case retryInfrastructureFailure
+    case publicationConflict
+    case persistenceUnavailable
 }
 
 @_spi(InvocationInfrastructure)
@@ -871,6 +877,24 @@ public struct InvocationRetryDiagnosticContext: Equatable, Sendable {
     public let completeInputTokens: Int
     public let inputCeilingTokens: Int
     public let memoryUTF8Bytes: Int
+
+    public init(
+        requestUTF8Bytes: Int,
+        completeModelInputUTF8Bytes: Int,
+        transcriptReadRequestUTF8Bytes: Int,
+        transcriptReadResponseUTF8Bytes: Int,
+        completeInputTokens: Int,
+        inputCeilingTokens: Int,
+        memoryUTF8Bytes: Int
+    ) {
+        self.requestUTF8Bytes = requestUTF8Bytes
+        self.completeModelInputUTF8Bytes = completeModelInputUTF8Bytes
+        self.transcriptReadRequestUTF8Bytes = transcriptReadRequestUTF8Bytes
+        self.transcriptReadResponseUTF8Bytes = transcriptReadResponseUTF8Bytes
+        self.completeInputTokens = completeInputTokens
+        self.inputCeilingTokens = inputCeilingTokens
+        self.memoryUTF8Bytes = memoryUTF8Bytes
+    }
 }
 
 /// Metadata-only evidence that one automatic or user-visible retry became
@@ -891,6 +915,30 @@ public struct InvocationRetryDiagnosticEvent: Equatable, Sendable {
     public let occurredAt: UTCInstant
     public let durationMilliseconds: UInt64
     public let context: InvocationRetryDiagnosticContext
+
+    public init(
+        reason: InvocationRetryDiagnosticReason,
+        classification: InvocationRetryDiagnosticClassification,
+        disposition: InvocationRetryDiagnosticDisposition,
+        invocationID: CoachInvocationID,
+        attemptID: CoachProviderAttemptID,
+        attemptOrdinal: UInt8,
+        retryNumber: UInt8,
+        occurredAt: UTCInstant,
+        durationMilliseconds: UInt64,
+        context: InvocationRetryDiagnosticContext
+    ) {
+        self.reason = reason
+        self.classification = classification
+        self.disposition = disposition
+        self.invocationID = invocationID
+        self.attemptID = attemptID
+        self.attemptOrdinal = attemptOrdinal
+        self.retryNumber = retryNumber
+        self.occurredAt = occurredAt
+        self.durationMilliseconds = durationMilliseconds
+        self.context = context
+    }
 }
 
 @_spi(InvocationInfrastructure)
@@ -940,9 +988,14 @@ public actor DefaultInvocations: Invocations {
     static let automaticRetryDelaysMilliseconds: [Int64] = [5_000, 10_000, 15_000]
     static let shorterRepairInstruction = """
     The previous Attempt exceeded the response limit. Return a materially shorter \
-    complete response. Preserve the direct answer, remove repetition and optional \
-    detail, and never return partial JSON.
+    valid complete response. Preserve the direct answer, remove repetition and \
+    optional detail, and never replay or continue any partial prior output.
     """
+
+    static func pinnedInstruction(outputTokenCeiling: Int) -> String {
+        "Return one complete structured response that fits within the " +
+            "\(outputTokenCeiling)-token output allowance."
+    }
     private let persistence: any InvocationPersistencePort
     private let admission: any InvocationAdmissionPort
     private let provider: any SyntheticCoachProviderPort
@@ -1350,6 +1403,16 @@ public actor DefaultInvocations: Invocations {
             case .shorterRepair:
                 .shorterRepair(instruction: Self.shorterRepairInstruction)
             }
+            let outputTokenCeiling = prepared.quote.reservedResponseTokens
+            let attemptInstruction: String = switch control {
+            case .standard:
+                ""
+            case let .shorterRepair(instruction):
+                " \(instruction)"
+            }
+            let pinnedInstruction = Self.pinnedInstruction(
+                outputTokenCeiling: outputTokenCeiling
+            ) + attemptInstruction
             let outcome = await provider.run(
                 SyntheticCoachProviderRequest(
                     invocation: invocation,
@@ -1358,6 +1421,8 @@ public actor DefaultInvocations: Invocations {
                     transcriptAccess: ProviderAttemptTranscriptAccess(
                         handles: transportAuthority.transcriptHandles
                     ),
+                    outputTokenCeiling: outputTokenCeiling,
+                    pinnedInstruction: pinnedInstruction,
                     control: control
                 )
             )
@@ -1524,24 +1589,32 @@ public actor DefaultInvocations: Invocations {
         case let .committed(aggregate):
             return .published(aggregate, prepared.quote)
         case let .stale(current):
-            return await interruptAndAbort(
+            return await interruptPublicationAndAbort(
                 activeSession,
                 fallback: current ?? processingAggregate,
                 reason: .publicationConflict,
                 publication: PublicationRecoveryIntent(
                     mutation: publication,
                     quote: prepared.quote
-                )
+                ),
+                diagnosticReason: .publicationConflict,
+                classification: .publicationConflict,
+                prepared: prepared,
+                startedAt: completedProviderResponse.startedAtMilliseconds
             )
         case .failed:
-            return await interruptAndAbort(
+            return await interruptPublicationAndAbort(
                 activeSession,
                 fallback: processingAggregate,
                 reason: .persistenceUnavailable,
                 publication: PublicationRecoveryIntent(
                     mutation: publication,
                     quote: prepared.quote
-                )
+                ),
+                diagnosticReason: .publicationPersistenceUnavailable,
+                classification: .persistenceUnavailable,
+                prepared: prepared,
+                startedAt: completedProviderResponse.startedAtMilliseconds
             )
         }
     }
@@ -1753,6 +1826,54 @@ public actor DefaultInvocations: Invocations {
         }
     }
 
+    private func interruptPublicationAndAbort(
+        _ session: any InvocationActivePersistenceSession,
+        fallback: ChatAggregate,
+        reason: InvocationInterruptionReason,
+        publication: PublicationRecoveryIntent,
+        diagnosticReason: InvocationRetryDiagnosticReason,
+        classification: InvocationRetryDiagnosticClassification,
+        prepared: PreparedCoachLaunchContext,
+        startedAt: UInt64
+    ) async -> InvocationTryOutcome {
+        let invocation = session.invocation
+        let outcome = await interruptAndAbort(
+            session,
+            fallback: fallback,
+            reason: reason,
+            publication: publication
+        )
+        guard presentsPublicationRetry(
+            outcome,
+            request: pendingRequest(for: invocation)
+        ) else { return outcome }
+        await recordRetryDiagnostic(
+            reason: diagnosticReason,
+            classification: classification,
+            disposition: .userRetryableFailure,
+            invocation: invocation,
+            prepared: prepared,
+            startedAt: startedAt
+        )
+        return outcome
+    }
+
+    private func presentsPublicationRetry(
+        _ outcome: InvocationTryOutcome,
+        request: PendingCoachInvocationRequest
+    ) -> Bool {
+        switch outcome {
+        case let .interrupted(current, _):
+            return current?.chat.id == request.chatID &&
+                current?.pendingUserTurn?.id == request.pendingUserTurnID &&
+                current?.pendingUserTurn?.failure != nil
+        case let .operationallyInterrupted(_, retryRequest, _):
+            return retryRequest == request
+        case .published, .contextCapacityFailure, .rejected:
+            return false
+        }
+    }
+
     private func outcomeAfterRecoveredAbort(
         _ pendingResolution: InvocationPendingResolutionOutcome,
         request: PendingCoachInvocationRequest,
@@ -1801,16 +1922,31 @@ public actor DefaultInvocations: Invocations {
         priorRecovery: PublicationRecoveryResolution?
     ) async -> InvocationTryOutcome {
         guard let publication else {
-            return .interrupted(current ?? fallback, reason)
+            return interruptionAfterUncommittedAbort(
+                current: current,
+                fallback: fallback,
+                reason: reason,
+                invocation: invocation
+            )
         }
         if case .notPublished? = priorRecovery {
-            return .interrupted(current ?? fallback, reason)
+            return interruptionAfterUncommittedAbort(
+                current: current,
+                fallback: fallback,
+                reason: reason,
+                invocation: invocation
+            )
         }
         switch await resolvePublicationRecovery(publication) {
         case let .published(outcome):
             return outcome
         case .notPublished:
-            return .interrupted(current ?? fallback, reason)
+            return interruptionAfterUncommittedAbort(
+                current: current,
+                fallback: fallback,
+                reason: reason,
+                invocation: invocation
+            )
         case .unavailable:
             return await interruptionAfterTerminalFailure(
                 request: pendingRequest(for: invocation),
@@ -1818,6 +1954,26 @@ public actor DefaultInvocations: Invocations {
                 publication: publication
             )
         }
+    }
+
+    private func interruptionAfterUncommittedAbort(
+        current: ChatAggregate?,
+        fallback: ChatAggregate,
+        reason: InvocationInterruptionReason,
+        invocation: CoachInvocation
+    ) -> InvocationTryOutcome {
+        let observed = current ?? fallback
+        let request = pendingRequest(for: invocation)
+        guard observed.chat.id == request.chatID,
+              let pending = observed.pendingUserTurn,
+              pending.id == request.pendingUserTurnID,
+              pending.failure == nil
+        else { return .interrupted(observed, reason) }
+        return retainOperationalRetry(
+            request: request,
+            fallback: observed,
+            publication: nil
+        )
     }
 
     private func pendingRequest(

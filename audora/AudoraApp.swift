@@ -84,7 +84,8 @@ struct AudoraApp: App {
             persistence: PortableInvocationStore(workspace: workspace),
             admission: MachineInvocationAdmissionFactory.live(),
             clock: SystemLibraryClock(),
-            identities: RandomInvocationIdentityGenerator()
+            identities: RandomInvocationIdentityGenerator(),
+            retryDiagnostics: MachineInvocationRetryDiagnosticsFactory.live()
         )
         let chatFeature = DefaultChatFeature(
             store: chatStore,

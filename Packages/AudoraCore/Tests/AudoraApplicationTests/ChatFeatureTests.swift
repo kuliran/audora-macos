@@ -158,6 +158,54 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertNil(terminalState.activity)
     }
 
+    func testRetryInterruptedWithoutSnapshotRestoresExactFailedPendingAndActions()
+        async throws
+    {
+        let aggregate = try Self.aggregate(draftText: "Keep this failed Draft.")
+        let failedPending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            ),
+            failure: .coachProviderError
+        )
+        let failedAggregate = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: failedPending
+        )
+        let gateway = SuspendedRetryInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failedAggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        async let retry: Void = feature.send(
+            .retryPendingUserTurn(Self.context, failedPending.id)
+        )
+        await gateway.waitUntilRetryIsSuspended()
+        await gateway.resume(with: .interrupted(nil, .providerFailed))
+        await retry
+
+        let state = await feature.currentState
+        XCTAssertEqual(state.selection, .open(failedAggregate))
+        XCTAssertEqual(
+            state.composer,
+            .locked(failedAggregate.chat.draft, failedPending)
+        )
+        XCTAssertTrue(state.isCoachResponseRetryableFailure(failedPending))
+        XCTAssertNil(state.operationallyInterruptedInvocation)
+        XCTAssertNil(
+            state.notice,
+            "the restored typed failure card is the terminal copy"
+        )
+        XCTAssertNil(state.activity)
+    }
+
     func testRejectedRetryRestoresTheAuthoritativeFailedPending() async throws {
         let aggregate = try Self.aggregate(draftText: "Preserve this failed Retry.")
         let failedPending = PendingUserTurn(
@@ -1167,6 +1215,50 @@ final class ChatFeatureTests: XCTestCase {
         )
         XCTAssertTrue(rejected.isCoachResponseRetryableFailure(pending))
         XCTAssertEqual(rejected.notice, .coachBusy)
+    }
+
+    func testOperationalRetryInterruptedWithoutSnapshotRestoresExactAuthorityAndFallback()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Keep this uncertain Draft locked."
+        )
+        let gateway = OperationalInterruptionThenSuspendedRetryGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let interrupted = await feature.currentState
+        guard case let .open(fallback) = interrupted.selection,
+              let pending = fallback.pendingUserTurn,
+              let authority = interrupted.operationallyInterruptedInvocation
+        else { return XCTFail("expected the exact operational Retry authority") }
+
+        async let retry: Void = feature.send(
+            .retryPendingUserTurn(Self.context, pending.id)
+        )
+        await gateway.waitUntilRetryIsSuspended()
+        await gateway.resume(
+            with: .interrupted(nil, .persistenceUnavailable)
+        )
+        await retry
+
+        let state = await feature.currentState
+        XCTAssertEqual(state.selection, .open(fallback))
+        XCTAssertEqual(
+            state.composer,
+            .locked(fallback.chat.draft, pending)
+        )
+        XCTAssertEqual(state.operationallyInterruptedInvocation, authority)
+        XCTAssertTrue(state.isCoachResponseRetryableFailure(pending))
+        XCTAssertEqual(state.notice, .coachResponseInterrupted)
+        XCTAssertNil(state.activity)
     }
 
     func testOperationalRetryRestoresAuthorityFromFailureFreeRejectedCurrent() async throws {
