@@ -4577,6 +4577,15 @@ final class PortableInvocationStoreTests: XCTestCase {
                     "publication-proof.json"
                 )
             )
+            let proofPartialURL = originalRoot.appendingPathComponent(
+                ".publication-proof.json.33333333-3333-3333-3333-333333333333.partial"
+            )
+            let invocationPartialURL = originalRoot.appendingPathComponent(
+                ".invocation.json.44444444-4444-4444-4444-444444444444.partial"
+            )
+            try proofBytes.write(to: proofPartialURL)
+            try Data(contentsOf: originalRoot.appendingPathComponent("invocation.json"))
+                .write(to: invocationPartialURL)
 
             let targetPendingURL = fixture.root
                 .appendingPathComponent("chats", isDirectory: true)
@@ -4588,6 +4597,8 @@ final class PortableInvocationStoreTests: XCTestCase {
             let evidenceURLs = [
                 originalRoot.appendingPathComponent("invocation.json"),
                 proofURL,
+                proofPartialURL,
+                invocationPartialURL,
                 alternateRoot.appendingPathComponent("invocation.json"),
                 alternateRoot.appendingPathComponent("publication-proof.json"),
                 targetPendingURL,
@@ -4609,6 +4620,12 @@ final class PortableInvocationStoreTests: XCTestCase {
                 fixture.competingAuthority.request
             )
             XCTAssertEqual(acquired, .acquired(fixture.competingAuthority))
+            XCTAssertFalse(
+                try PortableChatPersistence().hasActiveInvocation(
+                    at: fixture.root,
+                    in: fixture.scope
+                )
+            )
             for (url, expected) in zip(evidenceURLs, evidenceBytes) {
                 XCTAssertEqual(try Data(contentsOf: url), expected, url.path)
             }

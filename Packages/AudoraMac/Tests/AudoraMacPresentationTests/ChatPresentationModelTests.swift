@@ -33,6 +33,28 @@ final class ChatPresentationModelTests: XCTestCase {
         }
     }
 
+    func testRejectedRetryNoticeSaysTheDraftRemainsLockedAndNamesRecoveryActions()
+    {
+        let recoveryText =
+            "The Coach could not accept this Retry. " +
+            "Your Draft remains locked; Retry or Discard."
+
+        XCTAssertEqual(
+            ChatNoticePresentation.recoveryText(for: .coachRetryUnavailable),
+            recoveryText
+        )
+        XCTAssertEqual(
+            ChatNoticePresentation.accessibilityLabel(
+                for: .coachRetryUnavailable
+            ),
+            "Chat notice: \(recoveryText)"
+        )
+        XCTAssertEqual(
+            ChatNoticePresentation.recoveryText(for: .coachSendUnavailable),
+            "The Coach could not accept this Send. Your Draft is still editable."
+        )
+    }
+
     func testProcessingPendingTurnExposesNoRecoveryOrAccessibilityActions() throws {
         let scope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")

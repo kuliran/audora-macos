@@ -201,6 +201,71 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertNil(state.activity)
     }
 
+    func testUnavailableRejectedRetryKeepsFailedPendingLockedAndUsesRetryCopy()
+        async throws
+    {
+        let reasons: [InvocationRejectionReason] = [
+            .admissionUnavailable,
+            .contextChanged,
+            .persistenceUnavailable,
+            .identityCollisionExhausted(lastCollision: .freshDraftID),
+        ]
+        for reason in reasons {
+            let aggregate = try Self.aggregate(
+                draftText: "Keep this failed Retry locked."
+            )
+            let failedPending = PendingUserTurn(
+                id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+                draftID: aggregate.chat.draft.draftID,
+                draftVersion: aggregate.chat.draft.version,
+                responsePositionID: try ChatResponsePositionID(
+                    "rsp-20260830T120000000Z-6PQR"
+                ),
+                failure: .coachProviderError
+            )
+            let failedAggregate = try ChatAggregate(
+                chat: aggregate.chat,
+                memory: aggregate.memory,
+                pendingUserTurn: failedPending
+            )
+            let gateway = SuspendedRetryInvocationGateway()
+            let feature = makeFeature(
+                store: RecordingChatStore(catalog: [.available(failedAggregate)]),
+                invocations: gateway
+            )
+            await feature.send(.start(Self.context))
+            await feature.send(.open(Self.context, aggregate.chat.id))
+
+            async let retry: Void = feature.send(
+                .retryPendingUserTurn(Self.context, failedPending.id)
+            )
+            await gateway.waitUntilRetryIsSuspended()
+            let rejectedCurrent = reason == .contextChanged
+                ? failedAggregate
+                : nil
+            await gateway.resume(with: .rejected(rejectedCurrent, reason))
+            await retry
+
+            let state = await feature.currentState
+            XCTAssertEqual(
+                state.selection,
+                .open(failedAggregate),
+                String(describing: reason)
+            )
+            XCTAssertEqual(
+                state.composer,
+                .locked(failedAggregate.chat.draft, failedPending),
+                String(describing: reason)
+            )
+            XCTAssertEqual(
+                state.notice,
+                .coachRetryUnavailable,
+                String(describing: reason)
+            )
+            XCTAssertNil(state.activity, String(describing: reason))
+        }
+    }
+
     func testDelayedCreateFromPreviousLibraryContextIsRejectedAfterSwitch() async {
         let store = RecordingChatStore()
         let feature = makeFeature(store: store)
@@ -1141,7 +1206,7 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(rejected.selection, .open(processingAggregate))
         XCTAssertEqual(rejected.operationallyInterruptedInvocation, interruption)
         XCTAssertTrue(rejected.isCoachResponseRetryableFailure(pending))
-        XCTAssertEqual(rejected.notice, .coachSendUnavailable)
+        XCTAssertEqual(rejected.notice, .coachRetryUnavailable)
         XCTAssertNil(rejected.activity)
     }
 

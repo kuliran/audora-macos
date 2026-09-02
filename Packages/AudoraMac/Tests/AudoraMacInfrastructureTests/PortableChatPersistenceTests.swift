@@ -1975,6 +1975,224 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testHasActiveInvocationCleansRecognizedInvocationPartials() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let invocationRoot = root.appendingPathComponent(
+                "invocations/\(fixture.install.invocation.id.rawValue)",
+                isDirectory: true
+            )
+            let partials = [
+                ".publication-proof.json.11111111-1111-1111-1111-111111111111.partial",
+                ".invocation.json.22222222-2222-2222-2222-222222222222.partial",
+            ].map { invocationRoot.appendingPathComponent($0) }
+            for partial in partials {
+                try Data("crash-residue".utf8).write(to: partial)
+            }
+
+            XCTAssertTrue(try persistence.hasActiveInvocation(at: root, in: scope))
+            for partial in partials {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: partial.path))
+            }
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: invocationRoot.appendingPathComponent("invocation.json").path
+                )
+            )
+        }
+    }
+
+    func testHasActiveInvocationPreservesPartialsWhenInvocationRootChangesBeforeCleanup()
+        throws
+    {
+        try withCreatedLibrary { root, scope in
+            let baseline = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: baseline,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try baseline.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let invocationRoot = root.appendingPathComponent(
+                "invocations/\(fixture.install.invocation.id.rawValue)",
+                isDirectory: true
+            )
+            let displacedRoot = root.appendingPathComponent(
+                "displaced-invocation-race-evidence",
+                isDirectory: true
+            )
+            let evidenceNames = [
+                "invocation.json",
+                ".publication-proof.json.33333333-3333-3333-3333-333333333333.partial",
+                ".invocation.json.44444444-4444-4444-4444-444444444444.partial",
+            ]
+            try Data("proof-partial-race-evidence".utf8).write(
+                to: invocationRoot.appendingPathComponent(evidenceNames[1])
+            )
+            try Data("attempt-partial-race-evidence".utf8).write(
+                to: invocationRoot.appendingPathComponent(evidenceNames[2])
+            )
+            let expected = try evidenceNames.map {
+                try Data(contentsOf: invocationRoot.appendingPathComponent($0))
+            }
+            let faulting = PortableChatPersistence { point in
+                guard point == .beforeInvocationPartialCleanup,
+                      !FileManager.default.fileExists(atPath: displacedRoot.path)
+                else { return }
+                try FileManager.default.moveItem(at: invocationRoot, to: displacedRoot)
+                try FileManager.default.copyItem(at: displacedRoot, to: invocationRoot)
+            }
+
+            XCTAssertThrowsError(
+                try faulting.hasActiveInvocation(at: root, in: scope)
+            ) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .invalidLayout
+                )
+            }
+            for (name, bytes) in zip(evidenceNames, expected) {
+                XCTAssertEqual(
+                    try Data(contentsOf: displacedRoot.appendingPathComponent(name)),
+                    bytes
+                )
+                XCTAssertEqual(
+                    try Data(contentsOf: invocationRoot.appendingPathComponent(name)),
+                    bytes
+                )
+            }
+        }
+    }
+
+    func testHasActiveInvocationPreservesSameChatPartialsWhenSiblingFreezesBeforeCleanup()
+        throws
+    {
+        try withCreatedLibrary { root, scope in
+            let baseline = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: baseline,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try baseline.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let invocationsRoot = root.appendingPathComponent(
+                "invocations",
+                isDirectory: true
+            )
+            let originalRoot = invocationsRoot.appendingPathComponent(
+                fixture.install.invocation.id.rawValue,
+                isDirectory: true
+            )
+            let alternateIdentity = InvocationLaunchIdentity(
+                invocationID: try CoachInvocationID(
+                    "inv-20260830T120002000Z-9YZ0"
+                ),
+                attemptID: try CoachProviderAttemptID(
+                    "atm-20260830T120002000Z-0ABC"
+                ),
+                idempotencyValue: try ProviderIdempotencyValue(
+                    "synthetic-sibling-race-1BCD"
+                ),
+                userMessageID: try ChatMessageID(
+                    "msg-20260830T120003000Z-2CDE"
+                ),
+                coachMessageID: try ChatMessageID(
+                    "msg-20260830T120003000Z-3DEF"
+                ),
+                freshDraftID: try ChatDraftID(
+                    "drf-20260830T120003000Z-4GHJ"
+                )
+            )
+            let alternate = try InstallCoachInvocationMutation(
+                authority: fixture.install.authority,
+                identity: alternateIdentity,
+                preparedProfile: try XCTUnwrap(
+                    fixture.install.invocation.preparedProfile
+                ),
+                admittedAt: UTCInstant("2026-08-30T12:00:02.000Z")
+            ).invocation
+            let alternateRoot = invocationsRoot.appendingPathComponent(
+                alternate.id.rawValue,
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: alternateRoot,
+                withIntermediateDirectories: false
+            )
+            let alternateInvocationURL = alternateRoot.appendingPathComponent(
+                "invocation.json"
+            )
+            let alternateBody = try baseline.encodeInvocation(alternate)
+            try alternateBody.write(to: alternateInvocationURL)
+            let partialNames = [
+                ".publication-proof.json.55555555-5555-5555-5555-555555555555.partial",
+                ".invocation.json.66666666-6666-6666-6666-666666666666.partial",
+            ]
+            var evidence: [(url: URL, bytes: Data)] = []
+            for (label, invocationRoot) in [
+                ("original", originalRoot),
+                ("alternate", alternateRoot),
+            ] {
+                for (index, name) in partialNames.enumerated() {
+                    let url = invocationRoot.appendingPathComponent(name)
+                    let bytes = Data("\(label)-partial-\(index)".utf8)
+                    try bytes.write(to: url)
+                    evidence.append((url, bytes))
+                }
+            }
+            let originalInvocationURL = originalRoot.appendingPathComponent(
+                "invocation.json"
+            )
+            evidence.append((
+                originalInvocationURL,
+                try Data(contentsOf: originalInvocationURL)
+            ))
+            var newerObject = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: alternateBody) as? [String: Any]
+            )
+            newerObject["schemaVersion"] = CoachInvocation.schemaVersion + 1
+            let newerBody = try JSONSerialization.data(
+                withJSONObject: newerObject,
+                options: [.sortedKeys]
+            )
+            let displacedAlternateBody = root.appendingPathComponent(
+                "displaced-alternate-invocation.json"
+            )
+            let faulting = PortableChatPersistence { point in
+                guard point == .beforeInvocationPartialCleanup else { return }
+                try alternateBody.write(to: displacedAlternateBody)
+                try newerBody.write(to: alternateInvocationURL, options: .atomic)
+            }
+
+            XCTAssertFalse(
+                try faulting.hasActiveInvocation(at: root, in: scope)
+            )
+            for item in evidence {
+                XCTAssertEqual(try Data(contentsOf: item.url), item.bytes)
+            }
+            XCTAssertEqual(try Data(contentsOf: alternateInvocationURL), newerBody)
+            XCTAssertEqual(
+                try Data(contentsOf: displacedAlternateBody),
+                alternateBody
+            )
+        }
+    }
+
     func testRelaunchDiscardsCorruptProofForExactPrepublicationInvocation() throws {
         try withCreatedLibrary { root, scope in
             let persistence = PortableChatPersistence()

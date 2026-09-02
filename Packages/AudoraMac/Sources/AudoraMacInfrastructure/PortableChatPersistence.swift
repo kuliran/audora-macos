@@ -283,6 +283,7 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
     case afterPendingRemovalDirectoryFlush
     case beforeInvocationReconciliation
     case beforeInvocationReconciliationCommit
+    case beforeInvocationPartialCleanup
     case beforeInvocationIdentityRead
     case beforeInvocationPartialWrite
     case afterInvocationPartialWrite
@@ -404,6 +405,37 @@ public struct PortableChatPersistence: @unchecked Sendable {
     private struct DirectoryIdentity: Equatable {
         let device: dev_t
         let inode: ino_t
+    }
+
+    private struct InvocationPartialFileIdentity: Equatable {
+        let name: String
+        let identity: PortableInvocationLivenessKey
+    }
+
+    private struct InvocationPartialCleanupPlan {
+        let name: String
+        let rootIdentity: DirectoryIdentity
+        let invocationIdentity: PortableInvocationLivenessKey
+        let invocation: CoachInvocation
+        let partials: [InvocationPartialFileIdentity]
+
+        func hasSameBoundEvidence(as other: Self) -> Bool {
+            name == other.name &&
+                rootIdentity == other.rootIdentity &&
+                invocationIdentity == other.invocationIdentity &&
+                invocation.hasSameDurableProjection(as: other.invocation) &&
+                partials == other.partials
+        }
+    }
+
+    private struct InvocationPartialCleanupCandidate {
+        let record: InvocationDirectoryRecord
+        let plan: InvocationPartialCleanupPlan
+    }
+
+    private enum InvocationPartialCleanupInspection {
+        case available(InvocationPartialCleanupCandidate)
+        case frozen(PortableInvocationCommonIdentityEnvelope, FrozenChatSnapshot)
     }
 
     private struct BoundPendingMutationResult {
@@ -5435,6 +5467,154 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
+    private func inspectInvocationDirectoryForPartialCleanup(
+        named name: String,
+        expectedLibraryID: LibraryID,
+        under invocationsDescriptor: Int32
+    ) throws -> InvocationPartialCleanupInspection {
+        guard let invocationID = try? CoachInvocationID(name) else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let invocationRoot = try openDirectory(
+            named: name,
+            under: invocationsDescriptor
+        )
+        defer { Darwin.close(invocationRoot) }
+        let rootIdentity = try directoryIdentity(of: invocationRoot)
+        guard try directoryIdentity(
+            named: name,
+            under: invocationsDescriptor
+        ) == rootIdentity else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let body = try inspectInvocationBody(
+            expectedInvocationID: invocationID,
+            expectedLibraryID: expectedLibraryID,
+            under: invocationRoot
+        )
+        guard case let .available(validatedBody) = body else {
+            if case let .frozen(common, snapshot) = body {
+                return .frozen(common, snapshot)
+            }
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        do {
+            let invocationIdentity = try regularFileLivenessIdentity(
+                named: "invocation.json",
+                under: invocationRoot
+            )
+            let record = try loadInvocationDirectoryRecord(
+                expectedInvocationID: invocationID,
+                expectedLibraryID: expectedLibraryID,
+                under: invocationRoot,
+                reconcileProofPartial: false
+            )
+            guard record.invocation.hasSameDurableProjection(
+                as: validatedBody.invocation
+            ) else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            let entries = try listEntryNames(
+                under: invocationRoot,
+                maximumCount: 4
+            )
+            let proofPartials = entries.filter(Self.isPublicationProofPartialName)
+            let attemptPartials = entries.filter(Self.isAttemptReplacementPartialName)
+            guard proofPartials.count <= 1,
+                  attemptPartials.count <= 1,
+                  entries.count <= 4,
+                  Set(entries).isSubset(of: Set([
+                      "invocation.json",
+                      "publication-proof.json",
+                  ] + proofPartials + attemptPartials))
+            else { throw PortableChatPersistenceError.invalidLayout }
+            let partials = try (proofPartials + attemptPartials).sorted().map {
+                InvocationPartialFileIdentity(
+                    name: $0,
+                    identity: try regularFileLivenessIdentity(
+                        named: $0,
+                        under: invocationRoot
+                    )
+                )
+            }
+            guard try regularFileLivenessIdentity(
+                named: "invocation.json",
+                under: invocationRoot
+            ) == invocationIdentity,
+                try directoryIdentity(of: invocationRoot) == rootIdentity,
+                try directoryIdentity(
+                    named: name,
+                    under: invocationsDescriptor
+                ) == rootIdentity
+            else { throw PortableChatPersistenceError.invalidLayout }
+            return .available(InvocationPartialCleanupCandidate(
+                record: record,
+                plan: InvocationPartialCleanupPlan(
+                    name: name,
+                    rootIdentity: rootIdentity,
+                    invocationIdentity: invocationIdentity,
+                    invocation: record.invocation,
+                    partials: partials
+                )
+            ))
+        } catch let error as PortableChatPersistenceError {
+            guard let snapshot = frozenChatSnapshot(
+                for: error,
+                chatID: validatedBody.invocation.chatID
+            ) else { throw error }
+            return .frozen(validatedBody.common, snapshot)
+        }
+    }
+
+    private func removeBoundInvocationPartial(
+        _ partial: InvocationPartialFileIdentity,
+        from plan: InvocationPartialCleanupPlan,
+        expectedLibraryID: LibraryID,
+        under invocationsDescriptor: Int32
+    ) throws {
+        guard try directoryIdentity(
+            named: plan.name,
+            under: invocationsDescriptor
+        ) == plan.rootIdentity else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let invocationRoot = try openDirectory(
+            named: plan.name,
+            under: invocationsDescriptor
+        )
+        defer { Darwin.close(invocationRoot) }
+        guard try directoryIdentity(of: invocationRoot) == plan.rootIdentity,
+              try regularFileLivenessIdentity(
+                  named: "invocation.json",
+                  under: invocationRoot
+              ) == plan.invocationIdentity
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let current = try loadInvocationBodyIdentity(
+            expectedInvocationID: plan.invocation.id,
+            expectedLibraryID: expectedLibraryID,
+            under: invocationRoot
+        )
+        guard current.invocation.hasSameDurableProjection(as: plan.invocation),
+              try directoryIdentity(
+                  named: plan.name,
+                  under: invocationsDescriptor
+              ) == plan.rootIdentity,
+              try directoryIdentity(of: invocationRoot) == plan.rootIdentity,
+              try regularFileLivenessIdentity(
+                  named: "invocation.json",
+                  under: invocationRoot
+              ) == plan.invocationIdentity,
+              try regularFileLivenessIdentity(
+                  named: partial.name,
+                  under: invocationRoot
+              ) == partial.identity
+        else { throw PortableChatPersistenceError.invalidLayout }
+        guard unlinkat(invocationRoot, partial.name, 0) == 0 else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        try flushDescriptor(invocationRoot)
+    }
+
     private func isProvablyPrePublication(
         _ invocation: CoachInvocation,
         current: ChatAggregate
@@ -5549,26 +5729,99 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
         var activeCount = 0
         var frozenChatIDs: Set<ChatID> = []
-        let inspections = try names.sorted().map { name in
-            try inspectInvocationDirectory(
-                named: name,
-                expectedLibraryID: expectedLibraryID,
-                under: invocationsDescriptor,
-                reconcileProofPartial: false
-            )
-        }
-        for inspection in inspections {
+        let inspections: [(name: String, result: InvocationDirectoryInspection)] =
+            try names.sorted().map { name in
+                (
+                    name,
+                    try inspectInvocationDirectory(
+                        named: name,
+                        expectedLibraryID: expectedLibraryID,
+                        under: invocationsDescriptor,
+                        reconcileProofPartial: false
+                    )
+                )
+            }
+        for (_, inspection) in inspections {
             if case let .frozen(common, _) = inspection {
                 frozenChatIDs.insert(common.chatID)
             }
         }
-        for inspection in inspections {
-            guard case let .available(record) = inspection,
-                  !frozenChatIDs.contains(record.invocation.chatID)
+        // Bind every still-readable root without mutating it. A later sibling
+        // classification can therefore freeze the whole Chat before cleanup.
+        var candidates: [InvocationPartialCleanupCandidate] = []
+        for (name, initialInspection) in inspections {
+            guard case let .available(initialRecord) = initialInspection,
+                  !frozenChatIDs.contains(initialRecord.invocation.chatID)
             else { continue }
+            let reconciled = try inspectInvocationDirectoryForPartialCleanup(
+                named: name,
+                expectedLibraryID: expectedLibraryID,
+                under: invocationsDescriptor
+            )
+            switch reconciled {
+            case let .available(candidate):
+                guard candidate.record.invocation.hasSameDurableProjection(
+                    as: initialRecord.invocation
+                ) else {
+                    throw PortableChatPersistenceError.invalidLayout
+                }
+                candidates.append(candidate)
+            case let .frozen(common, _):
+                frozenChatIDs.insert(common.chatID)
+            }
+        }
+        let hasCleanableCandidate = candidates.contains {
+            !frozenChatIDs.contains($0.record.invocation.chatID) &&
+                !$0.plan.partials.isEmpty
+        }
+        if hasCleanableCandidate {
+            try fault(.beforeInvocationPartialCleanup)
+            try beforeDestructiveMutation()
+            // The callback is the last sanctioned race boundary. Reclassify
+            // the complete candidate set before the first unlink so a newly
+            // frozen sibling preserves every root belonging to that Chat.
+            var revalidatedCandidates: [InvocationPartialCleanupCandidate] = []
+            for candidate in candidates {
+                guard !frozenChatIDs.contains(candidate.record.invocation.chatID)
+                else { continue }
+                let revalidated = try inspectInvocationDirectoryForPartialCleanup(
+                    named: candidate.plan.name,
+                    expectedLibraryID: expectedLibraryID,
+                    under: invocationsDescriptor
+                )
+                switch revalidated {
+                case let .available(current):
+                    guard current.plan.hasSameBoundEvidence(as: candidate.plan),
+                          current.record.invocation.hasSameDurableProjection(
+                              as: candidate.record.invocation
+                          )
+                    else { throw PortableChatPersistenceError.invalidLayout }
+                    revalidatedCandidates.append(current)
+                case let .frozen(common, _):
+                    frozenChatIDs.insert(common.chatID)
+                }
+            }
+            candidates = revalidatedCandidates
+            for candidate in candidates
+            where !frozenChatIDs.contains(candidate.record.invocation.chatID) {
+                for partial in candidate.plan.partials {
+                    try beforeDestructiveMutation()
+                    // Reopen and revalidate the exact bound root, Invocation,
+                    // durable projection, and partial immediately before unlink.
+                    try removeBoundInvocationPartial(
+                        partial,
+                        from: candidate.plan,
+                        expectedLibraryID: expectedLibraryID,
+                        under: invocationsDescriptor
+                    )
+                }
+            }
+        }
+        for candidate in candidates
+        where !frozenChatIDs.contains(candidate.record.invocation.chatID) {
             do {
                 if try invocationIsActive(
-                    record,
+                    candidate.record,
                     under: invocationsDescriptor,
                     chatsDescriptor: chatsDescriptor,
                     beforeDestructiveMutation: beforeDestructiveMutation
@@ -5581,9 +5834,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
             } catch let error as PortableChatPersistenceError {
                 guard frozenChatSnapshot(
                     for: error,
-                    chatID: record.invocation.chatID
+                    chatID: candidate.record.invocation.chatID
                 ) != nil else { throw error }
-                frozenChatIDs.insert(record.invocation.chatID)
+                frozenChatIDs.insert(candidate.record.invocation.chatID)
             }
         }
         return activeCount == 1

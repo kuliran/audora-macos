@@ -930,7 +930,8 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func applyInvocationOutcome(
         _ outcome: InvocationTryOutcome,
-        rejectedOperationalInterruption: PendingCoachInvocationRequest? = nil
+        rejectedOperationalInterruption: PendingCoachInvocationRequest? = nil,
+        rejectedNotice: ChatNotice? = nil
     ) {
         switch outcome {
         case let .published(current, quote):
@@ -950,7 +951,7 @@ public actor DefaultChatFeature: ChatFeature {
             )
             install(current, selection: .open(current), notice: nil)
         case let .rejected(current, reason):
-            let notice = notice(for: reason)
+            let notice = rejectedNotice ?? notice(for: reason)
             if case let .messageMustBeShortened(maximumUTF8Bytes) = reason {
                 state = replacing(
                     contextAdvisory: .messageTooLong(
@@ -1170,9 +1171,21 @@ public actor DefaultChatFeature: ChatFeature {
             case .rejected: retryOperationalInterruption
             default: nil
             }
+        let rejectedNotice: ChatNotice? = switch presentedOutcome {
+        case let .rejected(.some(current), reason)
+            where reason != .eligibilityChanged &&
+            notice(for: reason) == .coachSendUnavailable &&
+            current.pendingUserTurn?.id == pending.id &&
+            (current.pendingUserTurn?.failure != nil ||
+                rejectedOperationalInterruption != nil):
+            .coachRetryUnavailable
+        default:
+            nil
+        }
         applyInvocationOutcome(
             presentedOutcome,
-            rejectedOperationalInterruption: rejectedOperationalInterruption
+            rejectedOperationalInterruption: rejectedOperationalInterruption,
+            rejectedNotice: rejectedNotice
         )
         await refreshSelectionIfInvocationEligibilityVanished(
             outcome,

@@ -75,6 +75,7 @@ public enum ChatNotice: String, Equatable, Sendable {
     case coachBusy
     case coachAdmissionLimited
     case coachSendUnavailable
+    case coachRetryUnavailable
     case coachResponseInterrupted
 }
 

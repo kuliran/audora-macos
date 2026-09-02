@@ -166,6 +166,76 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(claimCount, 1)
     }
 
+    func testAutomaticRetriesRecordMetadataOnlyDiagnostics() async throws {
+        let timing = ScriptedInvocationRetryTiming(
+            milliseconds: [0, 7, 100, 111, 200, 213, 300]
+        )
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .autoRetryableFailure,
+                .autoRetryableFailure,
+                .complete(markdown: "Fourth Attempt succeeds."),
+            ],
+            includesOnDemandAttachment: true,
+            retryTiming: timing
+        )
+
+        guard case let .published(_, quote) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else {
+            return XCTFail("the fourth Attempt must publish")
+        }
+
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [
+            .providerAutoRetryable,
+            .providerAutoRetryable,
+            .providerAutoRetryable,
+        ])
+        XCTAssertEqual(
+            events.map(\.classification),
+            Array(repeating: .providerAutoRetryable, count: 3)
+        )
+        XCTAssertEqual(
+            events.map(\.disposition),
+            Array(repeating: .automaticRetry, count: 3)
+        )
+        XCTAssertEqual(events.map(\.attemptOrdinal), [1, 2, 3])
+        XCTAssertEqual(events.map(\.retryNumber), [1, 2, 3])
+        XCTAssertEqual(
+            events.map(\.invocationID),
+            Array(repeating: try CoachInvocationID(
+                "inv-20260830T120000000Z-5KMN"
+            ), count: 3)
+        )
+        let requests = await fixture.provider.requests
+        XCTAssertEqual(events.map(\.attemptID), requests.prefix(3).map(\.attempt.id))
+        XCTAssertEqual(
+            events.map(\.occurredAt),
+            Array(repeating: fixture.instant, count: 3)
+        )
+        XCTAssertEqual(events.map(\.durationMilliseconds), [7, 11, 13])
+        XCTAssertEqual(timing.callCount, 7)
+        let exchange = try XCTUnwrap(requests.first?.exchange)
+        let exactContext = InvocationRetryDiagnosticContext(
+            requestUTF8Bytes: exchange.request.count,
+            completeModelInputUTF8Bytes: exchange.completeModelInput.count,
+            transcriptReadRequestUTF8Bytes: exchange.transcriptReadRequest?.count ?? 0,
+            transcriptReadResponseUTF8Bytes:
+                exchange.transcriptReadResponse?.count ?? 0,
+            completeInputTokens: quote.completeInputTokens,
+            inputCeilingTokens: quote.inputCeilingTokens,
+            memoryUTF8Bytes: quote.categoryCosts[.memory]?.utf8ByteCount ?? 0
+        )
+        XCTAssertGreaterThan(exactContext.memoryUTF8Bytes, 0)
+        XCTAssertEqual(
+            events.map(\.context),
+            Array(repeating: exactContext, count: 3)
+        )
+    }
+
     func testSameInvocationIdentityCollisionRegeneratesBeforeInstallingNextAttempt() async throws {
         for collision in SameInvocationCollisionIdentities.Collision.allCases {
             let identities = SameInvocationCollisionIdentities(
@@ -225,6 +295,88 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(installedOrdinals, [1])
         XCTAssertEqual(launchCount, 1)
         XCTAssertEqual(aggregate?.pendingUserTurn?.failure, .coachResponseInterrupted)
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [
+            .providerAutoRetryable,
+            .nextAttemptIdentityCollisionExhausted,
+        ])
+        XCTAssertEqual(
+            events.map(\.classification),
+            [.providerAutoRetryable, .retryInfrastructureFailure]
+        )
+        XCTAssertEqual(
+            events.map(\.disposition),
+            [.automaticRetry, .userRetryableFailure]
+        )
+        XCTAssertEqual(events.map(\.attemptOrdinal), [1, 1])
+        XCTAssertEqual(events.map(\.retryNumber), [1, 1])
+    }
+
+    func testNextAttemptInstallFailuresRecordTerminalInfrastructureDiagnostics() async throws {
+        let cases: [(
+            directive: MemoryInvocationPersistence.NextAttemptInstallDirective,
+            reason: InvocationRetryDiagnosticReason
+        )] = [
+            (.failed, .nextAttemptInstallationFailed),
+            (.staleWithCurrent, .nextAttemptBecameStale),
+        ]
+
+        for testCase in cases {
+            let fixture = try InvocationFixture(
+                contextWindow: 100_000,
+                providerOutcomes: [.autoRetryableFailure]
+            )
+            await fixture.persistence.scriptNextAttemptInstall(testCase.directive)
+
+            guard case .interrupted(_, .persistenceUnavailable) =
+                await fixture.invocations.tryInvoke(fixture.request)
+            else { return XCTFail("next Attempt install must fail closed") }
+
+        let events = fixture.diagnostics.recordedEvents()
+            XCTAssertEqual(
+                events.map(\.reason),
+                [.providerAutoRetryable, testCase.reason]
+            )
+            XCTAssertEqual(
+                events.map(\.classification),
+                [.providerAutoRetryable, .retryInfrastructureFailure]
+            )
+            XCTAssertEqual(
+                events.map(\.disposition),
+                [.automaticRetry, .userRetryableFailure]
+            )
+            XCTAssertEqual(events.map(\.attemptOrdinal), [1, 1])
+            XCTAssertEqual(events.map(\.retryNumber), [1, 1])
+        }
+    }
+
+    func testNextAttemptConstructionFailureRecordsTerminalInfrastructureDiagnostic() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [.autoRetryableFailure],
+            includesOnDemandAttachment: true,
+            identityGenerator: MalformedNextAttemptIdentities()
+        )
+
+        guard case .interrupted(_, .persistenceUnavailable) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("malformed next Attempt must fail closed") }
+
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [
+            .providerAutoRetryable,
+            .nextAttemptConstructionFailed,
+        ])
+        XCTAssertEqual(
+            events.map(\.classification),
+            [.providerAutoRetryable, .retryInfrastructureFailure]
+        )
+        XCTAssertEqual(
+            events.map(\.disposition),
+            [.automaticRetry, .userRetryableFailure]
+        )
+        XCTAssertEqual(events.map(\.attemptOrdinal), [1, 1])
+        XCTAssertEqual(events.map(\.retryNumber), [1, 1])
     }
 
     func testOverflowUsesOneImmediateShorterCompleteRepairWithoutChangingSemanticBytes() async throws {
@@ -284,6 +436,21 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(kinds, [.standard, .shorterRepair])
         XCTAssertEqual(delays, [])
         XCTAssertEqual(publicationCount, 0)
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [
+            .responseOverflowRepair,
+            .responseOverflowRepeated,
+        ])
+        XCTAssertEqual(
+            events.map(\.classification),
+            [.invalidProviderResponse, .invalidProviderResponse]
+        )
+        XCTAssertEqual(
+            events.map(\.disposition),
+            [.automaticRetry, .userRetryableFailure]
+        )
+        XCTAssertEqual(events.map(\.attemptOrdinal), [1, 2])
+        XCTAssertEqual(events.map(\.retryNumber), [1, 2])
     }
 
     func testTransientFailureAfterShorterRepairDoesNotResumeStandardRetry() async throws {
@@ -302,6 +469,19 @@ final class DefaultInvocationsTests: XCTestCase {
         let delays = await fixture.sleeper.recordedDelays()
         XCTAssertEqual(kinds, [.standard, .shorterRepair])
         XCTAssertEqual(delays, [])
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [
+            .responseOverflowRepair,
+            .shorterRepairProviderFailure,
+        ])
+        XCTAssertEqual(
+            events.map(\.classification),
+            [.invalidProviderResponse, .providerUserRetryable]
+        )
+        XCTAssertEqual(
+            events.map(\.disposition),
+            [.automaticRetry, .userRetryableFailure]
+        )
     }
 
     func testAutomaticRetryExhaustionPersistsProviderUserRetryableWithoutPartialPublication() async throws {
@@ -322,6 +502,92 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(ordinals, [1, 2, 3, 4])
         XCTAssertEqual(delays, [5_000, 10_000, 15_000])
         XCTAssertEqual(publicationCount, 0)
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [
+            .providerAutoRetryable,
+            .providerAutoRetryable,
+            .providerAutoRetryable,
+            .automaticRetriesExhausted,
+        ])
+        XCTAssertEqual(events.map(\.retryNumber), [1, 2, 3, 4])
+        XCTAssertEqual(events.last?.classification, .providerUserRetryable)
+        XCTAssertEqual(events.last?.disposition, .userRetryableFailure)
+    }
+
+    func testRetrySleepFailureRecordsTerminalInfrastructureDiagnostic() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [.autoRetryableFailure]
+        )
+        await fixture.sleeper.failNextSleep()
+
+        guard case let .interrupted(aggregate, .retryInfrastructureFailed) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("a failed retry sleep must interrupt") }
+
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [
+            .providerAutoRetryable,
+            .retrySleepFailed,
+        ])
+        XCTAssertEqual(
+            events.map(\.classification),
+            [.providerAutoRetryable, .retryInfrastructureFailure]
+        )
+        XCTAssertEqual(
+            events.map(\.disposition),
+            [.automaticRetry, .userRetryableFailure]
+        )
+        XCTAssertEqual(events.map(\.attemptOrdinal), [1, 1])
+        XCTAssertEqual(events.map(\.retryNumber), [1, 1])
+    }
+
+    func testDurableOnlyAttemptRecordsTerminalRetryInfrastructureDiagnostic() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true
+        )
+        await fixture.persistence.scriptNextInstall(.durableOnly)
+
+        guard case let .interrupted(aggregate, .retryInfrastructureFailed) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("durable-only Attempt must fail closed before launch") }
+
+        XCTAssertEqual(
+            aggregate?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.count, 1)
+        let event = try XCTUnwrap(events.first)
+        XCTAssertEqual(event.reason, .missingAttemptTransportAuthority)
+        XCTAssertEqual(event.classification, .retryInfrastructureFailure)
+        XCTAssertEqual(event.disposition, .userRetryableFailure)
+        XCTAssertEqual(
+            event.invocationID,
+            try CoachInvocationID("inv-20260830T120000000Z-5KMN")
+        )
+        XCTAssertEqual(
+            event.attemptID,
+            try CoachProviderAttemptID("atm-20260830T120000000Z-6NPQ")
+        )
+        XCTAssertEqual(event.attemptOrdinal, 1)
+        XCTAssertEqual(event.retryNumber, 1)
+        XCTAssertEqual(event.occurredAt, fixture.instant)
+        XCTAssertLessThan(event.durationMilliseconds, 60_000)
+        XCTAssertGreaterThan(event.context.requestUTF8Bytes, 0)
+        XCTAssertGreaterThan(event.context.completeModelInputUTF8Bytes, 0)
+        XCTAssertGreaterThan(event.context.transcriptReadRequestUTF8Bytes, 0)
+        XCTAssertGreaterThan(event.context.transcriptReadResponseUTF8Bytes, 0)
+        XCTAssertGreaterThan(event.context.completeInputTokens, 0)
+        XCTAssertGreaterThan(event.context.inputCeilingTokens, 0)
+        XCTAssertGreaterThan(event.context.memoryUTF8Bytes, 0)
+        let launchCount = await fixture.provider.launchCount
+        XCTAssertEqual(launchCount, 0)
     }
 
     func testOverflowOnFourthAutomaticAttemptCannotCreateFifthRepairAttempt() async throws {
@@ -351,6 +617,15 @@ final class DefaultInvocationsTests: XCTestCase {
         let publicationCount = await fixture.persistence.publicationCount
         XCTAssertEqual(delays, [5_000, 10_000, 15_000])
         XCTAssertEqual(publicationCount, 0)
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [
+            .providerAutoRetryable,
+            .providerAutoRetryable,
+            .providerAutoRetryable,
+            .responseOverflowAttemptLimitReached,
+        ])
+        XCTAssertEqual(events.last?.classification, .invalidProviderResponse)
+        XCTAssertEqual(events.last?.disposition, .userRetryableFailure)
     }
 
     func testInvalidCompleteResponseIsTerminalWithoutAutomaticRetryOrPublication() async throws {
@@ -724,6 +999,13 @@ final class DefaultInvocationsTests: XCTestCase {
         let publicationCount = await fixture.persistence.publicationCount
         XCTAssertNil(active)
         XCTAssertEqual(publicationCount, 0)
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.reason, .providerUserRetryable)
+        XCTAssertEqual(events.first?.classification, .providerUserRetryable)
+        XCTAssertEqual(events.first?.disposition, .userRetryableFailure)
+        XCTAssertEqual(events.first?.attemptOrdinal, 1)
+        XCTAssertEqual(events.first?.retryNumber, 1)
     }
 
     func testInvalidProviderResponsePublishesNeitherSideAndRetiresInvocation() async throws {
@@ -744,6 +1026,13 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
         let active = await fixture.persistence.activeInvocation
         XCTAssertNil(active)
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.reason, .invalidCompleteResponse)
+        XCTAssertEqual(events.first?.classification, .invalidProviderResponse)
+        XCTAssertEqual(events.first?.disposition, .userRetryableFailure)
+        XCTAssertEqual(events.first?.attemptOrdinal, 1)
+        XCTAssertEqual(events.first?.retryNumber, 1)
     }
 
     func testPublicationFailurePublishesNeitherSideAndRetiresInvocation() async throws {
@@ -1046,6 +1335,7 @@ private final class InvocationFixture: @unchecked Sendable {
     let admission: ScriptedInvocationAdmission
     let provider: RecordingSyntheticCoachProvider
     let sleeper: RecordingInvocationRetrySleeper
+    let diagnostics: RecordingInvocationRetryDiagnostics
     let contextSource: InvocationContextSource
     let invocations: DefaultInvocations
 
@@ -1064,7 +1354,8 @@ private final class InvocationFixture: @unchecked Sendable {
             .complete(markdown: "A concise **synthetic** answer."),
         ],
         includesOnDemandAttachment: Bool = false,
-        identityGenerator: (any InvocationIdentityGenerating)? = nil
+        identityGenerator: (any InvocationIdentityGenerating)? = nil,
+        retryTiming: (any InvocationRetryTiming)? = nil
     ) throws {
         let empty = try ChatAggregate.emptyDevelopmentChat(
             chatID: ChatID("cht-20260830T120000000Z-1ABC"),
@@ -1104,6 +1395,7 @@ private final class InvocationFixture: @unchecked Sendable {
             persistence: persistence
         )
         sleeper = RecordingInvocationRetrySleeper()
+        diagnostics = RecordingInvocationRetryDiagnostics()
         contextSource = InvocationContextSource(
             contextWindow: contextWindow,
             isCurrent: contextIsCurrent,
@@ -1130,7 +1422,11 @@ private final class InvocationFixture: @unchecked Sendable {
             coachContext: DefaultCoachContextFeature(source: contextSource),
             clock: clock ?? FixedInvocationClock(instant: instant),
             identities: identityGenerator ?? defaultIdentities,
-            retrySleeper: sleeper
+            retrySleeper: sleeper,
+            retryDiagnostics: diagnostics,
+            retryTiming: retryTiming ?? ScriptedInvocationRetryTiming(
+                milliseconds: [0]
+            )
         )
     }
 }
@@ -1143,10 +1439,17 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
 
     enum InstallDirective: Sendable {
         case installed
+        case durableOnly
         case failed
         case activeExists
         case staleWithCurrent
         case staleWithoutSnapshot
+    }
+
+    enum NextAttemptInstallDirective: Sendable {
+        case installed
+        case failed
+        case staleWithCurrent
     }
 
     enum InterruptedMutationDirective: Sendable {
@@ -1207,6 +1510,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private struct PersistenceScript: Sendable {
         var revalidations = OperationScript<RevalidationDirective>()
         var installs = OperationScript<InstallDirective>()
+        var nextAttemptInstalls = OperationScript<NextAttemptInstallDirective>()
         var interruptedMutations = OperationScript<InterruptedMutationDirective>()
         var pendingRecoveries = OperationScript<PendingRecoveryDirective>()
         var aborts = OperationScript<AbortDirective>()
@@ -1283,6 +1587,10 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
 
     func scriptNextInstall(_ directive: InstallDirective) {
         script.installs.append(directive)
+    }
+
+    func scriptNextAttemptInstall(_ directive: NextAttemptInstallDirective) {
+        script.nextAttemptInstalls.append(directive)
     }
 
     func scriptNextInterruptedMutation(_ directive: InterruptedMutationDirective) {
@@ -1392,6 +1700,13 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         switch script.installs.next(defaultingTo: .installed) {
         case .installed:
             break
+        case .durableOnly:
+            let durable = try! mutation.invocation.durableProjection()
+            reservedRequest = nil
+            aggregate = mutation.processingAggregate
+            activeInvocation = durable
+            installedAttemptOrdinals = [durable.attempt.ordinal]
+            return .installed(durable)
         case .failed:
             return .failed
         case .activeExists:
@@ -1414,6 +1729,14 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         _ mutation: InstallNextCoachProviderAttemptMutation
     ) async -> InvocationNextAttemptInstallOutcome {
         guard activeInvocation == mutation.base else { return .stale(aggregate) }
+        switch script.nextAttemptInstalls.next(defaultingTo: .installed) {
+        case .installed:
+            break
+        case .failed:
+            return .failed
+        case .staleWithCurrent:
+            return .stale(aggregate)
+        }
         activeInvocation = mutation.replacement
         installedAttemptOrdinals.append(mutation.replacement.attempt.ordinal)
         return .installed(
@@ -1898,13 +2221,70 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
 }
 
 private actor RecordingInvocationRetrySleeper: InvocationRetrySleeping {
+    private enum Failure: Error { case scripted }
+
     private(set) var delaysMilliseconds: [Int64] = []
+    private var failsNextSleep = false
+
+    func failNextSleep() { failsNextSleep = true }
 
     func sleep(milliseconds: Int64) async throws {
         delaysMilliseconds.append(milliseconds)
+        if failsNextSleep {
+            failsNextSleep = false
+            throw Failure.scripted
+        }
     }
 
     func recordedDelays() -> [Int64] { delaysMilliseconds }
+}
+
+private final class RecordingInvocationRetryDiagnostics:
+    @unchecked Sendable,
+    InvocationRetryDiagnostics
+{
+    private let lock = NSLock()
+    private var events: [InvocationRetryDiagnosticEvent] = []
+
+    func enqueue(_ event: InvocationRetryDiagnosticEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        events.append(event)
+    }
+
+    func recordedEvents() -> [InvocationRetryDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+}
+
+private final class ScriptedInvocationRetryTiming:
+    @unchecked Sendable,
+    InvocationRetryTiming
+{
+    private let lock = NSLock()
+    private let milliseconds: [UInt64]
+    private var nextIndex = 0
+
+    init(milliseconds: [UInt64]) {
+        precondition(!milliseconds.isEmpty)
+        self.milliseconds = milliseconds
+    }
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return nextIndex
+    }
+
+    func nowMilliseconds() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        let index = min(nextIndex, milliseconds.count - 1)
+        nextIndex += 1
+        return milliseconds[index]
+    }
 }
 
 private actor InvocationContextSource: CoachContextSnapshotPort {
@@ -2131,6 +2511,47 @@ private struct MalformedInitialAttemptIdentities: InvocationIdentityGenerating {
                 "drf-20260830T120000000Z-9YZ0"
             ),
             transcriptHandles: handles
+        )
+    }
+}
+
+private struct MalformedNextAttemptIdentities: InvocationIdentityGenerating {
+    private let valid = FixedInvocationIdentities(
+        invocationID: try! CoachInvocationID("inv-20260830T120000000Z-5KMN"),
+        attemptID: try! CoachProviderAttemptID("atm-20260830T120000000Z-6NPQ"),
+        idempotencyValue: try! ProviderIdempotencyValue("synthetic-attempt-6NPQ"),
+        userMessageID: try! ChatMessageID("msg-20260830T120000000Z-7RST"),
+        coachMessageID: try! ChatMessageID("msg-20260830T120000000Z-8VWX"),
+        freshDraftID: try! ChatDraftID("drf-20260830T120000000Z-9YZ0")
+    )
+
+    func generateInvocationID(at instant: UTCInstant) async -> CoachInvocationID {
+        await valid.generateInvocationID(at: instant)
+    }
+
+    func generateAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationAttemptIdentity {
+        let identity = await valid.generateAttemptIdentity(
+            at: instant,
+            ordinal: ordinal,
+            kind: kind,
+            transcriptHandleCount: transcriptHandleCount
+        )
+        guard ordinal > 1 else { return identity }
+        let duplicate = try! PreparedCoachTranscriptHandle(
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        )
+        return InvocationAttemptIdentity(
+            attemptID: identity.attemptID,
+            idempotencyValue: identity.idempotencyValue,
+            userMessageID: identity.userMessageID,
+            coachMessageID: identity.coachMessageID,
+            freshDraftID: identity.freshDraftID,
+            transcriptHandles: [duplicate, duplicate]
         )
     }
 }

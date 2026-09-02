@@ -30,6 +30,9 @@ enum ChatNoticePresentation {
         case .coachBusy: "The Coach is already working in this Library. Try again after it finishes."
         case .coachAdmissionLimited: "The Coach was used recently. Try this Send again when admission reopens."
         case .coachSendUnavailable: "The Coach could not accept this Send. Your Draft is still editable."
+        case .coachRetryUnavailable:
+            "The Coach could not accept this Retry. " +
+                "Your Draft remains locked; Retry or Discard."
         case .coachResponseInterrupted: "The Coach response was interrupted and nothing was published."
         }
     }
