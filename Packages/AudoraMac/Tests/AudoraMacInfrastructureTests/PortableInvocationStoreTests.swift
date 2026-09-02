@@ -989,6 +989,165 @@ final class PortableInvocationStoreTests: XCTestCase {
         }
     }
 
+    func testIdentityCollisionScansPreserveCallerSpecificFailurePrecedence() async throws {
+        try await withTemporaryParent { parent in
+            let nextParent = parent.appendingPathComponent("next", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: nextParent,
+                withIntermediateDirectories: false
+            )
+            let nextFixture = try await makeInvocationStoreFixture(
+                in: nextParent,
+                libraryID: "lib-20260902T180000000Z-2ABC",
+                includeCompetingPending: true
+            )
+            let nextStore = PortableInvocationStore(workspace: nextFixture.workspace)
+            guard case let .opened(pendingSession) = await nextStore
+                .openPendingInvocation(nextFixture.install.authority.request),
+                case let .installed(firstSession) = await pendingSession.install(
+                    nextFixture.install
+                )
+            else { return XCTFail("first Attempt was not installed") }
+            let nextIdentity = InvocationAttemptIdentity(
+                attemptID: try CoachProviderAttemptID(
+                    "atm-20260902T180001000Z-3BCD"
+                ),
+                idempotencyValue: try ProviderIdempotencyValue(
+                    "failure-precedence-next"
+                ),
+                userMessageID: try ChatMessageID(
+                    "msg-20260902T180001000Z-4CDE"
+                ),
+                coachMessageID: try ChatMessageID(
+                    "msg-20260902T180001000Z-5DEF"
+                ),
+                freshDraftID: try ChatDraftID(
+                    "drf-20260902T180001000Z-6EFG"
+                )
+            )
+            let nextActiveMessages = nextFixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(
+                    nextFixture.install.invocation.chatID.rawValue,
+                    isDirectory: true
+                )
+                .appendingPathComponent("messages", isDirectory: true)
+            try Data("{}".utf8).write(
+                to: nextActiveMessages.appendingPathComponent(
+                    "\(nextIdentity.userMessageID.rawValue).json"
+                )
+            )
+            let nextUnreadableMessages = nextFixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(
+                    nextFixture.competingAuthority.request.chatID.rawValue,
+                    isDirectory: true
+                )
+                .appendingPathComponent("messages", isDirectory: true)
+            XCTAssertEqual(
+                nextUnreadableMessages.path.withCString { Darwin.chmod($0, 0) },
+                0
+            )
+            defer {
+                _ = nextUnreadableMessages.path.withCString {
+                    Darwin.chmod($0, 0o700)
+                }
+            }
+
+            let nextMutation = try InstallNextCoachProviderAttemptMutation(
+                base: firstSession.invocation,
+                identity: nextIdentity,
+                kind: .standard
+            )
+            guard case let .collision(nextCollision) = await firstSession
+                .installNextAttempt(nextMutation)
+            else {
+                return XCTFail("next Attempt must return its early collision")
+            }
+            XCTAssertEqual(nextCollision, .userMessageID)
+            XCTAssertEqual(
+                nextUnreadableMessages.path.withCString { Darwin.chmod($0, 0o700) },
+                0
+            )
+            guard case .committed = await firstSession.abort(
+                failure: .coachProviderError
+            ) else { return XCTFail("first Attempt did not retire") }
+
+            let launchParent = parent.appendingPathComponent("launch", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: launchParent,
+                withIntermediateDirectories: false
+            )
+            let launchFixture = try await makeInvocationStoreFixture(
+                in: launchParent,
+                libraryID: "lib-20260902T180100000Z-7FGH",
+                includeCompetingPending: true
+            )
+            let launchStore = PortableInvocationStore(
+                workspace: launchFixture.workspace
+            )
+            let launchReservation = await launchStore.reserveInvocation(
+                launchFixture.install.authority.request
+            )
+            XCTAssertEqual(
+                launchReservation,
+                .acquired
+            )
+            let launchInvocation = launchFixture.install.invocation
+            let launchCandidate = InvocationLaunchIdentity(
+                invocationID: launchInvocation.id,
+                attemptID: launchInvocation.attemptID,
+                idempotencyValue: try XCTUnwrap(
+                    launchInvocation.providerIdempotencyValue
+                ),
+                userMessageID: nextIdentity.userMessageID,
+                coachMessageID: nextIdentity.coachMessageID,
+                freshDraftID: nextIdentity.freshDraftID
+            )
+            let launchActiveMessages = launchFixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(
+                    launchFixture.install.invocation.chatID.rawValue,
+                    isDirectory: true
+                )
+                .appendingPathComponent("messages", isDirectory: true)
+            try Data("{}".utf8).write(
+                to: launchActiveMessages.appendingPathComponent(
+                    "\(launchCandidate.userMessageID.rawValue).json"
+                )
+            )
+            let launchUnreadableMessages = launchFixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(
+                    launchFixture.competingAuthority.request.chatID.rawValue,
+                    isDirectory: true
+                )
+                .appendingPathComponent("messages", isDirectory: true)
+            XCTAssertEqual(
+                launchUnreadableMessages.path.withCString { Darwin.chmod($0, 0) },
+                0
+            )
+            defer {
+                _ = launchUnreadableMessages.path.withCString {
+                    Darwin.chmod($0, 0o700)
+                }
+            }
+
+            let launchAvailability = await launchStore.checkLaunchIdentity(
+                launchCandidate,
+                for: launchFixture.install.authority
+            )
+            XCTAssertEqual(
+                launchAvailability,
+                .unavailable,
+                "launch preflight must keep scanning after an early collision"
+            )
+            await launchStore.cancelInvocationReservation(
+                launchFixture.install.authority.request
+            )
+        }
+    }
+
     func testNextAttemptChecksSupportedInvocationRootDraftID() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makeInvocationStoreFixture(in: parent)

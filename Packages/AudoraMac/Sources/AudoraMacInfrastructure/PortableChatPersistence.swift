@@ -443,6 +443,221 @@ public struct PortableChatPersistence: @unchecked Sendable {
         case frozen(PortableInvocationCommonIdentityEnvelope, FrozenChatSnapshot)
     }
 
+    private enum DurablePublicIDCollisionCandidateID {
+        case attemptID(CoachProviderAttemptID)
+        case userMessageID(ChatMessageID)
+        case coachMessageID(ChatMessageID)
+        case freshDraftID(ChatDraftID)
+
+        var collision: InvocationLaunchIdentityCollision {
+            switch self {
+            case .attemptID: .attemptID
+            case .userMessageID: .userMessageID
+            case .coachMessageID: .coachMessageID
+            case .freshDraftID: .freshDraftID
+            }
+        }
+    }
+
+    private struct DurablePublicIDCollisionCandidate {
+        let attemptID: CoachProviderAttemptID
+        let userMessageID: ChatMessageID
+        let coachMessageID: ChatMessageID
+        let freshDraftID: ChatDraftID
+
+        init(_ identity: InvocationLaunchIdentity) {
+            attemptID = identity.attemptID
+            userMessageID = identity.userMessageID
+            coachMessageID = identity.coachMessageID
+            freshDraftID = identity.freshDraftID
+        }
+
+        init(
+            attemptID: CoachProviderAttemptID,
+            authority: CoachProviderAttemptPublicationAuthority
+        ) {
+            self.attemptID = attemptID
+            userMessageID = authority.userMessageID
+            coachMessageID = authority.coachMessageID
+            freshDraftID = authority.freshDraftID
+        }
+
+        /// Launch preflight preserves its category-major priority across every
+        /// Attempt while still validating the complete Library namespace.
+        func launchOrderedCollisions(
+            in invocation: CoachInvocation
+        ) -> [DurablePublicIDCollisionCandidateID] {
+            let attempts = invocation.attempts
+            var collisions: [DurablePublicIDCollisionCandidateID] = []
+            if attempts.contains(where: { $0.id == attemptID }) {
+                collisions.append(.attemptID(attemptID))
+            }
+            if attempts.contains(where: {
+                $0.userMessageID == userMessageID ||
+                    $0.coachMessageID == userMessageID
+            }) {
+                collisions.append(.userMessageID(userMessageID))
+            }
+            if attempts.contains(where: {
+                $0.userMessageID == coachMessageID ||
+                    $0.coachMessageID == coachMessageID
+            }) {
+                collisions.append(.coachMessageID(coachMessageID))
+            }
+            if attempts.contains(where: { $0.freshDraftID == freshDraftID }) ||
+                invocation.draftID == freshDraftID
+            {
+                collisions.append(.freshDraftID(freshDraftID))
+            }
+            return collisions
+        }
+
+        /// Next-Attempt installation preserves its attempt-major early-return
+        /// policy, including the Invocation-root Draft check after all Attempts.
+        func nextAttemptCollision(
+            in invocation: CoachInvocation
+        ) -> DurablePublicIDCollisionCandidateID? {
+            for attempt in invocation.attempts {
+                if attempt.id == attemptID { return .attemptID(attemptID) }
+                if attempt.userMessageID == userMessageID ||
+                    attempt.coachMessageID == userMessageID
+                { return .userMessageID(userMessageID) }
+                if attempt.userMessageID == coachMessageID ||
+                    attempt.coachMessageID == coachMessageID
+                { return .coachMessageID(coachMessageID) }
+                if attempt.freshDraftID == freshDraftID {
+                    return .freshDraftID(freshDraftID)
+                }
+            }
+            if invocation.draftID == freshDraftID {
+                return .freshDraftID(freshDraftID)
+            }
+            return nil
+        }
+
+        func collision(
+            in frozen: PortableInvocationCommonIdentityEnvelope
+        ) -> DurablePublicIDCollisionCandidateID? {
+            if frozen.contains(attemptID) { return .attemptID(attemptID) }
+            if frozen.contains(userMessageID) {
+                return .userMessageID(userMessageID)
+            }
+            if frozen.contains(coachMessageID) {
+                return .coachMessageID(coachMessageID)
+            }
+            if frozen.contains(freshDraftID) {
+                return .freshDraftID(freshDraftID)
+            }
+            return nil
+        }
+
+        func collision(
+            in chat: PortableChatDurablePublicIDs
+        ) -> DurablePublicIDCollisionCandidateID? {
+            if chat.contains(userMessageID) {
+                return .userMessageID(userMessageID)
+            }
+            if chat.contains(coachMessageID) {
+                return .coachMessageID(coachMessageID)
+            }
+            if chat.contains(freshDraftID) {
+                return .freshDraftID(freshDraftID)
+            }
+            return nil
+        }
+    }
+
+    private enum ChatRootPublicIDProbe {
+        case inspected(DurablePublicIDCollisionCandidateID?)
+        case missing(PortableChatPersistenceError)
+    }
+
+    private enum ChatRootPublicIDProbeMode {
+        case classifySiblingAbsence
+        case strict
+    }
+
+    private enum SiblingChatPublicIDProbeMode: Equatable {
+        case exhaustive
+        case stopAtFirstCollision
+    }
+
+    /// Shared descriptor-relative scanner for the durable public-ID namespace.
+    /// The two callers retain their own traversal and outcome policies: launch
+    /// preflight records and continues, while next-Attempt installation returns
+    /// its first collision immediately.
+    private struct DurablePublicIDCollisionScanner {
+        let candidate: DurablePublicIDCollisionCandidate
+        private let entryExists: (String, Int32) throws -> Bool
+        private let readChatPublicIDs: (Int32) throws -> PortableChatDurablePublicIDs
+
+        init(
+            persistence: PortableChatPersistence,
+            candidate: DurablePublicIDCollisionCandidate
+        ) {
+            self.candidate = candidate
+            entryExists = { name, descriptor in
+                try persistence.entryExists(named: name, under: descriptor)
+            }
+            readChatPublicIDs = { descriptor in
+                let manifest = try persistence.boundedData(
+                    named: "chat.json",
+                    under: descriptor
+                )
+                do {
+                    return try persistence.invocationEvidenceCodec
+                        .decodeChatDurablePublicIDs(manifest)
+                } catch {
+                    throw PortableChatPersistenceError.ioFailure
+                }
+            }
+        }
+
+        func messageFileCollision(
+            under messagesDescriptor: Int32,
+            mode: SiblingChatPublicIDProbeMode
+        ) throws -> DurablePublicIDCollisionCandidateID? {
+            var collision: DurablePublicIDCollisionCandidateID?
+            if try entryExists(
+                "\(candidate.userMessageID.rawValue).json",
+                messagesDescriptor
+            ) {
+                collision = .userMessageID(candidate.userMessageID)
+                if mode == .stopAtFirstCollision { return collision }
+            }
+            if try entryExists(
+                "\(candidate.coachMessageID.rawValue).json",
+                messagesDescriptor
+            ) {
+                return collision ?? .coachMessageID(candidate.coachMessageID)
+            }
+            return collision
+        }
+
+        func chatRootCollision(
+            under chatDescriptor: Int32,
+            mode: ChatRootPublicIDProbeMode
+        ) throws -> ChatRootPublicIDProbe {
+            do {
+                return .inspected(
+                    candidate.collision(in: try readChatPublicIDs(chatDescriptor))
+                )
+            } catch let error as PortableChatPersistenceError {
+                if case .strict = mode { throw error }
+                let manifestExists: Bool
+                do {
+                    manifestExists = try entryExists("chat.json", chatDescriptor)
+                } catch {
+                    throw PortableChatPersistenceError.ioFailure
+                }
+                if manifestExists {
+                    throw PortableChatPersistenceError.ioFailure
+                }
+                return .missing(error)
+            }
+        }
+    }
+
     private struct BoundPendingMutationResult {
         let mutation: PortableChatMutationResult
         let pendingLease: PortablePendingUserTurnFileLease?
@@ -2555,6 +2770,81 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return true
     }
 
+    private func siblingChatPublicIDCollision(
+        using scanner: DurablePublicIDCollisionScanner,
+        chatID: ChatID,
+        named chatName: String,
+        under chatsDescriptor: Int32,
+        mode: SiblingChatPublicIDProbeMode
+    ) throws -> DurablePublicIDCollisionCandidateID? {
+        let chatDescriptor: Int32
+        do {
+            chatDescriptor = try openDirectory(
+                named: chatName,
+                under: chatsDescriptor
+            )
+        } catch let error as PortableChatPersistenceError {
+            if error == .invalidLayout,
+               (try? directoryIdentity(
+                   named: chatName,
+                   under: chatsDescriptor
+               )) != nil
+            {
+                throw PortableChatPersistenceError.ioFailure
+            }
+            guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
+                throw error
+            }
+            return nil
+        } catch {
+            throw error
+        }
+        defer { Darwin.close(chatDescriptor) }
+
+        var collision: DurablePublicIDCollisionCandidateID?
+        do {
+            let messagesDescriptor = try openDirectory(
+                named: "messages",
+                under: chatDescriptor
+            )
+            defer { Darwin.close(messagesDescriptor) }
+            collision = try scanner.messageFileCollision(
+                under: messagesDescriptor,
+                mode: mode
+            )
+            if collision != nil, mode == .stopAtFirstCollision {
+                return collision
+            }
+        } catch let error as PortableChatPersistenceError {
+            if error == .invalidLayout,
+               (try? directoryIdentity(
+                   named: "messages",
+                   under: chatDescriptor
+               )) != nil
+            {
+                throw PortableChatPersistenceError.ioFailure
+            }
+            guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
+                throw error
+            }
+        } catch {
+            throw error
+        }
+
+        switch try scanner.chatRootCollision(
+            under: chatDescriptor,
+            mode: .classifySiblingAbsence
+        ) {
+        case let .inspected(rootCollision):
+            return collision ?? rootCollision
+        case let .missing(error):
+            guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
+                throw error
+            }
+            return collision
+        }
+    }
+
     func checkLaunchIdentity(
         _ identity: InvocationLaunchIdentity,
         for authority: InvocationPendingAuthority,
@@ -2587,6 +2877,10 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
         try revalidateLiveness()
 
+        let publicIDScanner = DurablePublicIDCollisionScanner(
+            persistence: self,
+            candidate: DurablePublicIDCollisionCandidate(identity)
+        )
         var collision: InvocationLaunchIdentityCollision?
         func recordCollision(_ candidate: InvocationLaunchIdentityCollision) {
             if collision == nil { collision = candidate }
@@ -2610,28 +2904,10 @@ public struct PortableChatPersistence: @unchecked Sendable {
             switch inspection {
             case let .available(record):
                 let attempts = record.invocation.attempts
-                if attempts.contains(where: { $0.id == identity.attemptID }) {
-                    recordCollision(.attemptID)
-                }
-                if attempts.contains(where: {
-                    $0.userMessageID == identity.userMessageID ||
-                        $0.coachMessageID == identity.userMessageID
-                }) {
-                    recordCollision(.userMessageID)
-                }
-                if attempts.contains(where: {
-                    $0.userMessageID == identity.coachMessageID ||
-                        $0.coachMessageID == identity.coachMessageID
-                }) {
-                    recordCollision(.coachMessageID)
-                }
-                if attempts.contains(where: {
-                    $0.freshDraftID == identity.freshDraftID
-                }) {
-                    recordCollision(.freshDraftID)
-                }
-                if record.invocation.draftID == identity.freshDraftID {
-                    recordCollision(.freshDraftID)
+                for candidateID in publicIDScanner.candidate
+                    .launchOrderedCollisions(in: record.invocation)
+                {
+                    recordCollision(candidateID.collision)
                 }
                 if attempts.contains(where: {
                     $0.transportAuthority?.providerIdempotencyValue ==
@@ -2645,17 +2921,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     recordCollision(.transcriptHandle)
                 }
             case let .frozen(common, _):
-                if common.contains(identity.attemptID) {
-                    recordCollision(.attemptID)
-                }
-                if common.contains(identity.userMessageID) {
-                    recordCollision(.userMessageID)
-                }
-                if common.contains(identity.coachMessageID) {
-                    recordCollision(.coachMessageID)
-                }
-                if common.contains(identity.freshDraftID) {
-                    recordCollision(.freshDraftID)
+                if let candidateID = publicIDScanner.candidate.collision(in: common) {
+                    recordCollision(candidateID.collision)
                 }
             }
         }
@@ -2672,6 +2939,19 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
         for chatName in chatNames {
             guard let chatID = try? ChatID(chatName) else { continue }
+            if chatID != authority.request.chatID {
+                if let candidateID = try siblingChatPublicIDCollision(
+                    using: publicIDScanner,
+                    chatID: chatID,
+                    named: chatName,
+                    under: chatsDescriptor,
+                    mode: .exhaustive
+                ) {
+                    recordCollision(candidateID.collision)
+                }
+                continue
+            }
+
             let chatDescriptor: Int32
             do {
                 chatDescriptor = try openDirectory(
@@ -2695,16 +2975,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 throw error
             }
             defer { Darwin.close(chatDescriptor) }
-            if chatID == authority.request.chatID {
-                try acquireExclusiveMutationLock(on: chatDescriptor)
-                defer { releaseMutationLock(on: chatDescriptor) }
-                guard let expectedPending = livenessAuthority.pendingUserTurn,
-                      try regularFileLivenessIdentity(
-                          named: "pending-user-turn.json",
-                          under: chatDescriptor
-                      ) == expectedPending
-                else { throw PortableChatPersistenceError.invalidLayout }
-            }
+            try acquireExclusiveMutationLock(on: chatDescriptor)
+            defer { releaseMutationLock(on: chatDescriptor) }
+            guard let expectedPending = livenessAuthority.pendingUserTurn,
+                  try regularFileLivenessIdentity(
+                      named: "pending-user-turn.json",
+                      under: chatDescriptor
+                  ) == expectedPending
+            else { throw PortableChatPersistenceError.invalidLayout }
 
             do {
                 let messagesDescriptor = try openDirectory(
@@ -2712,17 +2990,11 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     under: chatDescriptor
                 )
                 defer { Darwin.close(messagesDescriptor) }
-                if try entryExists(
-                    named: "\(identity.userMessageID.rawValue).json",
-                    under: messagesDescriptor
+                if let candidateID = try publicIDScanner.messageFileCollision(
+                    under: messagesDescriptor,
+                    mode: .exhaustive
                 ) {
-                    recordCollision(.userMessageID)
-                }
-                if try entryExists(
-                    named: "\(identity.coachMessageID.rawValue).json",
-                    under: messagesDescriptor
-                ) {
-                    recordCollision(.coachMessageID)
+                    recordCollision(candidateID.collision)
                 }
             } catch let error as PortableChatPersistenceError {
                 if error == .invalidLayout,
@@ -2742,70 +3014,22 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 throw error
             }
 
-            if chatID == authority.request.chatID {
-                let loaded = try loadChat(
-                    from: chatDescriptor,
-                    expectedID: chatID,
-                    reconcileTransients: true,
-                    beforeDestructiveMutation: revalidateLiveness
-                )
-                guard case let .readWrite(aggregate) = loaded else {
-                    return .stale(nil)
-                }
-                current = aggregate
-                if aggregate.chat.messageIDs.contains(identity.userMessageID) {
-                    recordCollision(.userMessageID)
-                }
-                if aggregate.chat.messageIDs.contains(identity.coachMessageID) {
-                    recordCollision(.coachMessageID)
-                }
-                if aggregate.chat.draft.draftID == identity.freshDraftID {
-                    recordCollision(.freshDraftID)
-                }
-            } else {
-                do {
-                    let manifest = try boundedData(
-                        named: "chat.json",
-                        under: chatDescriptor
-                    )
-                    let publicIDs: PortableChatDurablePublicIDs
-                    do {
-                        publicIDs = try invocationEvidenceCodec
-                            .decodeChatDurablePublicIDs(manifest)
-                    } catch {
-                        // A present but ambiguous root cannot prove the Library-wide
-                        // public namespace free even when only this Chat is frozen.
-                        throw PortableChatPersistenceError.ioFailure
-                    }
-                    if publicIDs.contains(identity.userMessageID) {
-                        recordCollision(.userMessageID)
-                    }
-                    if publicIDs.contains(identity.coachMessageID) {
-                        recordCollision(.coachMessageID)
-                    }
-                    if publicIDs.contains(identity.freshDraftID) {
-                        recordCollision(.freshDraftID)
-                    }
-                } catch let error as PortableChatPersistenceError {
-                    let manifestExists: Bool
-                    do {
-                        manifestExists = try entryExists(
-                            named: "chat.json",
-                            under: chatDescriptor
-                        )
-                    } catch {
-                        throw PortableChatPersistenceError.ioFailure
-                    }
-                    if manifestExists {
-                        throw PortableChatPersistenceError.ioFailure
-                    }
-                    guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
-                        throw error
-                    }
-                    // This sibling has no readable root identity to reserve.
-                } catch {
-                    throw error
-                }
+            let loaded = try loadChat(
+                from: chatDescriptor,
+                expectedID: chatID,
+                reconcileTransients: true,
+                beforeDestructiveMutation: revalidateLiveness
+            )
+            guard case let .readWrite(aggregate) = loaded else {
+                return .stale(nil)
+            }
+            current = aggregate
+            let publicIDs = PortableChatDurablePublicIDs(
+                draftID: aggregate.chat.draft.draftID,
+                messageIDs: Set(aggregate.chat.messageIDs)
+            )
+            if let candidateID = publicIDScanner.candidate.collision(in: publicIDs) {
+                recordCollision(candidateID.collision)
             }
         }
         guard let current else { return .stale(nil) }
@@ -3446,6 +3670,13 @@ public struct PortableChatPersistence: @unchecked Sendable {
         guard candidate.transportAuthority != nil else {
             throw PortableChatPersistenceError.invalidLayout
         }
+        let publicIDScanner = DurablePublicIDCollisionScanner(
+            persistence: self,
+            candidate: DurablePublicIDCollisionCandidate(
+                attemptID: candidate.id,
+                authority: authority
+            )
+        )
         for invocationName in try invocationDirectoryNamesRemovingEmptyResidue(
             under: invocationsDescriptor,
             beforeRemoving: beforeDestructiveMutation
@@ -3458,33 +3689,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
             )
             switch inspection {
             case let .available(record):
-                for attempt in record.invocation.attempts {
-                    if attempt.id == candidate.id { return .attemptID }
-                    if attempt.userMessageID == authority.userMessageID ||
-                        attempt.coachMessageID == authority.userMessageID
-                    { return .userMessageID }
-                    if attempt.userMessageID == authority.coachMessageID ||
-                        attempt.coachMessageID == authority.coachMessageID
-                    { return .coachMessageID }
-                    if attempt.freshDraftID == authority.freshDraftID {
-                        return .freshDraftID
-                    }
-                }
-                if record.invocation.draftID == authority.freshDraftID {
-                    return .freshDraftID
+                if let candidateID = publicIDScanner.candidate
+                    .nextAttemptCollision(in: record.invocation)
+                {
+                    return candidateID.collision
                 }
             case let .frozen(common, _):
-                if common.contains(candidate.id) {
-                    return .attemptID
-                }
-                if common.contains(authority.userMessageID) {
-                    return .userMessageID
-                }
-                if common.contains(authority.coachMessageID) {
-                    return .coachMessageID
-                }
-                if common.contains(authority.freshDraftID) {
-                    return .freshDraftID
+                if let candidateID = publicIDScanner.candidate.collision(in: common) {
+                    return candidateID.collision
                 }
             }
         }
@@ -3496,82 +3708,43 @@ public struct PortableChatPersistence: @unchecked Sendable {
             maximumCount: Self.maximumChatCatalogEntries
         ) {
             guard let chatID = try? ChatID(chatName) else { continue }
-            let chatDescriptor: Int32
-            do {
-                chatDescriptor = try openDirectory(named: chatName, under: chatsDescriptor)
-            } catch let error as PortableChatPersistenceError {
-                if chatID == activeChatID { throw error }
-                if error == .invalidLayout,
-                   (try? directoryIdentity(named: chatName, under: chatsDescriptor)) != nil
-                {
-                    throw PortableChatPersistenceError.ioFailure
-                }
-                guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
-                    throw error
+            if chatID != activeChatID {
+                if let candidateID = try siblingChatPublicIDCollision(
+                    using: publicIDScanner,
+                    chatID: chatID,
+                    named: chatName,
+                    under: chatsDescriptor,
+                    mode: .stopAtFirstCollision
+                ) {
+                    return candidateID.collision
                 }
                 continue
             }
+
+            let chatDescriptor = try openDirectory(
+                named: chatName,
+                under: chatsDescriptor
+            )
             defer { Darwin.close(chatDescriptor) }
-            do {
-                let messagesDescriptor = try openDirectory(
-                    named: "messages",
-                    under: chatDescriptor
-                )
-                defer { Darwin.close(messagesDescriptor) }
-                if try entryExists(
-                    named: "\(authority.userMessageID.rawValue).json",
-                    under: messagesDescriptor
-                ) { return .userMessageID }
-                if try entryExists(
-                    named: "\(authority.coachMessageID.rawValue).json",
-                    under: messagesDescriptor
-                ) { return .coachMessageID }
-            } catch let error as PortableChatPersistenceError {
-                if chatID == activeChatID { throw error }
-                if error == .invalidLayout,
-                   (try? directoryIdentity(named: "messages", under: chatDescriptor)) != nil
-                {
-                    throw PortableChatPersistenceError.ioFailure
-                }
-                guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
-                    throw error
-                }
+            let messagesDescriptor = try openDirectory(
+                named: "messages",
+                under: chatDescriptor
+            )
+            defer { Darwin.close(messagesDescriptor) }
+            if let candidateID = try publicIDScanner.messageFileCollision(
+                under: messagesDescriptor,
+                mode: .stopAtFirstCollision
+            ) {
+                return candidateID.collision
             }
-            do {
-                let manifest = try boundedData(named: "chat.json", under: chatDescriptor)
-                let publicIDs: PortableChatDurablePublicIDs
-                do {
-                    publicIDs = try invocationEvidenceCodec
-                        .decodeChatDurablePublicIDs(manifest)
-                } catch {
-                    throw PortableChatPersistenceError.ioFailure
-                }
-                if publicIDs.contains(authority.userMessageID) {
-                    return .userMessageID
-                }
-                if publicIDs.contains(authority.coachMessageID) {
-                    return .coachMessageID
-                }
-                if publicIDs.contains(authority.freshDraftID) {
-                    return .freshDraftID
-                }
-            } catch let error as PortableChatPersistenceError {
-                if chatID == activeChatID { throw error }
-                let manifestExists: Bool
-                do {
-                    manifestExists = try entryExists(
-                        named: "chat.json",
-                        under: chatDescriptor
-                    )
-                } catch {
-                    throw PortableChatPersistenceError.ioFailure
-                }
-                if manifestExists {
-                    throw PortableChatPersistenceError.ioFailure
-                }
-                guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
-                    throw error
-                }
+            switch try publicIDScanner.chatRootCollision(
+                under: chatDescriptor,
+                mode: .strict
+            ) {
+            case let .inspected(candidateID):
+                if let candidateID { return candidateID.collision }
+            case let .missing(error):
+                throw error
             }
         }
         return nil

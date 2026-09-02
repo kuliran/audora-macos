@@ -940,6 +940,9 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(retryRequest, fixture.request)
         let recoveredRequests = await fixture.persistence.recoveredRequests
         XCTAssertEqual(recoveredRequests, [fixture.request])
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.map(\.reason), [.providerUserRetryable])
+        XCTAssertEqual(events.map(\.disposition), [.userRetryableFailure])
     }
 
     func testOperationalRetryReconcilesUnchangedPendingBeforeAtomicReacquisition() async throws {
@@ -1185,6 +1188,26 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(events.first?.disposition, .userRetryableFailure)
         XCTAssertEqual(events.first?.attemptOrdinal, 1)
         XCTAssertEqual(events.first?.retryNumber, 1)
+    }
+
+    func testProviderFailureDoesNotDiagnoseAStaleTurnWithoutRetryAuthority() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [.userRetryableFailure]
+        )
+        await fixture.persistence.scriptNextAbort(.staleWithoutPending)
+
+        let outcome = await fixture.invocations.tryInvoke(fixture.request)
+
+        guard case let .interrupted(aggregate, .providerFailed) = outcome else {
+            return XCTFail("a stale terminal mutation must surface its current state")
+        }
+        XCTAssertNil(aggregate?.pendingUserTurn)
+        XCTAssertEqual(
+            fixture.diagnostics.recordedEvents(),
+            [],
+            "a retired Pending without Retry/Discard authority must not be diagnosed"
+        )
     }
 
     func testInvalidProviderResponsePublishesNeitherSideAndRetiresInvocation() async throws {
@@ -1694,6 +1717,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         case committed
         case failedWithoutCommit
         case staleWithCurrent
+        case staleWithoutPending
     }
 
     enum PublicationEvolution: Sendable {
@@ -2093,6 +2117,13 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
             return .failed
         case .staleWithCurrent:
             activeInvocation = nil
+            return .stale(aggregate)
+        case .staleWithoutPending:
+            activeInvocation = nil
+            aggregate = try! ChatAggregate(
+                chat: aggregate.chat,
+                memory: aggregate.memory
+            )
             return .stale(aggregate)
         }
         if lastPublication?.replacement == aggregate {

@@ -1476,18 +1476,14 @@ public actor DefaultInvocations: Invocations {
             let attempt = invocation.attempt
             let attemptStartedAt = retryTiming.nowMilliseconds()
             guard let transportAuthority = attempt.transportAuthority else {
-                await recordRetryDiagnostic(
-                    reason: .missingAttemptTransportAuthority,
-                    classification: .retryInfrastructureFailure,
-                    disposition: .userRetryableFailure,
-                    invocation: invocation,
-                    prepared: prepared,
-                    startedAt: attemptStartedAt
-                )
-                return await interruptAndAbort(
+                return await interruptAndAbortRecordingUserRetry(
                     activeSession,
                     fallback: processingAggregate,
-                    reason: .retryInfrastructureFailed
+                    reason: .retryInfrastructureFailed,
+                    diagnosticReason: .missingAttemptTransportAuthority,
+                    classification: .retryInfrastructureFailure,
+                    prepared: prepared,
+                    startedAt: attemptStartedAt
                 )
             }
             let control: CoachProviderAttemptControl = switch attempt.kind {
@@ -1524,54 +1520,42 @@ public actor DefaultInvocations: Invocations {
                 completedProviderResponse = (markdown, attemptStartedAt)
                 break providerAttempts
             case .userRetryableFailure:
-                await recordRetryDiagnostic(
-                    reason: .providerUserRetryable,
-                    classification: .providerUserRetryable,
-                    disposition: .userRetryableFailure,
-                    invocation: invocation,
-                    prepared: prepared,
-                    startedAt: attemptStartedAt
-                )
-                return await interruptAndAbort(
+                return await interruptAndAbortRecordingUserRetry(
                     activeSession,
                     fallback: processingAggregate,
-                    reason: .providerFailed
+                    reason: .providerFailed,
+                    diagnosticReason: .providerUserRetryable,
+                    classification: .providerUserRetryable,
+                    prepared: prepared,
+                    startedAt: attemptStartedAt
                 )
             case .autoRetryableFailure:
                 guard attempt.kind == .standard,
                       attempt.ordinal < CoachProviderAttempt.maximumOrdinal
                 else {
-                    await recordRetryDiagnostic(
-                        reason: attempt.kind == .shorterRepair
+                    return await interruptAndAbortRecordingUserRetry(
+                        activeSession,
+                        fallback: processingAggregate,
+                        reason: .providerFailed,
+                        diagnosticReason: attempt.kind == .shorterRepair
                             ? .shorterRepairProviderFailure
                             : .automaticRetriesExhausted,
                         classification: .providerUserRetryable,
-                        disposition: .userRetryableFailure,
-                        invocation: invocation,
                         prepared: prepared,
                         startedAt: attemptStartedAt
-                    )
-                    return await interruptAndAbort(
-                        activeSession,
-                        fallback: processingAggregate,
-                        reason: .providerFailed
                     )
                 }
                 let delayIndex = Int(attempt.ordinal - 1)
                 guard Self.automaticRetryDelaysMilliseconds.indices.contains(delayIndex)
                 else {
-                    await recordRetryDiagnostic(
-                        reason: .retryScheduleUnavailable,
-                        classification: .retryInfrastructureFailure,
-                        disposition: .userRetryableFailure,
-                        invocation: invocation,
-                        prepared: prepared,
-                        startedAt: attemptStartedAt
-                    )
-                    return await interruptAndAbort(
+                    return await interruptAndAbortRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
-                        reason: .retryInfrastructureFailed
+                        reason: .retryInfrastructureFailed,
+                        diagnosticReason: .retryScheduleUnavailable,
+                        classification: .retryInfrastructureFailure,
+                        prepared: prepared,
+                        startedAt: attemptStartedAt
                     )
                 }
                 await recordRetryDiagnostic(
@@ -1587,18 +1571,14 @@ public actor DefaultInvocations: Invocations {
                         milliseconds: Self.automaticRetryDelaysMilliseconds[delayIndex]
                     )
                 } catch {
-                    await recordRetryDiagnostic(
-                        reason: .retrySleepFailed,
-                        classification: .retryInfrastructureFailure,
-                        disposition: .userRetryableFailure,
-                        invocation: invocation,
-                        prepared: prepared,
-                        startedAt: attemptStartedAt
-                    )
-                    return await interruptAndAbort(
+                    return await interruptAndAbortRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
-                        reason: .retryInfrastructureFailed
+                        reason: .retryInfrastructureFailed,
+                        diagnosticReason: .retrySleepFailed,
+                        classification: .retryInfrastructureFailure,
+                        prepared: prepared,
+                        startedAt: attemptStartedAt
                     )
                 }
                 switch await installNextAttempt(
@@ -1615,20 +1595,16 @@ public actor DefaultInvocations: Invocations {
                 guard attempt.kind == .standard,
                       attempt.ordinal < CoachProviderAttempt.maximumOrdinal
                 else {
-                    await recordRetryDiagnostic(
-                        reason: attempt.kind == .shorterRepair
+                    return await interruptAndAbortRecordingUserRetry(
+                        activeSession,
+                        fallback: processingAggregate,
+                        reason: .invalidProviderResponse,
+                        diagnosticReason: attempt.kind == .shorterRepair
                             ? .responseOverflowRepeated
                             : .responseOverflowAttemptLimitReached,
                         classification: .invalidProviderResponse,
-                        disposition: .userRetryableFailure,
-                        invocation: invocation,
                         prepared: prepared,
                         startedAt: attemptStartedAt
-                    )
-                    return await interruptAndAbort(
-                        activeSession,
-                        fallback: processingAggregate,
-                        reason: .invalidProviderResponse
                     )
                 }
                 await recordRetryDiagnostic(
@@ -1663,18 +1639,14 @@ public actor DefaultInvocations: Invocations {
                 completedAt: completedAt
             )
         } catch {
-            await recordRetryDiagnostic(
-                reason: .invalidCompleteResponse,
-                classification: .invalidProviderResponse,
-                disposition: .userRetryableFailure,
-                invocation: invocation,
-                prepared: prepared,
-                startedAt: completedProviderResponse.startedAtMilliseconds
-            )
-            return await interruptAndAbort(
+            return await interruptAndAbortRecordingUserRetry(
                 activeSession,
                 fallback: processingAggregate,
-                reason: .invalidProviderResponse
+                reason: .invalidProviderResponse,
+                diagnosticReason: .invalidCompleteResponse,
+                classification: .invalidProviderResponse,
+                prepared: prepared,
+                startedAt: completedProviderResponse.startedAtMilliseconds
             )
         }
 
@@ -1742,19 +1714,15 @@ public actor DefaultInvocations: Invocations {
                     continue
                 }
             } catch {
-                await recordRetryDiagnostic(
-                    reason: .nextAttemptConstructionFailed,
-                    classification: .retryInfrastructureFailure,
-                    disposition: .userRetryableFailure,
-                    invocation: session.invocation,
-                    prepared: prepared,
-                    startedAt: startedAt
-                )
                 return .terminal(
-                    await interruptAndAbort(
+                    await interruptAndAbortRecordingUserRetry(
                         session,
                         fallback: fallback,
-                        reason: .persistenceUnavailable
+                        reason: .persistenceUnavailable,
+                        diagnosticReason: .nextAttemptConstructionFailed,
+                        classification: .retryInfrastructureFailure,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 )
             }
@@ -1765,53 +1733,41 @@ public actor DefaultInvocations: Invocations {
                 lastCollision = collision
                 continue
             case let .stale(current):
-                await recordRetryDiagnostic(
-                    reason: .nextAttemptBecameStale,
-                    classification: .retryInfrastructureFailure,
-                    disposition: .userRetryableFailure,
-                    invocation: session.invocation,
-                    prepared: prepared,
-                    startedAt: startedAt
-                )
                 return .terminal(
-                    await interruptAndAbort(
+                    await interruptAndAbortRecordingUserRetry(
                         session,
                         fallback: current ?? fallback,
-                        reason: .persistenceUnavailable
+                        reason: .persistenceUnavailable,
+                        diagnosticReason: .nextAttemptBecameStale,
+                        classification: .retryInfrastructureFailure,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 )
             case .failed:
-                await recordRetryDiagnostic(
-                    reason: .nextAttemptInstallationFailed,
-                    classification: .retryInfrastructureFailure,
-                    disposition: .userRetryableFailure,
-                    invocation: session.invocation,
-                    prepared: prepared,
-                    startedAt: startedAt
-                )
                 return .terminal(
-                    await interruptAndAbort(
+                    await interruptAndAbortRecordingUserRetry(
                         session,
                         fallback: fallback,
-                        reason: .persistenceUnavailable
+                        reason: .persistenceUnavailable,
+                        diagnosticReason: .nextAttemptInstallationFailed,
+                        classification: .retryInfrastructureFailure,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 )
             }
         }
         _ = lastCollision
-        await recordRetryDiagnostic(
-            reason: .nextAttemptIdentityCollisionExhausted,
-            classification: .retryInfrastructureFailure,
-            disposition: .userRetryableFailure,
-            invocation: session.invocation,
-            prepared: prepared,
-            startedAt: startedAt
-        )
         return .terminal(
-            await interruptAndAbort(
+            await interruptAndAbortRecordingUserRetry(
                 session,
                 fallback: fallback,
-                reason: .persistenceUnavailable
+                reason: .persistenceUnavailable,
+                diagnosticReason: .nextAttemptIdentityCollisionExhausted,
+                classification: .retryInfrastructureFailure,
+                prepared: prepared,
+                startedAt: startedAt
             )
         )
     }
@@ -1994,6 +1950,38 @@ public actor DefaultInvocations: Invocations {
                 priorRecovery: publicationRecovery
             )
         }
+    }
+
+    private func interruptAndAbortRecordingUserRetry(
+        _ session: any InvocationActivePersistenceSession,
+        fallback: ChatAggregate,
+        reason: InvocationInterruptionReason,
+        diagnosticReason: InvocationRetryDiagnosticReason,
+        classification: InvocationRetryDiagnosticClassification,
+        prepared: PreparedCoachLaunchContext,
+        startedAt: UInt64
+    ) async -> InvocationTryOutcome {
+        let invocation = session.invocation
+        let context = diagnosticContext(for: prepared)
+        let durationMilliseconds = elapsedMilliseconds(since: startedAt)
+        let outcome = await interruptAndAbort(
+            session,
+            fallback: fallback,
+            reason: reason
+        )
+        guard presentsUserRetry(
+            outcome,
+            request: pendingRequest(for: invocation)
+        ) else { return outcome }
+        await recordRetryDiagnostic(
+            reason: diagnosticReason,
+            classification: classification,
+            disposition: .userRetryableFailure,
+            invocation: invocation,
+            context: context,
+            durationMilliseconds: durationMilliseconds
+        )
+        return outcome
     }
 
     private func interruptPublicationAndAbort(
