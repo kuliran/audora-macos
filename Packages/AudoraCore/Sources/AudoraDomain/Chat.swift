@@ -183,16 +183,21 @@ public struct ChatSessionAttachment: Equatable, Sendable {
 }
 
 public enum ChatAttachmentsError: Error, Equatable, Sendable {
+    case tooManyAttachments
     case duplicateAttachmentID
     case duplicateSessionRevision
 }
 
 public struct ChatAttachments: Equatable, Sendable {
+    public static let maximumCount = 128
     public static let empty = try! ChatAttachments(validating: [])
 
     public let values: [ChatSessionAttachment]
 
     public init(validating values: [ChatSessionAttachment]) throws {
+        guard values.count <= Self.maximumCount else {
+            throw ChatAttachmentsError.tooManyAttachments
+        }
         var attachmentIDs: Set<ChatSessionAttachmentID> = []
         var pairs: Set<SessionRevisionPair> = []
         for value in values {
@@ -536,7 +541,24 @@ public struct ChatAggregate: Equatable, Sendable {
         instant: UTCInstant,
         profileStatementGeneration: UInt64
     ) throws -> ChatAggregate {
-        let attachments = ChatAttachments.empty
+        try newChat(
+            chatID: chatID,
+            draftID: draftID,
+            memoryID: memoryID,
+            instant: instant,
+            profileStatementGeneration: profileStatementGeneration,
+            attachments: .empty
+        )
+    }
+
+    public static func newChat(
+        chatID: ChatID,
+        draftID: ChatDraftID,
+        memoryID: CoachMemoryID,
+        instant: UTCInstant,
+        profileStatementGeneration: UInt64,
+        attachments: ChatAttachments
+    ) throws -> ChatAggregate {
         let creation = try ChatCreation(
             kind: .newChat,
             originAttachmentID: nil,

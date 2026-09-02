@@ -35,6 +35,76 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testCreateRejectsUnavailablePinnedAttachmentAtFinalInstallBoundary() throws {
+        try withCreatedLibrary { root, scope in
+            let attachment = ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-000001"),
+                sessionID: try SessionID("ses-20260830T120100000Z-5KMN"),
+                transcriptRevisionID: try TranscriptRevisionID(
+                    "trv-20260830T120200000Z-6PQR"
+                )
+            )
+            let seed = try makeChatSeed(
+                scope: scope,
+                attachments: ChatAttachments(validating: [attachment])
+            )
+
+            XCTAssertThrowsError(
+                try PortableChatPersistence().create(seed, at: root)
+            ) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .attachmentUnavailable
+                )
+            }
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: chatRoot(root, seed.aggregate.chat.id).path
+                )
+            )
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: root.appendingPathComponent("staging/publications").path
+                ),
+                []
+            )
+        }
+    }
+
+    func testAuthorizedCreateRejectsAReplacementRootDescriptor() throws {
+        try withCreatedLibrary { root, scope in
+            let quotedRootIdentity = try XCTUnwrap(
+                SessionProcessingRootIdentity.capture(root)
+            )
+            let displaced = root.deletingLastPathComponent().appendingPathComponent(
+                "quoted-root.audoralibrary",
+                isDirectory: true
+            )
+            try FileManager.default.moveItem(at: root, to: displaced)
+            try FileManager.default.copyItem(at: displaced, to: root)
+            let seed = try makeChatSeed(scope: scope)
+
+            XCTAssertThrowsError(
+                try PortableChatPersistence().create(
+                    seed,
+                    at: root,
+                    expectedAttachmentFingerprints: [],
+                    expectedRootIdentity: quotedRootIdentity
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .creationAuthorityChanged
+                )
+            }
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: chatRoot(root, seed.aggregate.chat.id).path
+                )
+            )
+        }
+    }
+
     func testChatValidationNeverReconcilesActiveAudioImportStaging() throws {
         try withCreatedLibrary { root, scope in
             let activeImport = try makeRecognizedAbandonedAudioImportTree(in: root)
@@ -197,6 +267,7 @@ final class PortableChatPersistenceTests: XCTestCase {
             .afterMemoryInstall, .afterMemoryDirectoryFlush, .beforeChatPartialWrite,
             .afterChatPartialWrite, .afterChatFileFlush, .afterChatInstall,
             .afterCandidateFlush, .beforeStagedRead, .beforeFinalInstall,
+            .afterAttachmentValidation,
             .afterFinalInstall, .afterChatsFlush, .beforeFinalRead,
         ]
         for point in points {
@@ -2640,7 +2711,7 @@ final class PortableChatPersistenceTests: XCTestCase {
         let memoryID = try CoachMemoryID("mem-20260830T12\(minute)00000Z-4GHJ")
         let createdAt = try UTCInstant("2026-08-30T12:\(minute):00.000Z")
         let created = try persistence.create(
-            NewDevelopmentChatSeed(
+            NewChatSeed(
                 library: scope,
                 chatID: chatID,
                 draftID: draftID,
@@ -2826,14 +2897,18 @@ final class PortableChatPersistenceTests: XCTestCase {
         try await body(root, LibraryScope(libraryID: libraryID))
     }
 
-    private func makeChatSeed(scope: LibraryScope) throws -> NewDevelopmentChatSeed {
-        try NewDevelopmentChatSeed(
+    private func makeChatSeed(
+        scope: LibraryScope,
+        attachments: ChatAttachments = .empty
+    ) throws -> NewChatSeed {
+        try NewChatSeed(
             library: scope,
             chatID: ChatID("cht-20260830T120000000Z-2ABC"),
             draftID: ChatDraftID("drf-20260830T120000000Z-3DEF"),
             memoryID: CoachMemoryID("mem-20260830T120000000Z-4GHJ"),
             instant: UTCInstant("2026-08-30T12:00:00.000Z"),
-            profileStatementGeneration: 7
+            profileStatementGeneration: 7,
+            attachments: attachments
         )
     }
 

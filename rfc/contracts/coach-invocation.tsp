@@ -1,4 +1,4 @@
-import "./development-chat.tsp";
+import "./chat.tsp";
 import "@typespec/json-schema";
 
 using TypeSpec.JsonSchema;

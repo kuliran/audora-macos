@@ -1,4 +1,4 @@
-@_spi(InvocationInfrastructure) import AudoraApplication
+@_spi(InvocationInfrastructure) @_spi(CoachContextQualification) import AudoraApplication
 import AudoraDomain
 import Darwin
 import Foundation
@@ -256,6 +256,7 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
     case afterCandidateFlush
     case beforeStagedRead
     case beforeFinalInstall
+    case afterAttachmentValidation
     case afterFinalInstall
     case afterChatsFlush
     case beforeFinalRead
@@ -327,6 +328,8 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
 
 public enum PortableChatPersistenceError: Error, Equatable, Sendable {
     case collision
+    case creationAuthorityChanged
+    case attachmentUnavailable
     case readOnlyLibrary
     case libraryScopeMismatch
     case profileStatementGenerationChanged(UInt64)
@@ -375,7 +378,8 @@ private func frozenChatSnapshot(
     case .expectedPathIsSymlink, .invalidLayout, .rootTooLarge, .invalidJSON,
          .invalidSchemaVersion, .unknownKey:
         FrozenChatSnapshot(chatID: chatID, reason: .corrupt)
-    case .collision, .readOnlyLibrary, .libraryScopeMismatch,
+    case .collision, .creationAuthorityChanged, .attachmentUnavailable,
+         .readOnlyLibrary, .libraryScopeMismatch,
          .profileStatementGenerationChanged, .chatMissing, .ioFailure,
          .injectedFault:
         nil
@@ -668,6 +672,13 @@ public struct PortableChatPersistence: @unchecked Sendable {
         case stale(ChatAggregate)
         case frozen(FrozenChatSnapshot)
         case activeExists
+    }
+
+    private struct OpenedLibraryRootAuthority {
+        let parentDescriptor: Int32
+        let rootDescriptor: Int32
+        let name: String
+        let identity: DirectoryIdentity
     }
 
     public static let maximumRootBytes = 65_536
@@ -1274,9 +1285,24 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
-    public func create(
-        _ seed: NewDevelopmentChatSeed,
+    func create(
+        _ seed: NewChatSeed,
         at libraryRoot: URL
+    ) throws -> ChatAggregate {
+        try create(
+            seed,
+            at: libraryRoot,
+            expectedAttachmentFingerprints: nil,
+            expectedRootIdentity: nil
+        )
+    }
+
+    func create(
+        _ seed: NewChatSeed,
+        at libraryRoot: URL,
+        expectedAttachmentFingerprints:
+            [PortableChatAttachmentFingerprint]?,
+        expectedRootIdentity: SessionProcessingRootIdentity? = nil
     ) throws -> ChatAggregate {
         // A new Chat introduces a Draft ID into the same Library-wide
         // namespace checked before provider launch. Hold the stable Invocation
@@ -1289,13 +1315,19 @@ public struct PortableChatPersistence: @unchecked Sendable {
             throw PortableChatPersistenceError.ioFailure
         }
         defer { invocationNamespaceLease.release() }
-        let rootDescriptor = try openLibraryRoot(
+        let rootAuthority = try openLibraryRootAuthority(
             at: libraryRoot,
             in: seed.library,
             expectedProfileStatementGeneration:
                 seed.aggregate.chat.profileStatementGenerationAtCreation
         )
+        let rootDescriptor = rootAuthority.rootDescriptor
         defer { Darwin.close(rootDescriptor) }
+        defer { Darwin.close(rootAuthority.parentDescriptor) }
+        try revalidateExpectedChatCreationRootIdentity(
+            expectedRootIdentity,
+            under: rootDescriptor
+        )
         let stagingDescriptor = try openDirectory(named: "staging", under: rootDescriptor)
         defer { Darwin.close(stagingDescriptor) }
         try acquireExclusiveMutationLock(on: stagingDescriptor)
@@ -1389,23 +1421,61 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let validatedCandidateIdentity = try directoryIdentity(of: candidateDescriptor)
 
         try fault(.beforeFinalInstall)
+        try revalidateConfiguredRootAuthority(rootAuthority)
         try revalidateLibraryAuthority(
             libraryID: seed.library.libraryID,
-            profileStatementGeneration: seed.aggregate.chat.profileStatementGenerationAtCreation,
+            profileStatementGeneration:
+                seed.aggregate.chat.profileStatementGenerationAtCreation,
             under: rootDescriptor
         )
-        guard try directoryIdentity(
-            named: candidateName,
-            under: publicationsDescriptor
-        ) == validatedCandidateIdentity else {
-            throw PortableChatPersistenceError.invalidLayout
+        let attachmentInstall: Bool?
+        do {
+            attachmentInstall = try PortableTranscriptRevisionRepository(
+                root: libraryRoot,
+                libraryID: seed.library.libraryID
+            ).withAvailableChatAttachmentsSynchronously(
+                seed.aggregate.chat.attachments,
+                expectedFingerprints: expectedAttachmentFingerprints,
+                underRootDescriptor: rootDescriptor
+            ) {
+                try fault(.afterAttachmentValidation)
+                try revalidateConfiguredRootAuthority(rootAuthority)
+                try revalidateExpectedChatCreationRootIdentity(
+                    expectedRootIdentity,
+                    under: rootDescriptor
+                )
+                try revalidateLibraryAuthority(
+                    libraryID: seed.library.libraryID,
+                    profileStatementGeneration:
+                        seed.aggregate.chat.profileStatementGenerationAtCreation,
+                    under: rootDescriptor
+                )
+                guard try directoryIdentity(
+                    named: candidateName,
+                    under: publicationsDescriptor
+                ) == validatedCandidateIdentity else {
+                    throw PortableChatPersistenceError.invalidLayout
+                }
+                try noReplaceRename(
+                    from: candidateName,
+                    under: publicationsDescriptor,
+                    to: finalName,
+                    under: chatsDescriptor
+                )
+                return true
+            }
+        } catch let error as PortableChatPersistenceError {
+            throw error
+        } catch {
+            throw expectedAttachmentFingerprints == nil
+                ? PortableChatPersistenceError.attachmentUnavailable
+                : PortableChatPersistenceError.creationAuthorityChanged
         }
-        try noReplaceRename(
-            from: candidateName,
-            under: publicationsDescriptor,
-            to: finalName,
-            under: chatsDescriptor
-        )
+        guard attachmentInstall == true else {
+            throw expectedAttachmentFingerprints == nil
+                ? PortableChatPersistenceError.attachmentUnavailable
+                : PortableChatPersistenceError.creationAuthorityChanged
+        }
         let finalDescriptor = try openDirectory(named: finalName, under: chatsDescriptor)
         defer { Darwin.close(finalDescriptor) }
         guard try directoryIdentity(of: finalDescriptor) == validatedCandidateIdentity else {
@@ -4409,8 +4479,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
     }
 
-    func reconcileCommittedCreate(
-        _ seed: NewDevelopmentChatSeed,
+    fileprivate func reconcileCommittedCreate(
+        _ seed: NewChatSeed,
         at libraryRoot: URL
     ) throws -> ChatAggregate? {
         let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: seed.library)
@@ -4864,34 +4934,134 @@ public struct PortableChatPersistence: @unchecked Sendable {
             throw PortableChatPersistenceError.ioFailure
         }
         do {
-            var metadata = stat()
-            guard fstat(descriptor, &metadata) == 0,
-                  (metadata.st_mode & S_IFMT) == S_IFDIR
-            else {
-                throw PortableChatPersistenceError.invalidLayout
-            }
-            switch try PortableLibraryPersistence().load(
-                from: descriptor,
-                reconcileAbandonedImports: false
-            ) {
-            case let .readWrite(authority):
-                guard authority.manifest.libraryID == scope.libraryID else {
-                    throw PortableChatPersistenceError.libraryScopeMismatch
-                }
-                if let expectedProfileStatementGeneration,
-                   authority.profileHead.statementGeneration != expectedProfileStatementGeneration
-                {
-                    throw PortableChatPersistenceError.profileStatementGenerationChanged(
-                        authority.profileHead.statementGeneration
-                    )
-                }
-            case .readOnly:
-                throw PortableChatPersistenceError.readOnlyLibrary
-            }
+            try validateLibraryRootDescriptor(
+                descriptor,
+                in: scope,
+                expectedProfileStatementGeneration: expectedProfileStatementGeneration
+            )
             return descriptor
         } catch {
             Darwin.close(descriptor)
             throw error
+        }
+    }
+
+    private func openLibraryRootAuthority(
+        at url: URL,
+        in scope: LibraryScope,
+        expectedProfileStatementGeneration: UInt64? = nil
+    ) throws -> OpenedLibraryRootAuthority {
+        let parentURL = url.deletingLastPathComponent()
+        let name = url.lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..",
+              !name.contains("/"), !name.contains("\\")
+        else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let parentDescriptor = parentURL.path.withCString { pointer -> Int32 in
+            while true {
+                let result = Darwin.open(
+                    pointer,
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+                )
+                if result < 0, errno == EINTR { continue }
+                return result
+            }
+        }
+        guard parentDescriptor >= 0 else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        let rootDescriptor = name.withCString { pointer -> Int32 in
+            while true {
+                let result = Darwin.openat(
+                    parentDescriptor,
+                    pointer,
+                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+                )
+                if result < 0, errno == EINTR { continue }
+                return result
+            }
+        }
+        guard rootDescriptor >= 0 else {
+            Darwin.close(parentDescriptor)
+            if urlHasSymlink(url) {
+                throw PortableChatPersistenceError.expectedPathIsSymlink
+            }
+            throw PortableChatPersistenceError.ioFailure
+        }
+        do {
+            try validateLibraryRootDescriptor(
+                rootDescriptor,
+                in: scope,
+                expectedProfileStatementGeneration: expectedProfileStatementGeneration
+            )
+            return OpenedLibraryRootAuthority(
+                parentDescriptor: parentDescriptor,
+                rootDescriptor: rootDescriptor,
+                name: name,
+                identity: try directoryIdentity(of: rootDescriptor)
+            )
+        } catch {
+            Darwin.close(rootDescriptor)
+            Darwin.close(parentDescriptor)
+            throw error
+        }
+    }
+
+    private func validateLibraryRootDescriptor(
+        _ descriptor: Int32,
+        in scope: LibraryScope,
+        expectedProfileStatementGeneration: UInt64?
+    ) throws {
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFDIR
+        else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        switch try PortableLibraryPersistence().load(
+            from: descriptor,
+            reconcileAbandonedImports: false
+        ) {
+        case let .readWrite(authority):
+            guard authority.manifest.libraryID == scope.libraryID else {
+                throw PortableChatPersistenceError.libraryScopeMismatch
+            }
+            if let expectedProfileStatementGeneration,
+               authority.profileHead.statementGeneration != expectedProfileStatementGeneration
+            {
+                throw PortableChatPersistenceError.profileStatementGenerationChanged(
+                    authority.profileHead.statementGeneration
+                )
+            }
+        case .readOnly:
+            throw PortableChatPersistenceError.readOnlyLibrary
+        }
+    }
+
+    private func revalidateConfiguredRootAuthority(
+        _ authority: OpenedLibraryRootAuthority
+    ) throws {
+        guard try directoryIdentity(of: authority.rootDescriptor) == authority.identity,
+              try directoryIdentity(
+                  named: authority.name,
+                  under: authority.parentDescriptor
+              ) == authority.identity
+        else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+    }
+
+    private func revalidateExpectedChatCreationRootIdentity(
+        _ expected: SessionProcessingRootIdentity?,
+        under rootDescriptor: Int32
+    ) throws {
+        guard let expected else { return }
+        let identity = try directoryIdentity(of: rootDescriptor)
+        guard UInt64(truncatingIfNeeded: identity.device) == expected.device,
+              UInt64(truncatingIfNeeded: identity.inode) == expected.inode
+        else {
+            throw PortableChatPersistenceError.creationAuthorityChanged
         }
     }
 
@@ -7341,6 +7511,279 @@ public struct PortableChatPersistence: @unchecked Sendable {
             return
         }
         _ = candidateName.withCString { Darwin.unlinkat(parent, $0, AT_REMOVEDIR) }
+    }
+}
+
+public actor PortableChatStore: ChatStorePort {
+    private let persistence: PortableChatPersistence
+    private let workspace: PortableLibraryWorkspace
+
+    public init(
+        persistence: PortableChatPersistence = PortableChatPersistence(),
+        workspace: PortableLibraryWorkspace
+    ) {
+        self.persistence = persistence
+        self.workspace = workspace
+    }
+
+    public func loadCatalog(in library: LibraryScope) async -> ChatCatalogOutcome {
+        let result: ActiveLibraryOperationResult<ChatCatalogOutcome> =
+            await workspace.performActiveReadWriteOperation(in: library) { root in
+            do {
+                try persistence.reconcileInterruptedInvocationsIfUnowned(
+                    at: root,
+                    in: library
+                )
+                return ChatCatalogOutcome.loaded(
+                    try persistence.loadCatalog(at: root, in: library).map { loaded -> ChatCatalogEntry in
+                        switch loaded {
+                        case let .readWrite(aggregate): ChatCatalogEntry.available(aggregate)
+                        case let .frozen(frozen): ChatCatalogEntry.frozen(frozen)
+                        }
+                    }
+                )
+            } catch PortableChatPersistenceError.readOnlyLibrary {
+                return ChatCatalogOutcome.readOnlyLibrary
+            } catch {
+                return ChatCatalogOutcome.failed
+            }
+        }
+        switch result {
+        case let .performed(outcome): return outcome
+        case .readOnly: return ChatCatalogOutcome.readOnlyLibrary
+        case .unavailable: return ChatCatalogOutcome.failed
+        }
+    }
+
+    public func create(_ commit: NewChatCommit) async -> ChatMutationOutcome {
+        await createAuthorized(commit)
+    }
+
+    /// Test-support setup path. Product creation crosses the authorized commit
+    /// interface above; infrastructure tests use this only to seed later mutation
+    /// scenarios that do not exercise new-Chat confirmation.
+    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
+        await createUnbound(seed)
+    }
+
+    private func createAuthorized(
+        _ commit: NewChatCommit
+    ) async -> ChatMutationOutcome {
+        let seed = commit.seed
+        let outcome = await workspace.withCurrentChatCreationEvidenceAuthority(
+            commit.portableEvidenceAuthority,
+            in: seed.library
+        ) { root, rootIdentity, fingerprints in
+            let outcome: ChatMutationOutcome
+            do {
+                outcome = ChatMutationOutcome.committed(
+                    try persistence.create(
+                        seed,
+                        at: root,
+                        expectedAttachmentFingerprints: fingerprints,
+                        expectedRootIdentity: rootIdentity
+                    )
+                )
+            } catch PortableChatPersistenceError.collision {
+                outcome = ChatMutationOutcome.collision
+            } catch PortableChatPersistenceError.creationAuthorityChanged {
+                outcome = ChatMutationOutcome.creationAuthorityChanged
+            } catch PortableChatPersistenceError.attachmentUnavailable {
+                outcome = ChatMutationOutcome.attachmentUnavailable
+            } catch let PortableChatPersistenceError
+                .profileStatementGenerationChanged(current)
+            {
+                outcome = ChatMutationOutcome.profileStatementGenerationChanged(current)
+            } catch PortableChatPersistenceError.readOnlyLibrary {
+                outcome = ChatMutationOutcome.readOnlyLibrary
+            } catch {
+                if let committed = try? persistence.reconcileCommittedCreate(
+                    seed,
+                    at: root
+                ) {
+                    outcome = ChatMutationOutcome.committed(committed)
+                } else {
+                    outcome = ChatMutationOutcome.failed
+                }
+            }
+            if case .collision = outcome,
+               commit.portableRetainsEvidenceAuthorityOnCollision
+            {
+                return .retain(outcome)
+            }
+            return .consume(outcome)
+        }
+        return outcome ?? .creationAuthorityChanged
+    }
+
+    private func createUnbound(_ seed: NewChatSeed) async -> ChatMutationOutcome {
+        let result: ActiveLibraryOperationResult<ChatMutationOutcome> =
+            await workspace.performActiveReadWriteOperation(in: seed.library) { root in
+            do {
+                return ChatMutationOutcome.committed(try persistence.create(seed, at: root))
+            } catch PortableChatPersistenceError.collision {
+                return ChatMutationOutcome.collision
+            } catch PortableChatPersistenceError.attachmentUnavailable {
+                return ChatMutationOutcome.attachmentUnavailable
+            } catch let PortableChatPersistenceError.profileStatementGenerationChanged(current) {
+                return ChatMutationOutcome.profileStatementGenerationChanged(current)
+            } catch PortableChatPersistenceError.readOnlyLibrary {
+                return ChatMutationOutcome.readOnlyLibrary
+            } catch {
+                if let committed = try? persistence.reconcileCommittedCreate(seed, at: root) {
+                    return ChatMutationOutcome.committed(committed)
+                }
+                return ChatMutationOutcome.failed
+            }
+        }
+        switch result {
+        case let .performed(outcome): return outcome
+        case .readOnly: return ChatMutationOutcome.readOnlyLibrary
+        case .unavailable: return ChatMutationOutcome.failed
+        }
+    }
+
+    public func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome {
+        let result: ActiveLibraryOperationResult<ChatMutationOutcome> =
+            await workspace.performActiveReadWriteOperation(in: mutation.library) { root in
+            do {
+                switch try persistence.rename(mutation, at: root) {
+                case let .renamed(aggregate):
+                    return ChatMutationOutcome.committed(aggregate)
+                case let .stale(aggregate):
+                    return ChatMutationOutcome.stale(aggregate)
+                case let .frozen(frozen):
+                    return ChatMutationOutcome.frozen(frozen)
+                }
+            } catch PortableChatPersistenceError.readOnlyLibrary {
+                return ChatMutationOutcome.readOnlyLibrary
+            } catch {
+                if let committed = try? persistence.reconcileCommittedRename(mutation, at: root) {
+                    return ChatMutationOutcome.committed(committed)
+                }
+                return ChatMutationOutcome.failed
+            }
+        }
+        switch result {
+        case let .performed(outcome): return outcome
+        case .readOnly: return ChatMutationOutcome.readOnlyLibrary
+        case .unavailable: return ChatMutationOutcome.failed
+        }
+    }
+
+    public func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome {
+        await performMutation(
+            in: mutation.library,
+            operation: { root in try persistence.saveDraft(mutation, at: root) },
+            reconcile: { root in
+                try persistence.reconcileCommittedDraft(mutation, at: root)
+            }
+        )
+    }
+
+    public func lockPendingUserTurn(
+        _ mutation: LockPendingUserTurnMutation
+    ) async -> ChatMutationOutcome {
+        await performMutation(
+            in: mutation.library,
+            operation: { root in
+                try persistence.lockPendingUserTurn(mutation, at: root)
+            },
+            reconcile: { root in
+                try persistence.reconcileCommittedPendingLock(mutation, at: root)
+            }
+        )
+    }
+
+    public func replacePendingUserTurn(
+        _ mutation: ReplacePendingUserTurnMutation
+    ) async -> ChatMutationOutcome {
+        await performMutation(
+            in: mutation.library,
+            operation: { root in
+                try persistence.replacePendingUserTurn(mutation, at: root)
+            },
+            reconcile: { root in
+                try persistence.reconcileCommittedPendingReplacement(mutation, at: root)
+            }
+        )
+    }
+
+    public func discardPendingUserTurn(
+        _ mutation: DiscardPendingUserTurnMutation
+    ) async -> ChatMutationOutcome {
+        await performMutation(
+            in: mutation.library,
+            operation: { root in
+                try persistence.discardPendingUserTurn(mutation, at: root)
+            },
+            reconcile: { root in
+                try persistence.reconcileCommittedPendingDiscard(mutation, at: root)
+            }
+        )
+    }
+
+    private func performMutation(
+        in library: LibraryScope,
+        operation: @Sendable (URL) throws -> PortableChatMutationResult,
+        reconcile: @Sendable (URL) throws -> ChatAggregate?
+    ) async -> ChatMutationOutcome {
+        let result: ActiveLibraryOperationResult<ChatMutationOutcome> =
+            await workspace.performActiveReadWriteOperation(in: library) { root in
+            do {
+                switch try operation(root) {
+                case let .committed(aggregate):
+                    return ChatMutationOutcome.committed(aggregate)
+                case let .stale(aggregate):
+                    return ChatMutationOutcome.stale(aggregate)
+                case let .frozen(frozen):
+                    return ChatMutationOutcome.frozen(frozen)
+                }
+            } catch PortableChatPersistenceError.readOnlyLibrary {
+                return ChatMutationOutcome.readOnlyLibrary
+            } catch {
+                if let committed = try? reconcile(root) {
+                    return ChatMutationOutcome.committed(committed)
+                }
+                return ChatMutationOutcome.failed
+            }
+        }
+        switch result {
+        case let .performed(outcome): return outcome
+        case .readOnly: return .readOnlyLibrary
+        case .unavailable: return .failed
+        }
+    }
+
+    public func load(_ chatID: ChatID, in library: LibraryScope) async -> ChatLoadOutcome {
+        let result: ActiveLibraryOperationResult<ChatLoadOutcome> =
+            await workspace.performActiveReadWriteOperation(in: library) { root in
+            do {
+                try persistence.reconcileInterruptedInvocationsIfUnowned(
+                    at: root,
+                    in: library
+                )
+                switch try persistence.load(chatID, at: root, in: library) {
+                case let .readWrite(aggregate):
+                    return ChatLoadOutcome.loaded(aggregate)
+                case let .frozen(frozen):
+                    return ChatLoadOutcome.frozen(frozen)
+                }
+            } catch PortableChatPersistenceError.chatMissing {
+                return ChatLoadOutcome.missing
+            } catch PortableChatPersistenceError.readOnlyLibrary {
+                return ChatLoadOutcome.readOnlyLibrary
+            } catch PortableChatPersistenceError.libraryScopeMismatch {
+                return ChatLoadOutcome.failed
+            } catch {
+                return ChatLoadOutcome.failed
+            }
+        }
+        switch result {
+        case let .performed(outcome): return outcome
+        case .readOnly: return ChatLoadOutcome.readOnlyLibrary
+        case .unavailable: return ChatLoadOutcome.failed
+        }
     }
 }
 

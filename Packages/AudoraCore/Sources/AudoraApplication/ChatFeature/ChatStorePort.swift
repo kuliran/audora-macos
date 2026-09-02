@@ -3,7 +3,7 @@ import Foundation
 
 public protocol ChatStorePort: Sendable {
     func loadCatalog(in library: LibraryScope) async -> ChatCatalogOutcome
-    func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome
     func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome
     func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome
     func lockPendingUserTurn(
@@ -16,6 +16,37 @@ public protocol ChatStorePort: Sendable {
         _ mutation: DiscardPendingUserTurnMutation
     ) async -> ChatMutationOutcome
     func load(_ chatID: ChatID, in library: LibraryScope) async -> ChatLoadOutcome
+}
+
+/// The one persistence command that may install a new Chat. Its evidence
+/// authority is opaque outside the persistence adapter and must be revalidated
+/// at the final no-replace install point.
+public struct NewChatCommit: Equatable, Sendable {
+    public let seed: NewChatSeed
+    let evidenceAuthority: ChatCreationEvidenceAuthority
+    let retainsEvidenceAuthorityOnCollision: Bool
+
+    @_spi(ChatCreationAuthorityTesting)
+    public init(
+        seed: NewChatSeed,
+        evidenceAuthority: ChatCreationEvidenceAuthority,
+        retainsEvidenceAuthorityOnCollision: Bool = false
+    ) {
+        self.seed = seed
+        self.evidenceAuthority = evidenceAuthority
+        self.retainsEvidenceAuthorityOnCollision =
+            retainsEvidenceAuthorityOnCollision
+    }
+
+    @_spi(CoachContextQualification)
+    public var portableEvidenceAuthority: ChatCreationEvidenceAuthority {
+        evidenceAuthority
+    }
+
+    @_spi(CoachContextQualification)
+    public var portableRetainsEvidenceAuthorityOnCollision: Bool {
+        retainsEvidenceAuthorityOnCollision
+    }
 }
 
 public protocol ChatClock: Sendable {
@@ -62,7 +93,7 @@ public protocol ProfileStatementGenerationReading: Sendable {
     func statementGeneration(in library: LibraryScope) async -> UInt64?
 }
 
-public struct NewDevelopmentChatSeed: Equatable, Sendable {
+public struct NewChatSeed: Equatable, Sendable {
     public let library: LibraryScope
     public let aggregate: ChatAggregate
 
@@ -72,15 +103,17 @@ public struct NewDevelopmentChatSeed: Equatable, Sendable {
         draftID: ChatDraftID,
         memoryID: CoachMemoryID,
         instant: UTCInstant,
-        profileStatementGeneration: UInt64
+        profileStatementGeneration: UInt64,
+        attachments: ChatAttachments = .empty
     ) throws {
         self.library = library
-        aggregate = try ChatAggregate.emptyDevelopmentChat(
+        aggregate = try ChatAggregate.newChat(
             chatID: chatID,
             draftID: draftID,
             memoryID: memoryID,
             instant: instant,
-            profileStatementGeneration: profileStatementGeneration
+            profileStatementGeneration: profileStatementGeneration,
+            attachments: attachments
         )
     }
 }
@@ -206,6 +239,8 @@ public enum ChatCatalogOutcome: Equatable, Sendable {
 public enum ChatMutationOutcome: Equatable, Sendable {
     case committed(ChatAggregate)
     case collision
+    case creationAuthorityChanged
+    case attachmentUnavailable
     case profileStatementGenerationChanged(UInt64)
     case stale(ChatAggregate)
     case frozen(FrozenChatSnapshot)

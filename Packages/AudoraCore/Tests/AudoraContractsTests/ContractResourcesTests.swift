@@ -526,8 +526,9 @@ final class ContractResourcesTests: XCTestCase {
         _ name: String,
         in definitions: [String: Any]
     ) throws -> [String] {
+        let union = try XCTUnwrap(definitions[name] as? [String: Any])
         let variants = try XCTUnwrap(
-            (definitions[name] as? [String: Any])?["anyOf"] as? [[String: Any]]
+            (union["oneOf"] ?? union["anyOf"]) as? [[String: Any]]
         )
         return try variants.map { variant in
             try definitionName(from: variant)
@@ -564,8 +565,8 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(text.contains("creationKind"))
     }
 
-    func testDevelopmentChatGoldenIsCanonicalEmptyAndHasNoMachineAuthority() throws {
-        let data = try ContractResources.data(for: .developmentChatExample)
+    func testEmptyDevelopmentChatGoldenIsCanonicalAndHasNoMachineAuthority() throws {
+        let data = try ContractResources.data(for: .emptyDevelopmentChatExample)
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
@@ -658,22 +659,26 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(schema.contains("unevaluatedProperties"))
     }
 
-    func testDevelopmentChatScenariosDeclareExactInvocationProviderAndAdmissionCalls() throws {
+    func testChatScenariosDeclareExactInvocationProviderAndAdmissionCalls() throws {
         let resources: [ContractResource] = [
             .createDevelopmentChatScenario,
-            .draftSendDiscardDevelopmentChatScenario,
-            .contextCapacityRecoveryDevelopmentChatScenario,
+            .draftSendDiscardChatScenario,
+            .contextCapacityRecoveryChatScenario,
             .fakeProviderSuccessDevelopmentChatScenario,
-            .renameDevelopmentChatScenario,
-            .filterDevelopmentChatsScenario,
-            .relaunchDevelopmentChatScenario,
-            .staleRenameDevelopmentChatScenario,
-            .wrongLibraryDevelopmentChatScenario,
-            .corruptDevelopmentChatScenario,
-            .newerDevelopmentChatScenario,
-            .collisionDevelopmentChatScenario,
-            .providerUnavailableDevelopmentChatScenario,
-            .suspendedLibrarySwitchDevelopmentChatScenario,
+            .renameChatScenario,
+            .filterChatsScenario,
+            .relaunchChatScenario,
+            .staleRenameChatScenario,
+            .wrongLibraryChatScenario,
+            .corruptChatScenario,
+            .newerChatScenario,
+            .collisionChatScenario,
+            .providerUnavailableNewChatScenario,
+            .invalidContextNewChatScenario,
+            .attachmentDisappearsDuringCreateChatScenario,
+            .cancelDuringNewChatQuoteScenario,
+            .cancelDuringAttachmentResolutionScenario,
+            .suspendedLibrarySwitchChatScenario,
         ]
         for resource in resources {
             let object = try XCTUnwrap(
@@ -682,8 +687,8 @@ final class ContractResourcesTests: XCTestCase {
                 ) as? [String: Any]
             )
             let executesProviderAttempt = [
-                ContractResource.draftSendDiscardDevelopmentChatScenario,
-                .contextCapacityRecoveryDevelopmentChatScenario,
+                ContractResource.draftSendDiscardChatScenario,
+                .contextCapacityRecoveryChatScenario,
                 .fakeProviderSuccessDevelopmentChatScenario,
             ].contains(resource)
             XCTAssertEqual(
@@ -691,11 +696,11 @@ final class ContractResourcesTests: XCTestCase {
                 executesProviderAttempt ? 1 : 0
             )
             let expectedInvocationCalls = if resource ==
-                .contextCapacityRecoveryDevelopmentChatScenario
+                .contextCapacityRecoveryChatScenario
             {
                 2
             } else if [
-                ContractResource.draftSendDiscardDevelopmentChatScenario,
+                ContractResource.draftSendDiscardChatScenario,
                 .fakeProviderSuccessDevelopmentChatScenario,
             ].contains(resource) {
                 1
@@ -713,8 +718,8 @@ final class ContractResourcesTests: XCTestCase {
             if resource == .fakeProviderSuccessDevelopmentChatScenario {
                 XCTAssertEqual(object["providerAvailability"] as? String, "available")
             } else if [
-                ContractResource.draftSendDiscardDevelopmentChatScenario,
-                .contextCapacityRecoveryDevelopmentChatScenario,
+                ContractResource.draftSendDiscardChatScenario,
+                .contextCapacityRecoveryChatScenario,
             ].contains(resource) {
                 XCTAssertEqual(object["providerAvailability"] as? String, "unavailable")
             }
@@ -790,15 +795,15 @@ final class ContractResourcesTests: XCTestCase {
         }
     }
 
-    func testDevelopmentChatScenarioSchemaClosesEffectsOutcomesAndNotices() throws {
+    func testChatFeatureScenarioSchemaClosesEffectsOutcomesAndNotices() throws {
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(
-                with: ContractResources.data(for: .developmentChatFeatureScenarioSchema)
+                with: ContractResources.data(for: .chatFeatureScenarioSchema)
             ) as? [String: Any]
         )
         let definitions = try XCTUnwrap(object["$defs"] as? [String: Any])
         let event = try XCTUnwrap(
-            definitions["DevelopmentChatDependencyEvent"] as? [String: Any]
+            definitions["ChatDependencyEvent"] as? [String: Any]
         )
         let variants = try XCTUnwrap(event["oneOf"] as? [[String: Any]])
         XCTAssertFalse(variants.isEmpty)
@@ -814,7 +819,7 @@ final class ContractResourcesTests: XCTestCase {
         }
 
         let notice = try XCTUnwrap(
-            definitions["DevelopmentChatScenarioNotice"] as? [String: Any]
+            definitions["ChatScenarioNotice"] as? [String: Any]
         )
         let noticeVariants = try XCTUnwrap(notice["anyOf"] as? [[String: Any]])
         XCTAssertEqual(
@@ -825,6 +830,132 @@ final class ContractResourcesTests: XCTestCase {
                 "chatFrozen", "catalogFailed", "readOnlyLibrary", "invalidDraft",
                 "draftSaveFailed", "draftChanged", "pendingUserTurnFailed",
                 "coachContextUnavailable", "messageMustBeShortened",
+                "attachmentCatalogFailed",
+                "qualifiedCoachConfigurationUnavailable",
+            ]
+        )
+    }
+
+    func testChatFeatureScenarioSchemaModelsBoundedNewChatAttachmentPickerWorkflow() throws {
+        let root = try jsonObject(.chatFeatureScenarioSchema)
+        let definitions = try XCTUnwrap(root["$defs"] as? [String: Any])
+
+        let commandNames = try unionReferences(
+            "ChatScenarioCommand",
+            in: definitions
+        )
+        let commandKinds = try commandNames.flatMap { name in
+            let properties = try schemaProperties(name, in: definitions)
+            return literalValues(in: properties["kind"])
+        }
+        XCTAssertTrue(
+            Set(commandKinds).isSuperset(of: [
+                "beginNewChat", "setNewChatAttachmentFilter",
+                "toggleNewChatAttachment", "cancelNewChat", "confirmNewChat",
+            ])
+        )
+
+        let catalog = try schemaProperties(
+            "NewChatAttachmentCatalogLoadedEvent",
+            in: definitions
+        )
+        XCTAssertEqual(
+            (catalog["candidates"] as? [String: Any])?["maxItems"] as? Int,
+            32_768
+        )
+        let candidate = try schemaProperties(
+            "NewChatAttachmentCandidate",
+            in: definitions
+        )
+        XCTAssertEqual(
+            (candidate["displayLabel"] as? [String: Any])?["$ref"] as? String,
+            "#/$defs/NewChatAttachmentDisplayLabel"
+        )
+        let displayLabel = try XCTUnwrap(
+            definitions["NewChatAttachmentDisplayLabel"] as? [String: Any]
+        )
+        XCTAssertEqual(displayLabel["minLength"] as? Int, 1)
+        XCTAssertEqual(displayLabel["maxLength"] as? Int, 256)
+        XCTAssertEqual(
+            displayLabel["pattern"] as? String,
+            #"^[^\u0000-\u001F\u007F-\u009F]*$"#
+        )
+        let filterText = try XCTUnwrap(
+            definitions["NewChatAttachmentFilterText"] as? [String: Any]
+        )
+        XCTAssertEqual(filterText["maxLength"] as? Int, 256)
+        XCTAssertEqual(
+            filterText["pattern"] as? String,
+            #"^[^\u0000-\u001F\u007F-\u009F]*$"#
+        )
+        XCTAssertEqual(
+            (candidate["durationMilliseconds"] as? [String: Any])?["maximum"]
+                as? Int,
+            2_700_000
+        )
+        XCTAssertEqual(
+            (candidate["approximateTranscriptTokens"] as? [String: Any])?["maximum"]
+                as? Int,
+            67_108_864
+        )
+
+        let expectedState = try schemaProperties(
+            "ChatScenarioState",
+            in: definitions
+        )
+        XCTAssertEqual(
+            (expectedState["newChatSelectedAttachmentIds"]
+                as? [String: Any])?["maxItems"] as? Int,
+            128
+        )
+        XCTAssertNotNil(expectedState["newChatFeasibility"])
+        XCTAssertNotNil(expectedState["newChatIssue"])
+        XCTAssertNotNil(expectedState["openedAttachmentStatuses"])
+
+        let dependencyNames = try unionReferences(
+            "ChatDependencyEvent",
+            in: definitions
+        )
+        let dependencyEffects = try dependencyNames.flatMap { name in
+            let properties = try schemaProperties(name, in: definitions)
+            return literalValues(in: properties["effect"])
+        }
+        XCTAssertTrue(
+            Set(dependencyEffects).isSuperset(of: [
+                "loadCandidates", "quoteNewChat", "resolveAttachments",
+            ])
+        )
+
+        for (name, outcome) in [
+            ("NewChatQuoteCancelledEvent", "cancelled"),
+            ("ChatAttachmentResolutionCancelledEvent", "cancelled"),
+            (
+                "NewChatAttachmentCatalogQualifiedConfigurationUnavailableEvent",
+                "qualifiedConfigurationUnavailable"
+            ),
+            (
+                "ChatAttachmentResolutionQualifiedConfigurationUnavailableEvent",
+                "qualifiedConfigurationUnavailable"
+            ),
+            ("ChatStoreCreateAttachmentUnavailableEvent", "attachmentUnavailable"),
+        ] {
+            let properties = try schemaProperties(name, in: definitions)
+            XCTAssertEqual(
+                literalValues(in: properties["outcome"]),
+                [outcome],
+                name
+            )
+        }
+
+        let suspendedEffect = try XCTUnwrap(
+            definitions["ChatScenarioSuspendedEffect"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(try XCTUnwrap(suspendedEffect["anyOf"] as? [[String: Any]])
+                .compactMap { $0["const"] as? String }),
+            [
+                "firstCatalogLoad", "firstAttachmentResolution",
+                "newChatQuoteAfterAttachmentResolution",
             ]
         )
     }

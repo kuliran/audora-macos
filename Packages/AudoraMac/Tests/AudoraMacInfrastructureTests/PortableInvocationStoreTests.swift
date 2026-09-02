@@ -733,7 +733,7 @@ final class PortableInvocationStoreTests: XCTestCase {
             let fixture = try await makeInvocationStoreFixture(in: parent)
             let persistence = PortableChatPersistence()
             let missingMessages = try persistence.create(
-                NewDevelopmentChatSeed(
+                NewChatSeed(
                     library: fixture.scope,
                     chatID: ChatID("cht-20260830T120020000Z-3DEF"),
                     draftID: ChatDraftID("drf-20260830T120020000Z-4GHJ"),
@@ -744,7 +744,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                 at: fixture.root
             )
             let missingManifest = try persistence.create(
-                NewDevelopmentChatSeed(
+                NewChatSeed(
                     library: fixture.scope,
                     chatID: ChatID("cht-20260830T120021000Z-6PQR"),
                     draftID: ChatDraftID("drf-20260830T120021000Z-7STV"),
@@ -3384,7 +3384,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                 for: fixture.install.authority
             )
             XCTAssertEqual(identityAvailability, .available)
-            let conflictingSeed = try NewDevelopmentChatSeed(
+            let conflictingSeed = try NewChatSeed(
                 library: fixture.scope,
                 chatID: ChatID("cht-20260830T120020000Z-3DEF"),
                 draftID: fixture.publication.freshDraft.draftID,
@@ -5810,7 +5810,7 @@ final class PortableInvocationStoreTests: XCTestCase {
         )
         let competingAuthority: InvocationPendingAuthority?
         if includeCompetingPending {
-            let competingSeed = try NewDevelopmentChatSeed(
+            let competingSeed = try NewChatSeed(
                 library: scope,
                 chatID: ChatID("cht-20260830T120010000Z-3DEF"),
                 draftID: ChatDraftID("drf-20260830T120010000Z-4GHJ"),

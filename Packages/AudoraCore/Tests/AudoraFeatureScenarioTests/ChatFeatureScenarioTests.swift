@@ -1,32 +1,36 @@
-@testable @_spi(CoachContextQualification) @_spi(InvocationInfrastructure) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(InvocationInfrastructure) @_spi(ChatCreationAuthorityTesting) import AudoraApplication
 import AudoraContracts
 import AudoraDomain
 import Foundation
 import XCTest
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
-final class DevelopmentChatScenarioTests: XCTestCase {
-    func testEveryDevelopmentChatScenarioMatchesTheSwiftFeature() async throws {
+final class ChatFeatureScenarioTests: XCTestCase {
+    func testEveryChatFeatureScenarioMatchesTheSwiftFeature() async throws {
         let resources: [ContractResource] = [
             .createDevelopmentChatScenario,
-            .draftSendDiscardDevelopmentChatScenario,
-            .contextCapacityRecoveryDevelopmentChatScenario,
+            .draftSendDiscardChatScenario,
+            .contextCapacityRecoveryChatScenario,
             .fakeProviderSuccessDevelopmentChatScenario,
-            .renameDevelopmentChatScenario,
-            .filterDevelopmentChatsScenario,
-            .relaunchDevelopmentChatScenario,
-            .staleRenameDevelopmentChatScenario,
-            .wrongLibraryDevelopmentChatScenario,
-            .corruptDevelopmentChatScenario,
-            .newerDevelopmentChatScenario,
-            .collisionDevelopmentChatScenario,
-            .providerUnavailableDevelopmentChatScenario,
-            .suspendedLibrarySwitchDevelopmentChatScenario,
+            .renameChatScenario,
+            .filterChatsScenario,
+            .relaunchChatScenario,
+            .staleRenameChatScenario,
+            .wrongLibraryChatScenario,
+            .corruptChatScenario,
+            .newerChatScenario,
+            .collisionChatScenario,
+            .providerUnavailableNewChatScenario,
+            .invalidContextNewChatScenario,
+            .attachmentDisappearsDuringCreateChatScenario,
+            .cancelDuringNewChatQuoteScenario,
+            .cancelDuringAttachmentResolutionScenario,
+            .suspendedLibrarySwitchChatScenario,
         ]
 
         for resource in resources {
             let dto = try JSONDecoder().decode(
-                DevelopmentChatScenarioDTO.self,
+                ChatFeatureScenarioDTO.self,
                 from: ContractResources.data(for: resource)
             )
             XCTAssertEqual(dto.schemaVersion, 1, dto.scenarioId)
@@ -40,13 +44,22 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 suspendFirstCatalogLoad: dto.suspendedEffect == "firstCatalogLoad"
             )
             let scripted = ChatScenarioScript(events: dto.dependencyTrace, recorder: recorder)
-            let contextSource = ScenarioCoachContextSnapshotPort(
-                mode: dto.contextCapacityMode ?? "alwaysFits"
+            let attachmentSource = ChatScenarioAttachmentSource(
+                events: dto.dependencyTrace.filter { $0.port == "attachmentSource" },
+                recorder: recorder
+            )
+            let coachContextSource = ScenarioCoachContextSnapshotPort(
+                mode: dto.contextCapacityMode ?? "alwaysFits",
+                events: dto.dependencyTrace.filter { $0.port == "coachContext" },
+                recorder: recorder
+            )
+            let baseCoachContext = DefaultCoachContextFeature(
+                source: coachContextSource
             )
             let invocations: any ScenarioMeasuringInvocations =
                 try ScenarioFakeInvocationGateway(
                     store: store,
-                    source: contextSource,
+                    source: coachContextSource,
                     providerIsAvailable: dto.providerAvailability == "available"
                 )
             let feature = DefaultChatFeature(
@@ -59,8 +72,18 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 pendingUserTurnIDGenerator: scripted,
                 responsePositionIDGenerator: scripted,
                 admissionRefreshScheduler: ScenarioAdmissionRefreshScheduler(),
-                coachContext: DefaultCoachContextFeature(
-                    source: contextSource
+                coachContext: ScenarioBoundCoachContext(
+                    attachmentSource: attachmentSource,
+                    base: baseCoachContext,
+                    providerUnavailable:
+                        dto.dependencyTrace.contains {
+                            $0.port == "coachContext" &&
+                                $0.effect == "quoteNewChat" &&
+                                $0.outcome.rendered == "providerUnavailable"
+                        },
+                    rejectsCreationLease:
+                        dto.suspendedEffect ==
+                            "newChatQuoteAfterAttachmentResolution"
                 ),
                 invocations: invocations
             )
@@ -111,6 +134,60 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                             invocations: invocations
                         )
                     }
+                }
+            } else if dto.suspendedEffect == "firstAttachmentResolution" ||
+                        dto.suspendedEffect ==
+                            "newChatQuoteAfterAttachmentResolution"
+            {
+                await feature.send(.start(commandContext))
+                guard let confirmationIndex = dto.commands.firstIndex(where: {
+                    $0.kind == "confirmNewChat"
+                }), confirmationIndex + 1 < dto.commands.count,
+                      dto.commands[confirmationIndex + 1].kind == "cancelNewChat"
+                else {
+                    throw ScenarioFailure.script
+                }
+                for command in dto.commands[..<confirmationIndex] {
+                    let activeState = await feature.currentState
+                    let applicationCommand = try contextualizedCommand(
+                        command,
+                        activeState: activeState,
+                        activeContext: &commandContext,
+                        generation: &commandGeneration
+                    )
+                    await feature.send(applicationCommand)
+                }
+                let confirmationState = await feature.currentState
+                let confirmation = try contextualizedCommand(
+                    dto.commands[confirmationIndex],
+                    activeState: confirmationState,
+                    activeContext: &commandContext,
+                    generation: &commandGeneration
+                )
+                async let suspendedConfirmation: Void = feature.send(confirmation)
+                if dto.suspendedEffect == "firstAttachmentResolution" {
+                    await attachmentSource.waitUntilCancelledResolutionStarts()
+                } else {
+                    await coachContextSource.waitUntilCancelledNewChatQuoteStarts()
+                }
+                let cancellationState = await feature.currentState
+                let cancellation = try contextualizedCommand(
+                    dto.commands[confirmationIndex + 1],
+                    activeState: cancellationState,
+                    activeContext: &commandContext,
+                    generation: &commandGeneration
+                )
+                await feature.send(cancellation)
+                await suspendedConfirmation
+                for command in dto.commands.dropFirst(confirmationIndex + 2) {
+                    let activeState = await feature.currentState
+                    let applicationCommand = try contextualizedCommand(
+                        command,
+                        activeState: activeState,
+                        activeContext: &commandContext,
+                        generation: &commandGeneration
+                    )
+                    await feature.send(applicationCommand)
                 }
             } else {
                 await feature.send(.start(commandContext))
@@ -218,6 +295,46 @@ final class DevelopmentChatScenarioTests: XCTestCase {
                 )
             }
             XCTAssertEqual(state.notice?.rawValue, dto.expectedState.notice, dto.scenarioId)
+            if let expected = dto.expectedState.newChatPickerStatus {
+                XCTAssertEqual(newChatPickerStatus(state), expected, dto.scenarioId)
+            }
+            if let expected = dto.expectedState.newChatFilterQuery {
+                XCTAssertEqual(newChatPicker(state)?.filterQuery.rawValue, expected, dto.scenarioId)
+            }
+            if let expected = dto.expectedState.newChatAllAttachmentIds {
+                XCTAssertEqual(
+                    newChatPicker(state)?.allRows.map(\.id.rawValue),
+                    expected,
+                    dto.scenarioId
+                )
+            }
+            if let expected = dto.expectedState.newChatVisibleAttachmentIds {
+                XCTAssertEqual(
+                    newChatPicker(state)?.visibleRows.map(\.id.rawValue),
+                    expected,
+                    dto.scenarioId
+                )
+            }
+            if let expected = dto.expectedState.newChatSelectedAttachmentIds {
+                XCTAssertEqual(
+                    newChatPicker(state)?.allRows.compactMap {
+                        newChatPicker(state)?.selectedAttachmentIDs.contains($0.id) == true
+                            ? $0.id.rawValue
+                            : nil
+                    },
+                    expected,
+                    dto.scenarioId
+                )
+            }
+            if let expected = dto.expectedState.newChatFeasibility {
+                XCTAssertEqual(newChatFeasibility(state), expected, dto.scenarioId)
+            }
+            if let expected = dto.expectedState.newChatIssue {
+                XCTAssertEqual(newChatIssue(state), expected, dto.scenarioId)
+            }
+            if let expected = dto.expectedState.openedAttachmentStatuses {
+                XCTAssertEqual(openedAttachmentStatuses(state), expected, dto.scenarioId)
+            }
             let recordedEvents = await recorder.events
             XCTAssertEqual(recordedEvents, dto.dependencyTrace.map(\.signature), dto.scenarioId)
             let expectedCommittedChats = try dto.dependencyTrace.compactMap {
@@ -233,7 +350,7 @@ final class DevelopmentChatScenarioTests: XCTestCase {
     }
 
     private func assertUnavailableProviderFailureIsClassified(
-        _ scenario: DevelopmentChatScenarioDTO,
+        _ scenario: ChatFeatureScenarioDTO,
         feature: DefaultChatFeature,
         invocations: any ScenarioMeasuringInvocations,
         file: StaticString = #filePath,
@@ -253,7 +370,7 @@ final class DevelopmentChatScenarioTests: XCTestCase {
         )
     }
 
-    private func aggregate(_ dto: DevelopmentChatSnapshotDTO) throws -> ChatAggregate {
+    private func aggregate(_ dto: ChatScenarioSnapshotDTO) throws -> ChatAggregate {
         let attachments = try ChatAttachments(
             validating: dto.attachments.map {
                 ChatSessionAttachment(
@@ -357,16 +474,72 @@ final class DevelopmentChatScenarioTests: XCTestCase {
         case nil: nil
         }
     }
+
+    private func newChatPickerStatus(_ state: ChatFeatureState) -> String {
+        switch state.newChatPicker {
+        case .closed: "closed"
+        case .loading: "loading"
+        case .ready: "ready"
+        case .failed: "failed"
+        }
+    }
+
+    private func newChatPicker(
+        _ state: ChatFeatureState
+    ) -> ChatAttachmentPickerSnapshot? {
+        guard case let .ready(snapshot) = state.newChatPicker else { return nil }
+        return snapshot
+    }
+
+    private func newChatFeasibility(_ state: ChatFeatureState) -> String? {
+        guard let snapshot = newChatPicker(state) else { return nil }
+        return switch snapshot.feasibility {
+        case .quoting: "quoting"
+        case let .available(quote): quote.context.fits ? "fits" : "cannotFit"
+        case let .providerUnavailable(lowerBound):
+            lowerBound.provesImpossible ? "cannotFit" : "providerUnavailable"
+        case let .unavailable(reason): reason.rawValue
+        }
+    }
+
+    private func newChatIssue(_ state: ChatFeatureState) -> String? {
+        guard let issue = newChatPicker(state)?.issue else { return nil }
+        return switch issue {
+        case .selectionLimitReached: "selectionLimitReached"
+        case .attachmentUnavailable: "attachmentUnavailable"
+        case .contextCannotFit: "contextCannotFit"
+        case let .contextUnavailable(reason): reason.rawValue
+        case .qualifiedConfigurationUnavailable:
+            "qualifiedConfigurationUnavailable"
+        }
+    }
+
+    private func openedAttachmentStatuses(
+        _ state: ChatFeatureState
+    ) -> [ChatOpenedAttachmentStatusDTO]? {
+        guard case let .resolved(resolutions) = state.openedAttachments else { return nil }
+        return resolutions.map { resolved in
+            let status: String
+            switch resolved.resolution {
+            case .available: status = "available"
+            case let .unavailable(reason): status = reason.rawValue
+            }
+            return ChatOpenedAttachmentStatusDTO(
+                attachmentId: resolved.attachment.attachmentID.rawValue,
+                status: status
+            )
+        }
+    }
 }
 
-private struct DevelopmentChatScenarioDTO: Decodable {
+private struct ChatFeatureScenarioDTO: Decodable {
     let schemaVersion: UInt32
     let scenarioId: String
     let libraryId: String
-    let initialChats: [DevelopmentChatSnapshotDTO]
-    let commands: [DevelopmentChatCommandDTO]
-    let dependencyTrace: [DevelopmentChatEventDTO]
-    let expectedState: DevelopmentChatStateDTO
+    let initialChats: [ChatScenarioSnapshotDTO]
+    let commands: [ChatScenarioCommandDTO]
+    let dependencyTrace: [ChatDependencyEventDTO]
+    let expectedState: ChatScenarioStateDTO
     let expectedProviderCalls: Int
     let expectedInvocationCalls: Int
     let expectedAdmissionCalls: Int
@@ -375,7 +548,7 @@ private struct DevelopmentChatScenarioDTO: Decodable {
     let suspendedEffect: String?
 }
 
-private struct DevelopmentChatSnapshotDTO: Decodable {
+private struct ChatScenarioSnapshotDTO: Decodable {
     let chatId: String
     let draftId: String
     let memoryId: String
@@ -384,26 +557,26 @@ private struct DevelopmentChatSnapshotDTO: Decodable {
     let createdAt: String
     let updatedAt: String
     let creationKind: String
-    let attachments: [DevelopmentChatAttachmentDTO]
+    let attachments: [ChatAttachmentDTO]
     let draftText: String
     let draftVersion: UInt64
     let messageIds: [String]
     let memoryGeneralNotes: String
-    let memorySessionSummaries: [DevelopmentChatMemorySummaryDTO]
+    let memorySessionSummaries: [ChatMemorySummaryDTO]
 }
 
-private struct DevelopmentChatAttachmentDTO: Decodable {
+private struct ChatAttachmentDTO: Decodable {
     let attachmentId: String
     let sessionId: String
     let transcriptRevisionId: String
 }
 
-private struct DevelopmentChatMemorySummaryDTO: Decodable {
+private struct ChatMemorySummaryDTO: Decodable {
     let sessionAttachmentId: String
     let notes: String
 }
 
-private struct DevelopmentChatCommandDTO: Decodable {
+private struct ChatScenarioCommandDTO: Decodable {
     let kind: String
     let libraryId: String?
     let chatId: String?
@@ -412,6 +585,7 @@ private struct DevelopmentChatCommandDTO: Decodable {
     let query: String?
     let text: String?
     let pendingUserTurnId: String?
+    let attachmentId: String?
 
     var startsInvocation: Bool {
         kind == "sendDraft" || kind == "retryPendingUserTurn"
@@ -420,17 +594,59 @@ private struct DevelopmentChatCommandDTO: Decodable {
     func applicationCommand(
         context: ChatCommandContext,
         activeChatID: ChatID?,
-        activeDraft: ChatDraft?
+        activeDraft: ChatDraft?,
+        newChatConfirmationToken: NewChatConfirmationToken?
     ) throws -> ChatCommand {
         switch kind {
-            case "createDevelopmentChat":
+            case "beginNewChat":
                 guard libraryId == nil, chatId == nil, title == nil,
                       expectedRevision == nil, query == nil, text == nil,
-                      pendingUserTurnId == nil
+                      pendingUserTurnId == nil, attachmentId == nil
                 else {
                     throw ScenarioFailure.command
                 }
-                return .createDevelopmentChat(context)
+                return .beginNewChat(context)
+            case "setNewChatAttachmentFilter":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, let query, text == nil,
+                      pendingUserTurnId == nil, attachmentId == nil
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .setNewChatAttachmentFilter(
+                    context,
+                    try ChatAttachmentFilterQuery(query)
+                )
+            case "toggleNewChatAttachment":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, query == nil, text == nil,
+                      pendingUserTurnId == nil, let attachmentId
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .toggleNewChatAttachment(
+                    context,
+                    try ChatSessionAttachmentID(attachmentId)
+                )
+            case "cancelNewChat":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, query == nil, text == nil,
+                      pendingUserTurnId == nil, attachmentId == nil
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .cancelNewChat(context)
+            case "confirmNewChat":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, query == nil, text == nil,
+                      pendingUserTurnId == nil, attachmentId == nil
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .confirmNewChat(
+                    context,
+                    newChatConfirmationToken ?? NewChatConfirmationToken()
+                )
             case "rename":
                 guard libraryId == nil, let chatId, let title, let expectedRevision,
                       query == nil, text == nil, pendingUserTurnId == nil
@@ -530,7 +746,7 @@ private struct DevelopmentChatCommandDTO: Decodable {
 }
 
 private func contextualizedCommand(
-    _ command: DevelopmentChatCommandDTO,
+    _ command: ChatScenarioCommandDTO,
     activeState: ChatFeatureState,
     activeContext: inout ChatCommandContext,
     generation: inout UInt64
@@ -557,23 +773,84 @@ private func contextualizedCommand(
     return try command.applicationCommand(
         context: activeContext,
         activeChatID: identity?.0,
-        activeDraft: identity?.1
+        activeDraft: identity?.1,
+        newChatConfirmationToken: {
+            guard case let .ready(snapshot) = activeState.newChatPicker else {
+                return nil
+            }
+            return snapshot.confirmationToken
+        }()
     )
 }
 
-private struct DevelopmentChatEventDTO: Decodable {
+private struct ChatDependencyEventDTO: Decodable {
     let port: String
     let effect: String
-    let outcome: DevelopmentChatEventOutcomeDTO
-    let chat: DevelopmentChatSnapshotDTO?
+    let outcome: ChatDependencyEventOutcomeDTO
+    let chat: ChatScenarioSnapshotDTO?
     let libraryId: String?
     let chatIds: [String]?
     let reason: String?
+    let candidates: [NewChatAttachmentCandidateDTO]?
+    let resolutions: [ChatAttachmentResolutionDTO]?
+    let fits: Bool?
 
     var signature: String { "\(port):\(effect):\(outcome.rendered)" }
 }
 
-private enum DevelopmentChatEventOutcomeDTO: Decodable {
+private struct NewChatAttachmentCandidateDTO: Decodable {
+    let sessionId: String
+    let transcriptRevisionId: String
+    let displayLabel: String
+    let durationMilliseconds: UInt64
+    let approximateTranscriptTokens: Int
+    let delivery: String
+
+    func candidate() throws -> ChatAttachmentCandidate {
+        guard let delivery = ChatAttachmentDelivery(rawValue: delivery) else {
+            throw ScenarioFailure.script
+        }
+        return try ChatAttachmentCandidate(
+            sessionID: SessionID(sessionId),
+            transcriptRevisionID: TranscriptRevisionID(transcriptRevisionId),
+            displayLabel: displayLabel,
+            durationMilliseconds: durationMilliseconds,
+            approximateTranscriptTokens: approximateTranscriptTokens,
+            delivery: delivery
+        )
+    }
+}
+
+private struct ChatAttachmentResolutionDTO: Decodable {
+    let attachment: ChatAttachmentDTO
+    let status: String
+    let candidate: NewChatAttachmentCandidateDTO?
+
+    func resolution() throws -> ResolvedChatAttachment {
+        let attachment = ChatSessionAttachment(
+            attachmentID: try ChatSessionAttachmentID(attachment.attachmentId),
+            sessionID: try SessionID(attachment.sessionId),
+            transcriptRevisionID: try TranscriptRevisionID(
+                attachment.transcriptRevisionId
+            )
+        )
+        let value: ChatAttachmentResolution
+        if status == "available", let candidate {
+            value = .available(try candidate.candidate())
+        } else if let reason = ChatAttachmentUnavailableReason(rawValue: status),
+                  candidate == nil {
+            value = .unavailable(reason)
+        } else {
+            throw ScenarioFailure.script
+        }
+        return try ResolvedChatAttachment(
+            attachment: attachment,
+            resolution: value
+        )
+    }
+}
+
+private enum ChatDependencyEventOutcomeDTO: Decodable {
     case text(String)
     case nonnegativeWholeNumber(UInt64)
 
@@ -594,7 +871,7 @@ private enum DevelopmentChatEventOutcomeDTO: Decodable {
     }
 }
 
-private struct DevelopmentChatStateDTO: Decodable {
+private struct ChatScenarioStateDTO: Decodable {
     let allChatIds: [String]
     let visibleChatIds: [String]
     let catalogStatus: String?
@@ -611,9 +888,28 @@ private struct DevelopmentChatStateDTO: Decodable {
     let responsePositionId: String?
     let pendingFailure: String?
     let notice: String?
+    let newChatPickerStatus: String?
+    let newChatFilterQuery: String?
+    let newChatAllAttachmentIds: [String]?
+    let newChatVisibleAttachmentIds: [String]?
+    let newChatSelectedAttachmentIds: [String]?
+    let newChatFeasibility: String?
+    let newChatIssue: String?
+    let openedAttachmentStatuses: [ChatOpenedAttachmentStatusDTO]?
+}
+
+private struct ChatOpenedAttachmentStatusDTO: Decodable, Equatable {
+    let attachmentId: String
+    let status: String
 }
 
 private enum ScenarioFailure: Error { case command, script }
+
+private func suspendUntilTaskCancellation() async {
+    do {
+        try await Task.sleep(nanoseconds: .max)
+    } catch {}
+}
 
 private actor ChatScenarioRecorder {
     private(set) var events: [String] = []
@@ -630,7 +926,7 @@ private actor ChatScenarioRecorder {
 
 private actor ChatScenarioStore: ChatStorePort {
     private var chats: [ChatID: ChatAggregate]
-    private var events: [DevelopmentChatEventDTO]
+    private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder
     private let suspendFirstCatalogLoad: Bool
     private var firstCatalogLoadStarted = false
@@ -638,7 +934,7 @@ private actor ChatScenarioStore: ChatStorePort {
 
     init(
         initial: [ChatAggregate],
-        events: [DevelopmentChatEventDTO],
+        events: [ChatDependencyEventDTO],
         recorder: ChatScenarioRecorder,
         suspendFirstCatalogLoad: Bool
     ) {
@@ -689,7 +985,8 @@ private actor ChatScenarioStore: ChatStorePort {
         }
     }
 
-    func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome {
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome {
+        let seed = commit.seed
         guard let event = consume(effect: "create") else {
             XCTFail("missing scripted create event")
             return .failed
@@ -702,6 +999,8 @@ private actor ChatScenarioStore: ChatStorePort {
             return .committed(seed.aggregate)
         case "collision":
             return .collision
+        case "attachmentUnavailable":
+            return .attachmentUnavailable
         case "readOnlyLibrary":
             return .readOnlyLibrary
         default:
@@ -860,14 +1159,14 @@ private actor ChatScenarioStore: ChatStorePort {
         return .committed(mutation.replacement)
     }
 
-    private func consume(effect: String) -> DevelopmentChatEventDTO? {
+    private func consume(effect: String) -> ChatDependencyEventDTO? {
         guard let index = events.firstIndex(where: { $0.effect == effect }) else {
             return nil
         }
         return events.remove(at: index)
     }
 
-    private func record(_ event: DevelopmentChatEventDTO) async {
+    private func record(_ event: ChatDependencyEventDTO) async {
         await recorder.append(
             port: event.port,
             effect: event.effect,
@@ -1467,11 +1766,14 @@ private actor ChatScenarioScript:
     PendingUserTurnIDGenerator, ChatResponsePositionIDGenerator,
     ProfileStatementGenerationReading
 {
-    private var events: [DevelopmentChatEventDTO]
+    private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder
 
-    init(events: [DevelopmentChatEventDTO], recorder: ChatScenarioRecorder) {
-        self.events = events.filter { $0.port != "chatStore" }
+    init(events: [ChatDependencyEventDTO], recorder: ChatScenarioRecorder) {
+        self.events = events.filter {
+            $0.port != "chatStore" && $0.port != "attachmentSource" &&
+                $0.port != "coachContext"
+        }
         self.recorder = recorder
     }
 
@@ -1521,14 +1823,14 @@ private actor ChatScenarioScript:
         return try! ChatResponsePositionID(event.outcome.rendered)
     }
 
-    private func consume(port: String, effect: String) -> DevelopmentChatEventDTO? {
+    private func consume(port: String, effect: String) -> ChatDependencyEventDTO? {
         guard let index = events.firstIndex(where: { $0.port == port && $0.effect == effect }) else {
             return nil
         }
         return events.remove(at: index)
     }
 
-    private func record(_ event: DevelopmentChatEventDTO) async {
+    private func record(_ event: ChatDependencyEventDTO) async {
         await recorder.append(
             port: event.port,
             effect: event.effect,
@@ -1537,18 +1839,280 @@ private actor ChatScenarioScript:
     }
 }
 
+private let developmentScenarioConfigurationStamp = CoachContextConfigurationStamp(
+    authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000225")!,
+    generation: 1
+)
+private let developmentScenarioEvidenceAuthority = ChatCreationEvidenceAuthority(
+    testingValue: UUID(uuidString: "00000000-0000-0000-0000-000000000226")!
+)
+
+private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
+    let attachmentSource: any ChatSessionAttachmentSource
+    let base: any CoachContextCoordinating
+    let providerUnavailable: Bool
+    let rejectsCreationLease: Bool
+
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        await attachmentSource.loadCandidates(in: library)
+    }
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        await attachmentSource.resolve(attachments, in: library)
+    }
+
+    func quoteNewChatBoundToConfiguration(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome {
+        let outcome = await base.quoteNewChat(request)
+        let classifiedOutcome: ChatCreationQuoteOutcome =
+            providerUnavailable && outcome == .unavailable(.sourceUnavailable)
+                ? .unavailable(.providerUnavailable)
+                : outcome
+        switch classifiedOutcome {
+        case let .available(quote):
+            return .available(
+                quote,
+                authority: ChatCreationQuoteAuthority(
+                    configuration: developmentScenarioConfigurationStamp,
+                    evidence: developmentScenarioEvidenceAuthority
+                )
+            )
+        case .unavailable(.providerUnavailable):
+            return .providerUnavailable(
+                scenarioProviderUnavailableCapacityLowerBound(),
+                authority: ChatCreationQuoteAuthority(
+                    configuration: developmentScenarioConfigurationStamp,
+                    evidence: developmentScenarioEvidenceAuthority
+                )
+            )
+        case let .unavailable(reason):
+            return .unavailable(reason)
+        }
+    }
+
+    func acquireNewChatCreationLease(
+        _ authority: ChatCreationQuoteAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard authority.configuration == developmentScenarioConfigurationStamp else {
+            return .stale
+        }
+        guard !rejectsCreationLease else { return .stale }
+        return .acquired(CoachContextAuthorityLease())
+    }
+
+    func quoteNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ChatCreationQuoteOutcome {
+        await base.quoteNewChat(request)
+    }
+
+    func quoteChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextQuoteOutcome {
+        await base.quoteChat(request)
+    }
+
+    func preparePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextPendingPreparationOutcome {
+        await base.preparePendingUserTurn(request)
+    }
+
+    func isPreparedContextCurrent(
+        _ prepared: PreparedCoachLaunchContext
+    ) async -> Bool {
+        await base.isPreparedContextCurrent(prepared)
+    }
+}
+
+private actor ChatScenarioAttachmentSource: ChatSessionAttachmentSource {
+    private var events: [ChatDependencyEventDTO]
+    private let recorder: ChatScenarioRecorder
+    private var cancelledResolutionStarted = false
+
+    init(events: [ChatDependencyEventDTO], recorder: ChatScenarioRecorder) {
+        self.events = events
+        self.recorder = recorder
+    }
+
+    func loadCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        guard let event = consume(effect: "loadCandidates") else {
+            XCTFail("missing scripted attachment catalog event")
+            return .failed
+        }
+        await record(event)
+        switch event.outcome.rendered {
+        case "loaded":
+            do {
+                return .loaded(
+                    try (event.candidates ?? []).map { try $0.candidate() },
+                    configuration: developmentScenarioConfigurationStamp
+                )
+            } catch {
+                XCTFail("invalid scripted attachment candidate: \(error)")
+                return .failed
+            }
+        case "readOnlyLibrary":
+            return .readOnlyLibrary
+        case "qualifiedConfigurationUnavailable":
+            return .qualifiedConfigurationUnavailable
+        default:
+            return .failed
+        }
+    }
+
+    func resolve(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        guard let event = consume(effect: "resolveAttachments") else {
+            XCTFail("missing scripted attachment resolution event")
+            return .failed
+        }
+        if event.outcome.rendered == "cancelled" {
+            cancelledResolutionStarted = true
+            await suspendUntilTaskCancellation()
+            await record(event)
+            return .failed
+        }
+        await record(event)
+        switch event.outcome.rendered {
+        case "resolved":
+            do {
+                let resolved = try (event.resolutions ?? []).map { try $0.resolution() }
+                XCTAssertEqual(resolved.map(\.attachment), attachments.values)
+                return .resolved(
+                    resolved,
+                    configuration: developmentScenarioConfigurationStamp
+                )
+            } catch {
+                XCTFail("invalid scripted attachment resolution: \(error)")
+                return .failed
+            }
+        case "readOnlyLibrary":
+            return .readOnlyLibrary
+        case "qualifiedConfigurationUnavailable":
+            return .qualifiedConfigurationUnavailable
+        default:
+            return .failed
+        }
+    }
+
+    func waitUntilCancelledResolutionStarts() async {
+        while !cancelledResolutionStarted { await Task.yield() }
+    }
+
+    private func consume(effect: String) -> ChatDependencyEventDTO? {
+        guard let index = events.firstIndex(where: { $0.effect == effect }) else {
+            return nil
+        }
+        return events.remove(at: index)
+    }
+
+    private func record(_ event: ChatDependencyEventDTO) async {
+        await recorder.append(
+            port: event.port,
+            effect: event.effect,
+            outcome: event.outcome.rendered
+        )
+    }
+}
+
+private func scenarioProviderUnavailableCapacityLowerBound()
+    -> ChatCreationCapacityLowerBound
+{
+    try! CoachContextCapacity().lowerBoundNewChat(
+        creation: try! ChatCreation(
+            kind: .newChat,
+            originAttachmentID: nil,
+            attachments: .empty
+        ),
+        attachments: [],
+        configuration: try! CoachContextConfiguration(
+            descriptor: CoachProviderDescriptor(
+                displayName: "Scenario provider-unavailable fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: 100_000,
+                    responseReservedTokens: 32,
+                    safetyMarginTokens: 8
+                ),
+                coachMemoryMaxTokens: 1
+            ),
+            policy: CoachProviderEstimationPolicy(
+                providerIdentifier: "scenario-provider-unavailable-v1",
+                responseCollectorByteCeiling: 8_192,
+                framing: CoachProviderFraming(),
+                attachmentProjectionPolicy: try! CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 8_192,
+                    tokenEstimator: .utf8ByteUpperBound()
+                )
+            )
+        )
+    )
+}
+
 private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
     private let mode: String
+    private var events: [ChatDependencyEventDTO]
+    private let recorder: ChatScenarioRecorder
     private var pendingResolutionCount = 0
+    private var cancelledNewChatQuoteStarted = false
 
-    init(mode: String) {
+    init(
+        mode: String,
+        events: [ChatDependencyEventDTO],
+        recorder: ChatScenarioRecorder
+    ) {
         self.mode = mode
+        self.events = events
+        self.recorder = recorder
     }
 
     func resolveNewChat(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> CoachContextSnapshotOutcome {
-        .sourceUnavailable
+        guard let event = consume(effect: "quoteNewChat") else {
+            XCTFail("missing scripted New Chat quote event")
+            return .sourceUnavailable
+        }
+        if event.outcome.rendered == "cancelled" {
+            cancelledNewChatQuoteStarted = true
+            await suspendUntilTaskCancellation()
+            await record(event)
+            return .sourceUnavailable
+        }
+        await record(event)
+        switch event.outcome.rendered {
+        case "available":
+            guard let fits = event.fits else {
+                XCTFail("scripted available quote is missing fits")
+                return .sourceUnavailable
+            }
+            return newChatSnapshot(for: request, fits: fits)
+        case "providerUnavailable":
+            return .providerUnavailable
+        case "staleState":
+            return .staleState
+        case "invalidContext":
+            return invalidContextSnapshot(for: request)
+        case "sourceUnavailable":
+            return .sourceUnavailable
+        default:
+            XCTFail("unsupported scripted New Chat quote outcome: \(event.outcome.rendered)")
+            return .sourceUnavailable
+        }
+    }
+
+    func waitUntilCancelledNewChatQuoteStarts() async {
+        while !cancelledNewChatQuoteStarted { await Task.yield() }
     }
 
     func resolveChat(
@@ -1592,6 +2156,198 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
             authority.configurationGeneration == UInt64(pendingResolutionCount + 1)
     }
 
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
+    }
+
+    func currentQualifiedConfiguration()
+        async -> CoachQualifiedConfigurationOutcome
+    {
+        .knownQualified(
+            configuration: try! qualifiedConfiguration(),
+            configurationGeneration: UInt64(pendingResolutionCount + 1)
+        )
+    }
+
+    func isCurrentConfiguration(_ configurationGeneration: UInt64) async -> Bool {
+        configurationGeneration == UInt64(pendingResolutionCount + 1)
+    }
+
+    private func qualifiedConfiguration() throws -> CoachContextConfiguration {
+        try CoachContextConfiguration(
+            descriptor: CoachProviderDescriptor(
+                displayName: "Synthetic scenario fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: 100_000,
+                    responseReservedTokens: 32,
+                    safetyMarginTokens: 8
+                ),
+                coachMemoryMaxTokens: 1
+            ),
+            policy: CoachProviderEstimationPolicy(
+                providerIdentifier: "synthetic-scenario-v1",
+                responseCollectorByteCeiling: 8_192,
+                framing: CoachProviderFraming(),
+                attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 8_192,
+                    tokenEstimator: .utf8ByteUpperBound()
+                )
+            )
+        )
+    }
+
+    private func newChatSnapshot(
+        for request: CoachContextNewChatQuoteRequest,
+        fits: Bool
+    ) -> CoachContextSnapshotOutcome {
+        do {
+            let transcriptBytes = fits ? 32 : 1_000
+            let prepared = request.attachments.values.map { attachment in
+                PreparedCoachAttachment.inline(
+                    requestValue: .object([
+                        "sessionAttachmentId": .string(
+                            attachment.attachmentID.rawValue
+                        ),
+                        "displayLabel": .string("Synthetic Session"),
+                        "transcript": .object([
+                            "text": .string(
+                                String(repeating: "x", count: transcriptBytes)
+                            ),
+                        ]),
+                    ])
+                )
+            }
+            return .resolved(
+                try CoachContextResolvedSnapshot(
+                    input: CoachContextQuoteInput(
+                        profile: .object(["statements": .array([])]),
+                        memory: .object([
+                            "generalNotes": .string(""),
+                            "sessionSummaries": .array([]),
+                        ]),
+                        creation: request.creation,
+                        attachments: prepared
+                    ),
+                    configuration: try CoachContextConfiguration(
+                        descriptor: CoachProviderDescriptor(
+                            displayName: "Synthetic scenario fixture",
+                            contextBudget: CoachContextBudget(
+                                contextWindowTokens: fits ? 100_000 : 400,
+                                responseReservedTokens: 32,
+                                safetyMarginTokens: 8
+                            ),
+                            coachMemoryMaxTokens: 1
+                        ),
+                        policy: CoachProviderEstimationPolicy(
+                            providerIdentifier: "synthetic-scenario-v1",
+                            responseCollectorByteCeiling: 8_192,
+                            framing: CoachProviderFraming(),
+                            attachmentProjectionPolicy:
+                                try CoachAttachmentProjectionPolicy(
+                                    maximumInlineTranscriptTokens: 8_192,
+                                    tokenEstimator: .utf8ByteUpperBound()
+                                )
+                        )
+                    ),
+                    authority: CoachContextSnapshotAuthority(
+                        binding: .newChat(
+                            library: request.library,
+                            attachments: request.attachments,
+                            creation: request.creation
+                        ),
+                        contextGeneration: UInt64(pendingResolutionCount + 1),
+                        configurationGeneration: UInt64(pendingResolutionCount + 1),
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
+                    )
+                )
+            )
+        } catch {
+            return .sourceUnavailable
+        }
+    }
+
+    private func invalidContextSnapshot(
+        for request: CoachContextNewChatQuoteRequest
+    ) -> CoachContextSnapshotOutcome {
+        do {
+            let rejectingEstimator = try CoachTokenEstimator(
+                identifier: "synthetic-invalid-context-v1",
+                mode: .exact,
+                maximumUTF8BytesPerToken: 1,
+                implementation: { _ in -1 }
+            )
+            return .resolved(
+                try CoachContextResolvedSnapshot(
+                    input: CoachContextQuoteInput(
+                        profile: .object(["statements": .array([])]),
+                        memory: .object([
+                            "generalNotes": .string(""),
+                            "sessionSummaries": .array([]),
+                        ]),
+                        creation: request.creation,
+                        attachments: []
+                    ),
+                    configuration: try CoachContextConfiguration(
+                        descriptor: CoachProviderDescriptor(
+                            displayName: "Synthetic invalid-context fixture",
+                            contextBudget: CoachContextBudget(
+                                contextWindowTokens: 100_000,
+                                responseReservedTokens: 32,
+                                safetyMarginTokens: 8
+                            ),
+                            coachMemoryMaxTokens: 1
+                        ),
+                        policy: CoachProviderEstimationPolicy(
+                            providerIdentifier: "synthetic-invalid-context-v1",
+                            responseCollectorByteCeiling: 8_192,
+                            framing: CoachProviderFraming(),
+                            attachmentProjectionPolicy:
+                                try CoachAttachmentProjectionPolicy(
+                                    maximumInlineTranscriptTokens: 8_192,
+                                    tokenEstimator: rejectingEstimator
+                                )
+                        )
+                    ),
+                    authority: CoachContextSnapshotAuthority(
+                        binding: .newChat(
+                            library: request.library,
+                            attachments: request.attachments,
+                            creation: request.creation
+                        ),
+                        contextGeneration: UInt64(pendingResolutionCount + 1),
+                        configurationGeneration: UInt64(pendingResolutionCount + 1),
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
+                    )
+                )
+            )
+        } catch {
+            return .sourceUnavailable
+        }
+    }
+
+    private func consume(effect: String) -> ChatDependencyEventDTO? {
+        guard let index = events.firstIndex(where: { $0.effect == effect }) else {
+            return nil
+        }
+        return events.remove(at: index)
+    }
+
+    private func record(_ event: ChatDependencyEventDTO) async {
+        await recorder.append(
+            port: event.port,
+            effect: event.effect,
+            outcome: event.outcome.rendered
+        )
+    }
+
     private func snapshot(
         for draft: ChatDraft,
         binding: CoachContextSnapshotBinding,
@@ -1623,7 +2379,11 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
                             providerIdentifier: "synthetic-scenario-v1",
                             responseCollectorByteCeiling: 8_192,
                             framing: CoachProviderFraming(),
-                            tokenEstimator: .utf8ByteUpperBound()
+                            attachmentProjectionPolicy:
+                                try CoachAttachmentProjectionPolicy(
+                                    maximumInlineTranscriptTokens: 8_192,
+                                    tokenEstimator: .utf8ByteUpperBound()
+                                )
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(

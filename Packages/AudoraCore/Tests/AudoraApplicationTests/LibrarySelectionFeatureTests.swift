@@ -45,6 +45,97 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         XCTAssertEqual(finalAdmission, .idle)
     }
 
+    func testNewChatConfirmationBeginsAnApplicationBoundary() async throws {
+        let trace = LibrarySelectionTrace()
+        let chat = SuspendedBoundaryChatFeature(trace: trace)
+        let library = SelectionLibraryFeature(trace: trace)
+        let feature = DefaultApplicationCommandFeature(library: library, chat: chat)
+        let context = ChatCommandContext(
+            libraryScope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let token = NewChatConfirmationToken()
+
+        let boundary = feature.enqueue(.confirmNewChat(context, token))
+
+        XCTAssertTrue(feature.admissionState.isChatBoundaryPending)
+        await chat.waitUntilCommandStarts()
+        let commandsWhileSuspended = await chat.commands
+        XCTAssertEqual(commandsWhileSuspended, [.confirmNewChat(context, token)])
+        await chat.resume()
+        await boundary.value
+        XCTAssertEqual(feature.admissionState, .idle)
+    }
+
+    func testNewChatCancelBypassesSuspendedConfirmationInApplicationFIFO() async throws {
+        let trace = LibrarySelectionTrace()
+        let chat = SuspendedNewChatPickerApplicationChatFeature()
+        let library = SelectionLibraryFeature(trace: trace)
+        let feature = DefaultApplicationCommandFeature(library: library, chat: chat)
+        let context = ChatCommandContext(
+            libraryScope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let token = NewChatConfirmationToken()
+
+        let confirmation = feature.enqueue(.confirmNewChat(context, token))
+        XCTAssertTrue(feature.admissionState.isChatBoundaryPending)
+        await chat.waitUntilConfirmationStarts()
+        let cancel = feature.enqueue(.cancelNewChat(context))
+        for _ in 0..<100 { await Task.yield() }
+        let deliveredWhileConfirmationWasSuspended = await chat.cancelReceived
+        if !deliveredWhileConfirmationWasSuspended {
+            await chat.forceResumeConfirmation()
+        }
+        await cancel.value
+        await confirmation.value
+
+        XCTAssertTrue(deliveredWhileConfirmationWasSuspended)
+        XCTAssertFalse(feature.admissionState.isChatBoundaryPending)
+        let commands = await chat.commands
+        XCTAssertEqual(
+            commands,
+            [.confirmNewChat(context, token), .cancelNewChat(context)]
+        )
+    }
+
+    func testTerminationBeginsChatLifecycleBeforeDrainingApplicationFIFO()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SuspendedNewChatPickerApplicationChatFeature()
+        let library = SelectionLibraryFeature(trace: trace)
+        let feature = DefaultApplicationCommandFeature(library: library, chat: chat)
+        let context = ChatCommandContext(
+            libraryScope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let token = NewChatConfirmationToken()
+
+        let confirmation = feature.enqueue(.confirmNewChat(context, token))
+        await chat.waitUntilConfirmationStarts()
+
+        let termination = feature.flushForOrderlyTermination()
+        for _ in 0..<100 { await Task.yield() }
+        let terminationBegan = await chat.orderlyTerminationBegan
+        if !terminationBegan {
+            await chat.forceResumeConfirmation()
+        }
+
+        let terminationSucceeded = await termination.value
+        await confirmation.value
+        let flushCallCount = await chat.flushCallCount
+        XCTAssertTrue(terminationSucceeded)
+        XCTAssertTrue(terminationBegan)
+        XCTAssertEqual(flushCallCount, 1)
+    }
+
     func testOneApplicationFIFOOrdersDraftSendDeferredStartAndTermination() async throws {
         let firstScope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
@@ -329,6 +420,58 @@ private actor SuspendedBoundaryChatFeature: ChatFeature {
     func resume() {
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private actor SuspendedNewChatPickerApplicationChatFeature: ChatFeature {
+    nonisolated let states = AsyncStream<ChatFeatureState> { continuation in
+        continuation.finish()
+    }
+
+    private var confirmationStarted = false
+    private var confirmationContinuation: CheckedContinuation<Void, Never>?
+    private(set) var cancelReceived = false
+    private(set) var orderlyTerminationBegan = false
+    private(set) var flushCallCount = 0
+    private(set) var commands: [ChatCommand] = []
+
+    var currentState: ChatFeatureState { ChatFeatureState() }
+
+    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+
+    func send(_ command: ChatCommand) async {
+        commands.append(command)
+        switch command {
+        case .confirmNewChat:
+            confirmationStarted = true
+            await withCheckedContinuation { confirmationContinuation = $0 }
+        case .cancelNewChat:
+            cancelReceived = true
+            confirmationContinuation?.resume()
+            confirmationContinuation = nil
+        default:
+            break
+        }
+    }
+
+    func beginOrderlyTermination() async {
+        orderlyTerminationBegan = true
+        confirmationContinuation?.resume()
+        confirmationContinuation = nil
+    }
+
+    func flushForOrderlyTermination() async -> Bool {
+        flushCallCount += 1
+        return true
+    }
+
+    func waitUntilConfirmationStarts() async {
+        while !confirmationStarted { await Task.yield() }
+    }
+
+    func forceResumeConfirmation() {
+        confirmationContinuation?.resume()
+        confirmationContinuation = nil
     }
 }
 

@@ -1,11 +1,46 @@
 import AudoraApplication
 import AudoraDomain
 import AppKit
+import Foundation
 import SwiftUI
 
 struct ChatRenameEditorTaskID: Hashable {
     let chatID: ChatID
     let manifestRevision: UInt64
+}
+
+struct NewChatSheetInteractionPresentation: Equatable, Sendable {
+    let allowsControlInteraction: Bool
+    let allowsCancellation: Bool
+    let preventsInteractiveDismissal: Bool
+    let busyAccessibilityLabel: String?
+
+    init(
+        admissionState: ApplicationCommandAdmissionState,
+        chatState: ChatFeatureState
+    ) {
+        let allowsNavigationAndMutation =
+            !admissionState.isLibraryNavigationPending &&
+            !admissionState.isChatBoundaryPending &&
+            !admissionState.isOrderlyTerminationPending &&
+            ChatInteractionPolicy.allowsNavigationAndMutation(in: chatState)
+        let isCreating = chatState.activity == .creating
+        allowsControlInteraction = allowsNavigationAndMutation
+        allowsCancellation = !admissionState.isOrderlyTerminationPending && !isCreating
+        preventsInteractiveDismissal = !allowsCancellation
+        if allowsNavigationAndMutation {
+            busyAccessibilityLabel = nil
+        } else if allowsCancellation {
+            busyAccessibilityLabel =
+                "New Chat is busy. Search, Session selection, and Create Chat are temporarily unavailable. Cancel remains available."
+        } else if isCreating {
+            busyAccessibilityLabel =
+                "New Chat is being created. Search, Session selection, Cancel, and Create Chat are unavailable."
+        } else {
+            busyAccessibilityLabel =
+                "New Chat is busy. Search, Session selection, Cancel, and Create Chat are temporarily unavailable."
+        }
+    }
 }
 
 enum ChatNoticePresentation {
@@ -34,6 +69,9 @@ enum ChatNoticePresentation {
             "The Coach could not accept this Retry. " +
                 "Your Draft remains locked; Retry or Discard."
         case .coachResponseInterrupted: "The Coach response was interrupted and nothing was published."
+        case .attachmentCatalogFailed: "Sessions could not be loaded for Chat creation."
+        case .qualifiedCoachConfigurationUnavailable:
+            "No qualified Coach configuration is available. Install an Audora update with a qualified configuration before creating a Chat."
         }
     }
 
@@ -262,9 +300,9 @@ public struct ChatRootView: View {
                         .font(.headline)
                     Spacer()
                     Button("New Chat") {
-                        model.createDevelopmentChat()
+                        model.beginNewChat()
                     }
-                    .accessibilityLabel("Create New Development Chat")
+                    .accessibilityLabel("Create New Chat")
                     .disabled(!allowsNavigationAndMutation)
                 }
 
@@ -303,6 +341,9 @@ public struct ChatRootView: View {
                 .padding(.leading, 12)
         }
         .task { await model.start(in: scope) }
+        .sheet(isPresented: newChatSheetIsPresented) {
+            newChatSheet
+        }
     }
 
     @ViewBuilder
@@ -380,9 +421,7 @@ public struct ChatRootView: View {
                     }
                     .disabled(!allowsNavigationAndMutation)
                 }
-                Text("No Sessions attached")
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Chat attachments: No Sessions attached")
+                openedAttachmentsView(aggregate)
                 GroupBox("Successful history") {
                     if aggregate.chat.messageIDs.isEmpty {
                         Text("No completed Coach turns yet.")
@@ -601,10 +640,292 @@ public struct ChatRootView: View {
     }
 
     private var allowsNavigationAndMutation: Bool {
-        !dispatcher.isLibraryNavigationPending &&
-            !dispatcher.isChatBoundaryPending &&
-            !dispatcher.isOrderlyTerminationPending &&
-            ChatInteractionPolicy.allowsNavigationAndMutation(in: model.snapshot)
+        newChatSheetInteractionPresentation.allowsControlInteraction
+    }
+
+    private var newChatSheetIsPresented: Binding<Bool> {
+        Binding(
+            get: {
+                if case .closed = model.snapshot.newChatPicker { return false }
+                return true
+            },
+            set: { presented in
+                if !presented { model.cancelNewChat() }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var newChatSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("New Chat")
+                .font(.title2.weight(.semibold))
+            Text("Choose any number of Sessions. The exact selected transcript revisions stay pinned to this Chat.")
+                .foregroundStyle(.secondary)
+
+            TextField(
+                "Search Sessions",
+                text: Binding(
+                    get: { model.newChatAttachmentFilterText },
+                    set: { model.updateNewChatAttachmentFilter($0) }
+                )
+            )
+            .textFieldStyle(.roundedBorder)
+            .accessibilityLabel("Search Sessions for New Chat")
+            .disabled(!newChatSheetInteractionPresentation.allowsControlInteraction)
+
+            switch model.snapshot.newChatPicker {
+            case .closed:
+                EmptyView()
+            case .loading:
+                VStack {
+                    ProgressView("Loading Sessions…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    HStack {
+                        Spacer()
+                        Button("Cancel") { model.cancelNewChat() }
+                            .keyboardShortcut(.cancelAction)
+                            .disabled(!newChatSheetInteractionPresentation.allowsCancellation)
+                    }
+                }
+            case .failed:
+                VStack {
+                    ContentUnavailableView(
+                        "Sessions Unavailable",
+                        systemImage: "exclamationmark.bubble"
+                    )
+                    HStack {
+                        Spacer()
+                        Button("Cancel") { model.cancelNewChat() }
+                            .keyboardShortcut(.cancelAction)
+                            .disabled(!newChatSheetInteractionPresentation.allowsCancellation)
+                    }
+                }
+            case let .ready(picker):
+                if picker.visibleRows.isEmpty {
+                    ContentUnavailableView(
+                        picker.allRows.isEmpty ? "No Sessions" : "No Matching Sessions",
+                        systemImage: "waveform"
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(picker.visibleRows) { row in
+                        Button {
+                            model.performNewChatAttachmentPickerAction(.toggle(row.id))
+                        } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(
+                                    systemName: picker.selectedAttachmentIDs.contains(row.id)
+                                        ? "checkmark.circle.fill"
+                                        : "circle"
+                                )
+                                .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(row.displayLabel)
+                                    HStack(spacing: 12) {
+                                        Text(Self.durationText(row.durationMilliseconds))
+                                        Text("~\(row.approximateTranscriptTokens) tokens")
+                                        Text(row.delivery == .inline ? "Inline" : "On demand")
+                                    }
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(
+                            "\(picker.selectedAttachmentIDs.contains(row.id) ? "Selected" : "Not selected"), \(row.displayLabel), \(Self.durationText(row.durationMilliseconds)), approximately \(row.approximateTranscriptTokens) transcript tokens, \(row.delivery == .inline ? "inline" : "on demand")"
+                        )
+                    }
+                    .disabled(!newChatSheetInteractionPresentation.allowsControlInteraction)
+                }
+
+                creationQuote(picker)
+                if let issue = picker.issue {
+                    Label(
+                        NewChatAttachmentPickerPresentation.recoveryText(for: issue),
+                        systemImage: issue.blocksConfirmation
+                            ? "exclamationmark.triangle"
+                            : "info.circle"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(
+                        NewChatAttachmentPickerPresentation.accessibilityAnnouncement(
+                            for: issue
+                        )
+                    )
+                    if issue == .qualifiedConfigurationUnavailable {
+                        Button("Check Again") {
+                            model.retryNewChatConfiguration()
+                        }
+                        .disabled(
+                            !newChatSheetInteractionPresentation.allowsControlInteraction
+                        )
+                        .accessibilityHint(
+                            "Reloads Sessions and recalculates context while retaining every still-available exact selection"
+                        )
+                    }
+                }
+                HStack {
+                    Text("\(picker.selectionCount) selected")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("\(picker.selectionCount) Sessions selected")
+                    Spacer()
+                    Button("Cancel") {
+                        model.performNewChatAttachmentPickerAction(.cancelAction)
+                    }
+                        .keyboardShortcut(.cancelAction)
+                        .disabled(!newChatSheetInteractionPresentation.allowsCancellation)
+                    Button("Create Chat") {
+                        model.performNewChatAttachmentPickerAction(.defaultAction)
+                    }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(
+                            !newChatSheetInteractionPresentation.allowsControlInteraction ||
+                                !picker.permitsConfirmation
+                        )
+                        .accessibilityHint("Creates a Chat without sending a message")
+                }
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 620, minHeight: 520)
+        .overlay(alignment: .bottomLeading) {
+            if let busyAccessibilityLabel =
+                newChatSheetInteractionPresentation.busyAccessibilityLabel
+            {
+                ProgressView("Finishing current action…")
+                    .accessibilityLabel(busyAccessibilityLabel)
+                    .padding(24)
+            }
+        }
+        .interactiveDismissDisabled(
+            newChatSheetInteractionPresentation.preventsInteractiveDismissal
+        )
+    }
+
+    private var newChatSheetInteractionPresentation: NewChatSheetInteractionPresentation {
+        NewChatSheetInteractionPresentation(
+            admissionState: dispatcher.admissionState,
+            chatState: model.snapshot
+        )
+    }
+
+    @ViewBuilder
+    private func creationQuote(_ picker: ChatAttachmentPickerSnapshot) -> some View {
+        switch picker.feasibility {
+        case .quoting:
+            ProgressView("Estimating current Profile and Session context…")
+                .controlSize(.small)
+        case let .available(quote):
+            creationContextMeter(NewChatCreationContextPresentation(quote.context))
+        case let .providerUnavailable(lowerBound):
+            VStack(alignment: .leading, spacing: 4) {
+                creationContextMeter(NewChatCreationContextPresentation(lowerBound))
+                Text(NewChatAttachmentPickerPresentation.providerUnavailableRecoveryText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .unavailable:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func creationContextMeter(
+        _ presentation: NewChatCreationContextPresentation
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(presentation.summary)
+                .font(.callout.monospacedDigit())
+            ProgressView(
+                value: Double(presentation.usedTokens),
+                total: Double(presentation.maximumTokens)
+            )
+            .accessibilityLabel(presentation.accessibilityLabel)
+            if let profileContribution = presentation.profileContribution {
+                Text(profileContribution)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private static func durationText(_ milliseconds: UInt64) -> String {
+        let totalSeconds = milliseconds / 1_000
+        return String(
+            format: "%llu:%02llu",
+            totalSeconds / 60,
+            totalSeconds % 60
+        )
+    }
+
+    @ViewBuilder
+    private func openedAttachmentsView(_ aggregate: ChatAggregate) -> some View {
+        if aggregate.chat.attachments.values.isEmpty {
+            Text("No Sessions attached")
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Chat attachments: No Sessions attached")
+        } else {
+            GroupBox("Pinned Sessions") {
+                switch model.snapshot.openedAttachments {
+                case .notRequested, .resolving:
+                    ProgressView("Checking exact transcript revisions…")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .failed:
+                    Label("Pinned Sessions could not be verified", systemImage: "exclamationmark.triangle")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityLabel("Pinned Chat attachments could not be verified")
+                case let .resolved(resolutions):
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(resolutions.enumerated()), id: \.element.attachment.attachmentID) {
+                            index, resolved in
+                            switch resolved.resolution {
+                            case let .available(candidate):
+                                HStack {
+                                    Image(systemName: "pin.fill")
+                                        .accessibilityHidden(true)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(candidate.displayLabel)
+                                        Text(
+                                            "\(Self.durationText(candidate.durationMilliseconds)) · ~\(candidate.approximateTranscriptTokens) tokens · \(candidate.delivery == .inline ? "Inline" : "On demand")"
+                                        )
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .accessibilityLabel(
+                                    "Pinned Session \(index + 1), \(candidate.displayLabel), exact transcript revision available"
+                                )
+                            case let .unavailable(reason):
+                                Label(
+                                    "Pinned Session \(index + 1): \(Self.attachmentUnavailableText(reason))",
+                                    systemImage: "exclamationmark.triangle"
+                                )
+                                .accessibilityLabel(
+                                    "Pinned Session \(index + 1), \(Self.attachmentUnavailableText(reason))"
+                                )
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private static func attachmentUnavailableText(
+        _ reason: ChatAttachmentUnavailableReason
+    ) -> String {
+        switch reason {
+        case .missing: "missing"
+        case .inTrash: "in Trash"
+        case .corrupt: "corrupt"
+        case .unsupportedSchema: "requires a newer Audora version"
+        }
     }
 
     @ViewBuilder

@@ -5,8 +5,7 @@ the provider aggregate in [`coach-provider.tsp`](coach-provider.tsp), the
 portable Library document roots in
 [`portable-library.tsp`](portable-library.tsp), and the Library lifecycle
 scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp), and
-the portable Chat roots and scenarios in
-[`development-chat.tsp`](development-chat.tsp).
+the portable Chat roots and scenarios in [`chat.tsp`](chat.tsp).
 [`session-audio.tsp`](session-audio.tsp) is the single source of truth for
 shared Session identity and the imported/microphone audio and Session manifest
 variants. Imported-audio normalization and feature behavior live in
@@ -48,7 +47,7 @@ current terminal reasons and legacy v1.
 - [`CoachProviderDescriptor.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachProviderDescriptor.json)
 - [`CoachRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachRequest.json)
 - [`CoachResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/CoachResponse.json)
-- [`DevelopmentChatFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/DevelopmentChatFeatureScenario.json)
+- [`ChatFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ChatFeatureScenario.json)
 - [`LibraryFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScenario.json)
 - [`LibraryManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json)
 - [`LibraryPreferences.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json)
@@ -77,7 +76,7 @@ current terminal reasons and legacy v1.
 | `CoachResponse` | Coach -> Application | Yes |
 | `ChatManifest` | Portable Library storage | No |
 | `CoachMemoryEnvelope` | Portable Library storage | No |
-| `DevelopmentChatFeatureScenario` | Portable cross-implementation behavior | No |
+| `ChatFeatureScenario` | Portable cross-implementation behavior | No |
 | `LibraryFeatureScenario` | Portable cross-implementation behavior | No |
 | `LibraryManifest` | Portable Library storage | No |
 | `LibraryPreferences` | Portable Library storage | No |
@@ -241,19 +240,31 @@ this repository boundary, exposes no partial Revision for review, and cannot
 change the selected Revision. Checked-in runtime-rejected fixtures lock the
 punctuation-as-Word and split-UTF-8-range cases while remaining schema-valid.
 
-## Development Chat roots and scenarios
+## Chat roots and scenarios
 
-A Development Chat created from the Chat UI starts with `creationKind: newChat`,
-no `originAttachmentId`, exactly zero attachments and messages, an empty stable
-Draft, and an empty stable Coach Memory. Its portable roots are
+A Development Chat is the exact zero-Session-attachment Chat specialization. It
+starts with `creationKind: newChat`, no `originAttachmentId`, exactly zero
+attachments and messages, an empty stable Draft, and an empty stable Coach Memory.
+The explicit
+[`create-empty-development-chat.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/Chat/create-empty-development-chat.v1.json)
+fixture keeps that specialization visible. Its portable roots are
 `chats/<chat-id>/chat.json`, an empty `messages/` directory, and
 `memory/<memory-id>.json`. Pending-turn, Proposal, and Profile-write operational
 files are absent. Rename changes only the title, manifest revision, and update
 instant; filter is a pure in-memory projection; reopen restores the same IDs and
 local Draft without invoking a provider.
 
-Checked-in fixtures cover create, rename, filter, relaunch, stale rename, and the
-Draft lock-and-discard lifecycle in
+Storage goldens for all Chat variants live under
+[`Examples/Chat/v1`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/Chat/v1/).
+The empty `chat.json` remains the Development Chat golden, while
+`session-analysis-chat.json` exercises the attached Session Analysis shape.
+
+`ChatFeatureScenario` describes portable Chat behavior across both zero-attachment
+and attached Chats, including the New Chat attachment picker. Checked-in fixtures
+cover create, rename, filter, relaunch, stale rename, final attachment disappearance
+with an atomic no-Chat result and retained selection, immediate cancellation of
+exact attachment resolution, cancellation of the post-resolution precommit quote,
+and the Draft lock-and-discard lifecycle in
 [`draft-send-discard.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/Chat/draft-send-discard.v1.json).
 Each scenario declares exact provider, Invocation, and admission call totals. The
 three scenarios containing Send cross the single Invocation gateway, while
@@ -335,7 +346,7 @@ dependency graph is committed in `pnpm-lock.yaml`. `generated-json-files.txt`
 enumerates the canonical package-resource schemas and makes the check fail when
 generated roots change unexpectedly or their committed bytes drift. The same
 check runs every checked-in audio-import, Recording, Transcript Revision, and
-Development Chat scenario or golden through the generated Draft 2020-12 schemas.
+Chat scenario or golden through the generated Draft 2020-12 schemas.
 It also checks exact imported cross-root hashes, rejects mixed manifest families,
 and keeps runtime-only Recording and Transcript Revision rejection fixtures
 schema-valid for the production Swift validators.

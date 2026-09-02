@@ -13,13 +13,16 @@ and publishes one immutable Session only after flush, atomic install, and strict
 reread. The portable Domain, Application, and Contracts products remain separate
 from the macOS-only Infrastructure and Presentation products.
 
-Development Chat also has a portable context-capacity coordinator. It projects
+Chat also has a portable context-capacity coordinator. It projects
 the current Profile, Coach Memory, complete successful history, Draft, framing,
 immutable attachments, one complete transcript-read exchange, response reserve,
 and safety margin through one deterministic serializer. Quotes are advisory; Send
 repeats the exact preflight and fails closed because no production provider
-descriptor is qualified yet. Context failure recovery is local and invokes no
-provider or admission service. Creation quotes use an explicit no-Draft framing;
+descriptor is qualified yet. Attachment projection and capacity-sensitive Chat
+creation fail closed for the same reason. A temporary provider outage permits
+local creation only when an injected adapter retains a known current qualified
+configuration. Context failure recovery is local and invokes no provider or
+admission service. Creation quotes use an explicit no-Draft framing;
 Send rejects the independent 16,384-byte message limit before resolving provider
 state, and exact snapshots are fenced by stable Draft/Pending identity plus current
 context and configuration generations.

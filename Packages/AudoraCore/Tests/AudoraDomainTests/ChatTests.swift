@@ -1,7 +1,7 @@
 import AudoraDomain
 import XCTest
 
-final class DevelopmentChatTests: XCTestCase {
+final class ChatTests: XCTestCase {
     func testCapacityFailureReplacementPreservesPendingTurnIdentity() throws {
         let pending = PendingUserTurn(
             id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
@@ -64,6 +64,16 @@ final class DevelopmentChatTests: XCTestCase {
 
     func testAttachmentAndCreationInvariantsAreEnforced() throws {
         let attachment = try makeAttachment()
+        XCTAssertThrowsError(
+            try ChatAttachments(
+                validating: Array(
+                    repeating: attachment,
+                    count: ChatAttachments.maximumCount + 1
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? ChatAttachmentsError, .tooManyAttachments)
+        }
         XCTAssertThrowsError(try ChatAttachments(validating: [attachment, attachment]))
         let attachments = try ChatAttachments(validating: [attachment])
 

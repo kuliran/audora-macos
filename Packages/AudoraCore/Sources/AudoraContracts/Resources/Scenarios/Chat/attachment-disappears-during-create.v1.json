@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "attachment-disappears-during-create",
+  "libraryId": "lib-20260830T100000000Z-1ABC",
+  "initialChats": [],
+  "commands": [
+    {"kind": "beginNewChat"},
+    {"kind": "toggleNewChatAttachment", "attachmentId": "attachment-000001"},
+    {"kind": "confirmNewChat"}
+  ],
+  "dependencyTrace": [
+    {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded"},
+    {
+      "port": "attachmentSource",
+      "effect": "loadCandidates",
+      "outcome": "loaded",
+      "candidates": [{
+        "sessionId": "ses-20260830T110000000Z-5JKM",
+        "transcriptRevisionId": "trv-20260830T113000000Z-6NPQ",
+        "displayLabel": "Weekly review",
+        "durationMilliseconds": 90000,
+        "approximateTranscriptTokens": 1200,
+        "delivery": "inline"
+      }]
+    },
+    {"port": "coachContext", "effect": "quoteNewChat", "outcome": "available", "fits": true},
+    {"port": "coachContext", "effect": "quoteNewChat", "outcome": "available", "fits": true},
+    {
+      "port": "attachmentSource",
+      "effect": "resolveAttachments",
+      "outcome": "resolved",
+      "resolutions": [{
+        "attachment": {
+          "attachmentId": "attachment-000001",
+          "sessionId": "ses-20260830T110000000Z-5JKM",
+          "transcriptRevisionId": "trv-20260830T113000000Z-6NPQ"
+        },
+        "status": "available",
+        "candidate": {
+          "sessionId": "ses-20260830T110000000Z-5JKM",
+          "transcriptRevisionId": "trv-20260830T113000000Z-6NPQ",
+          "displayLabel": "Weekly review",
+          "durationMilliseconds": 90000,
+          "approximateTranscriptTokens": 1200,
+          "delivery": "inline"
+        }
+      }]
+    },
+    {"port": "profileHead", "effect": "readStatementGeneration", "outcome": 0},
+    {"port": "clock", "effect": "now", "outcome": "2026-08-30T12:00:00.000Z"},
+    {"port": "chatIdGenerator", "effect": "next", "outcome": "cht-20260830T120000000Z-2ABC"},
+    {"port": "chatDraftIdGenerator", "effect": "next", "outcome": "drf-20260830T120000000Z-3DEF"},
+    {"port": "coachMemoryIdGenerator", "effect": "next", "outcome": "mem-20260830T120000000Z-4GHJ"},
+    {"port": "chatStore", "effect": "create", "outcome": "attachmentUnavailable"}
+  ],
+  "expectedState": {
+    "allChatIds": [],
+    "visibleChatIds": [],
+    "catalogStatus": "ready",
+    "newChatPickerStatus": "ready",
+    "newChatFilterQuery": "",
+    "newChatAllAttachmentIds": ["attachment-000001"],
+    "newChatVisibleAttachmentIds": ["attachment-000001"],
+    "newChatSelectedAttachmentIds": ["attachment-000001"],
+    "newChatFeasibility": "fits",
+    "newChatIssue": "attachmentUnavailable"
+  },
+  "expectedProviderCalls": 0,
+  "expectedInvocationCalls": 0,
+  "expectedAdmissionCalls": 0
+}

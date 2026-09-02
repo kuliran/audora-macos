@@ -2631,7 +2631,11 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                             providerIdentifier: "synthetic-fixture-v1",
                             responseCollectorByteCeiling: 8_192,
                             framing: CoachProviderFraming(),
-                            tokenEstimator: .utf8ByteUpperBound()
+                            attachmentProjectionPolicy:
+                                try CoachAttachmentProjectionPolicy(
+                                    maximumInlineTranscriptTokens: 8_192,
+                                    tokenEstimator: .utf8ByteUpperBound()
+                                )
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(
@@ -2657,6 +2661,12 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         currentCheckCount += 1
         return currentCheckCount == 1 || current
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
     }
 }
 

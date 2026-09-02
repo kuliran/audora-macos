@@ -1,5 +1,6 @@
-@testable @_spi(CoachContextQualification) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(ChatCreationAuthorityTesting) import AudoraApplication
 import AudoraDomain
+import Foundation
 import XCTest
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
@@ -314,7 +315,7 @@ final class ChatFeatureTests: XCTestCase {
         }
     }
 
-    func testDelayedCreateFromPreviousLibraryContextIsRejectedAfterSwitch() async {
+    func testDelayedConfirmFromPreviousLibraryContextIsRejectedAfterSwitch() async {
         let store = RecordingChatStore()
         let feature = makeFeature(store: store)
         let firstContext = ChatCommandContext(
@@ -328,7 +329,7 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(firstContext))
         await feature.send(.start(secondContext))
 
-        await feature.send(.createDevelopmentChat(firstContext))
+        await feature.sendCurrentNewChatConfirmation(firstContext)
 
         let calls = await store.calls
         XCTAssertEqual(calls, [.loadCatalog, .loadCatalog])
@@ -351,12 +352,13 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(loadedScopes, [Self.secondScope])
     }
 
-    func testCreateCommitsCanonicalEmptyDevelopmentChatBeforeSelectingIt() async throws {
+    func testConfirmedZeroSelectionCommitsCanonicalEmptyChatBeforeSelectingIt() async throws {
         let store = RecordingChatStore()
         let feature = makeFeature(store: store)
         await feature.send(.start(Self.context))
 
-        await feature.send(.createDevelopmentChat(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seeds = await store.createSeeds
         let seed = try XCTUnwrap(seeds.first)
@@ -375,71 +377,1097 @@ final class ChatFeatureTests: XCTestCase {
         let feature = makeFeature(store: store)
         await feature.send(.start(Self.context))
 
-        await feature.send(.createDevelopmentChat(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seedCount = await store.createSeeds.count
+        let collisionAuthorityRetentions =
+            await store.createCollisionAuthorityRetentions
         let state = await feature.currentState
         XCTAssertEqual(seedCount, 3)
+        XCTAssertEqual(collisionAuthorityRetentions, [true, true, false])
         XCTAssertEqual(state.notice, .createCollisionLimitReached)
     }
 
-    func testCreateRebuildsAgainstTheProfileGenerationObservedAtInstall() async throws {
+    func testProfileConflictRequiresFreshConfirmationBeforeRetryingCurrentGeneration()
+        async throws
+    {
         let store = RecordingChatStore(
             createOutcomes: [.profileStatementGenerationChanged(9)]
         )
-        let feature = makeFeature(store: store)
+        let feature = makeFeature(
+            store: store,
+            profileReader: SequencedProfileReader(generations: [7, 9])
+        )
         await feature.send(.start(Self.context))
 
-        await feature.send(.createDevelopmentChat(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
-        let generations = await store.createSeeds.map(
+        let generationsBeforeFreshConfirmation = await store.createSeeds.map(
             \.aggregate.chat.profileStatementGenerationAtCreation
         )
-        XCTAssertEqual(generations, [7, 9])
-        let state = await feature.currentState
-        XCTAssertEqual(Self.openAggregate(in: state)?.chat.profileStatementGenerationAtCreation, 9)
+        XCTAssertEqual(generationsBeforeFreshConfirmation, [7])
+        let requotedState = await feature.currentState
+        XCTAssertNil(Self.openAggregate(in: requotedState))
+        guard case let .ready(requotedPicker) = requotedState.newChatPicker else {
+            return XCTFail("the picker must remain open for a fresh confirmation")
+        }
+        XCTAssertTrue(requotedPicker.permitsConfirmation)
+
+        await feature.sendCurrentNewChatConfirmation(Self.context)
+
+        let generationsAfterFreshConfirmation = await store.createSeeds.map(
+            \.aggregate.chat.profileStatementGenerationAtCreation
+        )
+        XCTAssertEqual(generationsAfterFreshConfirmation, [7, 9])
+        let committedState = await feature.currentState
+        XCTAssertEqual(
+            Self.openAggregate(in: committedState)?.chat.profileStatementGenerationAtCreation,
+            9
+        )
     }
 
-    func testProfileRebasesDoNotConsumeTheCollisionRetryBudget() async throws {
-        let store = RecordingChatStore(
-            createOutcomes: [
-                .profileStatementGenerationChanged(8),
-                .profileStatementGenerationChanged(9),
-                .collision,
-                .collision,
-            ]
+    func testProfileGrowthDuringCreateRequotesPickerAndRequiresFreshConfirmationBeforeRetry()
+        async throws
+    {
+        let source = GrowingNewChatProfileSnapshotPort()
+        let store = ProfileChangingCreateStore(source: source)
+        let feature = makeFeature(
+            store: store,
+            coachContext: ChatFeatureBoundCoachContextFixture(
+                attachmentSource: EmptyChatAttachmentSource(),
+                base: DefaultCoachContextFeature(
+                    source: source,
+                    configurationAuthorityID:
+                        chatFeatureConfigurationStamp.authorityID
+                )
+            )
         )
-        let feature = makeFeature(store: store)
         await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
 
-        await feature.send(.createDevelopmentChat(Self.context))
+        guard case let .ready(initialPicker) = await feature.currentState.newChatPicker,
+              case let .available(initialQuote) = initialPicker.feasibility
+        else {
+            return XCTFail("the initial live Profile quote must permit confirmation")
+        }
+        XCTAssertTrue(initialQuote.context.fits)
+
+        await feature.sendCurrentNewChatConfirmation(Self.context)
 
         let seeds = await store.createSeeds
-        XCTAssertEqual(seeds.count, 5)
-        XCTAssertEqual(
-            seeds.map(\.aggregate.chat.profileStatementGenerationAtCreation),
-            [7, 8, 9, 9, 9]
-        )
+        XCTAssertEqual(seeds.count, 1)
         let state = await feature.currentState
-        XCTAssertNil(state.notice)
-        XCTAssertNotNil(Self.openAggregate(in: state))
+        XCTAssertNil(Self.openAggregate(in: state))
+        guard case let .ready(refreshedPicker) = state.newChatPicker,
+              case let .available(refreshedQuote) = refreshedPicker.feasibility
+        else {
+            return XCTFail("the changed Profile must be projected into the creation picker")
+        }
+        XCTAssertGreaterThan(
+            refreshedQuote.context.completeInputTokens,
+            initialQuote.context.completeInputTokens
+        )
+        XCTAssertFalse(refreshedQuote.context.fits)
+        XCTAssertEqual(refreshedPicker.issue, .contextCannotFit)
+        XCTAssertFalse(refreshedPicker.permitsConfirmation)
+
+        await feature.sendCurrentNewChatConfirmation(Self.context)
+
+        let createCountAfterBlockedConfirmation = await store.createSeeds.count
+        XCTAssertEqual(createCountAfterBlockedConfirmation, 1)
     }
 
-    func testProfileRebaseLimitIsNotReportedAsCollisionExhaustion() async throws {
+    func testContextDriftAfterDisplayedQuoteRequiresFreshConfirmation() async throws {
+        let source = GrowingNewChatProfileSnapshotPort()
+        let store = RecordingChatStore()
+        let feature = makeFeature(
+            store: store,
+            coachContext: ChatFeatureBoundCoachContextFixture(
+                attachmentSource: EmptyChatAttachmentSource(),
+                base: DefaultCoachContextFeature(
+                    source: source,
+                    configurationAuthorityID:
+                        chatFeatureConfigurationStamp.authorityID
+                )
+            )
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+
+        guard case let .ready(initialPicker) = await feature.currentState.newChatPicker,
+              case let .available(initialQuote) = initialPicker.feasibility
+        else {
+            return XCTFail("the initial live-context quote must permit confirmation")
+        }
+        XCTAssertTrue(initialPicker.permitsConfirmation)
+        await source.installExpandedProfile()
+
+        await feature.sendCurrentNewChatConfirmation(Self.context)
+
+        let seedsBeforeFreshConfirmation = await store.createSeeds
+        XCTAssertEqual(seedsBeforeFreshConfirmation.count, 0)
+        guard case let .ready(refreshedPicker) = await feature.currentState.newChatPicker,
+              case let .available(refreshedQuote) = refreshedPicker.feasibility
+        else {
+            return XCTFail("context drift must project the replacement quote")
+        }
+        XCTAssertGreaterThan(
+            refreshedQuote.context.completeInputTokens,
+            initialQuote.context.completeInputTokens
+        )
+        XCTAssertTrue(refreshedPicker.permitsConfirmation)
+
+        await feature.sendCurrentNewChatConfirmation(Self.context)
+
+        let seedsAfterFreshConfirmation = await store.createSeeds
+        XCTAssertEqual(seedsAfterFreshConfirmation.count, 1)
+    }
+
+    func testRepeatedProfileConflictsRequireOneFreshConfirmationEach() async throws {
         let store = RecordingChatStore(
             createOutcomes: [
                 .profileStatementGenerationChanged(8),
                 .profileStatementGenerationChanged(9),
-                .profileStatementGenerationChanged(10),
             ]
         )
-        let feature = makeFeature(store: store)
+        let feature = makeFeature(
+            store: store,
+            profileReader: SequencedProfileReader(generations: [7, 8, 9])
+        )
         await feature.send(.start(Self.context))
 
-        await feature.send(.createDevelopmentChat(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        await feature.sendCurrentNewChatConfirmation(Self.context)
+
+        let firstConfirmationSeeds = await store.createSeeds
+        XCTAssertEqual(
+            firstConfirmationSeeds.map(
+                \.aggregate.chat.profileStatementGenerationAtCreation
+            ),
+            [7]
+        )
+
+        await feature.sendCurrentNewChatConfirmation(Self.context)
+
+        let secondConfirmationSeeds = await store.createSeeds
+        XCTAssertEqual(
+            secondConfirmationSeeds.map(
+                \.aggregate.chat.profileStatementGenerationAtCreation
+            ),
+            [7, 8]
+        )
+
+        await feature.sendCurrentNewChatConfirmation(Self.context)
+
+        let finalSeeds = await store.createSeeds
+        XCTAssertEqual(
+            finalSeeds.map(\.aggregate.chat.profileStatementGenerationAtCreation),
+            [7, 8, 9]
+        )
+        let committedState = await feature.currentState
+        XCTAssertEqual(
+            Self.openAggregate(in: committedState)?.chat.profileStatementGenerationAtCreation,
+            9
+        )
+    }
+
+    func testQueuedConfirmationCannotAdoptReplacementQuoteToken() async throws {
+        let aggregate = try Self.aggregate()
+        let store = RecordingChatStore(
+            catalog: [.available(aggregate)],
+            createOutcomes: [.profileStatementGenerationChanged(9)],
+            suspendNextDraftSave: true
+        )
+        let scheduler = ControlledChatAutosaveScheduler()
+        let feature = makeFeature(
+            store: store,
+            profileReader: SequencedProfileReader(generations: [7, 9]),
+            autosaveScheduler: scheduler
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Keep this draft durable before creating."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initialPicker) = await feature.currentState.newChatPicker,
+              let tokenA = initialPicker.confirmationToken
+        else {
+            return XCTFail("the initial quote must publish confirmation A")
+        }
+
+        async let firstConfirmation: Void = feature.send(
+            .confirmNewChat(Self.context, tokenA)
+        )
+        await store.waitUntilDraftSaveStarts()
+        await feature.send(.confirmNewChat(Self.context, tokenA))
+        await store.resumeDraftSave()
+        await firstConfirmation
+
+        let seedsAfterStaleConfirmation = await store.createSeeds
+        XCTAssertEqual(seedsAfterStaleConfirmation.count, 1)
+        let replacementState = await feature.currentState
+        guard case let .ready(replacementPicker) = replacementState.newChatPicker,
+              let tokenB = replacementPicker.confirmationToken
+        else {
+            return XCTFail("the profile conflict must publish replacement confirmation B")
+        }
+        XCTAssertNotEqual(tokenB, tokenA)
+
+        await feature.send(.confirmNewChat(Self.context, tokenB))
+
+        let seedsAfterCurrentConfirmation = await store.createSeeds
+        XCTAssertEqual(seedsAfterCurrentConfirmation.count, 2)
+        let committedState = await feature.currentState
+        XCTAssertNotNil(Self.openAggregate(in: committedState))
+    }
+
+    func testStaleProposalTokenCannotPublishOrCreateButCurrentTokenSucceeds()
+        async throws
+    {
+        let candidate = try Self.attachmentCandidate()
+        let coordinator = ScriptedNewChatCoachContext(candidates: [candidate])
+        let store = RecordingChatStore()
+        let feature = makeFeature(store: store, coachContext: coordinator)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(initialPicker) = await feature.currentState.newChatPicker,
+              let row = initialPicker.allRows.first,
+              let staleToken = initialPicker.confirmationToken
+        else {
+            return XCTFail("the initial proposal must be confirmable")
+        }
+
+        await feature.send(.toggleNewChatAttachment(Self.context, row.id))
+
+        let selectedState = await feature.currentState
+        guard case let .ready(selectedPicker) = selectedState.newChatPicker,
+              let currentToken = selectedPicker.confirmationToken
+        else {
+            return XCTFail("the selected proposal must publish a fresh token")
+        }
+        XCTAssertNotEqual(currentToken, staleToken)
+
+        await feature.send(.confirmNewChat(Self.context, staleToken))
+
+        let stateAfterStaleConfirmation = await feature.currentState
+        let seedsAfterStaleConfirmation = await store.createSeeds
+        let resolutionCountAfterStaleConfirmation = await coordinator.resolutionCount
+        XCTAssertEqual(stateAfterStaleConfirmation, selectedState)
+        XCTAssertTrue(seedsAfterStaleConfirmation.isEmpty)
+        XCTAssertEqual(resolutionCountAfterStaleConfirmation, 0)
+
+        await feature.send(.confirmNewChat(Self.context, currentToken))
+
+        let seeds = await store.createSeeds
+        XCTAssertEqual(seeds.count, 1)
+        XCTAssertEqual(seeds.first?.aggregate.chat.attachments.values.count, 1)
+    }
+
+    func testConfigurationCannotAdvanceAcrossSuspendedCreateCommit() async throws {
+        let coordinator = AdvancingConfigurationChatContextFixture(
+            base: DefaultCoachContextFeature(
+                source: AlwaysFitCoachContextSnapshotPort()
+            )
+        )
+        let store = SuspendedCreateStore(coordinator: coordinator)
+        let feature = makeFeature(store: store, coachContext: coordinator)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+
+        async let confirmation: Void = feature.sendCurrentNewChatConfirmation(Self.context)
+        await store.waitUntilCreateStarts()
+        async let advancement: Void = coordinator.advanceConfiguration()
+        await coordinator.waitUntilAdvanceIsRequested()
+        await store.resumeCreate()
+        await confirmation
+        await advancement
+
+        let generationAtCommit = await store.configurationGenerationAtCommit
+        XCTAssertEqual(generationAtCommit, 1)
+        let state = await feature.currentState
+        XCTAssertNotNil(Self.openAggregate(in: state))
+        let currentGeneration = await coordinator.currentGeneration
+        XCTAssertEqual(currentGeneration, 2)
+    }
+
+    func testCancelCannotClosePickerAfterDurableCreationStarts() async {
+        let store = SuspendedCreateStore(result: .committed)
+        let feature = makeFeature(store: store)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+
+        async let confirmation: Void = feature.sendCurrentNewChatConfirmation(Self.context)
+        await store.waitUntilCreateStarts()
+        let creatingState = await feature.currentState
+        XCTAssertEqual(creatingState.activity, .creating)
+
+        await feature.send(.cancelNewChat(Self.context))
+
+        let stateAfterCancel = await feature.currentState
+        XCTAssertEqual(stateAfterCancel.activity, .creating)
+        guard case .ready = stateAfterCancel.newChatPicker else {
+            await store.resumeCreate()
+            await confirmation
+            return XCTFail("durable creation must keep the picker until it resolves")
+        }
+        await store.resumeCreate()
+        await confirmation
+
+        let committedState = await feature.currentState
+        XCTAssertNotNil(Self.openAggregate(in: committedState))
+        XCTAssertEqual(committedState.newChatPicker, .closed)
+    }
+
+    func testCancelInterruptsSuspendedAttachmentCatalogAndClosesPicker() async {
+        let coordinator = ScriptedNewChatCoachContext(suspendCatalog: true)
+        let feature = makeFeature(
+            store: RecordingChatStore(),
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+        let context = Self.context
+
+        let loading = Task { await feature.send(.beginNewChat(context)) }
+        await coordinator.waitUntilCatalogStarts()
+        await feature.send(.cancelNewChat(context))
+        await loading.value
+        await coordinator.waitUntilCancellationIsObserved()
 
         let state = await feature.currentState
-        XCTAssertEqual(state.notice, .createFailed)
+        let observedCancellation = await coordinator.observedCancellation
+        XCTAssertEqual(state.newChatPicker, .closed)
+        XCTAssertTrue(observedCancellation)
+    }
+
+    func testOrderlyTerminationCancelsSuspendedAttachmentCatalogAndFlushesDirtyDraft()
+        async throws
+    {
+        let aggregate = try Self.aggregate()
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let scheduler = ControlledChatAutosaveScheduler()
+        let coordinator = ScriptedNewChatCoachContext(suspendCatalog: true)
+        let feature = makeFeature(
+            store: store,
+            autosaveScheduler: scheduler,
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Flush after cancelling the Session catalog."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+
+        async let loading: Void = feature.send(.beginNewChat(Self.context))
+        await coordinator.waitUntilCatalogStarts()
+        async let mayTerminate: Bool = feature.flushForOrderlyTermination()
+
+        await loading
+        let terminationSucceeded = await mayTerminate
+        let savedDrafts = await store.savedDrafts
+        let state = await feature.currentState
+        XCTAssertTrue(terminationSucceeded)
+        XCTAssertEqual(
+            savedDrafts.map(\.replacement.text),
+            ["Flush after cancelling the Session catalog."]
+        )
+        XCTAssertEqual(state.newChatPicker, .closed)
+    }
+
+    func testCancelInterruptsSuspendedPostResolutionCreationQuoteAndClosesPicker()
+        async throws
+    {
+        let candidate = try Self.attachmentCandidate()
+        let coordinator = ScriptedNewChatCoachContext(
+            candidates: [candidate],
+            suspendedQuoteNumber: 3,
+            rejectsCreationLease: true
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(),
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(picker) = await feature.currentState.newChatPicker,
+              let attachmentID = picker.allRows.first?.id
+        else {
+            return XCTFail("expected one projected attachment")
+        }
+        await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
+
+        async let quoting: Void = feature.sendCurrentNewChatConfirmation(Self.context)
+        await coordinator.waitUntilQuoteStarts()
+        await feature.send(.cancelNewChat(Self.context))
+        await quoting
+        await coordinator.waitUntilCancellationIsObserved()
+
+        let state = await feature.currentState
+        let observedCancellation = await coordinator.observedCancellation
+        let resolutionCount = await coordinator.resolutionCount
+        XCTAssertEqual(state.newChatPicker, .closed)
+        XCTAssertTrue(observedCancellation)
+        XCTAssertEqual(resolutionCount, 1)
+    }
+
+    func testOrderlyTerminationCancelsSuspendedNewChatQuoteAndFlushesDirtyDraft()
+        async throws
+    {
+        let aggregate = try Self.aggregate()
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let scheduler = ControlledChatAutosaveScheduler()
+        let coordinator = ScriptedNewChatCoachContext(suspendedQuoteNumber: 1)
+        let feature = makeFeature(
+            store: store,
+            autosaveScheduler: scheduler,
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Flush after cancelling the creation quote."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+
+        async let quoting: Void = feature.send(.beginNewChat(Self.context))
+        await coordinator.waitUntilQuoteStarts()
+        async let mayTerminate: Bool = feature.flushForOrderlyTermination()
+
+        await quoting
+        let terminationSucceeded = await mayTerminate
+        let savedDrafts = await store.savedDrafts
+        let state = await feature.currentState
+        XCTAssertTrue(terminationSucceeded)
+        XCTAssertEqual(
+            savedDrafts.map(\.replacement.text),
+            ["Flush after cancelling the creation quote."]
+        )
+        XCTAssertEqual(state.newChatPicker, .closed)
+    }
+
+    func testCancelInterruptsSuspendedAttachmentResolutionAndClosesPicker()
+        async throws
+    {
+        let candidate = try Self.attachmentCandidate()
+        let coordinator = ScriptedNewChatCoachContext(
+            candidates: [candidate],
+            suspendResolution: true
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(),
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(picker) = await feature.currentState.newChatPicker,
+              let attachmentID = picker.allRows.first?.id
+        else {
+            return XCTFail("expected one projected attachment")
+        }
+        await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
+
+        async let resolving: Void = feature.sendCurrentNewChatConfirmation(Self.context)
+        await coordinator.waitUntilResolutionStarts()
+        await feature.send(.cancelNewChat(Self.context))
+        await resolving
+        await coordinator.waitUntilCancellationIsObserved()
+
+        let state = await feature.currentState
+        let observedCancellation = await coordinator.observedCancellation
+        XCTAssertEqual(state.newChatPicker, .closed)
+        XCTAssertTrue(observedCancellation)
+    }
+
+    func testOrderlyTerminationCancelsSuspendedExactAttachmentResolutionAndFlushesDirtyDraft()
+        async throws
+    {
+        let aggregate = try Self.aggregate()
+        let candidate = try Self.attachmentCandidate()
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let scheduler = ControlledChatAutosaveScheduler()
+        let coordinator = ScriptedNewChatCoachContext(
+            candidates: [candidate],
+            suspendResolution: true
+        )
+        let feature = makeFeature(
+            store: store,
+            autosaveScheduler: scheduler,
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Flush after cancelling exact attachment resolution."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(picker) = await feature.currentState.newChatPicker,
+              let attachmentID = picker.allRows.first?.id
+        else {
+            return XCTFail("expected one projected attachment")
+        }
+        await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
+
+        async let resolving: Void = feature.sendCurrentNewChatConfirmation(Self.context)
+        await coordinator.waitUntilResolutionStarts()
+        async let mayTerminate: Bool = feature.flushForOrderlyTermination()
+
+        await resolving
+        let terminationSucceeded = await mayTerminate
+        let savedDrafts = await store.savedDrafts
+        let state = await feature.currentState
+        XCTAssertTrue(terminationSucceeded)
+        XCTAssertEqual(
+            savedDrafts.map(\.replacement.text),
+            ["Flush after cancelling exact attachment resolution."]
+        )
+        XCTAssertEqual(state.newChatPicker, .closed)
+    }
+
+    func testCancelReturnsBeforeNoncooperativeExactAttachmentResolutionAndLateResultCannotCreate()
+        async throws
+    {
+        let candidate = try Self.attachmentCandidate()
+        let coordinator = ScriptedNewChatCoachContext(
+            candidates: [candidate],
+            suspendResolutionNoncooperatively: true
+        )
+        let store = RecordingChatStore()
+        let feature = makeFeature(store: store, coachContext: coordinator)
+        let context = Self.context
+        await feature.send(.start(context))
+        await feature.send(.beginNewChat(context))
+        guard case let .ready(picker) = await feature.currentState.newChatPicker,
+              let attachmentID = picker.allRows.first?.id
+        else {
+            return XCTFail("expected one projected attachment")
+        }
+        await feature.send(.toggleNewChatAttachment(context, attachmentID))
+
+        let confirmation = CompletionProbe<Void>()
+        Task {
+            await feature.sendCurrentNewChatConfirmation(context)
+            await confirmation.complete(())
+        }
+        await coordinator.waitUntilResolutionStarts()
+        await feature.send(.cancelNewChat(context))
+
+        let confirmationCompleted = await confirmation.completesWithinYieldBudget()
+        let cancelledState = await feature.currentState
+        let seedsBeforeLateResolution = await store.createSeeds
+        XCTAssertTrue(confirmationCompleted)
+        XCTAssertEqual(cancelledState.newChatPicker, .closed)
+        XCTAssertTrue(seedsBeforeLateResolution.isEmpty)
+
+        await coordinator.resumeResolution()
+        _ = await confirmation.completesWithinYieldBudget()
+        let seedsAfterLateResolution = await store.createSeeds
+        XCTAssertTrue(seedsAfterLateResolution.isEmpty)
+    }
+
+    func testCancelReturnsDuringNoncooperativeCreationLeaseAcquireAndLateLeaseSelfReleases()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext(
+            suspendLeaseAcquisitionNoncooperatively: true
+        )
+        let store = RecordingChatStore()
+        let feature = makeFeature(store: store, coachContext: coordinator)
+        let context = Self.context
+        await feature.send(.start(context))
+        await feature.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task {
+            await feature.sendCurrentNewChatConfirmation(context)
+            await confirmation.complete(())
+        }
+        await coordinator.waitUntilLeaseAcquisitionStarts()
+        await feature.send(.cancelNewChat(context))
+
+        let confirmationCompleted = await confirmation.completesWithinYieldBudget()
+        let cancelledState = await feature.currentState
+        let seedsBeforeLateAcquire = await store.createSeeds
+        XCTAssertTrue(confirmationCompleted)
+        XCTAssertEqual(cancelledState.newChatPicker, .closed)
+        XCTAssertTrue(seedsBeforeLateAcquire.isEmpty)
+
+        await coordinator.resumeLeaseAcquisition()
+        _ = await confirmation.completesWithinYieldBudget()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+        let seedsAfterLateAcquire = await store.createSeeds
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertTrue(seedsAfterLateAcquire.isEmpty)
+    }
+
+    func testCancelReleasesAcquiredCreationLeaseWhileProfileReadIgnoresCancellation()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext()
+        let profile = NoncooperativeProfileReader()
+        let store = RecordingChatStore()
+        let feature = makeFeature(
+            store: store,
+            profileReader: profile,
+            coachContext: coordinator
+        )
+        let context = Self.context
+        await feature.send(.start(context))
+        await feature.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task {
+            await feature.sendCurrentNewChatConfirmation(context)
+            await confirmation.complete(())
+        }
+        await profile.waitUntilReadStarts()
+        await feature.send(.cancelNewChat(context))
+
+        let confirmationCompleted = await confirmation.completesWithinYieldBudget()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+        let cancelledState = await feature.currentState
+        let seedsBeforeLateProfile = await store.createSeeds
+        XCTAssertTrue(confirmationCompleted)
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertEqual(cancelledState.newChatPicker, .closed)
+        XCTAssertTrue(seedsBeforeLateProfile.isEmpty)
+
+        await profile.resume()
+        _ = await confirmation.completesWithinYieldBudget()
+        let seedsAfterLateProfile = await store.createSeeds
+        XCTAssertTrue(seedsAfterLateProfile.isEmpty)
+    }
+
+    func testCancelReturnsAndReleasesFeatureBeforeSuspendedLeaseCleanupCompletes()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext(
+            suspendCreationLeaseReleaseNoncooperatively: true
+        )
+        let profile = NoncooperativeProfileReader()
+        let store = RecordingChatStore()
+        var feature: DefaultChatFeature? = makeFeature(
+            store: store,
+            profileReader: profile,
+            coachContext: coordinator
+        )
+        weak let observedFeature = feature
+        let context = Self.context
+        await feature?.send(.start(context))
+        await feature?.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task { [weak feature] in
+            await feature?.sendCurrentNewChatConfirmation(context)
+            await confirmation.complete(())
+        }
+        await profile.waitUntilReadStarts()
+
+        let cancellation = CompletionProbe<Void>()
+        Task { [weak feature] in
+            await feature?.send(.cancelNewChat(context))
+            await cancellation.complete(())
+        }
+        await coordinator.waitUntilCreationLeaseReleaseStarts()
+
+        let cancellationReturned = await cancellation.completesWithinYieldBudget()
+        let confirmationReturned = await confirmation.completesWithinYieldBudget()
+        let stateBeforeCleanup = await feature?.currentState
+        let seedsBeforeCleanup = await store.createSeeds
+        feature = nil
+        for _ in 0 ..< 10_000 where observedFeature != nil {
+            await Task.yield()
+        }
+        let featureReleasedBeforeCleanup = observedFeature == nil
+
+        await coordinator.resumeCreationLeaseRelease()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        await profile.resume()
+        _ = await cancellation.completesWithinYieldBudget()
+        _ = await confirmation.completesWithinYieldBudget()
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+        let seedsAfterLateProfile = await store.createSeeds
+
+        XCTAssertTrue(cancellationReturned)
+        XCTAssertTrue(confirmationReturned)
+        XCTAssertEqual(stateBeforeCleanup?.newChatPicker, .closed)
+        XCTAssertTrue(seedsBeforeCleanup.isEmpty)
+        XCTAssertTrue(featureReleasedBeforeCleanup)
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertTrue(seedsAfterLateProfile.isEmpty)
+    }
+
+    func testOrderlyTerminationReturnsAndReleasesFeatureBeforeSuspendedLeaseCleanupCompletes()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext(
+            suspendCreationLeaseReleaseNoncooperatively: true
+        )
+        let profile = NoncooperativeProfileReader()
+        let store = RecordingChatStore()
+        var feature: DefaultChatFeature? = makeFeature(
+            store: store,
+            profileReader: profile,
+            coachContext: coordinator
+        )
+        weak let observedFeature = feature
+        let context = Self.context
+        await feature?.send(.start(context))
+        await feature?.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task { [weak feature] in
+            await feature?.sendCurrentNewChatConfirmation(context)
+            await confirmation.complete(())
+        }
+        await profile.waitUntilReadStarts()
+
+        let termination = CompletionProbe<Void>()
+        Task { [weak feature] in
+            await feature?.beginOrderlyTermination()
+            await termination.complete(())
+        }
+        await coordinator.waitUntilCreationLeaseReleaseStarts()
+
+        let terminationReturned = await termination.completesWithinYieldBudget()
+        let confirmationReturned = await confirmation.completesWithinYieldBudget()
+        let stateBeforeCleanup = await feature?.currentState
+        let seedsBeforeCleanup = await store.createSeeds
+        feature = nil
+        for _ in 0 ..< 10_000 where observedFeature != nil {
+            await Task.yield()
+        }
+        let featureReleasedBeforeCleanup = observedFeature == nil
+
+        await coordinator.resumeCreationLeaseRelease()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        await profile.resume()
+        _ = await termination.completesWithinYieldBudget()
+        _ = await confirmation.completesWithinYieldBudget()
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+        let seedsAfterLateProfile = await store.createSeeds
+
+        XCTAssertTrue(terminationReturned)
+        XCTAssertTrue(confirmationReturned)
+        XCTAssertEqual(stateBeforeCleanup?.newChatPicker, .closed)
+        XCTAssertTrue(seedsBeforeCleanup.isEmpty)
+        XCTAssertTrue(featureReleasedBeforeCleanup)
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertTrue(seedsAfterLateProfile.isEmpty)
+    }
+
+    func testMissingProfilePublishesFailureBeforeSuspendedLeaseCleanupCompletes()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext(
+            suspendCreationLeaseReleaseNoncooperatively: true
+        )
+        let store = RecordingChatStore()
+        let feature = makeFeature(
+            store: store,
+            profileReader: MissingProfileReader(),
+            coachContext: coordinator
+        )
+        let context = Self.context
+        await feature.send(.start(context))
+        await feature.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task {
+            await feature.sendCurrentNewChatConfirmation(context)
+            await confirmation.complete(())
+        }
+        await coordinator.waitUntilCreationLeaseReleaseStarts()
+
+        let confirmationReturned = await confirmation.completesWithinYieldBudget()
+        let stateBeforeCleanup = await feature.currentState
+        let seedsBeforeCleanup = await store.createSeeds
+
+        await coordinator.resumeCreationLeaseRelease()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        _ = await confirmation.completesWithinYieldBudget()
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+
+        XCTAssertTrue(confirmationReturned)
+        XCTAssertEqual(stateBeforeCleanup.notice, .createFailed)
+        XCTAssertNil(stateBeforeCleanup.activity)
+        XCTAssertTrue(seedsBeforeCleanup.isEmpty)
+        XCTAssertEqual(releaseCount, 1)
+    }
+
+    func testCommittedChatPublishesAndReleasesFeatureBeforeSuspendedLeaseCleanupCompletes()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext(
+            suspendCreationLeaseReleaseNoncooperatively: true
+        )
+        let store = RecordingChatStore()
+        var feature: DefaultChatFeature? = makeFeature(
+            store: store,
+            coachContext: coordinator
+        )
+        weak let observedFeature = feature
+        let context = Self.context
+        await feature?.send(.start(context))
+        await feature?.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task { [weak feature] in
+            await feature?.sendCurrentNewChatConfirmation(context)
+            await confirmation.complete(())
+        }
+        await coordinator.waitUntilCreationLeaseReleaseStarts()
+
+        let confirmationReturned = await confirmation.completesWithinYieldBudget()
+        let stateBeforeCleanup = await feature?.currentState
+        let seedsBeforeCleanup = await store.createSeeds
+        feature = nil
+        for _ in 0 ..< 10_000 where observedFeature != nil {
+            await Task.yield()
+        }
+        let featureReleasedBeforeCleanup = observedFeature == nil
+
+        await coordinator.resumeCreationLeaseRelease()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        _ = await confirmation.completesWithinYieldBudget()
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+
+        XCTAssertTrue(confirmationReturned)
+        XCTAssertEqual(stateBeforeCleanup?.newChatPicker, .closed)
+        XCTAssertNil(stateBeforeCleanup?.activity)
+        XCTAssertNotNil(stateBeforeCleanup.flatMap(Self.openAggregate(in:)))
+        XCTAssertEqual(seedsBeforeCleanup.count, 1)
+        XCTAssertTrue(featureReleasedBeforeCleanup)
+        XCTAssertEqual(releaseCount, 1)
+    }
+
+    func testCancelDuringNoncooperativePrecommitClockNeverEntersCreatingOrCreates()
+        async
+    {
+        let coordinator = ScriptedNewChatCoachContext()
+        let clock = NoncooperativeNewChatClock()
+        let store = RecordingChatStore()
+        let feature = makeFeature(
+            store: store,
+            clock: clock,
+            coachContext: coordinator
+        )
+        let context = Self.context
+        await feature.send(.start(context))
+        await feature.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task {
+            await feature.sendCurrentNewChatConfirmation(context)
+            await confirmation.complete(())
+        }
+        await clock.waitUntilReadStarts()
+        let stateBeforeCancel = await feature.currentState
+        XCTAssertNil(stateBeforeCancel.activity)
+        await feature.send(.cancelNewChat(context))
+
+        let confirmationCompleted = await confirmation.completesWithinYieldBudget()
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+        let cancelledState = await feature.currentState
+        let seedsBeforeLateClock = await store.createSeeds
+        XCTAssertTrue(confirmationCompleted)
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertNil(cancelledState.activity)
+        XCTAssertTrue(seedsBeforeLateClock.isEmpty)
+
+        await clock.resume()
+        _ = await confirmation.completesWithinYieldBudget()
+        let seedsAfterLateClock = await store.createSeeds
+        XCTAssertTrue(seedsAfterLateClock.isEmpty)
+    }
+
+    func testOrderlyTerminationCancelsNoncooperativePrecommitIDReleasesLeaseAndFlushesDraft()
+        async throws
+    {
+        let aggregate = try Self.aggregate()
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let scheduler = ControlledChatAutosaveScheduler()
+        let coordinator = ScriptedNewChatCoachContext()
+        let identifiers = NoncooperativeNewChatIdentifiers()
+        let feature = makeFeature(
+            store: store,
+            chatIDGenerator: identifiers,
+            draftIDGenerator: identifiers,
+            memoryIDGenerator: identifiers,
+            autosaveScheduler: scheduler,
+            coachContext: coordinator
+        )
+        let context = Self.context
+        await feature.send(.start(context))
+        await feature.send(.open(context, aggregate.chat.id))
+        await feature.send(
+            .editDraft(
+                context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "Flush while cancelling precommit identity work."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        await feature.send(.beginNewChat(context))
+
+        let confirmation = CompletionProbe<Void>()
+        Task {
+            await feature.sendCurrentNewChatConfirmation(context)
+            await confirmation.complete(())
+        }
+        await identifiers.waitUntilChatIDRequestStarts()
+        let stateBeforeTermination = await feature.currentState
+        XCTAssertNil(stateBeforeTermination.activity)
+        let termination = CompletionProbe<Bool>()
+        Task {
+            await termination.complete(await feature.flushForOrderlyTermination())
+        }
+
+        let terminationCompleted = await termination.completesWithinYieldBudget()
+        let terminationValue = await termination.value
+        await coordinator.waitUntilCreationLeaseReleaseCount(1)
+        let releaseCount = await coordinator.creationLeaseReleaseCount
+        let terminatedState = await feature.currentState
+        let savedDrafts = await store.savedDrafts
+        let seedsBeforeLateID = await store.createSeeds
+        XCTAssertTrue(terminationCompleted)
+        XCTAssertEqual(terminationValue, true)
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertEqual(terminatedState.newChatPicker, .closed)
+        XCTAssertEqual(
+            savedDrafts.map(\.replacement.text),
+            ["Flush while cancelling precommit identity work."]
+        )
+        XCTAssertTrue(seedsBeforeLateID.isEmpty)
+
+        await identifiers.resumeChatIDRequest()
+        _ = await confirmation.completesWithinYieldBudget()
+        let seedsAfterLateID = await store.createSeeds
+        XCTAssertTrue(seedsAfterLateID.isEmpty)
+    }
+
+    func testOpenRetriesOneConfigurationRaceWithoutMutatingPinnedAttachments()
+        async throws
+    {
+        let attachment = try Self.attachment()
+        let attachments = try ChatAttachments(validating: [attachment])
+        let candidate = try Self.attachmentCandidate()
+        let resolved = try ResolvedChatAttachment(
+            attachment: attachment,
+            resolution: .available(candidate)
+        )
+        let coordinator = ScriptedNewChatCoachContext(
+            candidates: [candidate],
+            resolutionOutcomes: [
+                .configurationChanged,
+                .resolved([resolved], configuration: chatFeatureConfigurationStamp),
+            ]
+        )
+        let aggregate = try Self.aggregate(attachments: attachments)
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            coachContext: coordinator
+        )
+        await feature.send(.start(Self.context))
+
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        let state = await feature.currentState
+        let resolutionCount = await coordinator.resolutionCount
+        XCTAssertEqual(state.openedAttachments, .resolved([resolved]))
+        XCTAssertEqual(resolutionCount, 2)
+        XCTAssertEqual(Self.openAggregate(in: state)?.chat.attachments, attachments)
+    }
+
+    func testAttachmentUnavailableAtAtomicCreateKeepsPickerOpenForRepair()
+        async throws
+    {
+        let candidate = try Self.attachmentCandidate()
+        let coordinator = ScriptedNewChatCoachContext(candidates: [candidate])
+        let store = RecordingChatStore(createOutcomes: [.attachmentUnavailable])
+        let feature = makeFeature(store: store, coachContext: coordinator)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(picker) = await feature.currentState.newChatPicker,
+              let attachmentID = picker.allRows.first?.id
+        else {
+            return XCTFail("expected one projected attachment")
+        }
+        await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
+
+        await feature.sendCurrentNewChatConfirmation(Self.context)
+
+        let state = await feature.currentState
+        guard case let .ready(repairedPicker) = state.newChatPicker else {
+            return XCTFail("atomic evidence failure must keep the picker open")
+        }
+        XCTAssertEqual(repairedPicker.issue, .attachmentUnavailable)
+        XCTAssertNil(Self.openAggregate(in: state))
+        let seeds = await store.createSeeds
+        XCTAssertEqual(seeds.count, 1)
+        XCTAssertEqual(seeds.first?.aggregate.chat.attachments.values.count, 1)
+    }
+
+    func testAttachmentDisappearingDuringSuspendedCreateInstallsNothing()
+        async throws
+    {
+        let candidate = try Self.attachmentCandidate()
+        let coordinator = ScriptedNewChatCoachContext(candidates: [candidate])
+        let store = SuspendedCreateStore(result: .attachmentUnavailable)
+        let feature = makeFeature(store: store, coachContext: coordinator)
+        await feature.send(.start(Self.context))
+        await feature.send(.beginNewChat(Self.context))
+        guard case let .ready(picker) = await feature.currentState.newChatPicker,
+              let attachmentID = picker.allRows.first?.id
+        else {
+            return XCTFail("expected one projected attachment")
+        }
+        await feature.send(.toggleNewChatAttachment(Self.context, attachmentID))
+
+        async let confirmation: Void = feature.sendCurrentNewChatConfirmation(Self.context)
+        await store.waitUntilCreateStarts()
+        let seedsAtFinalBoundary = await store.createSeeds
+        XCTAssertEqual(
+            seedsAtFinalBoundary.first?.aggregate.chat.attachments.values.count,
+            1
+        )
+        await store.resumeCreate()
+        await confirmation
+
+        let state = await feature.currentState
+        guard case let .ready(repairedPicker) = state.newChatPicker else {
+            return XCTFail("atomic evidence race must keep the picker open")
+        }
+        XCTAssertEqual(repairedPicker.issue, .attachmentUnavailable)
+        XCTAssertNil(Self.openAggregate(in: state))
     }
 
     func testRenamePreservesIdentityAndOpenSelectionEvenWhenFilterHidesRow() async throws {
@@ -1890,27 +2918,37 @@ final class ChatFeatureTests: XCTestCase {
 
     private func makeFeature(
         store: any ChatStorePort,
+        profileReader: any ProfileStatementGenerationReading = FixedProfileReader(),
         clock: any ChatClock = FixedChatClock(),
+        chatIDGenerator: any ChatIDGenerator = FixedChatIDs(),
+        draftIDGenerator: any ChatDraftIDGenerator = FixedChatIDs(),
+        memoryIDGenerator: any CoachMemoryIDGenerator = FixedChatIDs(),
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator = FixedChatIDs(),
         autosaveScheduler: any ChatAutosaveScheduling = ImmediateChatAutosaveScheduler(),
         admissionRefreshScheduler: any ChatAdmissionRefreshScheduling =
             ImmediateAdmissionRefreshScheduler(),
-        invocations: any Invocations = RecordingInterruptedInvocationGateway()
+        invocations: any Invocations = RecordingInterruptedInvocationGateway(),
+        coachContext: any ChatCoachContextCoordinating = ChatFeatureBoundCoachContextFixture(
+            attachmentSource: EmptyChatAttachmentSource(),
+            base: DefaultCoachContextFeature(
+                source: AlwaysFitCoachContextSnapshotPort(),
+                configurationAuthorityID:
+                    chatFeatureConfigurationStamp.authorityID
+            )
+        )
     ) -> DefaultChatFeature {
         DefaultChatFeature(
             store: store,
-            profileReader: FixedProfileReader(),
+            profileReader: profileReader,
             clock: clock,
-            chatIDGenerator: FixedChatIDs(),
-            draftIDGenerator: FixedChatIDs(),
-            memoryIDGenerator: FixedChatIDs(),
+            chatIDGenerator: chatIDGenerator,
+            draftIDGenerator: draftIDGenerator,
+            memoryIDGenerator: memoryIDGenerator,
             pendingUserTurnIDGenerator: pendingUserTurnIDGenerator,
             responsePositionIDGenerator: FixedChatIDs(),
             autosaveScheduler: autosaveScheduler,
             admissionRefreshScheduler: admissionRefreshScheduler,
-            coachContext: DefaultCoachContextFeature(
-                source: AlwaysFitCoachContextSnapshotPort()
-            ),
+            coachContext: coachContext,
             invocations: invocations
         )
     }
@@ -1939,10 +2977,10 @@ final class ChatFeatureTests: XCTestCase {
         memory: String = "mem-20260830T120000000Z-4GHJ",
         title: String = "New Chat",
         revision: UInt64 = 0,
-        draftText: String = ""
+        draftText: String = "",
+        attachments: ChatAttachments = .empty
     ) throws -> ChatAggregate {
         let instant = try UTCInstant("2026-08-30T12:00:00.000Z")
-        let attachments = ChatAttachments.empty
         let chatID = try ChatID(chat)
         let memoryID = try CoachMemoryID(memory)
         let chatValue = try Chat(
@@ -1976,6 +3014,28 @@ final class ChatFeatureTests: XCTestCase {
                 sessionSummaries: [],
                 attachments: attachments
             )
+        )
+    }
+
+    private static func attachment() throws -> ChatSessionAttachment {
+        ChatSessionAttachment(
+            attachmentID: try ChatSessionAttachmentID("attachment-000001"),
+            sessionID: try SessionID("ses-20260830T120100000Z-5KMN"),
+            transcriptRevisionID: try TranscriptRevisionID(
+                "trv-20260830T120200000Z-6PQR"
+            )
+        )
+    }
+
+    private static func attachmentCandidate() throws -> ChatAttachmentCandidate {
+        let attachment = try attachment()
+        return try ChatAttachmentCandidate(
+            sessionID: attachment.sessionID,
+            transcriptRevisionID: attachment.transcriptRevisionID,
+            displayLabel: "Synthetic session",
+            durationMilliseconds: 1_000,
+            approximateTranscriptTokens: 16,
+            delivery: .inline
         )
     }
 
@@ -2366,6 +3426,497 @@ private actor ProjectedAdmissionInvocationGateway: Invocations {
     }
 }
 
+extension DefaultChatFeature {
+    func sendCurrentNewChatConfirmation(_ context: ChatCommandContext) async {
+        let token: NewChatConfirmationToken
+        if case let .ready(snapshot) = currentState.newChatPicker,
+           let currentToken = snapshot.confirmationToken
+        {
+            token = currentToken
+        } else {
+            token = NewChatConfirmationToken()
+        }
+        await send(.confirmNewChat(context, token))
+    }
+}
+
+private let chatFeatureConfigurationStamp = CoachContextConfigurationStamp(
+    authorityID: UUID(uuidString: "00000000-0000-0000-0000-000000000125")!,
+    generation: 1
+)
+private let chatFeatureEvidenceAuthority = ChatCreationEvidenceAuthority(
+    testingValue: UUID(uuidString: "00000000-0000-0000-0000-000000000225")!
+)
+
+private struct ChatFeatureBoundCoachContextFixture: ChatCoachContextCoordinating {
+    let attachmentSource: any ChatSessionAttachmentSource
+    let base: DefaultCoachContextFeature
+
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        await attachmentSource.loadCandidates(in: library)
+    }
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        await attachmentSource.resolve(attachments, in: library)
+    }
+
+    func quoteNewChatBoundToConfiguration(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome {
+        await base.quoteNewChatBoundToConfiguration(request)
+    }
+
+    func acquireNewChatCreationLease(
+        _ authority: ChatCreationQuoteAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await base.acquireNewChatCreationLease(authority)
+    }
+
+    func quoteNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ChatCreationQuoteOutcome {
+        await base.quoteNewChat(request)
+    }
+
+    func quoteChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextQuoteOutcome {
+        await base.quoteChat(request)
+    }
+
+    func preparePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextPendingPreparationOutcome {
+        await base.preparePendingUserTurn(request)
+    }
+
+    func isPreparedContextCurrent(
+        _ prepared: PreparedCoachLaunchContext
+    ) async -> Bool {
+        await base.isPreparedContextCurrent(prepared)
+    }
+}
+
+private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
+    private let candidates: [ChatAttachmentCandidate]
+    private let suspendCatalog: Bool
+    private let suspendResolution: Bool
+    private let suspendResolutionNoncooperatively: Bool
+    private let suspendedQuoteNumber: Int?
+    private let rejectsCreationLease: Bool
+    private let suspendLeaseAcquisitionNoncooperatively: Bool
+    private let suspendCreationLeaseReleaseNoncooperatively: Bool
+    private var resolutionOutcomes: [ChatAttachmentResolutionOutcome]
+    private var catalogStarted = false
+    private var resolutionStarted = false
+    private var resolutionContinuation: CheckedContinuation<Void, Never>?
+    private var quoteStarted = false
+    private var quoteCount = 0
+    private var leaseAcquisitionStarted = false
+    private var leaseAcquisitionContinuation: CheckedContinuation<Void, Never>?
+    private var creationLeaseReleaseStarted = false
+    private var creationLeaseReleaseContinuation: CheckedContinuation<Void, Never>?
+    private(set) var observedCancellation = false
+    private(set) var resolutionCount = 0
+    private(set) var creationLeaseReleaseCount = 0
+
+    init(
+        candidates: [ChatAttachmentCandidate] = [],
+        suspendCatalog: Bool = false,
+        suspendResolution: Bool = false,
+        suspendResolutionNoncooperatively: Bool = false,
+        suspendedQuoteNumber: Int? = nil,
+        rejectsCreationLease: Bool = false,
+        suspendLeaseAcquisitionNoncooperatively: Bool = false,
+        suspendCreationLeaseReleaseNoncooperatively: Bool = false,
+        resolutionOutcomes: [ChatAttachmentResolutionOutcome] = []
+    ) {
+        self.candidates = candidates
+        self.suspendCatalog = suspendCatalog
+        self.suspendResolution = suspendResolution
+        self.suspendResolutionNoncooperatively = suspendResolutionNoncooperatively
+        self.suspendedQuoteNumber = suspendedQuoteNumber
+        self.rejectsCreationLease = rejectsCreationLease
+        self.suspendLeaseAcquisitionNoncooperatively =
+            suspendLeaseAcquisitionNoncooperatively
+        self.suspendCreationLeaseReleaseNoncooperatively =
+            suspendCreationLeaseReleaseNoncooperatively
+        self.resolutionOutcomes = resolutionOutcomes
+    }
+
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        if suspendCatalog {
+            catalogStarted = true
+            await suspendUntilCancelled()
+        }
+        return .loaded(candidates, configuration: chatFeatureConfigurationStamp)
+    }
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        resolutionCount += 1
+        if suspendResolutionNoncooperatively, !attachments.values.isEmpty {
+            resolutionStarted = true
+            await withCheckedContinuation { resolutionContinuation = $0 }
+        } else if suspendResolution, !attachments.values.isEmpty {
+            resolutionStarted = true
+            await suspendUntilCancelled()
+        }
+        if !resolutionOutcomes.isEmpty {
+            return resolutionOutcomes.removeFirst()
+        }
+        let resolved: [ResolvedChatAttachment] = attachments.values.compactMap {
+            attachment in
+            guard let candidate = candidates.first(where: {
+                $0.sessionID == attachment.sessionID &&
+                    $0.transcriptRevisionID == attachment.transcriptRevisionID
+            }) else { return nil }
+            return try? ResolvedChatAttachment(
+                attachment: attachment,
+                resolution: .available(candidate)
+            )
+        }
+        guard resolved.count == attachments.values.count else { return .failed }
+        return .resolved(resolved, configuration: chatFeatureConfigurationStamp)
+    }
+
+    func quoteNewChatBoundToConfiguration(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome {
+        quoteCount += 1
+        if quoteCount == suspendedQuoteNumber {
+            quoteStarted = true
+            await suspendUntilCancelled()
+        }
+        return .providerUnavailable(
+            previouslyQualifiedProviderUnavailableCapacityLowerBound(),
+            authority: ChatCreationQuoteAuthority(
+                configuration: chatFeatureConfigurationStamp,
+                evidence: chatFeatureEvidenceAuthority
+            )
+        )
+    }
+
+    func acquireNewChatCreationLease(
+        _ authority: ChatCreationQuoteAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard authority.configuration == chatFeatureConfigurationStamp else {
+            return .stale
+        }
+        guard !rejectsCreationLease else { return .stale }
+        if suspendLeaseAcquisitionNoncooperatively {
+            leaseAcquisitionStarted = true
+            await withCheckedContinuation { leaseAcquisitionContinuation = $0 }
+        }
+        return .acquired(
+            CoachContextAuthorityLease { [weak self] in
+                await self?.releaseCreationLease()
+            }
+        )
+    }
+
+    func quoteNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ChatCreationQuoteOutcome {
+        .unavailable(.providerUnavailable)
+    }
+
+    func quoteChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextQuoteOutcome {
+        .unavailable(.providerUnavailable)
+    }
+
+    func preparePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextPendingPreparationOutcome {
+        .unavailable(.providerUnavailable)
+    }
+
+    func isPreparedContextCurrent(
+        _ prepared: PreparedCoachLaunchContext
+    ) async -> Bool {
+        false
+    }
+
+    func waitUntilCatalogStarts() async {
+        while !catalogStarted { await Task.yield() }
+    }
+
+    func waitUntilQuoteStarts() async {
+        while !quoteStarted { await Task.yield() }
+    }
+
+    func waitUntilResolutionStarts() async {
+        while !resolutionStarted { await Task.yield() }
+    }
+
+    func resumeResolution() {
+        resolutionContinuation?.resume()
+        resolutionContinuation = nil
+    }
+
+    func waitUntilLeaseAcquisitionStarts() async {
+        while !leaseAcquisitionStarted { await Task.yield() }
+    }
+
+    func resumeLeaseAcquisition() {
+        leaseAcquisitionContinuation?.resume()
+        leaseAcquisitionContinuation = nil
+    }
+
+    func waitUntilCancellationIsObserved() async {
+        while !observedCancellation { await Task.yield() }
+    }
+
+    func waitUntilCreationLeaseReleaseCount(_ count: Int) async {
+        while creationLeaseReleaseCount < count { await Task.yield() }
+    }
+
+    func waitUntilCreationLeaseReleaseStarts() async {
+        while !creationLeaseReleaseStarted { await Task.yield() }
+    }
+
+    func resumeCreationLeaseRelease() {
+        creationLeaseReleaseContinuation?.resume()
+        creationLeaseReleaseContinuation = nil
+    }
+
+    private func releaseCreationLease() async {
+        creationLeaseReleaseStarted = true
+        if suspendCreationLeaseReleaseNoncooperatively {
+            await withCheckedContinuation {
+                creationLeaseReleaseContinuation = $0
+            }
+        }
+        creationLeaseReleaseCount += 1
+    }
+
+    private func suspendUntilCancelled() async {
+        do {
+            try await Task.sleep(nanoseconds: .max)
+        } catch {
+            observedCancellation = true
+        }
+    }
+}
+
+private actor AdvancingConfigurationChatContextFixture:
+    ChatCoachContextCoordinating
+{
+    private let base: any CoachContextCoordinating
+    private let authorityID = UUID(
+        uuidString: "00000000-0000-0000-0000-000000000225"
+    )!
+    private var generation: UInt64 = 1
+    private var advanceRequested = false
+    private var activeLeaseID: UUID?
+    private var advancementWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(base: any CoachContextCoordinating) {
+        self.base = base
+    }
+
+    var currentGeneration: UInt64 { generation }
+
+    func advanceConfiguration() async {
+        advanceRequested = true
+        if activeLeaseID != nil {
+            await withCheckedContinuation { advancementWaiters.append($0) }
+        }
+        generation += 1
+    }
+
+    func waitUntilAdvanceIsRequested() async {
+        while !advanceRequested { await Task.yield() }
+    }
+
+    func loadAttachmentCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        .loaded([], configuration: stamp)
+    }
+
+    func resolveAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        .resolved([], configuration: stamp)
+    }
+
+    func quoteNewChatBoundToConfiguration(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome {
+        switch await fixtureNewChatQuotePreservingProviderOutage(
+            from: base,
+            request: request
+        ) {
+        case let .available(quote):
+            return .available(
+                quote,
+                authority: ChatCreationQuoteAuthority(
+                    configuration: stamp,
+                    evidence: chatFeatureEvidenceAuthority
+                )
+            )
+        case .unavailable(.providerUnavailable):
+            return .providerUnavailable(
+                previouslyQualifiedProviderUnavailableCapacityLowerBound(),
+                authority: ChatCreationQuoteAuthority(
+                    configuration: stamp,
+                    evidence: chatFeatureEvidenceAuthority
+                )
+            )
+        case let .unavailable(reason):
+            return .unavailable(reason)
+        }
+    }
+
+    func acquireNewChatCreationLease(
+        _ authority: ChatCreationQuoteAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard activeLeaseID == nil, authority.configuration == stamp else {
+            return .stale
+        }
+        let leaseID = UUID()
+        activeLeaseID = leaseID
+        return .acquired(
+            CoachContextAuthorityLease { [weak self] in
+                await self?.releaseLease(leaseID)
+            }
+        )
+    }
+
+    func quoteNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> ChatCreationQuoteOutcome {
+        await base.quoteNewChat(request)
+    }
+
+    func quoteChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextQuoteOutcome {
+        await base.quoteChat(request)
+    }
+
+    func preparePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextPendingPreparationOutcome {
+        await base.preparePendingUserTurn(request)
+    }
+
+    func isPreparedContextCurrent(
+        _ prepared: PreparedCoachLaunchContext
+    ) async -> Bool {
+        await base.isPreparedContextCurrent(prepared)
+    }
+
+    private var stamp: CoachContextConfigurationStamp {
+        CoachContextConfigurationStamp(
+            authorityID: authorityID,
+            generation: generation
+        )
+    }
+
+    private func releaseLease(_ leaseID: UUID) {
+        guard activeLeaseID == leaseID else { return }
+        activeLeaseID = nil
+        let waiters = advancementWaiters
+        advancementWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private enum SuspendedCreateResult {
+    case committed
+    case attachmentUnavailable
+}
+
+private actor SuspendedCreateStore: ChatStorePort {
+    private let coordinator: AdvancingConfigurationChatContextFixture?
+    private let result: SuspendedCreateResult
+    private var createStarted = false
+    private var createContinuation: CheckedContinuation<Void, Never>?
+    private(set) var configurationGenerationAtCommit: UInt64?
+    private(set) var createSeeds: [NewChatSeed] = []
+
+    init(coordinator: AdvancingConfigurationChatContextFixture) {
+        self.coordinator = coordinator
+        result = .committed
+    }
+
+    init(result: SuspendedCreateResult) {
+        coordinator = nil
+        self.result = result
+    }
+
+    func waitUntilCreateStarts() async {
+        while !createStarted { await Task.yield() }
+    }
+
+    func resumeCreate() {
+        createContinuation?.resume()
+        createContinuation = nil
+    }
+
+    func loadCatalog(in library: LibraryScope) async -> ChatCatalogOutcome {
+        .loaded([])
+    }
+
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome {
+        let seed = commit.seed
+        createSeeds.append(seed)
+        createStarted = true
+        await withCheckedContinuation { createContinuation = $0 }
+        if let coordinator {
+            configurationGenerationAtCommit = await coordinator.currentGeneration
+        }
+        switch result {
+        case .committed: return .committed(seed.aggregate)
+        case .attachmentUnavailable: return .attachmentUnavailable
+        }
+    }
+
+    func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome { .failed }
+    func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome { .failed }
+    func lockPendingUserTurn(
+        _ mutation: LockPendingUserTurnMutation
+    ) async -> ChatMutationOutcome { .failed }
+    func replacePendingUserTurn(
+        _ mutation: ReplacePendingUserTurnMutation
+    ) async -> ChatMutationOutcome { .failed }
+    func discardPendingUserTurn(
+        _ mutation: DiscardPendingUserTurnMutation
+    ) async -> ChatMutationOutcome { .failed }
+    func load(_ chatID: ChatID, in library: LibraryScope) async -> ChatLoadOutcome {
+        .missing
+    }
+}
+
+private struct EmptyChatAttachmentSource: ChatSessionAttachmentSource {
+    func loadCandidates(
+        in library: LibraryScope
+    ) async -> ChatAttachmentCatalogOutcome {
+        .loaded([], configuration: chatFeatureConfigurationStamp)
+    }
+
+    func resolve(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentResolutionOutcome {
+        .resolved([], configuration: chatFeatureConfigurationStamp)
+    }
+}
+
 private actor SuspendedCatalogChatStore: ChatStorePort {
     private let catalog: [ChatCatalogEntry]
     private var loadStarted = false
@@ -2390,7 +3941,7 @@ private actor SuspendedCatalogChatStore: ChatStorePort {
         return .loaded(catalog)
     }
 
-    func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome { .failed }
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome { .failed }
     func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome { .failed }
     func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome { .failed }
     func lockPendingUserTurn(
@@ -2424,7 +3975,7 @@ private actor SequencedSuspendedCatalogChatStore: ChatStorePort {
         }
     }
 
-    func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome { .failed }
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome { .failed }
     func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome { .failed }
     func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome { .failed }
     func lockPendingUserTurn(
@@ -2445,7 +3996,37 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
     func resolveNewChat(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> CoachContextSnapshotOutcome {
-        .sourceUnavailable
+        do {
+            return .resolved(
+                try CoachContextResolvedSnapshot(
+                    input: CoachContextQuoteInput(
+                        profile: .object(["statements": .array([])]),
+                        memory: .object([
+                            "generalNotes": .string(""),
+                            "sessionSummaries": .array([]),
+                        ]),
+                        creation: request.creation,
+                        attachments: []
+                    ),
+                    configuration: configuration(),
+                    authority: CoachContextSnapshotAuthority(
+                        binding: .newChat(
+                            library: request.library,
+                            attachments: request.attachments,
+                            creation: request.creation
+                        ),
+                        contextGeneration: 1,
+                        configurationGeneration: 1,
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
+                    )
+                )
+            )
+        } catch {
+            return .sourceUnavailable
+        }
     }
 
     func resolveChat(
@@ -2482,6 +4063,12 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
         authority.contextGeneration == 1 && authority.configurationGeneration == 1
     }
 
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
+    }
+
     private func snapshot(
         for draft: ChatDraft,
         binding: CoachContextSnapshotBinding
@@ -2498,23 +4085,7 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
                         history: [],
                         currentDraft: draft.text
                     ),
-                    configuration: try CoachContextConfiguration(
-                        descriptor: CoachProviderDescriptor(
-                            displayName: "Synthetic ChatFeature fixture",
-                            contextBudget: CoachContextBudget(
-                                contextWindowTokens: 100_000,
-                                responseReservedTokens: 32,
-                                safetyMarginTokens: 8
-                            ),
-                            coachMemoryMaxTokens: 1
-                        ),
-                        policy: CoachProviderEstimationPolicy(
-                            providerIdentifier: "synthetic-chat-feature-v1",
-                            responseCollectorByteCeiling: 8_192,
-                            framing: CoachProviderFraming(),
-                            tokenEstimator: .utf8ByteUpperBound()
-                        )
-                    ),
+                    configuration: configuration(),
                     authority: CoachContextSnapshotAuthority(
                         binding: binding,
                         contextGeneration: 1,
@@ -2529,6 +4100,213 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
         } catch {
             return .sourceUnavailable
         }
+    }
+
+    private func configuration() throws -> CoachContextConfiguration {
+        try CoachContextConfiguration(
+            descriptor: CoachProviderDescriptor(
+                displayName: "Synthetic ChatFeature fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: 100_000,
+                    responseReservedTokens: 32,
+                    safetyMarginTokens: 8
+                ),
+                coachMemoryMaxTokens: 1
+            ),
+            policy: CoachProviderEstimationPolicy(
+                providerIdentifier: "synthetic-chat-feature-v1",
+                responseCollectorByteCeiling: 8_192,
+                framing: CoachProviderFraming(),
+                attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 8_192,
+                    tokenEstimator: .utf8ByteUpperBound()
+                )
+            )
+        )
+    }
+}
+
+private actor GrowingNewChatProfileSnapshotPort: CoachContextSnapshotPort {
+    private var profileText = "Initial Profile"
+    private var contextGeneration: UInt64 = 1
+    private let configurationGeneration: UInt64 = 1
+    private var activeLeaseID: UUID?
+    private var oversizedProfilePending = false
+
+    func installOversizedProfile() {
+        guard activeLeaseID == nil else {
+            oversizedProfilePending = true
+            return
+        }
+        applyOversizedProfile()
+    }
+
+    func installExpandedProfile() {
+        precondition(activeLeaseID == nil)
+        profileText = String(repeating: "expanded-profile ", count: 8)
+        contextGeneration += 1
+    }
+
+    private func applyOversizedProfile() {
+        profileText = String(repeating: "expanded-profile ", count: 256)
+        contextGeneration += 1
+    }
+
+    func resolveNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        do {
+            return .resolved(
+                try CoachContextResolvedSnapshot(
+                    input: CoachContextQuoteInput(
+                        profile: .object([
+                            "statements": .array([.string(profileText)]),
+                        ]),
+                        memory: .object([
+                            "generalNotes": .string(""),
+                            "sessionSummaries": .array([]),
+                        ]),
+                        creation: request.creation,
+                        attachments: []
+                    ),
+                    configuration: try configuration(),
+                    authority: CoachContextSnapshotAuthority(
+                        binding: .newChat(
+                            library: request.library,
+                            attachments: request.attachments,
+                            creation: request.creation
+                        ),
+                        contextGeneration: contextGeneration,
+                        configurationGeneration: configurationGeneration,
+                        profile: CoachProfileProvenance(
+                            revisionID: nil,
+                            statementGeneration: 0
+                        )
+                    )
+                )
+            )
+        } catch {
+            return .sourceUnavailable
+        }
+    }
+
+    func resolveChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .sourceUnavailable
+    }
+
+    func resolvePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .sourceUnavailable
+    }
+
+    func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
+        authority.contextGeneration == contextGeneration &&
+            authority.configurationGeneration == configurationGeneration
+    }
+
+    func currentQualifiedConfiguration()
+        async -> CoachQualifiedConfigurationOutcome
+    {
+        .knownQualified(
+            configuration: try! configuration(),
+            configurationGeneration: configurationGeneration
+        )
+    }
+
+    func isCurrentConfiguration(_ generation: UInt64) async -> Bool {
+        generation == configurationGeneration
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        guard activeLeaseID == nil else { return .stale }
+        let current: Bool
+        switch authority {
+        case let .snapshot(snapshot):
+            current = await isCurrent(snapshot)
+        case let .configuration(generation):
+            current = generation == configurationGeneration
+        }
+        guard current else { return .stale }
+        let leaseID = UUID()
+        activeLeaseID = leaseID
+        return .acquired(
+            CoachContextAuthorityLease { [weak self] in
+                await self?.releaseLease(leaseID)
+            }
+        )
+    }
+
+    private func releaseLease(_ leaseID: UUID) {
+        guard activeLeaseID == leaseID else { return }
+        activeLeaseID = nil
+        if oversizedProfilePending {
+            oversizedProfilePending = false
+            applyOversizedProfile()
+        }
+    }
+
+    private func configuration() throws -> CoachContextConfiguration {
+        try CoachContextConfiguration(
+            descriptor: CoachProviderDescriptor(
+                displayName: "Growing Profile fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: 512,
+                    responseReservedTokens: 32,
+                    safetyMarginTokens: 8
+                ),
+                coachMemoryMaxTokens: 1
+            ),
+            policy: CoachProviderEstimationPolicy(
+                providerIdentifier: "growing-profile-fixture-v1",
+                responseCollectorByteCeiling: 8_192,
+                framing: CoachProviderFraming(),
+                attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 8_192,
+                    tokenEstimator: .utf8ByteUpperBound()
+                )
+            )
+        )
+    }
+}
+
+private actor ProfileChangingCreateStore: ChatStorePort {
+    private let source: GrowingNewChatProfileSnapshotPort
+    private(set) var createSeeds: [NewChatSeed] = []
+
+    init(source: GrowingNewChatProfileSnapshotPort) {
+        self.source = source
+    }
+
+    func loadCatalog(in library: LibraryScope) async -> ChatCatalogOutcome {
+        .loaded([])
+    }
+
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome {
+        let seed = commit.seed
+        createSeeds.append(seed)
+        guard createSeeds.count == 1 else { return .committed(seed.aggregate) }
+        await source.installOversizedProfile()
+        return .profileStatementGenerationChanged(9)
+    }
+
+    func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome { .failed }
+    func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome { .failed }
+    func lockPendingUserTurn(
+        _ mutation: LockPendingUserTurnMutation
+    ) async -> ChatMutationOutcome { .failed }
+    func replacePendingUserTurn(
+        _ mutation: ReplacePendingUserTurnMutation
+    ) async -> ChatMutationOutcome { .failed }
+    func discardPendingUserTurn(
+        _ mutation: DiscardPendingUserTurnMutation
+    ) async -> ChatMutationOutcome { .failed }
+    func load(_ chatID: ChatID, in library: LibraryScope) async -> ChatLoadOutcome {
+        .missing
     }
 }
 
@@ -2547,7 +4325,8 @@ private actor RecordingChatStore: ChatStorePort {
     private var suspendNextDraftSave: Bool
     private var draftSaveStarted = false
     private var draftSaveContinuation: CheckedContinuation<Void, Never>?
-    private(set) var createSeeds: [NewDevelopmentChatSeed] = []
+    private(set) var createSeeds: [NewChatSeed] = []
+    private(set) var createCollisionAuthorityRetentions: [Bool] = []
     private(set) var calls: [Call] = []
     private(set) var loadedScopes: [LibraryScope] = []
     private(set) var savedDrafts: [SaveChatDraftMutation] = []
@@ -2587,9 +4366,13 @@ private actor RecordingChatStore: ChatStorePort {
         })
     }
 
-    func create(_ seed: NewDevelopmentChatSeed) -> ChatMutationOutcome {
+    func create(_ commit: NewChatCommit) -> ChatMutationOutcome {
+        let seed = commit.seed
         calls.append(.create)
         createSeeds.append(seed)
+        createCollisionAuthorityRetentions.append(
+            commit.retainsEvidenceAuthorityOnCollision
+        )
         if !createOutcomes.isEmpty { return createOutcomes.removeFirst() }
         aggregates[seed.aggregate.chat.id] = seed.aggregate
         return .committed(seed.aggregate)
@@ -2721,8 +4504,60 @@ private struct FixedProfileReader: ProfileStatementGenerationReading {
     func statementGeneration(in library: LibraryScope) async -> UInt64? { 7 }
 }
 
+private struct MissingProfileReader: ProfileStatementGenerationReading {
+    func statementGeneration(in library: LibraryScope) async -> UInt64? { nil }
+}
+
+private actor NoncooperativeProfileReader: ProfileStatementGenerationReading {
+    private var continuation: CheckedContinuation<UInt64?, Never>?
+
+    func statementGeneration(in library: LibraryScope) async -> UInt64? {
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilReadStarts() async {
+        while continuation == nil { await Task.yield() }
+    }
+
+    func resume() {
+        continuation?.resume(returning: 7)
+        continuation = nil
+    }
+}
+
+private actor SequencedProfileReader: ProfileStatementGenerationReading {
+    private var generations: [UInt64]
+
+    init(generations: [UInt64]) {
+        self.generations = generations
+    }
+
+    func statementGeneration(in library: LibraryScope) async -> UInt64? {
+        guard !generations.isEmpty else { return nil }
+        return generations.removeFirst()
+    }
+}
+
 private struct FixedChatClock: ChatClock {
     func now() async -> UTCInstant { try! UTCInstant("2026-08-30T12:00:00.000Z") }
+}
+
+private actor NoncooperativeNewChatClock: ChatClock {
+    private let instant = try! UTCInstant("2026-08-30T12:00:00.000Z")
+    private var continuation: CheckedContinuation<UTCInstant, Never>?
+
+    func now() async -> UTCInstant {
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilReadStarts() async {
+        while continuation == nil { await Task.yield() }
+    }
+
+    func resume() {
+        continuation?.resume(returning: instant)
+        continuation = nil
+    }
 }
 
 private actor SuspendedFirstChatClock: ChatClock {
@@ -2773,6 +4608,53 @@ private struct FixedChatIDs:
         at instant: UTCInstant
     ) async -> ChatResponsePositionID {
         try! ChatResponsePositionID("rsp-20260830T120000000Z-6PQR")
+    }
+}
+
+private actor NoncooperativeNewChatIdentifiers:
+    ChatIDGenerator,
+    ChatDraftIDGenerator,
+    CoachMemoryIDGenerator
+{
+    private var chatContinuation: CheckedContinuation<ChatID, Never>?
+
+    func generateChatID(at instant: UTCInstant) async -> ChatID {
+        await withCheckedContinuation { chatContinuation = $0 }
+    }
+
+    func generateChatDraftID(at instant: UTCInstant) async -> ChatDraftID {
+        try! ChatDraftID("drf-20260830T120000000Z-3DEF")
+    }
+
+    func generateCoachMemoryID(at instant: UTCInstant) async -> CoachMemoryID {
+        try! CoachMemoryID("mem-20260830T120000000Z-4GHJ")
+    }
+
+    func waitUntilChatIDRequestStarts() async {
+        while chatContinuation == nil { await Task.yield() }
+    }
+
+    func resumeChatIDRequest() {
+        chatContinuation?.resume(
+            returning: try! ChatID("cht-20260830T120000000Z-2ABC")
+        )
+        chatContinuation = nil
+    }
+}
+
+private actor CompletionProbe<Value: Sendable> {
+    private(set) var value: Value?
+
+    func complete(_ value: Value) {
+        self.value = value
+    }
+
+    func completesWithinYieldBudget(_ budget: Int = 10_000) async -> Bool {
+        for _ in 0 ..< budget {
+            if value != nil { return true }
+            await Task.yield()
+        }
+        return value != nil
     }
 }
 

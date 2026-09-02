@@ -11,7 +11,28 @@
     "createdAt": "2026-08-30T12:00:00.000Z",
     "updatedAt": "2026-08-30T12:05:00.000Z",
     "creationKind": "newChat",
-    "attachments": [],
+    "attachments": [
+      {
+        "attachmentId": "attachment-000001",
+        "sessionId": "ses-20260830T110000000Z-5JKM",
+        "transcriptRevisionId": "trv-20260830T110500000Z-9XYZ"
+      },
+      {
+        "attachmentId": "attachment-000002",
+        "sessionId": "ses-20260830T111000000Z-6NPQ",
+        "transcriptRevisionId": "trv-20260830T111500000Z-ABCD"
+      },
+      {
+        "attachmentId": "attachment-000003",
+        "sessionId": "ses-20260830T112000000Z-7RST",
+        "transcriptRevisionId": "trv-20260830T112500000Z-EFGH"
+      },
+      {
+        "attachmentId": "attachment-000004",
+        "sessionId": "ses-20260830T113000000Z-8VWX",
+        "transcriptRevisionId": "trv-20260830T113500000Z-JKMN"
+      }
+    ],
     "draftText": "restored local thought",
     "draftVersion": 1,
     "messageIds": [],
@@ -21,14 +42,59 @@
   "commands": [{"kind": "open", "chatId": "cht-20260830T120000000Z-2ABC"}],
   "dependencyTrace": [
     {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded"},
-    {"port": "chatStore", "effect": "load", "outcome": "loaded"}
+    {"port": "chatStore", "effect": "load", "outcome": "loaded"},
+    {
+      "port": "attachmentSource",
+      "effect": "resolveAttachments",
+      "outcome": "resolved",
+      "resolutions": [
+        {
+          "attachment": {
+            "attachmentId": "attachment-000001",
+            "sessionId": "ses-20260830T110000000Z-5JKM",
+            "transcriptRevisionId": "trv-20260830T110500000Z-9XYZ"
+          },
+          "status": "missing"
+        },
+        {
+          "attachment": {
+            "attachmentId": "attachment-000002",
+            "sessionId": "ses-20260830T111000000Z-6NPQ",
+            "transcriptRevisionId": "trv-20260830T111500000Z-ABCD"
+          },
+          "status": "inTrash"
+        },
+        {
+          "attachment": {
+            "attachmentId": "attachment-000003",
+            "sessionId": "ses-20260830T112000000Z-7RST",
+            "transcriptRevisionId": "trv-20260830T112500000Z-EFGH"
+          },
+          "status": "corrupt"
+        },
+        {
+          "attachment": {
+            "attachmentId": "attachment-000004",
+            "sessionId": "ses-20260830T113000000Z-8VWX",
+            "transcriptRevisionId": "trv-20260830T113500000Z-JKMN"
+          },
+          "status": "unsupportedSchema"
+        }
+      ]
+    }
   ],
   "expectedState": {
     "allChatIds": ["cht-20260830T120000000Z-2ABC"],
     "visibleChatIds": ["cht-20260830T120000000Z-2ABC"],
     "selectedChatId": "cht-20260830T120000000Z-2ABC",
     "selectedTitle": "Weekly reflection",
-    "selectedRevision": 1
+    "selectedRevision": 1,
+    "openedAttachmentStatuses": [
+      {"attachmentId": "attachment-000001", "status": "missing"},
+      {"attachmentId": "attachment-000002", "status": "inTrash"},
+      {"attachmentId": "attachment-000003", "status": "corrupt"},
+      {"attachmentId": "attachment-000004", "status": "unsupportedSchema"}
+    ]
   },
   "expectedProviderCalls": 0,
   "expectedInvocationCalls": 0,

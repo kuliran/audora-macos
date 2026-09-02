@@ -435,6 +435,12 @@ private actor DynamicCapacitySnapshotPort: CoachContextSnapshotPort {
             authority.configurationGeneration == configurationGeneration
     }
 
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
+    }
+
     private func snapshot(
         draft: ChatDraft,
         binding: CoachContextSnapshotBinding,
@@ -472,7 +478,11 @@ private actor DynamicCapacitySnapshotPort: CoachContextSnapshotPort {
                             providerIdentifier: "synthetic-fixture-v1",
                             responseCollectorByteCeiling: 8_192,
                             framing: CoachProviderFraming(),
-                            tokenEstimator: .utf8ByteUpperBound()
+                            attachmentProjectionPolicy:
+                                try CoachAttachmentProjectionPolicy(
+                                    maximumInlineTranscriptTokens: 8_192,
+                                    tokenEstimator: .utf8ByteUpperBound()
+                                )
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(
@@ -505,7 +515,7 @@ private actor CapacityChatStore: ChatStorePort {
         .loaded([.available(aggregate)])
     }
 
-    func create(_ seed: NewDevelopmentChatSeed) async -> ChatMutationOutcome { .failed }
+    func create(_ commit: NewChatCommit) async -> ChatMutationOutcome { .failed }
     func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome { .failed }
 
     func saveDraft(_ mutation: SaveChatDraftMutation) async -> ChatMutationOutcome {

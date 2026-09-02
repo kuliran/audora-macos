@@ -71,6 +71,84 @@ final class CoachContextFeatureTests: XCTestCase {
         XCTAssertEqual(triggers, [.chatCreation(request.creation)])
     }
 
+    func testProviderUnavailableExceptionRequiresExplicitKnownCurrentConfiguration()
+        async throws
+    {
+        let request = try CoachContextNewChatQuoteRequest(
+            library: Self.scope,
+            attachments: .empty,
+            creationKind: .newChat
+        )
+        let knownFeature =
+            previouslyQualifiedProviderUnavailableCoachContextFixture()
+
+        let knownConfiguration = await knownFeature.quoteNewChat(request)
+        let missingConfiguration = await DefaultCoachContextFeature(
+            source: UnconfiguredProviderUnavailableSnapshotPort()
+        ).quoteNewChat(request)
+
+        XCTAssertEqual(
+            knownConfiguration,
+            .unavailable(.providerUnavailable)
+        )
+        XCTAssertEqual(
+            missingConfiguration,
+            .unavailable(.sourceUnavailable)
+        )
+
+        guard case let .providerUnavailable(lowerBound, authority) =
+            await knownFeature.quoteNewChatBoundToConfiguration(request)
+        else {
+            return XCTFail("expected the explicit known configuration authority")
+        }
+        XCTAssertFalse(lowerBound.provesImpossible)
+        guard case let .acquired(lease) =
+            await knownFeature.acquireNewChatCreationLease(authority)
+        else {
+            return XCTFail("expected the known configuration to remain leasable")
+        }
+        await lease.release()
+    }
+
+    func testLiveCompositionReportsSourceUnavailableWithoutQualifiedContext()
+        async throws
+    {
+        let aggregate = try fixtureAggregate()
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            )
+        )
+        let feature = DefaultCoachContextFeature()
+        let newChatRequest = try CoachContextNewChatQuoteRequest(
+            library: Self.scope,
+            attachments: .empty,
+            creationKind: .newChat
+        )
+        let chatRequest = CoachContextChatQuoteRequest(
+            library: Self.scope,
+            chatID: aggregate.chat.id,
+            draft: aggregate.chat.draft
+        )
+        let pendingRequest = try CoachContextPendingTurnRequest(
+            library: Self.scope,
+            chatID: aggregate.chat.id,
+            draft: aggregate.chat.draft,
+            pendingUserTurn: pending
+        )
+
+        let newChat = await feature.quoteNewChat(newChatRequest)
+        let chat = await feature.quoteChat(chatRequest)
+        let preparation = await feature.preparePendingUserTurn(pendingRequest)
+
+        XCTAssertEqual(newChat, .unavailable(.sourceUnavailable))
+        XCTAssertEqual(chat, .unavailable(.sourceUnavailable))
+        XCTAssertEqual(preparation, .unavailable(.sourceUnavailable))
+    }
+
     func testOversizedPendingDraftShortCircuitsBeforeEvenFailClosedResolution() async throws {
         let aggregate = try fixtureAggregate(
             draftText: String(
@@ -270,9 +348,44 @@ final class CoachContextFeatureTests: XCTestCase {
                 providerIdentifier: "synthetic-fixture-v1",
                 responseCollectorByteCeiling: 8_192,
                 framing: CoachProviderFraming(),
-                tokenEstimator: .utf8ByteUpperBound()
+                attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 8_192,
+                    tokenEstimator: .utf8ByteUpperBound()
+                )
             )
         )
+    }
+}
+
+private struct UnconfiguredProviderUnavailableSnapshotPort:
+    CoachContextSnapshotPort
+{
+    func resolveNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .providerUnavailable
+    }
+
+    func resolveChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .providerUnavailable
+    }
+
+    func resolvePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .providerUnavailable
+    }
+
+    func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
+        false
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        .stale
     }
 }
 
@@ -360,6 +473,12 @@ private actor RecordingCoachContextSnapshotPort: CoachContextSnapshotPort {
 
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         authority.contextGeneration == 1 && authority.configurationGeneration == 1
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
     }
 
     private func snapshot(
@@ -482,6 +601,12 @@ private actor SuspendingAuthoritySnapshotPort: CoachContextSnapshotPort {
             authority.configurationGeneration == configurationGeneration
     }
 
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
+    }
+
     func waitUntilValidationStarts() async {
         guard !validationStarted else { return }
         await withCheckedContinuation { continuation in
@@ -569,5 +694,11 @@ private actor WrongBindingSnapshotPort: CoachContextSnapshotPort {
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
         validationCount += 1
         return true
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireImmutableAuthorityLease(authority)
     }
 }

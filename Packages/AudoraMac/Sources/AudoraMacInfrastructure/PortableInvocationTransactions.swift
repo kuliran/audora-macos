@@ -514,8 +514,9 @@ struct PortableInvocationTransactions: Sendable {
         switch outcome {
         case let .committed(aggregate): .committed(aggregate)
         case let .stale(aggregate): .stale(aggregate)
-        case .collision, .profileStatementGenerationChanged, .frozen,
-             .readOnlyLibrary, .failed: .failed
+        case .collision, .creationAuthorityChanged, .attachmentUnavailable,
+             .profileStatementGenerationChanged, .frozen, .readOnlyLibrary,
+             .failed: .failed
         }
     }
 

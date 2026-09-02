@@ -1,4 +1,4 @@
-import AudoraApplication
+@_spi(ChatConfirmationTesting) import AudoraApplication
 import AudoraDomain
 @testable import AudoraMacPresentation
 import Foundation
@@ -193,6 +193,167 @@ final class ChatPresentationModelTests: XCTestCase {
         XCTAssertEqual(commandsAfterInvalidInput, validCommands)
     }
 
+    func testNewChatKeyboardInteractionsDispatchSearchManyToggleDefaultAndCancel() async throws {
+        let confirmationToken = NewChatConfirmationToken(
+            testingValue: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000325"
+            )!
+        )
+        let feature = RecordingPresentationChatFeature(
+            initial: ChatFeatureState(
+                catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])),
+                newChatPicker: .ready(
+                    ChatAttachmentPickerSnapshot(
+                        allRows: [],
+                        visibleRows: [],
+                        selectedAttachmentIDs: [],
+                        filterQuery: .empty,
+                        feasibility: .quoting,
+                        confirmationToken: confirmationToken
+                    )
+                )
+            )
+        )
+        let model = makeChatPresentationModel(feature: feature)
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let first = try ChatSessionAttachmentID("attachment-000001")
+        let second = try ChatSessionAttachmentID("attachment-000002")
+        await model.start(in: scope)
+        let startCommands = await feature.commands
+        let context = try XCTUnwrap(
+            startContexts(in: startCommands).first
+        )
+
+        model.beginNewChat()
+        await waitForCommandCount(2, in: feature)
+        model.updateNewChatAttachmentFilter("café")
+        await waitForCommandCount(3, in: feature)
+        model.performNewChatAttachmentPickerAction(.toggle(first))
+        await waitForCommandCount(4, in: feature)
+        model.performNewChatAttachmentPickerAction(.toggle(second))
+        await waitForCommandCount(5, in: feature)
+        model.performNewChatAttachmentPickerAction(.defaultAction)
+        await waitForCommandCount(6, in: feature)
+        model.performNewChatAttachmentPickerAction(.cancelAction)
+        await waitForCommandCount(7, in: feature)
+
+        let commands = await feature.commands
+        XCTAssertEqual(
+            commands,
+            [
+                .start(context),
+                .beginNewChat(context),
+                .setNewChatAttachmentFilter(
+                    context,
+                    try ChatAttachmentFilterQuery("café")
+                ),
+                .toggleNewChatAttachment(context, first),
+                .toggleNewChatAttachment(context, second),
+                .confirmNewChat(context, confirmationToken),
+                .cancelNewChat(context),
+            ]
+        )
+    }
+
+    func testNewChatConfigurationRecoveryDispatchesCandidateReprojection() async throws {
+        let feature = RecordingPresentationChatFeature(
+            initial: ChatFeatureState(
+                catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])),
+                newChatPicker: .ready(
+                    ChatAttachmentPickerSnapshot(
+                        allRows: [],
+                        visibleRows: [],
+                        selectedAttachmentIDs: [],
+                        filterQuery: .empty,
+                        feasibility: .unavailable(.sourceUnavailable),
+                        issue: .qualifiedConfigurationUnavailable
+                    )
+                )
+            )
+        )
+        let model = makeChatPresentationModel(feature: feature)
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        await model.start(in: scope)
+        let startCommands = await feature.commands
+        let context = try XCTUnwrap(startContexts(in: startCommands).first)
+
+        model.retryNewChatConfiguration()
+        await waitForCommandCount(2, in: feature)
+
+        let commands = await feature.commands
+        XCTAssertEqual(commands, [.start(context), .beginNewChat(context)])
+    }
+
+    func testNewChatSheetProjectionKeepsCancellationAvailableUntilDurableCreation() {
+        let readyState = ChatFeatureState(
+            catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: []))
+        )
+        let open = NewChatSheetInteractionPresentation(
+            admissionState: .idle,
+            chatState: readyState
+        )
+
+        XCTAssertTrue(open.allowsControlInteraction)
+        XCTAssertTrue(open.allowsCancellation)
+        XCTAssertFalse(open.preventsInteractiveDismissal)
+        XCTAssertNil(open.busyAccessibilityLabel)
+
+        let resolvingOrQuoting = NewChatSheetInteractionPresentation(
+            admissionState: ApplicationCommandAdmissionState(
+                isChatBoundaryPending: true
+            ),
+            chatState: readyState
+        )
+        XCTAssertFalse(resolvingOrQuoting.allowsControlInteraction)
+        XCTAssertTrue(resolvingOrQuoting.allowsCancellation)
+        XCTAssertFalse(resolvingOrQuoting.preventsInteractiveDismissal)
+        XCTAssertEqual(
+            resolvingOrQuoting.busyAccessibilityLabel,
+            "New Chat is busy. Search, Session selection, and Create Chat are temporarily unavailable. Cancel remains available."
+        )
+
+        let libraryNavigation = NewChatSheetInteractionPresentation(
+            admissionState: ApplicationCommandAdmissionState(
+                isLibraryNavigationPending: true
+            ),
+            chatState: readyState
+        )
+        XCTAssertFalse(libraryNavigation.allowsControlInteraction)
+        XCTAssertTrue(libraryNavigation.allowsCancellation)
+        XCTAssertFalse(libraryNavigation.preventsInteractiveDismissal)
+
+        let orderlyTermination = NewChatSheetInteractionPresentation(
+            admissionState: ApplicationCommandAdmissionState(
+                isOrderlyTerminationPending: true
+            ),
+            chatState: readyState
+        )
+        XCTAssertFalse(orderlyTermination.allowsControlInteraction)
+        XCTAssertFalse(orderlyTermination.allowsCancellation)
+        XCTAssertTrue(orderlyTermination.preventsInteractiveDismissal)
+
+        let creating = NewChatSheetInteractionPresentation(
+            admissionState: ApplicationCommandAdmissionState(
+                isChatBoundaryPending: true
+            ),
+            chatState: ChatFeatureState(
+                catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])),
+                activity: .creating
+            )
+        )
+        XCTAssertFalse(creating.allowsControlInteraction)
+        XCTAssertFalse(creating.allowsCancellation)
+        XCTAssertTrue(creating.preventsInteractiveDismissal)
+        XCTAssertEqual(
+            creating.busyAccessibilityLabel,
+            "New Chat is being created. Search, Session selection, Cancel, and Create Chat are unavailable."
+        )
+    }
+
     func testUserActionsCaptureTheCurrentLibraryCommandContext() async throws {
         let scope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
@@ -217,32 +378,29 @@ final class ChatPresentationModelTests: XCTestCase {
         let startCommands = await feature.commands
         let context = try XCTUnwrap(startContexts(in: startCommands).first)
 
-        model.createDevelopmentChat()
-        await waitForCommandCount(2, in: feature)
         model.open(chatID)
-        await waitForCommandCount(3, in: feature)
+        await waitForCommandCount(2, in: feature)
         model.rename(chatID, title: "Focused Practice", expectedRevision: 4)
-        await waitForCommandCount(4, in: feature)
+        await waitForCommandCount(3, in: feature)
         model.updateDraft("A synthetic coaching Draft")
-        await waitForCommandCount(5, in: feature)
+        await waitForCommandCount(4, in: feature)
         model.refreshContextQuote()
-        await waitForCommandCount(6, in: feature)
+        await waitForCommandCount(5, in: feature)
         model.sendDraft()
-        await waitForCommandCount(7, in: feature)
+        await waitForCommandCount(6, in: feature)
         let pendingID = try PendingUserTurnID("ptu-20260830T120000000Z-5KMN")
         model.retryPendingUserTurn(pendingID)
-        await waitForCommandCount(8, in: feature)
+        await waitForCommandCount(7, in: feature)
         model.createNewChatFromCapacityFailure(pendingID)
-        await waitForCommandCount(9, in: feature)
+        await waitForCommandCount(8, in: feature)
         model.discardPendingUserTurn(pendingID)
-        await waitForCommandCount(10, in: feature)
+        await waitForCommandCount(9, in: feature)
 
         let commands = await feature.commands
         XCTAssertEqual(
             commands,
             [
                 .start(context),
-                .createDevelopmentChat(context),
                 .open(context, chatID),
                 .rename(context, chatID, title: "Focused Practice", expectedRevision: 4),
                 .editDraft(
@@ -291,6 +449,8 @@ final class ChatPresentationModelTests: XCTestCase {
             .readOnlyLibrary,
             .coachContextUnavailable,
             .messageMustBeShortened,
+            .attachmentCatalogFailed,
+            .qualifiedCoachConfigurationUnavailable,
         ]
 
         for notice in notices {
@@ -301,6 +461,126 @@ final class ChatPresentationModelTests: XCTestCase {
                 notice.rawValue
             )
         }
+    }
+
+    func testNewChatPickerIssuesHaveDistinctActionableRecoveryText() {
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.recoveryText(
+                for: .selectionLimitReached(maximum: 128)
+            ),
+            "You can attach up to 128 Sessions. Deselect a Session before adding another."
+        )
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.recoveryText(
+                for: .attachmentUnavailable
+            ),
+            "A selected Session changed or is no longer available. Change the selection and try again."
+        )
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.recoveryText(
+                for: .contextCannotFit
+            ),
+            "These Sessions cannot fit together in this coach's context. Remove a Session."
+        )
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.recoveryText(
+                for: .contextUnavailable(.sourceUnavailable)
+            ),
+            "Current Coach context could not be verified. Change the selection or reopen New Chat to try again."
+        )
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.recoveryText(
+                for: .qualifiedConfigurationUnavailable
+            ),
+            "No qualified Coach configuration is available. Check again after installing a configuration update."
+        )
+    }
+
+    func testMissingQualifiedConfigurationAndTemporaryTransportHaveDistinctRecoveryCopy() {
+        XCTAssertEqual(
+            ChatNoticePresentation.recoveryText(
+                for: .qualifiedCoachConfigurationUnavailable
+            ),
+            "No qualified Coach configuration is available. Install an Audora update with a qualified configuration before creating a Chat."
+        )
+        XCTAssertEqual(
+            NewChatAttachmentPickerPresentation.providerUnavailableRecoveryText,
+            "Coach transport is temporarily unavailable. You can create this Chat locally and try coaching later."
+        )
+    }
+
+    func testNewChatPickerIssueIsAnnouncedOnceAcrossStateReconciliation() async throws {
+        let issue = ChatAttachmentPickerIssue.attachmentUnavailable
+        let state = ChatFeatureState(
+            catalog: .ready(ChatCatalogSnapshot(allRows: [], visibleRows: [])),
+            newChatPicker: .ready(
+                ChatAttachmentPickerSnapshot(
+                    allRows: [],
+                    visibleRows: [],
+                    selectedAttachmentIDs: [],
+                    filterQuery: .empty,
+                    feasibility: .unavailable(.sourceUnavailable),
+                    issue: issue
+                )
+            )
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let announcements = ChatAnnouncementRecorder()
+        let model = makeChatPresentationModel(
+            feature: feature,
+            announcements: announcements
+        )
+        await model.start(
+            in: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            )
+        )
+
+        XCTAssertEqual(
+            announcements.values,
+            [NewChatAttachmentPickerPresentation.accessibilityAnnouncement(for: issue)]
+        )
+    }
+
+    func testNewChatPickerIssueIsAnnouncedAgainAfterCloseAndReopen() async throws {
+        let issue = ChatAttachmentPickerIssue.contextCannotFit
+        let catalog = ChatCatalogSnapshot(allRows: [], visibleRows: [])
+        let issueState = ChatFeatureState(
+            catalog: .ready(catalog),
+            newChatPicker: .ready(
+                ChatAttachmentPickerSnapshot(
+                    allRows: [],
+                    visibleRows: [],
+                    selectedAttachmentIDs: [],
+                    filterQuery: .empty,
+                    feasibility: .unavailable(.sourceUnavailable),
+                    issue: issue
+                )
+            )
+        )
+        let closedState = ChatFeatureState(
+            catalog: .ready(catalog),
+            newChatPicker: .closed
+        )
+        let feature = PickerLifecyclePresentationChatFeature(
+            states: [issueState, closedState, issueState]
+        )
+        let announcements = ChatAnnouncementRecorder()
+        let model = makeChatPresentationModel(
+            feature: feature,
+            announcements: announcements
+        )
+
+        await model.start(
+            in: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            )
+        )
+
+        let announcement = NewChatAttachmentPickerPresentation.accessibilityAnnouncement(
+            for: issue
+        )
+        XCTAssertEqual(announcements.values, [announcement, announcement])
     }
 
     func testCoachContextPresentationExplainsAllNineNonadditiveCategories() {
@@ -320,6 +600,56 @@ final class ChatPresentationModelTests: XCTestCase {
                 "Provider framing", "Attachments", "Transcript exchange reserve",
                 "Response reserve", "Safety margin",
             ]
+        )
+    }
+
+    func testNewChatCreationLiveContextUsesTheFullWindowAndTotalReservedUsage() {
+        let presentation = NewChatCreationContextPresentation(
+            totalContextTokens: 682,
+            inputCeilingTokens: 4_032,
+            reservedResponseTokens: 32,
+            safetyMarginTokens: 8,
+            profileTokens: 128
+        )
+
+        XCTAssertEqual(presentation.usedTokens, 682)
+        XCTAssertEqual(presentation.maximumTokens, 4_072)
+        XCTAssertEqual(
+            presentation.summary,
+            "~682 / 4072 total context tokens"
+        )
+        XCTAssertEqual(
+            presentation.profileContribution,
+            "Current Profile: ~128 tokens"
+        )
+        XCTAssertEqual(
+            presentation.accessibilityLabel,
+            "Estimated total context, 682 of 4072 tokens"
+        )
+    }
+
+    func testNewChatCreationProviderOutageShowsTheAvailableLowerBoundAndProfile() {
+        let presentation = NewChatCreationContextPresentation(
+            minimumTotalContextTokens: 420,
+            inputCeilingTokens: 4_032,
+            reservedResponseTokens: 32,
+            safetyMarginTokens: 8,
+            minimumProfileTokens: 12
+        )
+
+        XCTAssertEqual(presentation.usedTokens, 420)
+        XCTAssertEqual(presentation.maximumTokens, 4_072)
+        XCTAssertEqual(
+            presentation.summary,
+            "At least ~420 / 4072 total context tokens"
+        )
+        XCTAssertEqual(
+            presentation.profileContribution,
+            "Profile lower bound: ~12 tokens"
+        )
+        XCTAssertEqual(
+            presentation.accessibilityLabel,
+            "Minimum total context, at least 420 of 4072 tokens"
         )
     }
 
@@ -511,7 +841,7 @@ final class ChatPresentationModelTests: XCTestCase {
         title: String
     ) throws -> ChatAggregate {
         let instant = try UTCInstant("2026-08-30T12:00:00.000Z")
-        let seed = try NewDevelopmentChatSeed(
+        let seed = try NewChatSeed(
             library: scope,
             chatID: ChatID(chatID),
             draftID: ChatDraftID(draftID),
@@ -543,15 +873,26 @@ final class ChatPresentationModelTests: XCTestCase {
 
 @MainActor
 private func makeChatPresentationModel(
-    feature: any ChatFeature
+    feature: any ChatFeature,
+    announcements: (any AccessibilityAnnouncementPosting)? = nil
 ) -> ChatPresentationModel {
     let application = DefaultApplicationCommandFeature(
         library: PassivePresentationLibraryFeature(),
         chat: feature
     )
     return ChatPresentationModel(
-        dispatcher: ChatCommandDispatcher(feature: application)
+        dispatcher: ChatCommandDispatcher(feature: application),
+        announcements: announcements
     )
+}
+
+@MainActor
+private final class ChatAnnouncementRecorder: AccessibilityAnnouncementPosting {
+    private(set) var values: [String] = []
+
+    func post(_ announcement: String) {
+        values.append(announcement)
+    }
 }
 
 private actor PassivePresentationLibraryFeature: LibraryFeature {
@@ -607,7 +948,9 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
                 )
             }
             filterIsComplete = true
-        case .createDevelopmentChat, .rename, .open, .editDraft,
+        case .beginNewChat, .setNewChatAttachmentFilter, .toggleNewChatAttachment,
+             .cancelNewChat, .confirmNewChat,
+             .rename, .open, .editDraft,
              .refreshContextQuote, .sendDraft,
              .retryPendingUserTurn, .createNewChatFromCapacityFailure,
              .discardPendingUserTurn:
@@ -656,6 +999,59 @@ private actor RecordingPresentationChatFeature: ChatFeature {
             activeScope = context.libraryScope
             streams.publishStart()
         }
+    }
+}
+
+private actor PickerLifecyclePresentationChatFeature: ChatFeature {
+    nonisolated var states: AsyncStream<ChatFeatureState> { streams.makeStream() }
+
+    private nonisolated let streams: PickerLifecyclePresentationStateStreams
+    private let snapshots: [ChatFeatureState]
+    private let finalState: ChatFeatureState
+    private var activeScope: LibraryScope?
+
+    init(states snapshots: [ChatFeatureState]) {
+        self.snapshots = snapshots
+        finalState = snapshots.last ?? ChatFeatureState()
+        streams = PickerLifecyclePresentationStateStreams()
+    }
+
+    var currentState: ChatFeatureState { finalState }
+
+    func currentState(in scope: LibraryScope) -> ChatFeatureState? {
+        activeScope == scope ? finalState : nil
+    }
+
+    func flushForOrderlyTermination() async -> Bool { true }
+
+    func send(_ command: ChatCommand) {
+        if case let .start(context) = command {
+            activeScope = context.libraryScope
+            streams.publish(snapshots)
+        }
+    }
+}
+
+private final class PickerLifecyclePresentationStateStreams: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: AsyncStream<ChatFeatureState>.Continuation?
+
+    func makeStream() -> AsyncStream<ChatFeatureState> {
+        AsyncStream { continuation in
+            lock.withLock { self.continuation = continuation }
+        }
+    }
+
+    func publish(_ states: [ChatFeatureState]) {
+        let continuation = lock.withLock {
+            () -> AsyncStream<ChatFeatureState>.Continuation? in
+            defer { self.continuation = nil }
+            return self.continuation
+        }
+        for state in states {
+            continuation?.yield(state)
+        }
+        continuation?.finish()
     }
 }
 

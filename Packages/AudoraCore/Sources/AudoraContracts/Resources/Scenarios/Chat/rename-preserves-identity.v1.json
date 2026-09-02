@@ -25,6 +25,7 @@
   "dependencyTrace": [
     {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded"},
     {"port": "chatStore", "effect": "load", "outcome": "loaded"},
+    {"port": "attachmentSource", "effect": "resolveAttachments", "outcome": "resolved", "resolutions": []},
     {"port": "clock", "effect": "now", "outcome": "2026-08-30T12:05:00.000Z"},
     {"port": "chatStore", "effect": "rename", "outcome": "committed"}
   ],

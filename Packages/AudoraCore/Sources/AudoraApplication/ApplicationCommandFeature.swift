@@ -98,6 +98,10 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
         guard !admissionState.isOrderlyTerminationPending else {
             return completedReceipt()
         }
+        if case .cancelNewChat = command {
+            let chat = chat
+            return ApplicationCommandReceipt(task: Task { await chat.send(command) })
+        }
         guard !admissionState.isLibraryNavigationPending,
               !admissionState.isChatBoundaryPending
         else {
@@ -144,6 +148,7 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
         updateAdmissionState(isOrderlyTerminationPending: true)
         let chat = chat
         let operation = Task<Bool, Never> {
+            await chat.beginOrderlyTermination()
             await drainAcceptedCommands()
             let succeeded = await chat.flushForOrderlyTermination()
             if !succeeded {
@@ -276,9 +281,11 @@ private final class DeferredApplicationCommandCompletion {
 private extension ChatCommand {
     var beginsApplicationChatBoundary: Bool {
         switch self {
-        case .createDevelopmentChat, .open, .sendDraft, .retryPendingUserTurn:
+        case .confirmNewChat, .open, .sendDraft, .retryPendingUserTurn:
             true
-        case .start, .rename, .setFilter, .editDraft, .refreshContextQuote,
+        case .start, .beginNewChat, .setNewChatAttachmentFilter,
+             .toggleNewChatAttachment, .cancelNewChat,
+             .rename, .setFilter, .editDraft, .refreshContextQuote,
              .createNewChatFromCapacityFailure, .discardPendingUserTurn:
             false
         }

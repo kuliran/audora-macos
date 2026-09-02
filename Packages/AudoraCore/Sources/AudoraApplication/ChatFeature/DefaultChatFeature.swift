@@ -27,6 +27,65 @@ private struct ScheduledAdmissionRefresh: Sendable {
     let task: Task<Void, Never>
 }
 
+private struct NewChatConfirmationBinding: Equatable, Sendable {
+    let token: NewChatConfirmationToken
+    let attachments: ChatAttachments
+    let quoteAuthority: ChatCreationQuoteAuthority
+}
+
+private struct SessionTranscriptRevisionPair: Hashable, Sendable {
+    let sessionID: SessionID
+    let transcriptRevisionID: TranscriptRevisionID
+
+    init(_ attachment: ChatSessionAttachment) {
+        sessionID = attachment.sessionID
+        transcriptRevisionID = attachment.transcriptRevisionID
+    }
+
+    init(_ candidate: ChatAttachmentCandidate) {
+        sessionID = candidate.sessionID
+        transcriptRevisionID = candidate.transcriptRevisionID
+    }
+}
+
+private struct UnavailableChatAdmissionRefreshScheduler:
+    ChatAdmissionRefreshScheduling
+{
+    func sleep(until deadline: UTCInstant) async throws {
+        throw CancellationError()
+    }
+}
+
+private struct UnavailableChatInvocations: Invocations {
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .unavailable
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .failed
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        .rejected(prepared.aggregate, .admissionUnavailable)
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        .rejected(nil, .admissionUnavailable)
+    }
+}
+
 private enum DraftSaveDisposition: Equatable, Sendable {
     case notAttempted
     case durable
@@ -36,8 +95,6 @@ private enum DraftSaveDisposition: Equatable, Sendable {
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 public actor DefaultChatFeature: ChatFeature {
-    private static let maximumCollisionAttempts = 3
-    private static let maximumProfileRebases = 3
     public static let draftAutosaveIntervalNanoseconds: UInt64 = 2_000_000_000
 
     private let store: any ChatStorePort
@@ -50,11 +107,17 @@ public actor DefaultChatFeature: ChatFeature {
     private let responsePositionIDGenerator: any ChatResponsePositionIDGenerator
     private let autosaveScheduler: any ChatAutosaveScheduling
     private let admissionRefreshScheduler: any ChatAdmissionRefreshScheduling
-    private let coachContext: any CoachContextCoordinating
+    private let coachContext: any ChatCoachContextCoordinating
     private let invocations: any Invocations
+    private let newChatCreation: NewChatCreationModule
 
     private var activeContext: ChatCommandContext?
     private var requestedContext: ChatCommandContext?
+    private var newChatAttachmentFilterQuery = ChatAttachmentFilterQuery.empty
+    private var newChatAttachmentConfigurationStamp:
+        CoachContextConfigurationStamp?
+    private var newChatConfirmation: NewChatConfirmationBinding?
+    private var isOrderlyTerminationPending = false
     private var state = ChatFeatureState()
     private var operationInFlight = false
     private var operationIdleWaiters: [CheckedContinuation<Void, Never>] = []
@@ -92,8 +155,59 @@ public actor DefaultChatFeature: ChatFeature {
         self.responsePositionIDGenerator = responsePositionIDGenerator
         self.autosaveScheduler = autosaveScheduler
         self.admissionRefreshScheduler = admissionRefreshScheduler
-        coachContext = DefaultCoachContextFeature()
+        let coachContext = DefaultCoachContextFeature()
+        self.coachContext = coachContext
         self.invocations = invocations
+        newChatCreation = NewChatCreationModule(
+            store: store,
+            profileReader: profileReader,
+            clock: clock,
+            chatIDGenerator: chatIDGenerator,
+            draftIDGenerator: draftIDGenerator,
+            memoryIDGenerator: memoryIDGenerator,
+            coachContext: coachContext
+        )
+    }
+
+    @_spi(CoachContextQualification)
+    public init(
+        store: any ChatStorePort,
+        profileReader: any ProfileStatementGenerationReading,
+        clock: any ChatClock,
+        chatIDGenerator: any ChatIDGenerator,
+        draftIDGenerator: any ChatDraftIDGenerator,
+        memoryIDGenerator: any CoachMemoryIDGenerator,
+        pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
+        responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
+        autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
+        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling,
+        invocations: any Invocations,
+        attachmentEvidenceSource: any ChatSessionAttachmentEvidenceSource
+    ) {
+        self.store = store
+        self.profileReader = profileReader
+        self.clock = clock
+        self.chatIDGenerator = chatIDGenerator
+        self.draftIDGenerator = draftIDGenerator
+        self.memoryIDGenerator = memoryIDGenerator
+        self.pendingUserTurnIDGenerator = pendingUserTurnIDGenerator
+        self.responsePositionIDGenerator = responsePositionIDGenerator
+        self.autosaveScheduler = autosaveScheduler
+        self.admissionRefreshScheduler = admissionRefreshScheduler
+        self.invocations = invocations
+        let coachContext = DefaultCoachContextFeature(
+            attachmentEvidenceSource: attachmentEvidenceSource
+        )
+        self.coachContext = coachContext
+        newChatCreation = NewChatCreationModule(
+            store: store,
+            profileReader: profileReader,
+            clock: clock,
+            chatIDGenerator: chatIDGenerator,
+            draftIDGenerator: draftIDGenerator,
+            memoryIDGenerator: memoryIDGenerator,
+            coachContext: coachContext
+        )
     }
 
     init(
@@ -106,9 +220,9 @@ public actor DefaultChatFeature: ChatFeature {
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
-        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling,
-        coachContext: any CoachContextCoordinating,
-        invocations: any Invocations
+        admissionRefreshScheduler: (any ChatAdmissionRefreshScheduling)? = nil,
+        coachContext: any ChatCoachContextCoordinating,
+        invocations: (any Invocations)? = nil
     ) {
         self.store = store
         self.profileReader = profileReader
@@ -120,8 +234,18 @@ public actor DefaultChatFeature: ChatFeature {
         self.responsePositionIDGenerator = responsePositionIDGenerator
         self.autosaveScheduler = autosaveScheduler
         self.admissionRefreshScheduler = admissionRefreshScheduler
+            ?? UnavailableChatAdmissionRefreshScheduler()
         self.coachContext = coachContext
-        self.invocations = invocations
+        self.invocations = invocations ?? UnavailableChatInvocations()
+        newChatCreation = NewChatCreationModule(
+            store: store,
+            profileReader: profileReader,
+            clock: clock,
+            chatIDGenerator: chatIDGenerator,
+            draftIDGenerator: draftIDGenerator,
+            memoryIDGenerator: memoryIDGenerator,
+            coachContext: coachContext
+        )
     }
 
     public var currentState: ChatFeatureState { state }
@@ -137,6 +261,11 @@ public actor DefaultChatFeature: ChatFeature {
     }
 
     public func send(_ command: ChatCommand) async {
+        if isOrderlyTerminationPending,
+           command.isTransientNewChatCommand
+        {
+            return
+        }
         if case let .start(context) = command {
             if let newest = requestedContext ?? activeContext,
                context.generation <= newest.generation {
@@ -144,16 +273,28 @@ public actor DefaultChatFeature: ChatFeature {
             }
             requestedContext = context
             pendingStart = context
+            await newChatCreation.cancelTransientWork()
             guard !operationInFlight else { return }
             operationInFlight = true
             defer { finishOperation() }
             await drainWork()
             return
         }
-        if case let .setFilter(context, query) = command,
-           context == requestedContext {
-            setFilter(query)
+        if case let .cancelNewChat(context) = command, isCurrent(context) {
+            await cancelNewChat(context: context)
             return
+        }
+        if contextForImmediateCommand(command) == requestedContext {
+            switch command {
+            case let .setFilter(_, query):
+                setFilter(query)
+                return
+            case let .setNewChatAttachmentFilter(_, query):
+                setNewChatAttachmentFilter(query)
+                return
+            default:
+                break
+            }
         }
         guard isCurrent(command.context) else { return }
         switch command {
@@ -253,8 +394,17 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func perform(_ command: ChatCommand) async {
         switch command {
-        case let .createDevelopmentChat(context):
-            await createDevelopmentChat(context: context)
+        case let .beginNewChat(context):
+            await beginNewChat(context: context)
+        case let .toggleNewChatAttachment(context, attachmentID):
+            await toggleNewChatAttachment(attachmentID, context: context)
+        case let .cancelNewChat(context):
+            await cancelNewChat(context: context)
+        case let .confirmNewChat(context, confirmationToken):
+            await confirmNewChat(
+                confirmationToken: confirmationToken,
+                context: context
+            )
         case let .rename(context, chatID, title, expectedRevision):
             await rename(
                 chatID,
@@ -276,9 +426,522 @@ public actor DefaultChatFeature: ChatFeature {
             createNewChatFromCapacityFailure(pendingUserTurnID, context: context)
         case let .discardPendingUserTurn(context, pendingUserTurnID):
             await discardPendingUserTurn(pendingUserTurnID, context: context)
-        case .start, .setFilter, .editDraft, .sendDraft:
+        case .start, .setFilter, .setNewChatAttachmentFilter,
+             .editDraft, .sendDraft:
             break
         }
+    }
+
+    private func beginNewChat(
+        context: ChatCommandContext,
+        remainingConfigurationRefreshAttempts: Int = 1
+    ) async {
+        guard isActive(context), case .ready = state.catalog else { return }
+        if case let .ready(snapshot) = state.newChatPicker,
+           snapshot.issue == .qualifiedConfigurationUnavailable,
+           let attachments = try? selectedAttachments(in: snapshot)
+        {
+            await refreshNewChatPickerForConfigurationChange(
+                preserving: attachments,
+                context: context,
+                remainingQuoteRefreshAttempts:
+                    remainingConfigurationRefreshAttempts
+            )
+            return
+        }
+        newChatAttachmentFilterQuery = .empty
+        newChatAttachmentConfigurationStamp = nil
+        newChatConfirmation = nil
+        await newChatCreation.cancelTransientWork()
+        state = replacing(
+            newChatPicker: .loading,
+            activity: nil,
+            notice: nil
+        )
+        publish()
+        guard let outcome = await newChatCreation.loadCandidates(
+            in: context.libraryScope
+        ) else { return }
+        guard isCurrent(context) else { return }
+        switch outcome {
+        case let .loaded(candidates, configuration):
+            do {
+                let rows = try attachmentRows(from: candidates)
+                newChatAttachmentConfigurationStamp = configuration
+                let query = newChatAttachmentFilterQuery
+                let snapshot = ChatAttachmentPickerSnapshot(
+                    allRows: rows,
+                    visibleRows: filtered(rows, by: query),
+                    selectedAttachmentIDs: [],
+                    filterQuery: query,
+                    feasibility: .quoting
+                )
+                state = replacing(
+                    newChatPicker: .ready(snapshot),
+                    activity: nil,
+                    notice: nil
+                )
+                publish()
+                await quoteNewChatSelection(snapshot, context: context)
+            } catch {
+                newChatAttachmentConfigurationStamp = nil
+                newChatConfirmation = nil
+                state = replacing(
+                    newChatPicker: .failed,
+                    activity: nil,
+                    notice: .attachmentCatalogFailed
+                )
+                publish()
+            }
+        case .configurationChanged
+            where remainingConfigurationRefreshAttempts > 0:
+            await beginNewChat(
+                context: context,
+                remainingConfigurationRefreshAttempts:
+                    remainingConfigurationRefreshAttempts - 1
+            )
+        case .configurationChanged:
+            newChatAttachmentConfigurationStamp = nil
+            newChatConfirmation = nil
+            state = replacing(
+                newChatPicker: .failed,
+                activity: nil,
+                notice: .attachmentCatalogFailed
+            )
+            publish()
+        case .qualifiedConfigurationUnavailable:
+            failNewChatForMissingQualifiedConfiguration()
+        case .readOnlyLibrary:
+            newChatAttachmentConfigurationStamp = nil
+            newChatConfirmation = nil
+            state = replacing(
+                newChatPicker: .failed,
+                activity: nil,
+                notice: .readOnlyLibrary
+            )
+            publish()
+        case .failed:
+            newChatAttachmentConfigurationStamp = nil
+            newChatConfirmation = nil
+            state = replacing(
+                newChatPicker: .failed,
+                activity: nil,
+                notice: .attachmentCatalogFailed
+            )
+            publish()
+        }
+    }
+
+    private func setNewChatAttachmentFilter(_ query: ChatAttachmentFilterQuery) {
+        newChatAttachmentFilterQuery = query
+        guard case let .ready(snapshot) = state.newChatPicker else { return }
+        let replacement = ChatAttachmentPickerSnapshot(
+            allRows: snapshot.allRows,
+            visibleRows: filtered(snapshot.allRows, by: query),
+            selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
+            filterQuery: query,
+            feasibility: snapshot.feasibility,
+            issue: snapshot.issue,
+            confirmationToken: snapshot.confirmationToken
+        )
+        state = replacing(
+            newChatPicker: .ready(replacement),
+            activity: state.activity,
+            notice: nil
+        )
+        publish()
+    }
+
+    private func toggleNewChatAttachment(
+        _ attachmentID: ChatSessionAttachmentID,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context), case let .ready(snapshot) = state.newChatPicker,
+              snapshot.allRows.contains(where: { $0.id == attachmentID })
+        else { return }
+        var selected = snapshot.selectedAttachmentIDs
+        if selected.contains(attachmentID) {
+            selected.remove(attachmentID)
+        } else {
+            guard selected.count < ChatAttachments.maximumCount else {
+                let replacement = ChatAttachmentPickerSnapshot(
+                    allRows: snapshot.allRows,
+                    visibleRows: snapshot.visibleRows,
+                    selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
+                    filterQuery: snapshot.filterQuery,
+                    feasibility: snapshot.feasibility,
+                    issue: .selectionLimitReached(
+                        maximum: ChatAttachments.maximumCount
+                    ),
+                    confirmationToken: snapshot.confirmationToken
+                )
+                state = replacing(
+                    newChatPicker: .ready(replacement),
+                    activity: state.activity,
+                    notice: nil
+                )
+                publish()
+                return
+            }
+            selected.insert(attachmentID)
+        }
+        let replacement = ChatAttachmentPickerSnapshot(
+            allRows: snapshot.allRows,
+            visibleRows: snapshot.visibleRows,
+            selectedAttachmentIDs: selected,
+            filterQuery: snapshot.filterQuery,
+            feasibility: .quoting,
+            issue: nil
+        )
+        newChatConfirmation = nil
+        state = replacing(
+            newChatPicker: .ready(replacement),
+            activity: state.activity,
+            notice: nil
+        )
+        publish()
+        await quoteNewChatSelection(replacement, context: context)
+    }
+
+    private func cancelNewChat(context: ChatCommandContext) async {
+        guard isActive(context), state.activity != .creating else { return }
+        await newChatCreation.cancelTransientWork()
+        newChatAttachmentFilterQuery = .empty
+        newChatAttachmentConfigurationStamp = nil
+        newChatConfirmation = nil
+        state = replacing(
+            newChatPicker: .closed,
+            activity: state.activity,
+            notice: nil
+        )
+        publish()
+    }
+
+    private func confirmNewChat(
+        confirmationToken: NewChatConfirmationToken,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context), case let .ready(snapshot) = state.newChatPicker,
+              snapshot.permitsConfirmation,
+              snapshot.confirmationToken == confirmationToken,
+              let attachments = try? selectedAttachments(in: snapshot),
+              let expectedConfiguration = newChatAttachmentConfigurationStamp,
+              let confirmation = newChatConfirmation,
+              confirmation.token == confirmationToken,
+              confirmation.attachments == attachments
+        else { return }
+        guard confirmation.quoteAuthority.configuration == expectedConfiguration else {
+            await refreshNewChatPickerForConfigurationChange(
+                preserving: attachments,
+                context: context,
+                remainingQuoteRefreshAttempts: 0
+            )
+            return
+        }
+        await createNewChat(
+            context: context,
+            confirmation: confirmation
+        )
+    }
+
+    private func quoteNewChatSelection(
+        _ expected: ChatAttachmentPickerSnapshot,
+        context: ChatCommandContext,
+        remainingConfigurationRefreshAttempts: Int = 1
+    ) async {
+        newChatConfirmation = nil
+        guard let attachments = try? selectedAttachments(in: expected),
+              let expectedConfiguration = newChatAttachmentConfigurationStamp
+        else {
+            updatePickerFeasibility(
+                .unavailable(.invalidContext),
+                issue: .contextUnavailable(.invalidContext)
+            )
+            return
+        }
+        guard let outcome = await authoritativeCreationQuote(
+            attachments: attachments,
+            context: context
+        ) else { return }
+        guard isCurrent(context), case let .ready(current) = state.newChatPicker,
+              current.selectedAttachmentIDs == expected.selectedAttachmentIDs
+        else { return }
+        if let authority = outcome.creationAuthority {
+            guard await requireExpectedNewChatQuoteConfiguration(
+                authority,
+                expected: expectedConfiguration,
+                attachments: attachments,
+                context: context,
+                remainingRefreshAttempts: remainingConfigurationRefreshAttempts
+            ) else { return }
+        }
+        switch outcome {
+        case let .available(quote, authority):
+            updatePickerFeasibility(
+                .available(quote),
+                issue: quote.context.fits ? nil : .contextCannotFit,
+                confirmation: NewChatConfirmationBinding(
+                    token: NewChatConfirmationToken(),
+                    attachments: attachments,
+                    quoteAuthority: authority
+                )
+            )
+        case let .providerUnavailable(lowerBound, authority):
+            updatePickerFeasibility(
+                .providerUnavailable(lowerBound),
+                issue: lowerBound.provesImpossible ? .contextCannotFit : nil,
+                confirmation: NewChatConfirmationBinding(
+                    token: NewChatConfirmationToken(),
+                    attachments: attachments,
+                    quoteAuthority: authority
+                )
+            )
+        case let .unavailable(reason):
+            newChatConfirmation = nil
+            updatePickerFeasibility(
+                .unavailable(reason),
+                issue: .contextUnavailable(reason)
+            )
+        }
+    }
+
+    private func requireExpectedNewChatQuoteConfiguration(
+        _ authority: ChatCreationQuoteAuthority,
+        expected configuration: CoachContextConfigurationStamp,
+        attachments: ChatAttachments,
+        context: ChatCommandContext,
+        remainingRefreshAttempts: Int
+    ) async -> Bool {
+        if authority.configuration == configuration { return true }
+        if remainingRefreshAttempts > 0 {
+            await refreshNewChatPickerForConfigurationChange(
+                preserving: attachments,
+                context: context,
+                remainingQuoteRefreshAttempts: remainingRefreshAttempts - 1
+            )
+        } else {
+            updatePickerFeasibility(
+                .unavailable(.staleState),
+                issue: .contextUnavailable(.staleState)
+            )
+        }
+        return false
+    }
+
+    private func authoritativeCreationQuote(
+        attachments: ChatAttachments,
+        context: ChatCommandContext
+    ) async -> ConfigurationBoundChatCreationQuoteOutcome? {
+        do {
+            return await newChatCreation.quote(
+                try CoachContextNewChatQuoteRequest(
+                    library: context.libraryScope,
+                    attachments: attachments,
+                    creationKind: .newChat
+                )
+            )
+        } catch {
+            return .unavailable(.invalidContext)
+        }
+    }
+
+    /// A provider/model change invalidates both the displayed row projection and
+    /// its quote. Reload from immutable Session/Revision identity, preserve any
+    /// still-present selection, and require an explicit subsequent confirmation.
+    private func refreshNewChatPickerForConfigurationChange(
+        preserving attachments: ChatAttachments,
+        context: ChatCommandContext,
+        remainingQuoteRefreshAttempts: Int
+    ) async {
+        newChatConfirmation = nil
+        if case let .ready(current) = state.newChatPicker {
+            let invalidated = ChatAttachmentPickerSnapshot(
+                allRows: current.allRows,
+                visibleRows: current.visibleRows,
+                selectedAttachmentIDs: current.selectedAttachmentIDs,
+                filterQuery: current.filterQuery,
+                feasibility: .quoting,
+                issue: nil
+            )
+            state = replacing(
+                newChatPicker: .ready(invalidated),
+                activity: state.activity,
+                notice: nil
+            )
+            publish()
+        }
+        guard let outcome = await newChatCreation.loadCandidates(
+            in: context.libraryScope
+        ) else { return }
+        guard isCurrent(context), case let .ready(current) = state.newChatPicker else {
+            return
+        }
+        if case .qualifiedConfigurationUnavailable = outcome {
+            failNewChatForMissingQualifiedConfiguration()
+            return
+        }
+        guard case let .loaded(candidates, configuration) = outcome,
+              let rows = try? attachmentRows(from: candidates)
+        else {
+            updatePickerFeasibility(
+                .unavailable(.staleState),
+                issue: .contextUnavailable(.staleState)
+            )
+            return
+        }
+        let selectedPairs = Set(
+            attachments.values.map(SessionTranscriptRevisionPair.init)
+        )
+        let selectedIDs = Set(rows.compactMap { row in
+            selectedPairs.contains(SessionTranscriptRevisionPair(row.attachment))
+                ? row.id
+                : nil
+        })
+        let refreshed = ChatAttachmentPickerSnapshot(
+            allRows: rows,
+            visibleRows: filtered(rows, by: current.filterQuery),
+            selectedAttachmentIDs: selectedIDs,
+            filterQuery: current.filterQuery,
+            feasibility: .quoting,
+            issue: selectedIDs.count == selectedPairs.count
+                ? nil
+                : .attachmentUnavailable
+        )
+        newChatAttachmentConfigurationStamp = configuration
+        state = replacing(
+            newChatPicker: .ready(refreshed),
+            activity: state.activity,
+            notice: nil
+        )
+        publish()
+        guard refreshed.issue == nil else { return }
+        await quoteNewChatSelection(
+            refreshed,
+            context: context,
+            remainingConfigurationRefreshAttempts:
+                remainingQuoteRefreshAttempts
+        )
+    }
+
+    private func updatePickerFeasibility(
+        _ feasibility: ChatCreationFeasibility,
+        issue: ChatAttachmentPickerIssue?,
+        confirmation: NewChatConfirmationBinding? = nil
+    ) {
+        guard case let .ready(snapshot) = state.newChatPicker else { return }
+        let acceptedConfirmation =
+            feasibility.permitsCreation && issue?.blocksConfirmation != true
+                ? confirmation
+                : nil
+        newChatConfirmation = acceptedConfirmation
+        let replacement = ChatAttachmentPickerSnapshot(
+            allRows: snapshot.allRows,
+            visibleRows: snapshot.visibleRows,
+            selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
+            filterQuery: snapshot.filterQuery,
+            feasibility: feasibility,
+            issue: issue,
+            confirmationToken: acceptedConfirmation?.token
+        )
+        state = replacing(
+            newChatPicker: .ready(replacement),
+            activity: state.activity,
+            notice: nil
+        )
+        publish()
+    }
+
+    private func updatePickerIssue(_ issue: ChatAttachmentPickerIssue) {
+        guard case let .ready(snapshot) = state.newChatPicker else { return }
+        newChatConfirmation = nil
+        let replacement = ChatAttachmentPickerSnapshot(
+            allRows: snapshot.allRows,
+            visibleRows: snapshot.visibleRows,
+            selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
+            filterQuery: snapshot.filterQuery,
+            feasibility: snapshot.feasibility,
+            issue: issue,
+            confirmationToken: nil
+        )
+        state = replacing(
+            newChatPicker: .ready(replacement),
+            activity: state.activity,
+            notice: nil
+        )
+        publish()
+    }
+
+    private func failNewChatForMissingQualifiedConfiguration() {
+        newChatAttachmentConfigurationStamp = nil
+        newChatConfirmation = nil
+        if case let .ready(snapshot) = state.newChatPicker {
+            let blocked = ChatAttachmentPickerSnapshot(
+                allRows: snapshot.allRows,
+                visibleRows: snapshot.visibleRows,
+                selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
+                filterQuery: snapshot.filterQuery,
+                feasibility: .unavailable(.sourceUnavailable),
+                issue: .qualifiedConfigurationUnavailable
+            )
+            state = replacing(
+                newChatPicker: .ready(blocked),
+                activity: nil,
+                notice: .qualifiedCoachConfigurationUnavailable
+            )
+            publish()
+            return
+        }
+        state = replacing(
+            newChatPicker: .failed,
+            activity: nil,
+            notice: .qualifiedCoachConfigurationUnavailable
+        )
+        publish()
+    }
+
+    private func attachmentRows(
+        from candidates: [ChatAttachmentCandidate]
+    ) throws -> [ChatAttachmentPickerRow] {
+        guard candidates.count <= ChatAttachmentCandidate.maximumCatalogCount else {
+            throw ChatAttachmentCatalogError.tooManyCandidates
+        }
+        let ordered = candidates.sorted { lhs, rhs in
+            let left = folded(lhs.displayLabel)
+            let right = folded(rhs.displayLabel)
+            if left != right { return left < right }
+            if lhs.sessionID != rhs.sessionID {
+                return lhs.sessionID.rawValue < rhs.sessionID.rawValue
+            }
+            return lhs.transcriptRevisionID.rawValue < rhs.transcriptRevisionID.rawValue
+        }
+        var seenPairs: Set<SessionTranscriptRevisionPair> = []
+        return try ordered.enumerated().map { index, candidate in
+            let pairKey = SessionTranscriptRevisionPair(candidate)
+            guard seenPairs.insert(pairKey).inserted else {
+                throw ChatAttachmentsError.duplicateSessionRevision
+            }
+            let attachment = ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID(
+                    String(format: "attachment-%06d", index + 1)
+                ),
+                sessionID: candidate.sessionID,
+                transcriptRevisionID: candidate.transcriptRevisionID
+            )
+            return ChatAttachmentPickerRow(
+                attachment: attachment,
+                candidate: candidate
+            )
+        }
+    }
+
+    private func selectedAttachments(
+        in snapshot: ChatAttachmentPickerSnapshot
+    ) throws -> ChatAttachments {
+        try ChatAttachments(
+            validating: snapshot.allRows.compactMap { row in
+                snapshot.selectedAttachmentIDs.contains(row.id) ? row.attachment : nil
+            }
+        )
     }
 
     private func drainPendingStarts() async {
@@ -299,8 +962,13 @@ public actor DefaultChatFeature: ChatFeature {
             state = ChatFeatureState(
                 catalog: .loading,
                 filterQuery: state.filterQuery,
-                selection: .none
+                selection: .none,
+                newChatPicker: .closed,
+                openedAttachments: .notRequested
             )
+            newChatAttachmentFilterQuery = .empty
+            newChatAttachmentConfigurationStamp = nil
+            newChatConfirmation = nil
             publish()
             await start(in: context)
         }
@@ -315,7 +983,9 @@ public actor DefaultChatFeature: ChatFeature {
             state = ChatFeatureState(
                 catalog: readyCatalog(from: entries, query: query),
                 filterQuery: query,
-                selection: .none
+                selection: .none,
+                newChatPicker: .closed,
+                openedAttachments: .notRequested
             )
         case .readOnlyLibrary:
             let query = state.filterQuery
@@ -323,6 +993,8 @@ public actor DefaultChatFeature: ChatFeature {
                 catalog: .failed,
                 filterQuery: query,
                 selection: .none,
+                newChatPicker: .closed,
+                openedAttachments: .notRequested,
                 notice: .readOnlyLibrary
             )
         case .failed:
@@ -331,6 +1003,8 @@ public actor DefaultChatFeature: ChatFeature {
                 catalog: .failed,
                 filterQuery: query,
                 selection: .none,
+                newChatPicker: .closed,
+                openedAttachments: .notRequested,
                 notice: .catalogFailed
             )
         }
@@ -338,89 +1012,145 @@ public actor DefaultChatFeature: ChatFeature {
         await refreshAdmissionAvailability(in: context)
     }
 
-    private func createDevelopmentChat(context: ChatCommandContext) async {
-        guard isActive(context), case .ready = state.catalog else { return }
+    private func createNewChat(
+        context: ChatCommandContext,
+        confirmation: NewChatConfirmationBinding
+    ) async {
+        let attachments = confirmation.attachments
+        guard isCurrentNewChatConfirmation(
+            context: context,
+            confirmation: confirmation
+        ), case .ready = state.catalog else { return }
         guard await flushSelectedDraft(in: context) else { return }
-        let library = context.libraryScope
+        guard isCurrentNewChatConfirmation(
+            context: context,
+            confirmation: confirmation
+        ) else { return }
+        let outcome = await newChatCreation.create(
+            NewChatCreationRequest(
+                library: context.libraryScope,
+                attachments: attachments,
+                quoteAuthority: confirmation.quoteAuthority
+            ),
+            durablePhaseWillBegin: { [weak self] in
+                guard let self else { return false }
+                return await self.beginNewChatDurablePhase(
+                    context: context,
+                    confirmation: confirmation
+                )
+            }
+        )
+        guard isActive(context) else { return }
+        switch outcome {
+        case let .committed(committed):
+            newChatAttachmentFilterQuery = .empty
+            newChatAttachmentConfigurationStamp = nil
+            newChatConfirmation = nil
+            state = replacing(
+                newChatPicker: .closed,
+                activity: state.activity,
+                notice: state.notice
+            )
+            install(committed, selection: .open(committed), notice: nil)
+            await resolveOpenedAttachments(for: committed, context: context)
+            await refreshContextAdvisory(
+                for: committed,
+                draft: committed.chat.draft,
+                context: context
+            )
+            return
+        case .collisionLimitReached:
+            state = replacing(activity: nil, notice: .createCollisionLimitReached)
+            publish()
+            return
+        case .attachmentUnavailable:
+            state = replacing(activity: nil, notice: nil)
+            updatePickerIssue(.attachmentUnavailable)
+            return
+        case .requote:
+            await requoteNewChatAfterAuthorityChange(
+                attachments: attachments,
+                context: context
+            )
+            return
+        case .qualifiedConfigurationUnavailable:
+            failNewChatForMissingQualifiedConfiguration()
+            return
+        case let .frozen(frozen):
+            install(frozen, selection: .frozen(frozen), notice: .chatFrozen)
+            return
+        case .readOnlyLibrary:
+            state = replacing(activity: nil, notice: .readOnlyLibrary)
+            publish()
+            return
+        case .failed:
+            state = replacing(activity: nil, notice: .createFailed)
+            publish()
+            return
+        case .cancelled:
+            return
+        }
+    }
+
+    private func beginNewChatDurablePhase(
+        context: ChatCommandContext,
+        confirmation: NewChatConfirmationBinding
+    ) -> Bool {
+        guard isCurrentNewChatConfirmation(
+            context: context,
+            confirmation: confirmation
+        ) else {
+            return false
+        }
         state = replacing(activity: .creating, notice: nil)
         publish()
+        return true
+    }
 
-        let observedStatementGeneration = await profileReader.statementGeneration(in: library)
-        guard isActive(context) else { return }
-        guard var statementGeneration = observedStatementGeneration else {
+    private func isCurrentNewChatConfirmation(
+        context: ChatCommandContext,
+        confirmation: NewChatConfirmationBinding
+    ) -> Bool {
+        guard isActive(context),
+              case let .ready(snapshot) = state.newChatPicker,
+              snapshot.permitsConfirmation,
+              snapshot.confirmationToken == confirmation.token,
+              newChatConfirmation == confirmation,
+              let currentAttachments = try? selectedAttachments(in: snapshot)
+        else {
+            return false
+        }
+        return currentAttachments == confirmation.attachments
+    }
+
+    private func requoteNewChatAfterAuthorityChange(
+        attachments: ChatAttachments,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context), case let .ready(snapshot) = state.newChatPicker,
+              let selected = try? selectedAttachments(in: snapshot),
+              selected == attachments
+        else {
             state = replacing(activity: nil, notice: .createFailed)
             publish()
             return
         }
-        let instant = await clock.now()
-        guard isActive(context) else { return }
-
-        var collisionAttempts = 0
-        var profileRebases = 0
-        while true {
-            let chatID = await chatIDGenerator.generateChatID(at: instant)
-            guard isActive(context) else { return }
-            let draftID = await draftIDGenerator.generateChatDraftID(at: instant)
-            guard isActive(context) else { return }
-            let memoryID = await memoryIDGenerator.generateCoachMemoryID(at: instant)
-            guard isActive(context) else { return }
-            let seed: NewDevelopmentChatSeed
-            do {
-                seed = try NewDevelopmentChatSeed(
-                    library: library,
-                    chatID: chatID,
-                    draftID: draftID,
-                    memoryID: memoryID,
-                    instant: instant,
-                    profileStatementGeneration: statementGeneration
-                )
-            } catch {
-                state = replacing(activity: nil, notice: .createFailed)
-                publish()
-                return
-            }
-
-            let outcome = await store.create(seed)
-            guard isActive(context) else { return }
-            switch outcome {
-            case let .committed(committed):
-                install(committed, selection: .open(committed), notice: nil)
-                await refreshContextAdvisory(
-                    for: committed,
-                    draft: committed.chat.draft,
-                    context: context
-                )
-                return
-            case .collision:
-                collisionAttempts += 1
-                guard collisionAttempts < Self.maximumCollisionAttempts else {
-                    state = replacing(activity: nil, notice: .createCollisionLimitReached)
-                    publish()
-                    return
-                }
-                continue
-            case let .profileStatementGenerationChanged(current):
-                profileRebases += 1
-                guard profileRebases < Self.maximumProfileRebases else {
-                    state = replacing(activity: nil, notice: .createFailed)
-                    publish()
-                    return
-                }
-                statementGeneration = current
-                continue
-            case let .frozen(frozen):
-                install(frozen, selection: .frozen(frozen), notice: .chatFrozen)
-                return
-            case .readOnlyLibrary:
-                state = replacing(activity: nil, notice: .readOnlyLibrary)
-                publish()
-                return
-            case .stale, .failed:
-                state = replacing(activity: nil, notice: .createFailed)
-                publish()
-                return
-            }
-        }
+        let requoting = ChatAttachmentPickerSnapshot(
+            allRows: snapshot.allRows,
+            visibleRows: snapshot.visibleRows,
+            selectedAttachmentIDs: snapshot.selectedAttachmentIDs,
+            filterQuery: snapshot.filterQuery,
+            feasibility: .quoting,
+            issue: nil
+        )
+        newChatConfirmation = nil
+        state = replacing(
+            newChatPicker: .ready(requoting),
+            activity: nil,
+            notice: nil
+        )
+        publish()
+        await quoteNewChatSelection(requoting, context: context)
     }
 
     private func rename(
@@ -535,7 +1265,7 @@ public actor DefaultChatFeature: ChatFeature {
         case .readOnlyLibrary:
             state = replacing(activity: nil, notice: .readOnlyLibrary)
             publish()
-        case .collision, .failed:
+        case .collision, .creationAuthorityChanged, .attachmentUnavailable, .failed:
             state = replacing(activity: nil, notice: .renameFailed)
             publish()
         case .profileStatementGenerationChanged:
@@ -556,6 +1286,8 @@ public actor DefaultChatFeature: ChatFeature {
                 createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
                 operationallyInterruptedInvocation:
                     state.operationallyInterruptedInvocation,
+                newChatPicker: state.newChatPicker,
+                openedAttachments: state.openedAttachments,
                 activity: state.activity,
                 notice: state.notice
             )
@@ -577,6 +1309,8 @@ public actor DefaultChatFeature: ChatFeature {
             createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
             operationallyInterruptedInvocation:
                 state.operationallyInterruptedInvocation,
+            newChatPicker: state.newChatPicker,
+            openedAttachments: state.openedAttachments,
             activity: state.activity,
             notice: nil
         )
@@ -591,6 +1325,7 @@ public actor DefaultChatFeature: ChatFeature {
             selection: .opening(chatID),
             composer: nil,
             replacesComposer: true,
+            openedAttachments: .notRequested,
             activity: nil,
             notice: nil
         )
@@ -600,6 +1335,7 @@ public actor DefaultChatFeature: ChatFeature {
         switch outcome {
         case let .loaded(aggregate):
             install(aggregate, selection: .open(aggregate), notice: nil)
+            await resolveOpenedAttachments(for: aggregate, context: context)
             await refreshContextAdvisory(
                 for: aggregate,
                 draft: aggregate.chat.draft,
@@ -638,17 +1374,41 @@ public actor DefaultChatFeature: ChatFeature {
     }
 
     public func flushForOrderlyTermination() async -> Bool {
+        await beginOrderlyTermination()
         while operationInFlight {
             await withCheckedContinuation { operationIdleWaiters.append($0) }
         }
         operationInFlight = true
-        defer { finishOperation() }
+        defer {
+            isOrderlyTerminationPending = false
+            finishOperation()
+        }
         while true {
             await drainWork()
             guard let activeContext else { return true }
             guard await flushSelectedDraft(in: activeContext) else { return false }
             if queuedActions.isEmpty, pendingStart == nil { return true }
         }
+    }
+
+    public func beginOrderlyTermination() async {
+        isOrderlyTerminationPending = true
+        queuedActions.removeAll { action in
+            guard case let .command(command) = action else { return false }
+            return command.isTransientNewChatCommand
+        }
+        guard state.activity != .creating else { return }
+        await newChatCreation.cancelTransientWork()
+        newChatAttachmentFilterQuery = .empty
+        newChatAttachmentConfigurationStamp = nil
+        newChatConfirmation = nil
+        guard state.newChatPicker != .closed else { return }
+        state = replacing(
+            newChatPicker: .closed,
+            activity: state.activity,
+            notice: nil
+        )
+        publish()
     }
 
     private func refreshContextAdvisory(
@@ -710,6 +1470,59 @@ public actor DefaultChatFeature: ChatFeature {
             activity: state.activity,
             notice: state.notice
         )
+        publish()
+    }
+
+    private func resolveOpenedAttachments(
+        for aggregate: ChatAggregate,
+        context: ChatCommandContext,
+        remainingConfigurationRefreshAttempts: Int = 1
+    ) async {
+        guard isActive(context), case let .open(selected) = state.selection,
+              selected.chat.id == aggregate.chat.id,
+              selected.chat.attachments == aggregate.chat.attachments
+        else { return }
+        state = replacing(
+            openedAttachments: .resolving(aggregate.chat.attachments),
+            activity: state.activity,
+            notice: state.notice
+        )
+        publish()
+        let outcome = await coachContext.resolveAttachments(
+            aggregate.chat.attachments,
+            in: context.libraryScope
+        )
+        guard isCurrent(context), case let .open(current) = state.selection,
+              current.chat.id == aggregate.chat.id,
+              current.chat.attachments == aggregate.chat.attachments
+        else { return }
+        switch outcome {
+        case let .resolved(resolved, _)
+            where resolved.count == aggregate.chat.attachments.values.count &&
+                zip(resolved, aggregate.chat.attachments.values).allSatisfy({ item, expected in
+                    item.attachment == expected
+                }):
+            state = replacing(
+                openedAttachments: .resolved(resolved),
+                activity: state.activity,
+                notice: state.notice
+            )
+        case .configurationChanged where remainingConfigurationRefreshAttempts > 0:
+            await resolveOpenedAttachments(
+                for: aggregate,
+                context: context,
+                remainingConfigurationRefreshAttempts:
+                    remainingConfigurationRefreshAttempts - 1
+            )
+            return
+        case .resolved, .configurationChanged,
+             .qualifiedConfigurationUnavailable, .readOnlyLibrary, .failed:
+            state = replacing(
+                openedAttachments: .failed,
+                activity: state.activity,
+                notice: state.notice
+            )
+        }
         publish()
     }
 
@@ -1544,7 +2357,8 @@ public actor DefaultChatFeature: ChatFeature {
         case .readOnlyLibrary:
             state = replacing(activity: retryActivity, notice: .readOnlyLibrary)
             publish()
-        case .collision, .profileStatementGenerationChanged, .failed:
+        case .collision, .creationAuthorityChanged, .attachmentUnavailable,
+             .profileStatementGenerationChanged, .failed:
             state = replacing(activity: retryActivity, notice: failureNotice)
             publish()
         }
@@ -1574,7 +2388,8 @@ public actor DefaultChatFeature: ChatFeature {
         case .readOnlyLibrary:
             state = replacing(activity: nil, notice: .readOnlyLibrary)
             publish()
-        case .collision, .profileStatementGenerationChanged, .failed:
+        case .collision, .creationAuthorityChanged, .attachmentUnavailable,
+             .profileStatementGenerationChanged, .failed:
             state = replacing(activity: nil, notice: operationFailure)
             publish()
         }
@@ -1691,6 +2506,10 @@ public actor DefaultChatFeature: ChatFeature {
                 ? state.createNewChatRecoveryIntent
                 : nil,
             operationallyInterruptedInvocation: operationallyInterruptedInvocation,
+            newChatPicker: state.newChatPicker,
+            openedAttachments: preservesSelectedChat
+                ? state.openedAttachments
+                : .notRequested,
             activity: activity,
             notice: notice
         )
@@ -1747,6 +2566,15 @@ public actor DefaultChatFeature: ChatFeature {
         }
     }
 
+    private func filtered(
+        _ rows: [ChatAttachmentPickerRow],
+        by query: ChatAttachmentFilterQuery
+    ) -> [ChatAttachmentPickerRow] {
+        let needle = folded(query.rawValue)
+        guard !needle.isEmpty else { return rows }
+        return rows.filter { folded($0.displayLabel).contains(needle) }
+    }
+
     private func folded(_ text: String) -> String {
         text.folding(
             options: [.caseInsensitive, .diacriticInsensitive],
@@ -1779,6 +2607,8 @@ public actor DefaultChatFeature: ChatFeature {
         clearsRecoveryIntent: Bool = false,
         operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
         replacesOperationallyInterruptedInvocation: Bool = false,
+        newChatPicker: NewChatAttachmentPickerState? = nil,
+        openedAttachments: OpenedChatAttachmentsState? = nil,
         activity: ChatFeatureState.Activity?,
         notice: ChatNotice?
     ) -> ChatFeatureState {
@@ -1796,6 +2626,8 @@ public actor DefaultChatFeature: ChatFeature {
                 replacesOperationallyInterruptedInvocation
                 ? operationallyInterruptedInvocation
                 : state.operationallyInterruptedInvocation,
+            newChatPicker: newChatPicker ?? state.newChatPicker,
+            openedAttachments: openedAttachments ?? state.openedAttachments,
             activity: activity,
             notice: notice
         )
@@ -1825,11 +2657,27 @@ public actor DefaultChatFeature: ChatFeature {
 }
 
 private extension ChatCommand {
+    var isTransientNewChatCommand: Bool {
+        switch self {
+        case .beginNewChat, .setNewChatAttachmentFilter,
+             .toggleNewChatAttachment, .cancelNewChat, .confirmNewChat:
+            true
+        case .start, .rename, .setFilter, .open, .editDraft,
+             .refreshContextQuote, .sendDraft, .retryPendingUserTurn,
+             .createNewChatFromCapacityFailure, .discardPendingUserTurn:
+            false
+        }
+    }
+
     var context: ChatCommandContext {
         switch self {
-        case let .start(context), let .createDevelopmentChat(context):
+        case let .start(context), let .beginNewChat(context),
+             let .cancelNewChat(context),
+             let .confirmNewChat(context, _):
             context
-        case let .rename(context, _, _, _), let .setFilter(context, _),
+        case let .setNewChatAttachmentFilter(context, _),
+             let .toggleNewChatAttachment(context, _),
+             let .rename(context, _, _, _), let .setFilter(context, _),
              let .open(context, _), let .editDraft(context, _, _, _),
              let .refreshContextQuote(context, _, _),
              let .sendDraft(context, _, _),
@@ -1837,6 +2685,30 @@ private extension ChatCommand {
              let .createNewChatFromCapacityFailure(context, _),
              let .discardPendingUserTurn(context, _):
             context
+        }
+    }
+}
+
+private func contextForImmediateCommand(
+    _ command: ChatCommand
+) -> ChatCommandContext? {
+    switch command {
+    case let .setFilter(context, _),
+         let .setNewChatAttachmentFilter(context, _):
+        context
+    default:
+        nil
+    }
+}
+
+private extension ConfigurationBoundChatCreationQuoteOutcome {
+    var creationAuthority: ChatCreationQuoteAuthority? {
+        switch self {
+        case let .available(_, authority),
+             let .providerUnavailable(_, authority):
+            authority
+        case .unavailable:
+            nil
         }
     }
 }

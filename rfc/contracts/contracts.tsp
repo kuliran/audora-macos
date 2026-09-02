@@ -1,6 +1,6 @@
 import "./coach-provider.tsp";
 import "./coach-context-capacity.tsp";
-import "./development-chat.tsp";
+import "./chat.tsp";
 import "./coach-invocation.tsp";
 import "./portable-library.tsp";
 import "./library-feature-scenario.tsp";

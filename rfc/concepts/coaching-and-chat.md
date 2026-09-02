@@ -177,6 +177,13 @@ There are two creation paths:
   selected and locked. The Speaker may add more Sessions but cannot remove the
   origin while that sheet is open.
 
+Cancel is an immediate picker command, including from the keyboard. It cancels the
+exact in-flight catalog load, attachment-resolution pass, or context quote and
+closes the sheet without waiting behind that work. Once confirmation crosses into
+the durable `creating` phase, the picker no longer reports a cancellation that
+cannot undo the commit; creation instead finishes with its atomic success or
+recoverable failure result.
+
 The reusable picker supports selecting multiple Sessions in one operation. The
 same selection shell is reused by batch **Move to Trash**, although that is a
 separate Application command and never changes a Chat's attachments. An existing
@@ -352,6 +359,29 @@ expected inline/on-demand delivery. The picker shows approximate `X / max` usage
 including the current Profile. In Chat, a compact `~X / max` quote updates as the
 Draft, Profile, Memory, history, or provider configuration changes. It explains the
 major categories but never exposes a raw payload editor.
+
+The picker catalog, exact attachment re-resolution, and creation quote use one
+provider-configuration authority. Their in-memory stamps include both authority
+identity and generation; equal generation numbers from different authorities are
+not interchangeable. If the configuration changes, Application reprojects the
+catalog, preserves every still-available immutable Session/Revision selection, and
+requires a fresh confirmation. A known qualified projection may remain usable
+while its provider is temporarily unavailable, but absence of a usable
+configuration cannot be reported as the provider-unavailable creation exception.
+Resolving an opened Chat's immutable attachments retries one configuration-change
+race against the same pins, then reports the authoritative result; it never swaps
+in a newer Transcript Revision.
+
+Confirmation acquires the exact quoted provider-configuration/context lease and
+holds it across the current Profile Statement-generation read and durable create.
+The persistence adapter performs one last exact evidence traversal inside that
+active Library operation, after validating the staged Chat and immediately before
+the no-replace install. Every `(sessionId, transcriptRevisionId)` pin must still be
+available. A Session or Revision moved to Trash or removed during preparation
+therefore installs no Chat, releases the staged candidate, and returns the picker
+with its selection intact and an attachment-unavailable issue. Configuration or
+Profile-generation drift similarly re-quotes and requires fresh confirmation;
+neither can silently reuse the earlier authority.
 
 The creation quote uses an explicit app-only creation-context frame. A new Chat has
 no provider trigger yet, so Application neither fabricates user prose nor treats an

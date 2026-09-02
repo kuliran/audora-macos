@@ -13,7 +13,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case coachProviderDescriptorSchema
     case coachRequestSchema
     case coachResponseSchema
-    case developmentChatFeatureScenarioSchema
+    case chatFeatureScenarioSchema
     case invocationAdmissionLedgerSchema
     case libraryFeatureScenarioSchema
     case libraryManifestSchema
@@ -41,19 +41,23 @@ public enum ContractResource: CaseIterable, Sendable {
     case audioImportPostcommitFailureScenario
     case audioImportCollisionRegenerationScenario
     case createDevelopmentChatScenario
-    case draftSendDiscardDevelopmentChatScenario
-    case contextCapacityRecoveryDevelopmentChatScenario
+    case draftSendDiscardChatScenario
+    case contextCapacityRecoveryChatScenario
     case fakeProviderSuccessDevelopmentChatScenario
-    case renameDevelopmentChatScenario
-    case filterDevelopmentChatsScenario
-    case relaunchDevelopmentChatScenario
-    case staleRenameDevelopmentChatScenario
-    case wrongLibraryDevelopmentChatScenario
-    case corruptDevelopmentChatScenario
-    case newerDevelopmentChatScenario
-    case collisionDevelopmentChatScenario
-    case providerUnavailableDevelopmentChatScenario
-    case suspendedLibrarySwitchDevelopmentChatScenario
+    case renameChatScenario
+    case filterChatsScenario
+    case relaunchChatScenario
+    case staleRenameChatScenario
+    case wrongLibraryChatScenario
+    case corruptChatScenario
+    case newerChatScenario
+    case collisionChatScenario
+    case providerUnavailableNewChatScenario
+    case invalidContextNewChatScenario
+    case attachmentDisappearsDuringCreateChatScenario
+    case cancelDuringNewChatQuoteScenario
+    case cancelDuringAttachmentResolutionScenario
+    case suspendedLibrarySwitchChatScenario
     case libraryLaunchNoSelectionScenario
     case libraryCreateScenario
     case libraryRelaunchScenario
@@ -98,8 +102,8 @@ public enum ContractResource: CaseIterable, Sendable {
     case rejectedNegativeProfileGeneration
     case newerPreferencesExample
 
-    case developmentChatExample
-    case developmentChatMemoryExample
+    case emptyDevelopmentChatExample
+    case emptyDevelopmentChatMemoryExample
     case developmentChatUserMessageExample
     case developmentChatCoachMessageExample
     case developmentChatCoachInvocationExample
@@ -111,7 +115,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case pendingUserTurnInvalidResponseExample
     case pendingUserTurnLegacyV1Example
     case coachContextQuoteExample
-    case renamedDevelopmentChatExample
+    case renamedEmptyDevelopmentChatExample
     case sessionAnalysisChatExample
     case rejectedChatExplicitNullOrigin
     case rejectedChatMissingAttachments
@@ -183,8 +187,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "CoachRequest.json"
         case .coachResponseSchema:
             "CoachResponse.json"
-        case .developmentChatFeatureScenarioSchema:
-            "DevelopmentChatFeatureScenario.json"
+        case .chatFeatureScenarioSchema:
+            "ChatFeatureScenario.json"
         case .invocationAdmissionLedgerSchema:
             "InvocationAdmissionLedger.json"
         case .libraryFeatureScenarioSchema:
@@ -237,31 +241,39 @@ public enum ContractResource: CaseIterable, Sendable {
             "session-id-collision-regenerates.v1.json"
         case .createDevelopmentChatScenario:
             "create-empty-development-chat.v1.json"
-        case .draftSendDiscardDevelopmentChatScenario:
+        case .draftSendDiscardChatScenario:
             "draft-send-discard.v1.json"
-        case .contextCapacityRecoveryDevelopmentChatScenario:
+        case .contextCapacityRecoveryChatScenario:
             "context-capacity-recovery.v1.json"
         case .fakeProviderSuccessDevelopmentChatScenario:
             "fake-provider-success.v1.json"
-        case .renameDevelopmentChatScenario:
+        case .renameChatScenario:
             "rename-preserves-identity.v1.json"
-        case .filterDevelopmentChatsScenario:
+        case .filterChatsScenario:
             "filter-is-pure.v1.json"
-        case .relaunchDevelopmentChatScenario:
+        case .relaunchChatScenario:
             "relaunch-reopens-exact-aggregate.v1.json"
-        case .staleRenameDevelopmentChatScenario:
+        case .staleRenameChatScenario:
             "stale-rename-cannot-overwrite.v1.json"
-        case .wrongLibraryDevelopmentChatScenario:
+        case .wrongLibraryChatScenario:
             "wrong-library-load-fails.v1.json"
-        case .corruptDevelopmentChatScenario:
+        case .corruptChatScenario:
             "corrupt-chat-freezes.v1.json"
-        case .newerDevelopmentChatScenario:
+        case .newerChatScenario:
             "newer-chat-freezes.v1.json"
-        case .collisionDevelopmentChatScenario:
+        case .collisionChatScenario:
             "create-collision-limit.v1.json"
-        case .providerUnavailableDevelopmentChatScenario:
+        case .providerUnavailableNewChatScenario:
             "provider-unavailable-creates-locally.v1.json"
-        case .suspendedLibrarySwitchDevelopmentChatScenario:
+        case .invalidContextNewChatScenario:
+            "invalid-context-blocks-new-chat.v1.json"
+        case .attachmentDisappearsDuringCreateChatScenario:
+            "attachment-disappears-during-create.v1.json"
+        case .cancelDuringNewChatQuoteScenario:
+            "cancel-during-new-chat-quote.v1.json"
+        case .cancelDuringAttachmentResolutionScenario:
+            "cancel-during-attachment-resolution.v1.json"
+        case .suspendedLibrarySwitchChatScenario:
             "library-switch-during-suspended-load.v1.json"
         case .libraryLaunchNoSelectionScenario:
             "library-launch-no-selection.v1.json"
@@ -347,9 +359,9 @@ public enum ContractResource: CaseIterable, Sendable {
             "profile-head-negative-generation.json"
         case .newerPreferencesExample:
             "preferences-newer-schema.json"
-        case .developmentChatExample:
+        case .emptyDevelopmentChatExample:
             "chat.json"
-        case .developmentChatMemoryExample:
+        case .emptyDevelopmentChatMemoryExample:
             "memory.json"
         case .developmentChatUserMessageExample:
             "user-message.json"
@@ -373,7 +385,7 @@ public enum ContractResource: CaseIterable, Sendable {
             "pending-user-turn-legacy-v1.json"
         case .coachContextQuoteExample:
             "quote.json"
-        case .renamedDevelopmentChatExample:
+        case .renamedEmptyDevelopmentChatExample:
             "renamed-chat.json"
         case .sessionAnalysisChatExample:
             "session-analysis-chat.json"
@@ -462,7 +474,7 @@ public enum ContractResource: CaseIterable, Sendable {
              .coachMemoryEnvelopeSchema, .coachContextQuoteSchema, .coachInvocationSchema,
              .coachProviderDescriptorSchema,
              .coachRequestSchema, .coachResponseSchema,
-             .developmentChatFeatureScenarioSchema, .invocationAdmissionLedgerSchema,
+             .chatFeatureScenarioSchema, .invocationAdmissionLedgerSchema,
              .libraryFeatureScenarioSchema,
              .libraryManifestSchema, .libraryPreferencesSchema, .profileHeadSchema,
              .readSessionTranscriptsRequestSchema, .readSessionTranscriptsResponseSchema,
@@ -478,16 +490,18 @@ public enum ContractResource: CaseIterable, Sendable {
              .audioImportInstallFailureScenario, .audioImportPostcommitFailureScenario,
              .audioImportCollisionRegenerationScenario:
             "Scenarios/AudioImport"
-        case .createDevelopmentChatScenario, .draftSendDiscardDevelopmentChatScenario,
-             .contextCapacityRecoveryDevelopmentChatScenario,
-             .fakeProviderSuccessDevelopmentChatScenario,
-             .renameDevelopmentChatScenario,
-             .filterDevelopmentChatsScenario, .relaunchDevelopmentChatScenario,
-             .staleRenameDevelopmentChatScenario, .wrongLibraryDevelopmentChatScenario,
-             .corruptDevelopmentChatScenario, .newerDevelopmentChatScenario,
-             .collisionDevelopmentChatScenario,
-             .providerUnavailableDevelopmentChatScenario,
-             .suspendedLibrarySwitchDevelopmentChatScenario:
+        case .createDevelopmentChatScenario, .draftSendDiscardChatScenario,
+             .contextCapacityRecoveryChatScenario,
+             .fakeProviderSuccessDevelopmentChatScenario, .renameChatScenario,
+             .filterChatsScenario, .relaunchChatScenario,
+             .staleRenameChatScenario, .wrongLibraryChatScenario,
+             .corruptChatScenario, .newerChatScenario, .collisionChatScenario,
+             .providerUnavailableNewChatScenario,
+             .invalidContextNewChatScenario,
+             .attachmentDisappearsDuringCreateChatScenario,
+             .cancelDuringNewChatQuoteScenario,
+             .cancelDuringAttachmentResolutionScenario,
+             .suspendedLibrarySwitchChatScenario:
             "Scenarios/Chat"
         case .libraryLaunchNoSelectionScenario:
             "Scenarios"
@@ -519,7 +533,7 @@ public enum ContractResource: CaseIterable, Sendable {
              .rejectedUnknownPreferenceKey, .rejectedInvalidLibraryInstant,
              .rejectedNegativeProfileGeneration, .newerPreferencesExample:
             "Examples/PortableLibrary/v1/rejected"
-        case .developmentChatExample, .developmentChatMemoryExample,
+        case .emptyDevelopmentChatExample, .emptyDevelopmentChatMemoryExample,
              .developmentChatUserMessageExample, .developmentChatCoachMessageExample,
              .developmentChatCoachInvocationExample,
              .pendingUserTurnExample, .pendingUserTurnCapacityFailureExample,
@@ -527,8 +541,8 @@ public enum ContractResource: CaseIterable, Sendable {
              .pendingUserTurnProviderFailureExample,
              .pendingUserTurnInvalidResponseExample,
              .pendingUserTurnLegacyV1Example,
-             .renamedDevelopmentChatExample, .sessionAnalysisChatExample:
-            "Examples/DevelopmentChat/v1"
+             .renamedEmptyDevelopmentChatExample, .sessionAnalysisChatExample:
+            "Examples/Chat/v1"
         case .invocationAdmissionLedgerExample:
             "Examples/Invocation/v1"
         case .coachContextQuoteExample:
@@ -536,7 +550,7 @@ public enum ContractResource: CaseIterable, Sendable {
         case .rejectedChatExplicitNullOrigin, .rejectedChatMissingAttachments,
              .rejectedNewChatWithOrigin, .rejectedNewerChatSchema,
              .rejectedChatUnknownKey, .rejectedDanglingMemorySummary:
-            "Examples/DevelopmentChat/v1/rejected"
+            "Examples/Chat/v1/rejected"
         case .importedAudioManifestExample, .importedSessionManifestExample,
              .audioNormalizationVectorsExample:
             "Examples/AudioImport/v1"

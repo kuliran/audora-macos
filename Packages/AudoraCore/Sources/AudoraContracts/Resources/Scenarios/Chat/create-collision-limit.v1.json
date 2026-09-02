@@ -3,9 +3,12 @@
   "scenarioId": "create-collision-limit",
   "libraryId": "lib-20260830T100000000Z-1ABC",
   "initialChats": [],
-  "commands": [{"kind": "createDevelopmentChat"}],
+  "commands": [{"kind": "beginNewChat"}, {"kind": "confirmNewChat"}],
   "dependencyTrace": [
     {"port": "chatStore", "effect": "loadCatalog", "outcome": "loaded"},
+    {"port": "attachmentSource", "effect": "loadCandidates", "outcome": "loaded", "candidates": []},
+    {"port": "coachContext", "effect": "quoteNewChat", "outcome": "available", "fits": true},
+    {"port": "attachmentSource", "effect": "resolveAttachments", "outcome": "resolved", "resolutions": []},
     {"port": "profileHead", "effect": "readStatementGeneration", "outcome": 0},
     {"port": "clock", "effect": "now", "outcome": "2026-08-30T12:00:00.000Z"},
     {"port": "chatIdGenerator", "effect": "next", "outcome": "cht-20260830T120000000Z-2ABC"},
@@ -25,7 +28,13 @@
     "allChatIds": [],
     "visibleChatIds": [],
     "catalogStatus": "ready",
-    "notice": "createCollisionLimitReached"
+    "notice": "createCollisionLimitReached",
+    "newChatPickerStatus": "ready",
+    "newChatFilterQuery": "",
+    "newChatAllAttachmentIds": [],
+    "newChatVisibleAttachmentIds": [],
+    "newChatSelectedAttachmentIds": [],
+    "newChatFeasibility": "fits"
   },
   "expectedProviderCalls": 0,
   "expectedInvocationCalls": 0,

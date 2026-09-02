@@ -39,7 +39,13 @@ The essential loop is:
 7. Create a Chat with an immutable set of zero or more Session/Transcript Revision
    attachments. Analyze Session opens the same creation picker with its source
    Session locked, seeds a singular or plural ordinary Draft, and submits it;
-   New Chat opens without sending.
+   New Chat opens without sending. Cancel closes the picker immediately while its
+   catalog, exact-resolution, or quote work is still in flight. Confirmation binds
+   the exact selected revisions, provider-configuration authority, current Profile
+   Statement generation, and creation-context quote through the durable create.
+   The final install revalidates every attachment under the active Library
+   authority; a missing or trashed Session/Revision installs no Chat and returns the
+   still-open picker for repair.
 8. On Send, Invocation Retry, or Reconsider, ask the Invocation module to admit one
    immutable intent. An admitted Invocation sends the structured Development Profile,
    current structured Coach Memory, successful Chat history, current trigger, and
@@ -256,6 +262,9 @@ The native application has a reduced set of states:
   The creation picker shows Session duration and estimated transcript cost and
   rejects an attachment set whose complete evidence can never fit with **These
   Sessions cannot fit together in this coach's context. Remove a Session.**
+  Catalog projection, exact attachment resolution, and creation quoting are
+  cancellable picker work. Reopening a Chat retries one provider-configuration race
+  against the same immutable pins; a persistent race is shown as unavailable.
   At Send, Application uses the actual current Profile, Memory, and complete
   eligible prose-history projection; it never omits successful turns merely
   because the request is large. Creation feasibility may conservatively reserve
@@ -264,7 +273,12 @@ The native application has a reduced set of states:
   fields. A rejected transcript batch releases no partial transcript.
   New Chat may use zero or more attachments; Analyze locks its source Session in
   the same picker. Attachments cannot change after creation, so another set requires
-  a new Chat. While the Library-wide one-per-minute admission gate is closed,
+  a new Chat. Confirmation holds the quoted provider-configuration context lease
+  through the Profile read and durable create. Storage repeats exact attachment
+  availability at the final no-replace install while the Library operation is
+  active. Configuration or Profile drift requires a fresh quote and confirmation;
+  attachment disappearance leaves the picker open and installs nothing. While the
+  Library-wide one-per-minute admission gate is closed,
   Send, Invocation Retry, and Reconsider are disabled and use the forbidden cursor;
   local Profile-publication Retry remains available. Audora creates no separate
   waiting state. If a new Send loses a final eligibility, concurrency, or admission

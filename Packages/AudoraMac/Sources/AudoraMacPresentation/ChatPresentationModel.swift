@@ -2,23 +2,36 @@ import AudoraApplication
 import AudoraDomain
 import Combine
 
+public enum NewChatAttachmentPickerAction: Equatable, Sendable {
+    case toggle(ChatSessionAttachmentID)
+    case defaultAction
+    case cancelAction
+}
+
 @MainActor
 public final class ChatPresentationModel: ObservableObject {
     private static var lastIssuedCommandGeneration: UInt64 = 0
 
     @Published public private(set) var snapshot = ChatFeatureState()
     @Published public var filterText = ""
+    @Published public var newChatAttachmentFilterText = ""
 
     private let feature: any ApplicationCommandFeature
     private let dispatcher: ChatCommandDispatcher
+    private let announcements: any AccessibilityAnnouncementPosting
     private var startedLibrary: LibraryID?
     private var commandContext: ChatCommandContext?
     private var projectedStateContext: ChatCommandContext?
     private var stateConsumer: Task<Void, Never>?
+    private var lastAnnouncedPickerIssue: ChatAttachmentPickerIssue?
 
-    public init(dispatcher: ChatCommandDispatcher) {
+    public init(
+        dispatcher: ChatCommandDispatcher,
+        announcements: (any AccessibilityAnnouncementPosting)? = nil
+    ) {
         feature = dispatcher.feature
         self.dispatcher = dispatcher
+        self.announcements = announcements ?? SystemAccessibilityAnnouncementPoster()
     }
 
     public func start(in scope: LibraryScope) async {
@@ -29,10 +42,13 @@ public final class ChatPresentationModel: ObservableObject {
         commandContext = context
 
         stateConsumer?.cancel()
-        snapshot = ChatFeatureState(
-            catalog: .loading,
-            filterQuery: .empty,
-            selection: .none
+        lastAnnouncedPickerIssue = nil
+        installSnapshot(
+            ChatFeatureState(
+                catalog: .loading,
+                filterQuery: .empty,
+                selection: .none
+            )
         )
         filterText = ""
 
@@ -47,7 +63,7 @@ public final class ChatPresentationModel: ObservableObject {
                     guard context == commandContext, !Task.isCancelled else { return }
                     projectedStateContext = context
                 }
-                snapshot = next
+                installSnapshot(next)
             }
         }
         stateConsumer = consumer
@@ -64,7 +80,7 @@ public final class ChatPresentationModel: ObservableObject {
                     return
                 }
                 projectedStateContext = context
-                snapshot = current
+                installSnapshot(current)
             }
             await consumer.value
         } onCancel: {
@@ -72,6 +88,31 @@ public final class ChatPresentationModel: ObservableObject {
         }
         guard context == commandContext, !Task.isCancelled else { return }
         stateConsumer = nil
+    }
+
+    private func installSnapshot(_ replacement: ChatFeatureState) {
+        snapshot = replacement
+        let issue: ChatAttachmentPickerIssue?
+        switch replacement.newChatPicker {
+        case let .ready(picker):
+            issue = picker.issue
+        case .closed:
+            if case .loading = replacement.catalog {
+                return
+            }
+            issue = nil
+        case .loading, .failed:
+            issue = nil
+        }
+        guard issue != lastAnnouncedPickerIssue else { return }
+        lastAnnouncedPickerIssue = issue
+        if let issue {
+            announcements.post(
+                NewChatAttachmentPickerPresentation.accessibilityAnnouncement(
+                    for: issue
+                )
+            )
+        }
     }
 
     private static func issueCommandContext(
@@ -85,9 +126,54 @@ public final class ChatPresentationModel: ObservableObject {
         )
     }
 
-    public func createDevelopmentChat() {
+    public func beginNewChat() {
         guard let context = commandContext else { return }
-        send(.createDevelopmentChat(context))
+        newChatAttachmentFilterText = ""
+        send(.beginNewChat(context))
+    }
+
+    public func retryNewChatConfiguration() {
+        guard let context = commandContext,
+              case let .ready(picker) = snapshot.newChatPicker,
+              picker.issue == .qualifiedConfigurationUnavailable
+        else { return }
+        send(.beginNewChat(context))
+    }
+
+    public func updateNewChatAttachmentFilter(_ value: String) {
+        newChatAttachmentFilterText = value
+        guard let context = commandContext,
+              let query = try? ChatAttachmentFilterQuery(value)
+        else { return }
+        send(.setNewChatAttachmentFilter(context, query))
+    }
+
+    public func toggleNewChatAttachment(_ attachmentID: ChatSessionAttachmentID) {
+        guard let context = commandContext else { return }
+        send(.toggleNewChatAttachment(context, attachmentID))
+    }
+
+    public func performNewChatAttachmentPickerAction(
+        _ action: NewChatAttachmentPickerAction
+    ) {
+        switch action {
+        case let .toggle(attachmentID): toggleNewChatAttachment(attachmentID)
+        case .defaultAction: confirmNewChat()
+        case .cancelAction: cancelNewChat()
+        }
+    }
+
+    public func cancelNewChat() {
+        guard let context = commandContext else { return }
+        send(.cancelNewChat(context))
+    }
+
+    public func confirmNewChat() {
+        guard let context = commandContext,
+              case let .ready(picker) = snapshot.newChatPicker,
+              let confirmationToken = picker.confirmationToken
+        else { return }
+        send(.confirmNewChat(context, confirmationToken))
     }
 
     public func open(_ chatID: ChatID) {

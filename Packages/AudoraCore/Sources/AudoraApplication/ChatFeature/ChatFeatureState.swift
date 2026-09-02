@@ -77,6 +77,8 @@ public enum ChatNotice: String, Equatable, Sendable {
     case coachSendUnavailable
     case coachRetryUnavailable
     case coachResponseInterrupted
+    case attachmentCatalogFailed
+    case qualifiedCoachConfigurationUnavailable
 }
 
 public enum CoachContextAdvisoryState: Equatable, Sendable {
@@ -132,6 +134,8 @@ public struct ChatFeatureState: Equatable, Sendable {
     /// An exact retry authority held only in Application memory when
     /// persistence could not prove its terminal interruption write.
     public let operationallyInterruptedInvocation: PendingCoachInvocationRequest?
+    public let newChatPicker: NewChatAttachmentPickerState
+    public let openedAttachments: OpenedChatAttachmentsState
     public let activity: Activity?
     public let notice: ChatNotice?
 
@@ -144,6 +148,8 @@ public struct ChatFeatureState: Equatable, Sendable {
         admissionAvailability: InvocationAdmissionAvailability? = nil,
         createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
         operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
+        newChatPicker: NewChatAttachmentPickerState = .closed,
+        openedAttachments: OpenedChatAttachmentsState = .notRequested,
         activity: Activity? = nil,
         notice: ChatNotice? = nil
     ) {
@@ -155,6 +161,8 @@ public struct ChatFeatureState: Equatable, Sendable {
         self.admissionAvailability = admissionAvailability
         self.createNewChatRecoveryIntent = createNewChatRecoveryIntent
         self.operationallyInterruptedInvocation = operationallyInterruptedInvocation
+        self.newChatPicker = newChatPicker
+        self.openedAttachments = openedAttachments
         self.activity = activity
         self.notice = notice
     }

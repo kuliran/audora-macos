@@ -15,7 +15,7 @@ const resourcesDirectory = path.join(
 const schemasDirectory = path.join(resourcesDirectory, "Schemas");
 const examplesDirectory = path.join(
   resourcesDirectory,
-  "Examples/DevelopmentChat/v1",
+  "Examples/Chat/v1",
 );
 const coachContextExamplesDirectory = path.join(
   resourcesDirectory,
@@ -45,6 +45,9 @@ const positiveInventory = [
   "user-message.json",
 ];
 const scenarioInventory = [
+  "attachment-disappears-during-create.v1.json",
+  "cancel-during-attachment-resolution.v1.json",
+  "cancel-during-new-chat-quote.v1.json",
   "corrupt-chat-freezes.v1.json",
   "context-capacity-recovery.v1.json",
   "create-collision-limit.v1.json",
@@ -52,6 +55,7 @@ const scenarioInventory = [
   "draft-send-discard.v1.json",
   "fake-provider-success.v1.json",
   "filter-is-pure.v1.json",
+  "invalid-context-blocks-new-chat.v1.json",
   "library-switch-during-suspended-load.v1.json",
   "newer-chat-freezes.v1.json",
   "provider-unavailable-creates-locally.v1.json",
@@ -113,7 +117,7 @@ const pendingUserTurn = await validator("PendingUserTurn.json");
 const chatMessage = await validator("ChatMessage.json");
 const coachInvocation = await validator("CoachInvocation.json");
 const invocationAdmissionLedger = await validator("InvocationAdmissionLedger.json");
-const scenario = await validator("DevelopmentChatFeatureScenario.json");
+const chatFeatureScenario = await validator("ChatFeatureScenario.json");
 const coachContextQuote = await validator("CoachContextQuote.json");
 
 await assertExactInventory(
@@ -215,11 +219,37 @@ assertValidation(
 
 for (const name of scenarioInventory) {
   assertValidation(
-    scenario,
+    chatFeatureScenario,
     await loadJSON(path.join(scenariosDirectory, name)),
     true,
     `scenario/${name}`,
   );
+}
+
+const attachmentBoundaryScenario = await loadJSON(
+  path.join(scenariosDirectory, "invalid-context-blocks-new-chat.v1.json"),
+);
+const invalidAttachmentMetadata = [
+  ["empty display label", (value) => {
+    value.dependencyTrace[1].candidates[0].displayLabel = "";
+  }],
+  ["257-scalar display label", (value) => {
+    value.dependencyTrace[1].candidates[0].displayLabel = "😀".repeat(257);
+  }],
+  ["control display label", (value) => {
+    value.dependencyTrace[1].candidates[0].displayLabel = "label\u0000";
+  }],
+  ["257-scalar filter", (value) => {
+    value.commands[1].query = "😀".repeat(257);
+  }],
+  ["control filter", (value) => {
+    value.commands[1].query = "query\u009f";
+  }],
+];
+for (const [label, mutate] of invalidAttachmentMetadata) {
+  const value = structuredClone(attachmentBoundaryScenario);
+  mutate(value);
+  assertValidation(chatFeatureScenario, value, false, `scenario/${label}`);
 }
 
 for (const name of schemaInvalidChatFixtures) {

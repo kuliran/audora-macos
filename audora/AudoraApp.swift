@@ -1,6 +1,6 @@
 import AppKit
-@_spi(InvocationInfrastructure) import AudoraApplication
-@_spi(InvocationInfrastructure) import AudoraMacInfrastructure
+@_spi(InvocationInfrastructure) @_spi(CoachContextQualification) import AudoraApplication
+@_spi(InvocationInfrastructure) @_spi(CoachContextQualification) import AudoraMacInfrastructure
 import AudoraMacPresentation
 import SwiftUI
 
@@ -121,7 +121,9 @@ struct AudoraApp: App {
             pendingUserTurnIDGenerator: chatIdentityGenerator,
             responsePositionIDGenerator: chatIdentityGenerator,
             admissionRefreshScheduler: SystemChatAdmissionRefreshScheduler(),
-            invocations: invocations
+            invocations: invocations,
+            attachmentEvidenceSource:
+                PortableChatSessionAttachmentSource(workspace: workspace)
         )
         let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,
