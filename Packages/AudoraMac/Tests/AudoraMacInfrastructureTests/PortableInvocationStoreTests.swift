@@ -101,6 +101,7 @@ final class PortableInvocationStoreTests: XCTestCase {
 
     func testRetryProcessingFaultsReconcileBeforeProviderAuthorityReturns() async throws {
         let points: [PortableChatFaultPoint] = [
+            .afterInvocationInstall,
             .beforeRetryProcessingPendingPartialWrite,
             .afterRetryProcessingPendingPartialWrite,
             .afterRetryProcessingPendingFileFlush,
@@ -162,6 +163,19 @@ final class PortableInvocationStoreTests: XCTestCase {
                             .afterRetryProcessingAuthorityRebind
                         ),
                         "provider authority returned without a post-recovery directory flush"
+                    )
+                }
+                if point == .afterInvocationInstall {
+                    XCTAssertTrue(
+                        trace.containsInOrder(
+                            .afterInvocationInstall,
+                            .afterReconciledInvocationRootFlush,
+                            .afterReconciledInvocationDirectoryFlush,
+                            .afterRetryProcessingPendingInstall,
+                            .afterRetryProcessingPendingDirectoryFlush,
+                            .afterRetryProcessingAuthorityRebind
+                        ),
+                        "Retry Pending became processing before its reconciled Invocation marker was durable"
                     )
                 }
                 _ = await activeSession.abort()
@@ -813,6 +827,211 @@ final class PortableInvocationStoreTests: XCTestCase {
                     reason: .corrupt
                 ))
             )
+        }
+    }
+
+    func testNextAttemptDecodesEscapedFrozenChatPublicIDs() async throws {
+        let cases: [(String, Bool, InvocationLaunchIdentityCollision)] = [
+            ("newer-message", true, .userMessageID),
+            ("newer-draft", true, .freshDraftID),
+            ("corrupt-message", false, .userMessageID),
+            ("corrupt-draft", false, .freshDraftID),
+        ]
+        for (index, testCase) in cases.enumerated() {
+            try await withTemporaryParent { parent in
+                let (label, newerSchema, expected) = testCase
+                let fixture = try await makeInvocationStoreFixture(
+                    in: parent,
+                    libraryID: "lib-20260902T10010\(index)000Z-2ABC",
+                    includeCompetingPending: true
+                )
+                let store = PortableInvocationStore(workspace: fixture.workspace)
+                guard case let .opened(pendingSession) = await store
+                    .openPendingInvocation(fixture.install.authority.request),
+                    case let .installed(firstSession) = await pendingSession.install(
+                        fixture.install
+                    )
+                else { return XCTFail("first Attempt was not installed: \(label)") }
+                let candidate = InvocationAttemptIdentity(
+                    attemptID: try CoachProviderAttemptID(
+                        "atm-20260902T10010\(index)000Z-0ABC"
+                    ),
+                    idempotencyValue: try ProviderIdempotencyValue(
+                        "escaped-chat-next-\(index)"
+                    ),
+                    userMessageID: try ChatMessageID(
+                        "msg-20260902T10010\(index)000Z-1BCD"
+                    ),
+                    coachMessageID: try ChatMessageID(
+                        "msg-20260902T10010\(index)000Z-2CDE"
+                    ),
+                    freshDraftID: try ChatDraftID(
+                        "drf-20260902T10010\(index)000Z-3DEF"
+                    )
+                )
+                try writeEscapedFrozenSiblingChatRoot(
+                    in: fixture,
+                    newerSchema: newerSchema,
+                    messageID: expected == .userMessageID
+                        ? candidate.userMessageID
+                        : nil,
+                    draftID: expected == .freshDraftID
+                        ? candidate.freshDraftID
+                        : nil
+                )
+                let mutation = try InstallNextCoachProviderAttemptMutation(
+                    base: firstSession.invocation,
+                    identity: candidate,
+                    kind: .standard
+                )
+                let outcome = await firstSession.installNextAttempt(mutation)
+                guard case let .collision(actual) = outcome else {
+                    return XCTFail("escaped Chat collision was missed: \(label)")
+                }
+                XCTAssertEqual(actual, expected, label)
+                guard case .committed = await firstSession.abort(
+                    failure: .coachProviderError
+                ) else { return XCTFail("first Attempt did not retire: \(label)") }
+            }
+        }
+    }
+
+    func testNextAttemptDoesNotReserveOpaqueFrozenChatStrings() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(
+                in: parent,
+                includeCompetingPending: true
+            )
+            let store = PortableInvocationStore(workspace: fixture.workspace)
+            guard case let .opened(pendingSession) = await store
+                .openPendingInvocation(fixture.install.authority.request),
+                case let .installed(firstSession) = await pendingSession.install(
+                    fixture.install
+                )
+            else { return XCTFail("first Attempt was not installed") }
+            let candidate = InvocationAttemptIdentity(
+                attemptID: try CoachProviderAttemptID(
+                    "atm-20260902T100500000Z-0ABC"
+                ),
+                idempotencyValue: try ProviderIdempotencyValue(
+                    "opaque-chat-next"
+                ),
+                userMessageID: try ChatMessageID(
+                    "msg-20260902T100500000Z-1BCD"
+                ),
+                coachMessageID: try ChatMessageID(
+                    "msg-20260902T100500000Z-2CDE"
+                ),
+                freshDraftID: try ChatDraftID(
+                    "drf-20260902T100500000Z-3DEF"
+                )
+            )
+            try writeOpaqueFrozenSiblingChatRoot(in: fixture, identity: candidate)
+            let mutation = try InstallNextCoachProviderAttemptMutation(
+                base: firstSession.invocation,
+                identity: candidate,
+                kind: .standard
+            )
+
+            guard case let .installed(installed) = await firstSession
+                .installNextAttempt(mutation)
+            else { return XCTFail("opaque strings reserved a public identity") }
+            guard case .committed = await installed.abort(
+                failure: .coachProviderError
+            ) else { return XCTFail("next Attempt did not retire") }
+        }
+    }
+
+    func testNextAttemptFailsClosedForAmbiguousSiblingChatPublicIDs() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(
+                in: parent,
+                includeCompetingPending: true
+            )
+            let store = PortableInvocationStore(workspace: fixture.workspace)
+            guard case let .opened(pendingSession) = await store
+                .openPendingInvocation(fixture.install.authority.request),
+                case let .installed(firstSession) = await pendingSession.install(
+                    fixture.install
+                )
+            else { return XCTFail("first Attempt was not installed") }
+            let candidate = InvocationAttemptIdentity(
+                attemptID: try CoachProviderAttemptID(
+                    "atm-20260902T100600000Z-0ABC"
+                ),
+                idempotencyValue: try ProviderIdempotencyValue(
+                    "ambiguous-chat-next"
+                ),
+                userMessageID: try ChatMessageID(
+                    "msg-20260902T100600000Z-1BCD"
+                ),
+                coachMessageID: try ChatMessageID(
+                    "msg-20260902T100600000Z-2CDE"
+                ),
+                freshDraftID: try ChatDraftID(
+                    "drf-20260902T100600000Z-3DEF"
+                )
+            )
+            try writeAmbiguousSiblingChatRoot(
+                in: fixture,
+                messageID: candidate.userMessageID
+            )
+            let mutation = try InstallNextCoachProviderAttemptMutation(
+                base: firstSession.invocation,
+                identity: candidate,
+                kind: .standard
+            )
+
+            guard case .failed = await firstSession.installNextAttempt(mutation)
+            else { return XCTFail("ambiguous public identity did not fail closed") }
+        }
+    }
+
+    func testNextAttemptChecksSupportedInvocationRootDraftID() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let store = PortableInvocationStore(workspace: fixture.workspace)
+            guard case let .opened(pendingSession) = await store
+                .openPendingInvocation(fixture.install.authority.request),
+                case let .installed(firstSession) = await pendingSession.install(
+                    fixture.install
+                )
+            else { return XCTFail("first Attempt was not installed") }
+            let candidate = InvocationAttemptIdentity(
+                attemptID: try CoachProviderAttemptID(
+                    "atm-20260902T100200000Z-0ABC"
+                ),
+                idempotencyValue: try ProviderIdempotencyValue(
+                    "supported-root-next"
+                ),
+                userMessageID: try ChatMessageID(
+                    "msg-20260902T100200000Z-1BCD"
+                ),
+                coachMessageID: try ChatMessageID(
+                    "msg-20260902T100200000Z-2CDE"
+                ),
+                freshDraftID: try ChatDraftID(
+                    "drf-20260902T100200000Z-3DEF"
+                )
+            )
+            try writeSupportedInvocation(
+                in: fixture,
+                rootDraftID: candidate.freshDraftID
+            )
+            let mutation = try InstallNextCoachProviderAttemptMutation(
+                base: firstSession.invocation,
+                identity: candidate,
+                kind: .standard
+            )
+
+            let outcome = await firstSession.installNextAttempt(mutation)
+            guard case let .collision(collision) = outcome else {
+                return XCTFail("supported Invocation root Draft collision was missed")
+            }
+            XCTAssertEqual(collision, .freshDraftID)
+            guard case .committed = await firstSession.abort(
+                failure: .coachProviderError
+            ) else { return XCTFail("first Attempt did not retire") }
         }
     }
 
@@ -2417,8 +2636,192 @@ final class PortableInvocationStoreTests: XCTestCase {
         }
     }
 
-    func testLaunchIdentityPreflightIgnoresUnreadableSiblingAggregate() async throws {
-        for corruption in ["corrupt", "newer"] {
+    func testLaunchIdentityPreflightDecodesEscapedFrozenChatPublicIDs() async throws {
+        let cases: [(String, Bool, InvocationLaunchIdentityCollision)] = [
+            ("newer-message", true, .userMessageID),
+            ("newer-draft", true, .freshDraftID),
+            ("corrupt-message", false, .userMessageID),
+            ("corrupt-draft", false, .freshDraftID),
+        ]
+        for (index, testCase) in cases.enumerated() {
+            try await withTemporaryParent { parent in
+                let (label, newerSchema, expected) = testCase
+                let fixture = try await makeInvocationStoreFixture(
+                    in: parent,
+                    libraryID: "lib-20260902T10000\(index)000Z-2ABC",
+                    includeCompetingPending: true
+                )
+                let invocation = fixture.install.invocation
+                let candidate = InvocationLaunchIdentity(
+                    invocationID: invocation.id,
+                    attemptID: invocation.attemptID,
+                    idempotencyValue: try XCTUnwrap(
+                        invocation.providerIdempotencyValue
+                    ),
+                    userMessageID: fixture.publication.userMessage.id,
+                    coachMessageID: fixture.publication.coachMessage.id,
+                    freshDraftID: fixture.publication.freshDraft.draftID
+                )
+                try writeEscapedFrozenSiblingChatRoot(
+                    in: fixture,
+                    newerSchema: newerSchema,
+                    messageID: expected == .userMessageID
+                        ? candidate.userMessageID
+                        : nil,
+                    draftID: expected == .freshDraftID
+                        ? candidate.freshDraftID
+                        : nil
+                )
+
+                let store = PortableInvocationStore(workspace: fixture.workspace)
+                let reservation = await store.reserveInvocation(
+                    fixture.install.authority.request
+                )
+                XCTAssertEqual(
+                    reservation,
+                    .acquired,
+                    label
+                )
+                let availability = await store.checkLaunchIdentity(
+                    candidate,
+                    for: fixture.install.authority
+                )
+                XCTAssertEqual(
+                    availability,
+                    .collision(expected),
+                    label
+                )
+                await store.cancelInvocationReservation(
+                    fixture.install.authority.request
+                )
+            }
+        }
+    }
+
+    func testLaunchIdentityPreflightDoesNotReserveOpaqueFrozenChatStrings()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(
+                in: parent,
+                includeCompetingPending: true
+            )
+            let invocation = fixture.install.invocation
+            let candidate = InvocationLaunchIdentity(
+                invocationID: invocation.id,
+                attemptID: invocation.attemptID,
+                idempotencyValue: try XCTUnwrap(
+                    invocation.providerIdempotencyValue
+                ),
+                userMessageID: fixture.publication.userMessage.id,
+                coachMessageID: fixture.publication.coachMessage.id,
+                freshDraftID: fixture.publication.freshDraft.draftID
+            )
+            try writeOpaqueFrozenSiblingChatRoot(
+                in: fixture,
+                identity: candidate.attemptIdentity
+            )
+            let store = PortableInvocationStore(workspace: fixture.workspace)
+            let reservation = await store.reserveInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(reservation, .acquired)
+
+            let availability = await store.checkLaunchIdentity(
+                candidate,
+                for: fixture.install.authority
+            )
+            XCTAssertEqual(availability, .available)
+            await store.cancelInvocationReservation(
+                fixture.install.authority.request
+            )
+        }
+    }
+
+    func testLaunchIdentityPreflightFailsClosedForAmbiguousSiblingChatPublicIDs()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(
+                in: parent,
+                includeCompetingPending: true
+            )
+            let invocation = fixture.install.invocation
+            let candidate = InvocationLaunchIdentity(
+                invocationID: invocation.id,
+                attemptID: invocation.attemptID,
+                idempotencyValue: try XCTUnwrap(
+                    invocation.providerIdempotencyValue
+                ),
+                userMessageID: fixture.publication.userMessage.id,
+                coachMessageID: fixture.publication.coachMessage.id,
+                freshDraftID: fixture.publication.freshDraft.draftID
+            )
+            try writeAmbiguousSiblingChatRoot(
+                in: fixture,
+                messageID: candidate.userMessageID
+            )
+            let store = PortableInvocationStore(workspace: fixture.workspace)
+            let reservation = await store.reserveInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(reservation, .acquired)
+
+            let availability = await store.checkLaunchIdentity(
+                candidate,
+                for: fixture.install.authority
+            )
+            XCTAssertEqual(availability, .unavailable)
+            await store.cancelInvocationReservation(
+                fixture.install.authority.request
+            )
+        }
+    }
+
+    func testLaunchIdentityPreflightChecksSupportedInvocationRootDraftID() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let invocation = fixture.install.invocation
+            let candidate = InvocationLaunchIdentity(
+                invocationID: invocation.id,
+                attemptID: invocation.attemptID,
+                idempotencyValue: try XCTUnwrap(
+                    invocation.providerIdempotencyValue
+                ),
+                userMessageID: fixture.publication.userMessage.id,
+                coachMessageID: fixture.publication.coachMessage.id,
+                freshDraftID: try ChatDraftID(
+                    "drf-20260902T100300000Z-3DEF"
+                )
+            )
+            let store = PortableInvocationStore(workspace: fixture.workspace)
+            let reservation = await store.reserveInvocation(
+                fixture.install.authority.request
+            )
+            XCTAssertEqual(reservation, .acquired)
+            try writeSupportedInvocation(
+                in: fixture,
+                rootDraftID: candidate.freshDraftID
+            )
+
+            let availability = await store.checkLaunchIdentity(
+                candidate,
+                for: fixture.install.authority
+            )
+            XCTAssertEqual(availability, .collision(.freshDraftID))
+            await store.cancelInvocationReservation(
+                fixture.install.authority.request
+            )
+        }
+    }
+
+    func testLaunchIdentityPreflightUsesReadableFrozenRootAndFailsClosedWhenUnreadable()
+        async throws
+    {
+        for (corruption, expected) in [
+            ("corrupt", InvocationLaunchIdentityAvailabilityOutcome.unavailable),
+            ("newer", InvocationLaunchIdentityAvailabilityOutcome.available),
+        ] {
             try await withTemporaryParent { parent in
                 let fixture = try await makeInvocationStoreFixture(
                     in: parent,
@@ -2471,7 +2874,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                     candidate,
                     for: fixture.install.authority
                 )
-                XCTAssertEqual(availability, .available, corruption)
+                XCTAssertEqual(availability, expected, corruption)
                 await store.cancelInvocationReservation(
                     fixture.install.authority.request
                 )
@@ -3997,9 +4400,12 @@ final class PortableInvocationStoreTests: XCTestCase {
         }
     }
 
-    func testDuplicateFrozenInvocationAuthoritiesForOneChatFailClosed() async throws {
+    func testMixedFrozenInvocationRootsCoalesceToOneCorruptChatInCatalog() async throws {
         try await withTemporaryParent { parent in
-            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let fixture = try await makeInvocationStoreFixture(
+                in: parent,
+                includeCompetingPending: true
+            )
             let crash = await leaveCommittedPublicationForRelaunch(fixture)
             XCTAssertEqual(crash.outcome, .failed)
             XCTAssertTrue(crash.livenessReleased)
@@ -4027,7 +4433,7 @@ final class PortableInvocationStoreTests: XCTestCase {
 
             let alternateIdentity = InvocationLaunchIdentity(
                 invocationID: try CoachInvocationID(
-                    "inv-20260830T120002000Z-9YZ0"
+                    "inv-20260830T120001000Z-9YZ0"
                 ),
                 attemptID: try CoachProviderAttemptID(
                     "atm-20260830T120002000Z-0ABC"
@@ -4061,12 +4467,20 @@ final class PortableInvocationStoreTests: XCTestCase {
                 at: alternateRoot,
                 withIntermediateDirectories: false
             )
-            try PortableChatPersistence().encodeInvocation(alternate).write(
-                to: alternateRoot.appendingPathComponent("invocation.json")
+            var alternateObject = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: PortableChatPersistence().encodeInvocation(alternate)
+                ) as? [String: Any]
             )
-            try corruptProof.write(
-                to: alternateRoot.appendingPathComponent("publication-proof.json")
+            alternateObject["schemaVersion"] = CoachInvocation.schemaVersion + 1
+            let newerBody = try JSONSerialization.data(
+                withJSONObject: alternateObject,
+                options: [.sortedKeys]
             )
+            let alternateInvocationURL = alternateRoot.appendingPathComponent(
+                "invocation.json"
+            )
+            try newerBody.write(to: alternateInvocationURL)
 
             let relaunchedWorkspace = PortableLibraryWorkspace(
                 locations: QueueLocations(existing: [fixture.root]),
@@ -4078,21 +4492,31 @@ final class PortableInvocationStoreTests: XCTestCase {
             _ = await relaunchedWorkspace.chooseLibrary()
             let store = PortableChatStore(workspace: relaunchedWorkspace)
 
-            let catalog = await store.loadCatalog(in: fixture.scope)
-            XCTAssertEqual(catalog, .failed)
+            guard case let .loaded(catalog) = await store.loadCatalog(
+                in: fixture.scope
+            ) else { return XCTFail("repeated frozen roots blocked the catalog") }
+            XCTAssertEqual(catalog.count, 2)
+            XCTAssertTrue(catalog.contains(.frozen(FrozenChatSnapshot(
+                chatID: fixture.locked.chat.id,
+                reason: .corrupt
+            ))))
+            XCTAssertTrue(catalog.contains { entry in
+                guard case let .available(aggregate) = entry else { return false }
+                return aggregate.chat.id == fixture.competingAuthority.request.chatID
+            })
             XCTAssertEqual(try Data(contentsOf: proofURL), corruptProof)
-            XCTAssertEqual(
-                try Data(contentsOf: alternateRoot.appendingPathComponent(
-                    "publication-proof.json"
-                )),
-                corruptProof
-            )
+            XCTAssertEqual(try Data(contentsOf: alternateInvocationURL), newerBody)
         }
     }
 
-    func testUsableAndFrozenInvocationAuthoritiesForOneChatFailClosed() async throws {
+    func testFrozenInvocationRootPreservesAvailableSameChatEvidenceDuringRecovery()
+        async throws
+    {
         try await withTemporaryParent { parent in
-            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let fixture = try await makeInvocationStoreFixture(
+                in: parent,
+                includeCompetingPending: true
+            )
             let crash = await leaveCommittedPublicationForRelaunch(fixture)
             XCTAssertEqual(crash.outcome, .failed)
             XCTAssertTrue(crash.livenessReleased)
@@ -4154,24 +4578,57 @@ final class PortableInvocationStoreTests: XCTestCase {
                 )
             )
 
-            XCTAssertThrowsError(
-                try PortableChatPersistence().loadCatalog(
-                    at: fixture.root,
-                    in: fixture.scope
+            let targetPendingURL = fixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(
+                    fixture.locked.chat.id.rawValue,
+                    isDirectory: true
                 )
-            ) { error in
-                XCTAssertEqual(
-                    error as? PortableChatPersistenceError,
-                    .invalidLayout
-                )
-            }
-            XCTAssertEqual(try Data(contentsOf: proofURL), proofBytes)
-            XCTAssertEqual(
-                try Data(contentsOf: alternateRoot.appendingPathComponent(
-                    "publication-proof.json"
-                )),
-                proofBytes
+                .appendingPathComponent("pending-user-turn.json")
+            let evidenceURLs = [
+                originalRoot.appendingPathComponent("invocation.json"),
+                proofURL,
+                alternateRoot.appendingPathComponent("invocation.json"),
+                alternateRoot.appendingPathComponent("publication-proof.json"),
+                targetPendingURL,
+            ]
+            let evidenceBytes = try evidenceURLs.map { try Data(contentsOf: $0) }
+            let relaunchedWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
             )
+            _ = await relaunchedWorkspace.chooseLibrary()
+            let invocationStore = PortableInvocationStore(
+                workspace: relaunchedWorkspace
+            )
+
+            let acquired = await invocationStore.acquirePendingInvocation(
+                fixture.competingAuthority.request
+            )
+            XCTAssertEqual(acquired, .acquired(fixture.competingAuthority))
+            for (url, expected) in zip(evidenceURLs, evidenceBytes) {
+                XCTAssertEqual(try Data(contentsOf: url), expected, url.path)
+            }
+            await invocationStore.cancelInvocationReservation(
+                fixture.competingAuthority.request
+            )
+
+            let chatStore = PortableChatStore(workspace: relaunchedWorkspace)
+            guard case let .loaded(catalog) = await chatStore.loadCatalog(
+                in: fixture.scope
+            ) else { return XCTFail("same-Chat frozen evidence blocked the catalog") }
+            XCTAssertEqual(catalog.count, 2)
+            XCTAssertTrue(catalog.contains(.frozen(FrozenChatSnapshot(
+                chatID: fixture.locked.chat.id,
+                reason: .corrupt
+            ))))
+            XCTAssertTrue(catalog.contains { entry in
+                guard case let .available(aggregate) = entry else { return false }
+                return aggregate.chat.id == fixture.competingAuthority.request.chatID
+            })
         }
     }
 
@@ -4791,6 +5248,172 @@ final class PortableInvocationStoreTests: XCTestCase {
             }
             return optedInCompetingAuthority
         }
+    }
+
+    private func writeEscapedFrozenSiblingChatRoot(
+        in fixture: InvocationStoreFixture,
+        newerSchema: Bool,
+        messageID: ChatMessageID?,
+        draftID: ChatDraftID?
+    ) throws {
+        precondition((messageID != nil) != (draftID != nil))
+        let manifest = fixture.root
+            .appendingPathComponent("chats", isDirectory: true)
+            .appendingPathComponent(
+                fixture.competingAuthority.request.chatID.rawValue,
+                isDirectory: true
+            )
+            .appendingPathComponent("chat.json")
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: manifest)
+            ) as? [String: Any]
+        )
+        if newerSchema {
+            object["schemaVersion"] = Chat.schemaVersion + 1
+        } else {
+            object["title"] = ["unsupported": true]
+        }
+        let rawID: String
+        if let messageID {
+            rawID = messageID.rawValue
+            object["messageIds"] = [rawID]
+        } else {
+            let draftID = try XCTUnwrap(draftID)
+            rawID = draftID.rawValue
+            var draft = try XCTUnwrap(object["draft"] as? [String: Any])
+            draft["draftId"] = rawID
+            object["draft"] = draft
+        }
+        let canonical = try XCTUnwrap(String(
+            data: JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            ),
+            encoding: .utf8
+        ))
+        let firstByte = try XCTUnwrap(rawID.utf8.first)
+        let escapedID = String(format: "\\u%04X", firstByte) + rawID.dropFirst()
+        let escaped = canonical.replacingOccurrences(
+            of: "\"\(rawID)\"",
+            with: "\"\(escapedID)\""
+        )
+        XCTAssertNotEqual(escaped, canonical)
+        XCTAssertFalse(escaped.contains(rawID))
+        try Data(escaped.utf8).write(to: manifest)
+    }
+
+    private func writeOpaqueFrozenSiblingChatRoot(
+        in fixture: InvocationStoreFixture,
+        identity: InvocationAttemptIdentity
+    ) throws {
+        let manifest = fixture.root
+            .appendingPathComponent("chats", isDirectory: true)
+            .appendingPathComponent(
+                fixture.competingAuthority.request.chatID.rawValue,
+                isDirectory: true
+            )
+            .appendingPathComponent("chat.json")
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: manifest)
+            ) as? [String: Any]
+        )
+        object["schemaVersion"] = Chat.schemaVersion + 1
+        var draft = try XCTUnwrap(object["draft"] as? [String: Any])
+        draft["text"] = identity.freshDraftID.rawValue
+        object["draft"] = draft
+        object["futurePrivateValues"] = [
+            identity.userMessageID.rawValue,
+            identity.coachMessageID.rawValue,
+        ]
+        try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys]
+        ).write(to: manifest)
+    }
+
+    private func writeAmbiguousSiblingChatRoot(
+        in fixture: InvocationStoreFixture,
+        messageID: ChatMessageID
+    ) throws {
+        let manifest = fixture.root
+            .appendingPathComponent("chats", isDirectory: true)
+            .appendingPathComponent(
+                fixture.competingAuthority.request.chatID.rawValue,
+                isDirectory: true
+            )
+            .appendingPathComponent("chat.json")
+        let canonical = try XCTUnwrap(
+            String(data: Data(contentsOf: manifest), encoding: .utf8)
+        )
+        guard canonical.first == "{" else {
+            return XCTFail("Chat root was not an object")
+        }
+        let ambiguous = "{\"messageIds\":[\"\(messageID.rawValue)\"]," +
+            canonical.dropFirst()
+        try Data(ambiguous.utf8).write(to: manifest)
+    }
+
+    private func writeSupportedInvocation(
+        in fixture: InvocationStoreFixture,
+        rootDraftID: ChatDraftID
+    ) throws {
+        let invocationID = try CoachInvocationID(
+            "inv-20260902T100400000Z-4GHJ"
+        )
+        let attempt = try CoachProviderAttempt(
+            id: CoachProviderAttemptID(
+                "atm-20260902T100400000Z-5KMN"
+            ),
+            ordinal: 1,
+            kind: .standard,
+            providerIdempotencyValue: ProviderIdempotencyValue(
+                "supported-root-orphan"
+            ),
+            transcriptHandles: [],
+            publicationAuthority: CoachProviderAttemptPublicationAuthority(
+                userMessageID: ChatMessageID(
+                    "msg-20260902T100400000Z-6PQR"
+                ),
+                coachMessageID: ChatMessageID(
+                    "msg-20260902T100400000Z-7STV"
+                ),
+                freshDraftID: ChatDraftID(
+                    "drf-20260902T100400000Z-8WXY"
+                )
+            )
+        )
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID(
+                "ptu-20260902T100400000Z-9YZ0"
+            ),
+            draftID: rootDraftID,
+            draftVersion: 1,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260902T100400000Z-0ABC"
+            )
+        )
+        let invocation = try CoachInvocation(
+            id: invocationID,
+            attempt: attempt,
+            library: fixture.scope,
+            chatID: fixture.locked.chat.id,
+            pendingUserTurn: pending,
+            preparedProfile: fixture.install.invocation.preparedProfile,
+            expectedManifestRevision: fixture.locked.chat.manifestRevision,
+            admittedAt: UTCInstant("2026-09-02T10:04:00.000Z")
+        )
+        let root = fixture.root
+            .appendingPathComponent("invocations", isDirectory: true)
+            .appendingPathComponent(invocationID.rawValue, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false
+        )
+        try PortableChatPersistence().encodeInvocation(invocation).write(
+            to: root.appendingPathComponent("invocation.json")
+        )
     }
 
     @discardableResult

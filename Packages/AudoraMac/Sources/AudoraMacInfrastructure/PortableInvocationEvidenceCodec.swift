@@ -83,6 +83,22 @@ struct PortableInvocationCommonIdentityEnvelope {
     }
 }
 
+/// The durable public namespaces exposed by a bounded Chat root. Only the
+/// schema-stable `draft.draftId` and root `messageIds` values are retained;
+/// Draft text and future private values remain opaque.
+struct PortableChatDurablePublicIDs {
+    let draftID: ChatDraftID
+    let messageIDs: Set<ChatMessageID>
+
+    func contains(_ messageID: ChatMessageID) -> Bool {
+        messageIDs.contains(messageID)
+    }
+
+    func contains(_ draftID: ChatDraftID) -> Bool {
+        self.draftID == draftID
+    }
+}
+
 struct InvocationPublicationProof: Equatable {
     static let schemaVersion: UInt32 = 1
 
@@ -201,6 +217,23 @@ struct PortableInvocationEvidenceCodec {
               invocation.chatID == identity.chatID
         else { throw PortableChatPersistenceError.invalidLayout }
         return invocation
+    }
+
+    func decodeChatDurablePublicIDs(_ data: Data) throws -> PortableChatDurablePublicIDs {
+        guard data.count <= maximumRootBytes else {
+            throw PortableChatPersistenceError.rootTooLarge
+        }
+        var scanner = PortableChatJSONScanner(data: data)
+        let raw = try scanner.scan()
+        guard raw.messageIDs.count <= maximumMessageCount else {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        return try mapPersistedDomainValidation {
+            PortableChatDurablePublicIDs(
+                draftID: try ChatDraftID(raw.draftID),
+                messageIDs: Set(try raw.messageIDs.map(ChatMessageID.init))
+            )
+        }
     }
 
     func decodeInvocation(_ data: Data) throws -> CoachInvocation {
@@ -568,6 +601,403 @@ struct PortableInvocationEvidenceCodec {
         value.utf8.count == 64 && value.utf8.allSatisfy {
             (48 ... 57).contains($0) || (97 ... 102).contains($0)
         }
+    }
+}
+
+private struct PortableChatRawDurablePublicIDs {
+    let draftID: String
+    let messageIDs: [String]
+}
+
+/// A path-aware bounded scan of the two Chat-root public namespaces. Values at
+/// every other path are advanced over without constructing a Swift String.
+private struct PortableChatJSONScanner {
+    private static let maximumContainerDepth = 128
+
+    private enum ObjectContext {
+        case root
+        case draft
+        case opaque
+    }
+
+    private let bytes: [UInt8]
+    private var index = 0
+    private var draftID: String?
+    private var messageIDs: [String]?
+
+    init(data: Data) {
+        bytes = Array(data)
+    }
+
+    mutating func scan() throws -> PortableChatRawDurablePublicIDs {
+        skipWhitespace()
+        try parseObject(depth: 0, context: .root)
+        skipWhitespace()
+        guard index == bytes.count,
+              let draftID,
+              let messageIDs
+        else { throw PortableChatPersistenceError.invalidJSON }
+        return PortableChatRawDurablePublicIDs(
+            draftID: draftID,
+            messageIDs: messageIDs
+        )
+    }
+
+    private mutating func parseObject(
+        depth: Int,
+        context: ObjectContext
+    ) throws {
+        guard depth < Self.maximumContainerDepth,
+              index < bytes.count,
+              bytes[index] == 0x7B
+        else { throw PortableChatPersistenceError.invalidJSON }
+        index += 1
+        skipWhitespace()
+        if consume(0x7D) {
+            if context == .draft {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            return
+        }
+
+        var keys: Set<String> = []
+        while true {
+            let key = try requiredJSONString()
+            if !keys.insert(key).inserted,
+               isRelevant(key, in: context)
+            {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            skipWhitespace()
+            guard consume(0x3A) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            skipWhitespace()
+            switch (context, key) {
+            case (.root, "draft"):
+                guard draftID == nil else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                try parseObject(depth: depth + 1, context: .draft)
+            case (.root, "messageIds"):
+                guard messageIDs == nil else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                messageIDs = try parseMessageIDs(depth: depth + 1)
+            case (.draft, "draftId"):
+                guard draftID == nil else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                draftID = try requiredJSONString()
+            default:
+                try parseValue(depth: depth + 1)
+            }
+            skipWhitespace()
+            if consume(0x7D) {
+                if context == .draft, draftID == nil {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                return
+            }
+            guard consume(0x2C) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            skipWhitespace()
+            guard index < bytes.count, bytes[index] != 0x7D else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        }
+    }
+
+    private mutating func parseMessageIDs(depth: Int) throws -> [String] {
+        guard depth < Self.maximumContainerDepth,
+              index < bytes.count,
+              bytes[index] == 0x5B
+        else { throw PortableChatPersistenceError.invalidJSON }
+        index += 1
+        skipWhitespace()
+        if consume(0x5D) { return [] }
+
+        var values: [String] = []
+        while true {
+            values.append(try requiredJSONString())
+            skipWhitespace()
+            if consume(0x5D) { return values }
+            guard consume(0x2C) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            skipWhitespace()
+            guard index < bytes.count, bytes[index] != 0x5D else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        }
+    }
+
+    private mutating func parseArray(depth: Int) throws {
+        guard depth < Self.maximumContainerDepth,
+              index < bytes.count,
+              bytes[index] == 0x5B
+        else { throw PortableChatPersistenceError.invalidJSON }
+        index += 1
+        skipWhitespace()
+        if consume(0x5D) { return }
+
+        while true {
+            try parseValue(depth: depth + 1)
+            skipWhitespace()
+            if consume(0x5D) { return }
+            guard consume(0x2C) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            skipWhitespace()
+            guard index < bytes.count, bytes[index] != 0x5D else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        }
+    }
+
+    private mutating func parseValue(depth: Int) throws {
+        guard index < bytes.count else {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        switch bytes[index] {
+        case 0x22:
+            try skipJSONString()
+        case 0x7B:
+            try parseObject(depth: depth, context: .opaque)
+        case 0x5B:
+            try parseArray(depth: depth)
+        default:
+            try parsePrimitive()
+        }
+    }
+
+    private mutating func requiredJSONString() throws -> String {
+        guard let value = try parseJSONString(materialize: true) else {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        return value
+    }
+
+    private mutating func skipJSONString() throws {
+        _ = try parseJSONString(materialize: false)
+    }
+
+    private mutating func parseJSONString(materialize: Bool) throws -> String? {
+        guard index < bytes.count, bytes[index] == 0x22 else {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        let start = index
+        index += 1
+        while index < bytes.count {
+            let byte = bytes[index]
+            if byte == 0x22 {
+                index += 1
+                guard materialize else { return nil }
+                do {
+                    return try JSONDecoder().decode(
+                        String.self,
+                        from: Data(bytes[start ..< index])
+                    )
+                } catch {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+            }
+            if byte == 0x5C {
+                index += 1
+                guard index < bytes.count else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                switch bytes[index] {
+                case 0x22, 0x2F, 0x5C, 0x62, 0x66, 0x6E, 0x72, 0x74:
+                    index += 1
+                case 0x75:
+                    let first = try parseUnicodeEscape()
+                    if (0xD800 ... 0xDBFF).contains(first) {
+                        guard index + 5 < bytes.count,
+                              bytes[index] == 0x5C,
+                              bytes[index + 1] == 0x75
+                        else { throw PortableChatPersistenceError.invalidJSON }
+                        index += 1
+                        let second = try parseUnicodeEscape()
+                        guard (0xDC00 ... 0xDFFF).contains(second) else {
+                            throw PortableChatPersistenceError.invalidJSON
+                        }
+                    } else if (0xDC00 ... 0xDFFF).contains(first) {
+                        throw PortableChatPersistenceError.invalidJSON
+                    }
+                default:
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                continue
+            }
+            guard byte >= 0x20 else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            try advanceUTF8Scalar()
+        }
+        throw PortableChatPersistenceError.invalidJSON
+    }
+
+    private mutating func parsePrimitive() throws {
+        if consumeLiteral([0x74, 0x72, 0x75, 0x65]) ||
+            consumeLiteral([0x66, 0x61, 0x6C, 0x73, 0x65]) ||
+            consumeLiteral([0x6E, 0x75, 0x6C, 0x6C])
+        {
+            return
+        }
+        try parseNumber()
+    }
+
+    private mutating func parseNumber() throws {
+        if consume(0x2D), index == bytes.count {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        guard index < bytes.count else {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        if consume(0x30) {
+            guard index == bytes.count || !Self.isDigit(bytes[index]) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        } else {
+            guard (0x31 ... 0x39).contains(bytes[index]) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            repeat { index += 1 } while index < bytes.count && Self.isDigit(bytes[index])
+        }
+        if consume(0x2E) {
+            guard index < bytes.count, Self.isDigit(bytes[index]) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            repeat { index += 1 } while index < bytes.count && Self.isDigit(bytes[index])
+        }
+        if index < bytes.count, bytes[index] == 0x65 || bytes[index] == 0x45 {
+            index += 1
+            if index < bytes.count, bytes[index] == 0x2B || bytes[index] == 0x2D {
+                index += 1
+            }
+            guard index < bytes.count, Self.isDigit(bytes[index]) else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            repeat { index += 1 } while index < bytes.count && Self.isDigit(bytes[index])
+        }
+    }
+
+    private mutating func parseUnicodeEscape() throws -> UInt16 {
+        guard index + 4 < bytes.count,
+              bytes[index] == 0x75,
+              bytes[(index + 1) ... (index + 4)].allSatisfy(Self.isHex)
+        else { throw PortableChatPersistenceError.invalidJSON }
+        var value: UInt16 = 0
+        for byte in bytes[(index + 1) ... (index + 4)] {
+            value = value * 16 + UInt16(Self.hexValue(byte))
+        }
+        index += 5
+        return value
+    }
+
+    private mutating func advanceUTF8Scalar() throws {
+        let first = bytes[index]
+        if first <= 0x7F {
+            index += 1
+            return
+        }
+        let continuationCount: Int
+        let secondRange: ClosedRange<UInt8>
+        switch first {
+        case 0xC2 ... 0xDF:
+            continuationCount = 1
+            secondRange = 0x80 ... 0xBF
+        case 0xE0:
+            continuationCount = 2
+            secondRange = 0xA0 ... 0xBF
+        case 0xE1 ... 0xEC, 0xEE ... 0xEF:
+            continuationCount = 2
+            secondRange = 0x80 ... 0xBF
+        case 0xED:
+            continuationCount = 2
+            secondRange = 0x80 ... 0x9F
+        case 0xF0:
+            continuationCount = 3
+            secondRange = 0x90 ... 0xBF
+        case 0xF1 ... 0xF3:
+            continuationCount = 3
+            secondRange = 0x80 ... 0xBF
+        case 0xF4:
+            continuationCount = 3
+            secondRange = 0x80 ... 0x8F
+        default:
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        guard index + continuationCount < bytes.count,
+              secondRange.contains(bytes[index + 1])
+        else { throw PortableChatPersistenceError.invalidJSON }
+        if continuationCount > 1 {
+            for offset in 2 ... continuationCount {
+                guard (0x80 ... 0xBF).contains(bytes[index + offset]) else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+            }
+        }
+        index += continuationCount + 1
+    }
+
+    private mutating func consumeLiteral(_ literal: [UInt8]) -> Bool {
+        guard index + literal.count <= bytes.count,
+              Array(bytes[index ..< (index + literal.count)]) == literal
+        else { return false }
+        index += literal.count
+        return true
+    }
+
+    private func isRelevant(_ key: String, in context: ObjectContext) -> Bool {
+        switch context {
+        case .root:
+            key == "draft" || key == "messageIds"
+        case .draft:
+            key == "draftId"
+        case .opaque:
+            false
+        }
+    }
+
+    private mutating func skipWhitespace() {
+        while index < bytes.count {
+            switch bytes[index] {
+            case 0x20, 0x09, 0x0A, 0x0D:
+                index += 1
+            default:
+                return
+            }
+        }
+    }
+
+    private mutating func consume(_ byte: UInt8) -> Bool {
+        guard index < bytes.count, bytes[index] == byte else { return false }
+        index += 1
+        return true
+    }
+
+    private static func isHex(_ byte: UInt8) -> Bool {
+        (48 ... 57).contains(byte) ||
+            (65 ... 70).contains(byte) ||
+            (97 ... 102).contains(byte)
+    }
+
+    private static func hexValue(_ byte: UInt8) -> UInt8 {
+        switch byte {
+        case 48 ... 57:
+            byte - 48
+        case 65 ... 70:
+            byte - 55
+        default:
+            byte - 87
+        }
+    }
+
+    private static func isDigit(_ byte: UInt8) -> Bool {
+        (48 ... 57).contains(byte)
     }
 }
 

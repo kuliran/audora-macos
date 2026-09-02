@@ -1975,6 +1975,41 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testRelaunchDiscardsCorruptProofForExactPrepublicationInvocation() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            let invocationRoot = root.appendingPathComponent(
+                "invocations/\(fixture.install.invocation.id.rawValue)",
+                isDirectory: true
+            )
+            try Data(#"{"schemaVersion":2}"#.utf8).write(
+                to: invocationRoot.appendingPathComponent("publication-proof.json")
+            )
+
+            try persistence.reconcileInterruptedInvocations(at: root, in: scope)
+
+            guard case let .readWrite(reopened) = try persistence.load(
+                fixture.locked.chat.id,
+                at: root,
+                in: scope
+            ) else { return XCTFail("disposable proof froze the Chat") }
+            XCTAssertEqual(
+                reopened.pendingUserTurn?.failure,
+                .coachResponseInterrupted
+            )
+            XCTAssertFalse(FileManager.default.fileExists(atPath: invocationRoot.path))
+        }
+    }
+
     func testRelaunchAfterTitleRenameRetainsExactRetryableIntent() throws {
         try withCreatedLibrary { root, scope in
             let persistence = PortableChatPersistence()

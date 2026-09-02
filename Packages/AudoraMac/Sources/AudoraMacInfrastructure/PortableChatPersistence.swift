@@ -289,6 +289,8 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
     case afterInvocationFileFlush
     case afterInvocationInstall
     case afterInvocationDirectoryFlush
+    case afterReconciledInvocationRootFlush
+    case afterReconciledInvocationDirectoryFlush
     case beforeRetryProcessingPendingPartialWrite
     case afterRetryProcessingPendingPartialWrite
     case afterRetryProcessingPendingFileFlush
@@ -377,6 +379,25 @@ private func frozenChatSnapshot(
          .injectedFault:
         nil
     }
+}
+
+private func coalesceFrozenChatSnapshot(
+    _ snapshot: FrozenChatSnapshot,
+    into snapshots: inout [ChatID: FrozenChatSnapshot]
+) {
+    guard let current = snapshots[snapshot.chatID] else {
+        snapshots[snapshot.chatID] = snapshot
+        return
+    }
+    let reason: FrozenChatReason = switch (current.reason, snapshot.reason) {
+    case (.corrupt, _), (_, .corrupt): .corrupt
+    case (.unsupportedSchema, _), (_, .unsupportedSchema): .unsupportedSchema
+    case (.newerSchema, .newerSchema): .newerSchema
+    }
+    snapshots[snapshot.chatID] = FrozenChatSnapshot(
+        chatID: snapshot.chatID,
+        reason: reason
+    )
 }
 
 public struct PortableChatPersistence: @unchecked Sendable {
@@ -752,20 +773,36 @@ public struct PortableChatPersistence: @unchecked Sendable {
             under: invocationsDescriptor,
             beforeRemoving: revalidateLiveness
         )
-        var remainingTargets: Set<ChatID> = []
-        for name in remainingInvocationNames {
-            let inspection = try inspectInvocationDirectory(
+        let inspections = try remainingInvocationNames.sorted().map { name in
+            try inspectInvocationDirectory(
                 named: name,
                 expectedLibraryID: scope.libraryID,
                 under: invocationsDescriptor,
                 reconcileProofPartial: false
             )
-            guard case let .frozen(invocation, _) = inspection else {
+        }
+        let invocationRootFrozenTargets = Set<ChatID>(
+            inspections.compactMap { inspection in
+                guard case let .frozen(common, _) = inspection else { return nil }
+                return common.chatID
+            }
+        )
+        var remainingTargets: Set<ChatID> = []
+        for inspection in inspections {
+            let chatID: ChatID
+            switch inspection {
+            case let .available(record):
+                chatID = record.invocation.chatID
+                guard invocationRootFrozenTargets.contains(chatID) else {
+                    throw PortableChatPersistenceError.invalidLayout
+                }
+            case let .frozen(common, _):
+                chatID = common.chatID
+            }
+            guard frozenChatIDs.contains(chatID) else {
                 throw PortableChatPersistenceError.invalidLayout
             }
-            guard remainingTargets.insert(invocation.chatID).inserted else {
-                throw PortableChatPersistenceError.invalidLayout
-            }
+            remainingTargets.insert(chatID)
         }
         guard remainingTargets == frozenChatIDs else {
             throw PortableChatPersistenceError.invalidLayout
@@ -2045,22 +2082,32 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
         let chatsDescriptor = try openDirectory(named: "chats", under: rootDescriptor)
         defer { Darwin.close(chatsDescriptor) }
-        var frozenChatIDs: Set<ChatID> = []
-        var availableCount = 0
-        for name in candidates {
-            let body = try inspectInvocationBody(
-                named: name,
-                expectedLibraryID: scope.libraryID,
-                under: invocationsDescriptor
-            )
-            guard case let .available(bodyIdentity) = body else {
-                if case let .frozen(common, _) = body {
-                    guard frozenChatIDs.insert(common.chatID).inserted else {
-                        throw PortableChatPersistenceError.invalidLayout
-                    }
-                }
-                continue
+        let bodyInspections: [(name: String, result: InvocationBodyInspection)] =
+            try candidates.sorted().map { name in
+                (
+                    name,
+                    try inspectInvocationBody(
+                        named: name,
+                        expectedLibraryID: scope.libraryID,
+                        under: invocationsDescriptor
+                    )
+                )
             }
+        var frozenChatIDs: Set<ChatID> = []
+        for (_, inspection) in bodyInspections {
+            if case let .frozen(common, _) = inspection {
+                frozenChatIDs.insert(common.chatID)
+            }
+        }
+        var exactPrePublicationNames: Set<String> = []
+        var directoryInspections: [String: InvocationDirectoryInspection] = [:]
+        // Exact prepublication intent makes proof bytes disposable. Establish
+        // that classification before decoding proof, while still completing
+        // every read-only root classification before the first retirement.
+        for (name, bodyInspection) in bodyInspections {
+            guard case let .available(bodyIdentity) = bodyInspection,
+                  !frozenChatIDs.contains(bodyIdentity.invocation.chatID)
+            else { continue }
             let invocation = bodyIdentity.invocation
             do {
                 if try retireExactPrePublicationInvocationIfPresent(
@@ -2071,8 +2118,10 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     livenessAuthority: livenessAuthority,
                     invocationsDescriptor: invocationsDescriptor,
                     chatsDescriptor: chatsDescriptor,
-                    beforeCommitting: revalidateBeforeMutation
+                    beforeCommitting: revalidateBeforeMutation,
+                    performRetirement: false
                 ) {
+                    exactPrePublicationNames.insert(name)
                     continue
                 }
             } catch let error as PortableChatPersistenceError {
@@ -2080,8 +2129,63 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     for: error,
                     chatID: invocation.chatID
                 ) != nil else { throw error }
-                guard frozenChatIDs.insert(invocation.chatID).inserted else {
-                    throw PortableChatPersistenceError.invalidLayout
+                frozenChatIDs.insert(invocation.chatID)
+                continue
+            }
+            let inspection = try inspectInvocationDirectory(
+                named: name,
+                expectedLibraryID: scope.libraryID,
+                under: invocationsDescriptor,
+                reconcileProofPartial: false
+            )
+            directoryInspections[name] = inspection
+            if case let .frozen(common, _) = inspection {
+                frozenChatIDs.insert(common.chatID)
+            }
+        }
+        // Classify every trustworthy Invocation root before touching one. A
+        // frozen root owns the complete recovery decision for its Chat, so an
+        // otherwise readable sibling root for that same Chat must remain byte
+        // exact regardless of directory enumeration order.
+        var availableCount = 0
+        for (name, bodyInspection) in bodyInspections {
+            guard case let .available(bodyIdentity) = bodyInspection,
+                  !frozenChatIDs.contains(bodyIdentity.invocation.chatID)
+            else { continue }
+            let invocation = bodyIdentity.invocation
+            if exactPrePublicationNames.contains(name) {
+                do {
+                    if try retireExactPrePublicationInvocationIfPresent(
+                        invocation,
+                        named: name,
+                        scope: scope,
+                        reservedRequest: reservedRequest,
+                        livenessAuthority: livenessAuthority,
+                        invocationsDescriptor: invocationsDescriptor,
+                        chatsDescriptor: chatsDescriptor,
+                        beforeCommitting: revalidateBeforeMutation
+                    ) {
+                        continue
+                    }
+                } catch let error as PortableChatPersistenceError {
+                    guard frozenChatSnapshot(
+                        for: error,
+                        chatID: invocation.chatID
+                    ) != nil else { throw error }
+                    frozenChatIDs.insert(invocation.chatID)
+                    continue
+                }
+            }
+            let initialInspection = try directoryInspections[name] ??
+                inspectInvocationDirectory(
+                    named: name,
+                    expectedLibraryID: scope.libraryID,
+                    under: invocationsDescriptor,
+                    reconcileProofPartial: false
+                )
+            guard case .available = initialInspection else {
+                if case let .frozen(common, _) = initialInspection {
+                    frozenChatIDs.insert(common.chatID)
                 }
                 continue
             }
@@ -2094,9 +2198,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             )
             guard case let .available(record) = inspection else {
                 if case let .frozen(common, _) = inspection {
-                    guard frozenChatIDs.insert(common.chatID).inserted else {
-                        throw PortableChatPersistenceError.invalidLayout
-                    }
+                    frozenChatIDs.insert(common.chatID)
                 }
                 continue
             }
@@ -2239,9 +2341,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     for: error,
                     chatID: invocation.chatID
                 ) != nil else { throw error }
-                guard frozenChatIDs.insert(invocation.chatID).inserted else {
-                    throw PortableChatPersistenceError.invalidLayout
-                }
+                frozenChatIDs.insert(invocation.chatID)
             }
         }
         return frozenChatIDs
@@ -2262,7 +2362,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         livenessAuthority: PortableInvocationLivenessAuthority?,
         invocationsDescriptor: Int32,
         chatsDescriptor: Int32,
-        beforeCommitting: () throws -> Void
+        beforeCommitting: () throws -> Void,
+        performRetirement: Bool = true
     ) throws -> Bool {
         guard try entryExists(
             named: invocation.chatID.rawValue,
@@ -2341,18 +2442,20 @@ public struct PortableChatPersistence: @unchecked Sendable {
               (try? invocation.validateIntent(against: current)) != nil
         else { return false }
 
-        try discardPrePublicationEvidence(
-            from: invocationRoot,
-            beforeRemoving: beforeCommitting
-        )
-        _ = try retireInvocation(
-            invocation,
-            current: current,
-            invocationRoot: invocationRoot,
-            invocationsDescriptor: invocationsDescriptor,
-            chatDescriptor: chatDescriptor,
-            beforeCommitting: beforeCommitting
-        )
+        if performRetirement {
+            try discardPrePublicationEvidence(
+                from: invocationRoot,
+                beforeRemoving: beforeCommitting
+            )
+            _ = try retireInvocation(
+                invocation,
+                current: current,
+                invocationRoot: invocationRoot,
+                invocationsDescriptor: invocationsDescriptor,
+                chatDescriptor: chatDescriptor,
+                beforeCommitting: beforeCommitting
+            )
+        }
         return true
     }
 
@@ -2429,6 +2532,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 if attempts.contains(where: {
                     $0.freshDraftID == identity.freshDraftID
                 }) {
+                    recordCollision(.freshDraftID)
+                }
+                if record.invocation.draftID == identity.freshDraftID {
                     recordCollision(.freshDraftID)
                 }
                 if attempts.contains(where: {
@@ -2566,30 +2672,35 @@ public struct PortableChatPersistence: @unchecked Sendable {
                         named: "chat.json",
                         under: chatDescriptor
                     )
-                    // Sibling Chats are independent failure domains. Their bounded
-                    // root bytes are sufficient for conservative identity
-                    // detection even when a newer schema or corruption makes the
-                    // aggregate permanently frozen. A literal hit may regenerate
-                    // unnecessarily, but can never admit a known collision.
-                    if manifest.range(
-                        of: Data(identity.userMessageID.rawValue.utf8)
-                    ) != nil {
+                    let publicIDs: PortableChatDurablePublicIDs
+                    do {
+                        publicIDs = try invocationEvidenceCodec
+                            .decodeChatDurablePublicIDs(manifest)
+                    } catch {
+                        // A present but ambiguous root cannot prove the Library-wide
+                        // public namespace free even when only this Chat is frozen.
+                        throw PortableChatPersistenceError.ioFailure
+                    }
+                    if publicIDs.contains(identity.userMessageID) {
                         recordCollision(.userMessageID)
                     }
-                    if manifest.range(
-                        of: Data(identity.coachMessageID.rawValue.utf8)
-                    ) != nil {
+                    if publicIDs.contains(identity.coachMessageID) {
                         recordCollision(.coachMessageID)
                     }
-                    if manifest.range(
-                        of: Data(identity.freshDraftID.rawValue.utf8)
-                    ) != nil {
+                    if publicIDs.contains(identity.freshDraftID) {
                         recordCollision(.freshDraftID)
                     }
                 } catch let error as PortableChatPersistenceError {
-                    if error == .invalidLayout,
-                       isRegularFile(named: "chat.json", under: chatDescriptor)
-                    {
+                    let manifestExists: Bool
+                    do {
+                        manifestExists = try entryExists(
+                            named: "chat.json",
+                            under: chatDescriptor
+                        )
+                    } catch {
+                        throw PortableChatPersistenceError.ioFailure
+                    }
+                    if manifestExists {
                         throw PortableChatPersistenceError.ioFailure
                     }
                     guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
@@ -2890,6 +3001,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
         guard invocation.hasSameDurableProjection(as: mutation.invocation),
               invocation.libraryID == scope.libraryID
         else { return nil }
+        // A recovered rename proves that the generation marker exists, but
+        // not that either directory entry survived a crash. Establish the
+        // marker's complete durability boundary before clearing the visible
+        // Retry failure or rebinding provider liveness to that Pending inode.
+        try flushDescriptor(invocationRoot)
+        try fault(.afterReconciledInvocationRootFlush)
+        try flushDescriptor(invocationsDescriptor)
+        try fault(.afterReconciledInvocationDirectoryFlush)
         _ = try installRetryProcessingTransition(
             mutation,
             current: current,
@@ -2897,8 +3016,6 @@ public struct PortableChatPersistence: @unchecked Sendable {
             holding: livenessLease,
             beforeCommitting: revalidateLiveness
         )
-        try flushDescriptor(invocationRoot)
-        try flushDescriptor(invocationsDescriptor)
         if let livenessAuthority {
             try revalidateInvocationLivenessAuthority(
                 livenessAuthority,
@@ -3257,6 +3374,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
                         return .freshDraftID
                     }
                 }
+                if record.invocation.draftID == authority.freshDraftID {
+                    return .freshDraftID
+                }
             case let .frozen(common, _):
                 if common.contains(candidate.id) {
                     return .attemptID
@@ -3323,20 +3443,34 @@ public struct PortableChatPersistence: @unchecked Sendable {
             }
             do {
                 let manifest = try boundedData(named: "chat.json", under: chatDescriptor)
-                if manifest.range(of: Data(authority.userMessageID.rawValue.utf8)) != nil {
+                let publicIDs: PortableChatDurablePublicIDs
+                do {
+                    publicIDs = try invocationEvidenceCodec
+                        .decodeChatDurablePublicIDs(manifest)
+                } catch {
+                    throw PortableChatPersistenceError.ioFailure
+                }
+                if publicIDs.contains(authority.userMessageID) {
                     return .userMessageID
                 }
-                if manifest.range(of: Data(authority.coachMessageID.rawValue.utf8)) != nil {
+                if publicIDs.contains(authority.coachMessageID) {
                     return .coachMessageID
                 }
-                if manifest.range(of: Data(authority.freshDraftID.rawValue.utf8)) != nil {
+                if publicIDs.contains(authority.freshDraftID) {
                     return .freshDraftID
                 }
             } catch let error as PortableChatPersistenceError {
                 if chatID == activeChatID { throw error }
-                if error == .invalidLayout,
-                   isRegularFile(named: "chat.json", under: chatDescriptor)
-                {
+                let manifestExists: Bool
+                do {
+                    manifestExists = try entryExists(
+                        named: "chat.json",
+                        under: chatDescriptor
+                    )
+                } catch {
+                    throw PortableChatPersistenceError.ioFailure
+                }
+                if manifestExists {
                     throw PortableChatPersistenceError.ioFailure
                 }
                 guard frozenChatSnapshot(for: error, chatID: chatID) != nil else {
@@ -5324,8 +5458,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         ).filter { $0 != ".DS_Store" && !Self.isInvocationPartialName($0) }
         var authorities: [ChatID: InvocationPublicationProofAuthority] = [:]
         var frozenSnapshots: [ChatID: FrozenChatSnapshot] = [:]
-        var availableCount = 0
-        for name in names {
+        var inspections: [InvocationDirectoryInspection] = []
+        for name in names.sorted() {
             let isEmpty: Bool = try {
                 let invocationRoot = try openDirectory(
                     named: name,
@@ -5338,13 +5472,25 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 ).isEmpty
             }()
             if isEmpty { continue }
-            switch try inspectInvocationDirectory(
+            inspections.append(try inspectInvocationDirectory(
                 named: name,
                 expectedLibraryID: expectedLibraryID,
                 under: invocationsDescriptor,
                 reconcileProofPartial: false
-            ) {
+            ))
+        }
+        for inspection in inspections {
+            if case let .frozen(_, snapshot) = inspection {
+                coalesceFrozenChatSnapshot(snapshot, into: &frozenSnapshots)
+            }
+        }
+        var availableCount = 0
+        for inspection in inspections {
+            switch inspection {
             case let .available(record):
+                guard frozenSnapshots[record.invocation.chatID] == nil else {
+                    continue
+                }
                 availableCount += 1
                 guard availableCount == 1 else {
                     throw PortableChatPersistenceError.invalidLayout
@@ -5359,17 +5505,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
                             proof: proof
                         )
                 }
-            case let .frozen(_, snapshot):
-                guard frozenSnapshots.updateValue(
-                    snapshot,
-                    forKey: snapshot.chatID
-                ) == nil else {
-                    throw PortableChatPersistenceError.invalidLayout
-                }
+            case .frozen:
+                continue
             }
-        }
-        guard authorities.keys.allSatisfy({ frozenSnapshots[$0] == nil }) else {
-            throw PortableChatPersistenceError.invalidLayout
         }
         return InvocationPublicationProofLookup(
             authorities: authorities,
@@ -5411,22 +5549,23 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
         var activeCount = 0
         var frozenChatIDs: Set<ChatID> = []
-        for name in names {
-            let inspection = try inspectInvocationDirectory(
+        let inspections = try names.sorted().map { name in
+            try inspectInvocationDirectory(
                 named: name,
                 expectedLibraryID: expectedLibraryID,
                 under: invocationsDescriptor,
-                reconcileProofPartial: true,
-                beforeRemoving: beforeDestructiveMutation
+                reconcileProofPartial: false
             )
-            guard case let .available(record) = inspection else {
-                if case let .frozen(invocation, _) = inspection {
-                    guard frozenChatIDs.insert(invocation.chatID).inserted else {
-                        throw PortableChatPersistenceError.invalidLayout
-                    }
-                }
-                continue
+        }
+        for inspection in inspections {
+            if case let .frozen(common, _) = inspection {
+                frozenChatIDs.insert(common.chatID)
             }
+        }
+        for inspection in inspections {
+            guard case let .available(record) = inspection,
+                  !frozenChatIDs.contains(record.invocation.chatID)
+            else { continue }
             do {
                 if try invocationIsActive(
                     record,
@@ -5444,9 +5583,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     for: error,
                     chatID: record.invocation.chatID
                 ) != nil else { throw error }
-                guard frozenChatIDs.insert(record.invocation.chatID).inserted else {
-                    throw PortableChatPersistenceError.invalidLayout
-                }
+                frozenChatIDs.insert(record.invocation.chatID)
             }
         }
         return activeCount == 1
