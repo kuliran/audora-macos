@@ -729,7 +729,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
                         attachmentFeatureConfigurationStamp.authorityID
                 )
             ),
-            store: store,
+            store: store
         )
         await feature.send(.start(Self.context))
         await feature.send(.beginNewChat(Self.context))

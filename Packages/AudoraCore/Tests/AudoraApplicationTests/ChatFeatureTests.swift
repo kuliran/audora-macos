@@ -1077,7 +1077,7 @@ final class ChatFeatureTests: XCTestCase {
             profileReader: profile,
             coachContext: coordinator
         )
-        weak let observedFeature = feature
+        weak var observedFeature = feature
         let context = Self.context
         await feature?.send(.start(context))
         await feature?.send(.beginNewChat(context))
@@ -1136,7 +1136,7 @@ final class ChatFeatureTests: XCTestCase {
             profileReader: profile,
             coachContext: coordinator
         )
-        weak let observedFeature = feature
+        weak var observedFeature = feature
         let context = Self.context
         await feature?.send(.start(context))
         await feature?.send(.beginNewChat(context))
@@ -1232,7 +1232,7 @@ final class ChatFeatureTests: XCTestCase {
             store: store,
             coachContext: coordinator
         )
-        weak let observedFeature = feature
+        weak var observedFeature = feature
         let context = Self.context
         await feature?.send(.start(context))
         await feature?.send(.beginNewChat(context))

@@ -882,7 +882,7 @@ final class AVFoundationAudioCaptureAdapterConcurrencyTests: XCTestCase {
                 sources: AdapterRaceQueuedInputFactory(sources: [source]),
                 monotonicClock: clock
             )
-            weak let weakAdapter = adapter
+            weak var weakAdapter = adapter
             guard case let .started(feed) = await adapter?.begin(request) else {
                 return XCTFail("capture did not start")
             }

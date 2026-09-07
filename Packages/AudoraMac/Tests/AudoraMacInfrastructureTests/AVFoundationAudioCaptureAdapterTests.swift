@@ -330,7 +330,7 @@ final class AVFoundationAudioCaptureAdapterTests: XCTestCase {
         var relay: AVFoundationInputRelay? = AVFoundationInputRelay(
             afterTerminalLifetimeReleased: { lifetimeReleased.signal() }
         )
-        weak let weakRelay = relay
+        weak var weakRelay = relay
         relay?.finish()
         XCTAssertEqual(lifetimeReleased.wait(timeout: .now() + 1), .success)
         relay = nil
@@ -362,7 +362,7 @@ final class AVFoundationAudioCaptureAdapterTests: XCTestCase {
                 drainQueue: drainQueue,
                 afterTerminalLifetimeReleased: { lifetimeReleased.signal() }
             )
-            weak let weakRelay = relay
+            weak var weakRelay = relay
             relay?.accept(buffer: buffer, time: time)
             XCTAssertEqual(lifetimeReleased.wait(timeout: .now() + 1), .success)
             // Ensure the drain handler has returned after releasing its retain.
