@@ -43,6 +43,27 @@ struct NewChatSheetInteractionPresentation: Equatable, Sendable {
     }
 }
 
+struct CoachResponseStopInteractionPresentation: Equatable, Sendable {
+    let isEnabled: Bool
+
+    init(
+        admissionState: ApplicationCommandAdmissionState,
+        chatState: ChatFeatureState
+    ) {
+        guard !admissionState.isOrderlyTerminationPending,
+              let authority = chatState.coachInvocationStopAuthority,
+              case let .open(aggregate) = chatState.selection,
+              aggregate.chat.id == authority.chatID,
+              aggregate.pendingUserTurn?.id == authority.pendingUserTurnID,
+              chatState.activity == .invokingCoach(authority.chatID)
+        else {
+            isEnabled = false
+            return
+        }
+        isEnabled = true
+    }
+}
+
 enum ChatNoticePresentation {
     static func recoveryText(for notice: ChatNotice) -> String {
         switch notice {
@@ -169,6 +190,7 @@ enum CoachResponseFailurePresentation {
 }
 
 enum PendingUserTurnRecoveryAction: Hashable {
+    case stopCoachResponse
     case retryPendingUserTurn
     case discardPendingUserTurn
     case createNewChatFromCapacityFailure
@@ -177,6 +199,7 @@ enum PendingUserTurnRecoveryAction: Hashable {
 
     var title: String {
         switch self {
+        case .stopCoachResponse: "Stop"
         case .retryPendingUserTurn, .retryCoachResponse: "Retry"
         case .discardPendingUserTurn, .discardCoachResponse: "Discard"
         case .createNewChatFromCapacityFailure: "Create New Chat"
@@ -185,6 +208,7 @@ enum PendingUserTurnRecoveryAction: Hashable {
 
     var accessibilityLabel: String {
         switch self {
+        case .stopCoachResponse: "Stop Coach Response"
         case .retryPendingUserTurn: "Retry Pending User Turn"
         case .discardPendingUserTurn: "Discard Pending User Turn"
         case .createNewChatFromCapacityFailure:
@@ -199,6 +223,7 @@ enum PendingUserTurnRecoveryAction: Hashable {
 
 enum PendingUserTurnPresentation: Equatable {
     case processing
+    case stopping
     case contextCapacityFailure
     case coachResponseFailure
     case locked
@@ -210,11 +235,15 @@ enum PendingUserTurnPresentation: Equatable {
         if case let .open(aggregate) = state.selection,
            aggregate.pendingUserTurn == pending,
            state.composer == .locked(aggregate.chat.draft, pending),
-           state.activity == .invokingCoach(aggregate.chat.id),
            state.operationallyInterruptedInvocation == nil,
            pending.failure == nil
         {
-            return .processing
+            if state.activity == .invokingCoach(aggregate.chat.id) {
+                return .processing
+            }
+            if state.activity == .stoppingCoach(aggregate.chat.id) {
+                return .stopping
+            }
         }
         if pending.failure == .coachContextCannotFit {
             return .contextCapacityFailure
@@ -226,12 +255,14 @@ enum PendingUserTurnPresentation: Equatable {
     }
 
     var showsAdmissionUnavailableReason: Bool {
-        self != .processing
+        self != .processing && self != .stopping
     }
 
     var recoveryActions: [PendingUserTurnRecoveryAction] {
         switch self {
         case .processing:
+            [.stopCoachResponse]
+        case .stopping:
             []
         case .contextCapacityFailure:
             [
@@ -532,6 +563,14 @@ public struct ChatRootView: View {
                     }
                     switch presentation {
                     case .processing:
+                        HStack {
+                            Spacer()
+                            pendingRecoveryButtons(
+                                presentation.recoveryActions,
+                                pending: pending
+                            )
+                        }
+                    case .stopping:
                         EmptyView()
                     case .contextCapacityFailure:
                         VStack(alignment: .leading, spacing: 8) {
@@ -595,6 +634,8 @@ public struct ChatRootView: View {
             ProgressView("Preparing Draft…")
         case .invokingCoach:
             ProgressView("Coach is responding…")
+        case .stoppingCoach:
+            ProgressView("Stopping Coach response…")
         case .retryingPendingUserTurn:
             ProgressView("Rechecking Chat capacity…")
         case .discardingPendingUserTurn:
@@ -611,6 +652,17 @@ public struct ChatRootView: View {
     ) -> some View {
         ForEach(actions, id: \.self) { action in
             switch action {
+            case .stopCoachResponse:
+                Button(action.title) {
+                    model.stopCoachResponse()
+                }
+                .accessibilityLabel(action.accessibilityLabel)
+                .disabled(
+                    !CoachResponseStopInteractionPresentation(
+                        admissionState: dispatcher.admissionState,
+                        chatState: model.snapshot
+                    ).isEnabled
+                )
             case .retryPendingUserTurn, .retryCoachResponse:
                 Button(action.title) {
                     model.retryPendingUserTurn(pending.id)

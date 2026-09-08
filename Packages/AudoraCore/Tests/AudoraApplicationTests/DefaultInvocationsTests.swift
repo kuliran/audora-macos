@@ -1,8 +1,531 @@
-@testable @_spi(CoachContextQualification) @_spi(InvocationInfrastructure) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(InvocationInfrastructure) @_spi(InvocationTesting) import AudoraApplication
 import AudoraDomain
 import XCTest
 
 final class DefaultInvocationsTests: XCTestCase {
+    func testStopRevokesAndReapsSuspendedProviderBeforePersistingInterruption() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.provider.suspendNextLaunch()
+
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        await fixture.provider.waitUntilLaunchStarts()
+        let authority = await authorities.waitForAuthority()
+        let stopRequest = StopCoachInvocationRequest(
+            library: fixture.scope,
+            chatID: fixture.request.chatID,
+            pendingUserTurnID: fixture.request.pendingUserTurnID
+        )
+
+        let stopOutcome = await fixture.invocations.stop(
+            stopRequest,
+            authority: authority
+        )
+
+        guard case let .interrupted(aggregate) = stopOutcome else {
+            return XCTFail("Stop must durably interrupt after reaping, got \(stopOutcome)")
+        }
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInterrupted)
+        _ = await invocationTask.value
+        let cancelledAttemptIDs = await fixture.provider.cancelledAttemptIDs
+        let cancellationGraceMilliseconds = await fixture.provider
+            .cancellationGraceMilliseconds
+        let publicationCount = await fixture.persistence.publicationCount
+        let activeInvocation = await fixture.persistence.activeInvocation
+        XCTAssertEqual(cancelledAttemptIDs, [authority.attemptID])
+        XCTAssertEqual(
+            cancellationGraceMilliseconds,
+            [DefaultInvocations.providerCancellationGraceMilliseconds]
+        )
+        XCTAssertEqual(publicationCount, 0)
+        XCTAssertNil(activeInvocation)
+        XCTAssertEqual(aggregate.chat.messageIDs, [])
+        let stopDiagnostic = try XCTUnwrap(
+            fixture.diagnostics.recordedEvents().first
+        )
+        XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
+        XCTAssertEqual(stopDiagnostic.reason, .coachResponseStopped)
+        XCTAssertEqual(stopDiagnostic.classification, .interruption)
+        XCTAssertEqual(stopDiagnostic.disposition, .userRetryableFailure)
+        XCTAssertEqual(stopDiagnostic.invocationID, authority.invocationID)
+        XCTAssertEqual(stopDiagnostic.attemptID, authority.attemptID)
+    }
+
+    func testStoppingOneLibraryDoesNotReplaceAnotherLibrarysActiveControl()
+        async throws
+    {
+        let first = try InvocationFixture(contextWindow: 100_000)
+        let secondScope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T121000000Z-2DEF")
+        )
+        let secondAggregate = try makePendingInvocationAggregate(
+            instant: first.instant,
+            chatID: "cht-20260830T121000000Z-A234",
+            draftID: "drf-20260830T121000000Z-B345",
+            memoryID: "mem-20260830T121000000Z-C456",
+            pendingID: "ptu-20260830T121000000Z-D567",
+            responsePositionID: "rsp-20260830T121000000Z-E678",
+            draftText: "Keep the second Library invocation running."
+        )
+        let secondRequest = PendingCoachInvocationRequest(
+            library: secondScope,
+            chatID: secondAggregate.chat.id,
+            pendingUserTurnID: try XCTUnwrap(secondAggregate.pendingUserTurn).id
+        )
+        let secondPersistence = MemoryInvocationPersistence(
+            initial: secondAggregate
+        )
+        let persistence = LibraryRoutingInvocationPersistence(
+            routes: [
+                first.scope.libraryID: first.persistence,
+                secondScope.libraryID: secondPersistence,
+            ]
+        )
+        let provider = TwoLibrarySuspendingProvider()
+        let identities = try TwoLibraryInvocationIdentities()
+        let invocations = DefaultInvocations(
+            persistence: persistence,
+            admission: ScriptedInvocationAdmission(decision: .admitted),
+            provider: provider,
+            coachContext: DefaultCoachContextFeature(
+                source: InvocationContextSource(
+                    contextWindow: 100_000,
+                    isCurrent: true
+                )
+            ),
+            clock: FixedInvocationClock(instant: first.instant),
+            identities: identities,
+            retrySleeper: RecordingInvocationRetrySleeper(),
+            retryDiagnostics: RecordingInvocationRetryDiagnostics(),
+            retryTiming: ScriptedInvocationRetryTiming(milliseconds: [0])
+        )
+        let firstAuthorities = InvocationStopAuthorityRecorder()
+        let secondAuthorities = InvocationStopAuthorityRecorder()
+
+        let firstTask = Task {
+            await invocations.tryInvoke(
+                first.request,
+                observingStopAuthority: { authority in
+                    await firstAuthorities.record(authority)
+                }
+            )
+        }
+        await provider.waitUntilLaunchStarts(in: first.scope)
+        let firstAuthority = await firstAuthorities.waitForAuthority()
+
+        let secondTask = Task {
+            await invocations.tryInvoke(
+                secondRequest,
+                observingStopAuthority: { authority in
+                    await secondAuthorities.record(authority)
+                }
+            )
+        }
+        await provider.waitUntilLaunchStarts(in: secondScope)
+        let secondAuthority = await secondAuthorities.waitForAuthority()
+        XCTAssertNotEqual(firstAuthority, secondAuthority)
+        XCTAssertEqual(firstAuthority.library, first.scope)
+        XCTAssertEqual(secondAuthority.library, secondScope)
+
+        let stopOutcome = await invocations.stop(
+            StopCoachInvocationRequest(
+                library: first.scope,
+                chatID: first.request.chatID,
+                pendingUserTurnID: first.request.pendingUserTurnID
+            ),
+            authority: firstAuthority
+        )
+
+        guard case let .interrupted(firstTerminal) = stopOutcome else {
+            return XCTFail("the first Library must stop independently")
+        }
+        XCTAssertEqual(
+            firstTerminal.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        let firstOutcome = await firstTask.value
+        let firstActiveAfterStop = await first.persistence.activeInvocation
+        let secondActiveAfterStop = await secondPersistence.activeInvocation
+        let cancelledAttemptIDs = await provider.cancelledAttemptIDs
+        let firstRunRemainsSuspended = await provider.isRunSuspended(
+            attemptID: firstAuthority.attemptID
+        )
+        XCTAssertEqual(firstOutcome, .stopped)
+        XCTAssertNil(firstActiveAfterStop)
+        XCTAssertNotNil(secondActiveAfterStop)
+        XCTAssertEqual(cancelledAttemptIDs, [firstAuthority.attemptID])
+        XCTAssertTrue(
+            firstRunRemainsSuspended,
+            "reaping can finish before a non-cooperative late result arrives"
+        )
+
+        await provider.resume(attemptID: firstAuthority.attemptID)
+        await provider.waitUntilRunFinishes(attemptID: firstAuthority.attemptID)
+        let firstPublicationAfterLateResult = await first.persistence.publicationCount
+        let secondStillActiveAfterLateResult = await secondPersistence.activeInvocation
+        XCTAssertEqual(firstPublicationAfterLateResult, 0)
+        XCTAssertNotNil(secondStillActiveAfterLateResult)
+
+        await provider.resume(attemptID: secondAuthority.attemptID)
+        guard case .published = await secondTask.value else {
+            return XCTFail("stopping the first Library must not stop the second")
+        }
+        let firstPublicationCount = await first.persistence.publicationCount
+        let secondPublicationCount = await secondPersistence.publicationCount
+        let secondActiveAfterPublication = await secondPersistence.activeInvocation
+        XCTAssertEqual(firstPublicationCount, 0)
+        XCTAssertEqual(secondPublicationCount, 1)
+        XCTAssertNil(secondActiveAfterPublication)
+    }
+
+    func testLateProviderCompletionAfterStopCannotPublishWhileReapIsPending() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.provider.suspendNextLaunch()
+        await fixture.provider.suspendNextCancellation()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        await fixture.provider.waitUntilLaunchStarts()
+        let authority = await authorities.waitForAuthority()
+        let stopTask = Task {
+            await fixture.invocations.stop(
+                StopCoachInvocationRequest(
+                    library: fixture.scope,
+                    chatID: fixture.request.chatID,
+                    pendingUserTurnID: fixture.request.pendingUserTurnID
+                ),
+                authority: authority
+            )
+        }
+
+        await fixture.provider.waitUntilCancellationStarts()
+        let lateInvocationOutcome = await invocationTask.value
+        XCTAssertEqual(lateInvocationOutcome, .stopped)
+        let publicationCountBeforeReap = await fixture.persistence.publicationCount
+        let activeBeforeReap = await fixture.persistence.activeInvocation
+        XCTAssertEqual(publicationCountBeforeReap, 0)
+        XCTAssertNotNil(activeBeforeReap, "liveness must remain held until reap")
+
+        await fixture.provider.resumeCancellation()
+        guard case let .interrupted(aggregate) = await stopTask.value else {
+            return XCTFail("reaped Stop must persist interruption")
+        }
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInterrupted)
+        let finalPublicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(finalPublicationCount, 0)
+    }
+
+    func testStopDuringBackoffCancelsTimerAndNeverInstallsAnotherAttempt() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .complete(markdown: "must not launch"),
+            ]
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.sleeper.suspendNextSleep()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        await fixture.sleeper.waitUntilSleepStarts()
+        let authority = await authorities.waitForAuthority()
+
+        let stopOutcome = await fixture.invocations.stop(
+            StopCoachInvocationRequest(
+                library: fixture.scope,
+                chatID: fixture.request.chatID,
+                pendingUserTurnID: fixture.request.pendingUserTurnID
+            ),
+            authority: authority
+        )
+
+        guard case .interrupted = stopOutcome else {
+            return XCTFail("backoff Stop must interrupt, got \(stopOutcome)")
+        }
+        _ = await invocationTask.value
+        let installedOrdinals = await fixture.persistence.installedAttemptOrdinals
+        let launchCount = await fixture.provider.launchCount
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(installedOrdinals, [1])
+        XCTAssertEqual(launchCount, 1)
+        XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testStopDuringNonCooperativeBackoffReturnsBeforeSleeperFinishes()
+        async throws
+    {
+        let sleeper = NonCooperativeInvocationRetrySleeper()
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .complete(markdown: "must not launch"),
+            ],
+            invocationRetrySleeper: sleeper
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        await sleeper.waitUntilSleepStarts()
+        let authority = await authorities.waitForAuthority()
+
+        let stopOutcome = await fixture.invocations.stop(
+            StopCoachInvocationRequest(
+                library: fixture.scope,
+                chatID: fixture.request.chatID,
+                pendingUserTurnID: fixture.request.pendingUserTurnID
+            ),
+            authority: authority
+        )
+        let invocationOutcome = await invocationTask.value
+        let sleeperRemainsSuspended = await sleeper.isSuspended
+
+        guard case .interrupted = stopOutcome else {
+            return XCTFail("Stop must persist interruption without waiting on sleep")
+        }
+        XCTAssertEqual(invocationOutcome, .stopped)
+        XCTAssertTrue(sleeperRemainsSuspended)
+        let installedOrdinals = await fixture.persistence.installedAttemptOrdinals
+        let launchCount = await fixture.provider.launchCount
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(installedOrdinals, [1])
+        XCTAssertEqual(launchCount, 1)
+        XCTAssertEqual(publicationCount, 0)
+
+        await sleeper.resume()
+        await sleeper.waitUntilSleepFinishes()
+        let finalPublicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(finalPublicationCount, 0)
+    }
+
+    func testStopDuringAttemptInstallAbortsReplacementBeforeItCanLaunch()
+        async throws
+    {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .complete(markdown: "must never launch"),
+            ]
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.persistence.suspendNextAttemptInstall()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        await fixture.persistence.waitUntilNextAttemptInstallStarts()
+        let authority = await authorities.waitForAuthority()
+        let stopTask = Task {
+            await fixture.invocations.stop(
+                StopCoachInvocationRequest(
+                    library: fixture.scope,
+                    chatID: fixture.request.chatID,
+                    pendingUserTurnID: fixture.request.pendingUserTurnID
+                ),
+                authority: authority
+            )
+        }
+        await fixture.provider.waitUntilCancellationStarts()
+
+        let launchesBeforeInstallCompletes = await fixture.provider.launchCount
+        XCTAssertEqual(launchesBeforeInstallCompletes, 1)
+        await fixture.persistence.resumeNextAttemptInstall()
+
+        guard case let .interrupted(aggregate) = await stopTask.value else {
+            return XCTFail("Stop must retire the installed replacement")
+        }
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInterrupted)
+        let invocationOutcome = await invocationTask.value
+        XCTAssertEqual(invocationOutcome, .stopped)
+        let activeInvocation = await fixture.persistence.activeInvocation
+        let launchCount = await fixture.provider.launchCount
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertNil(activeInvocation)
+        XCTAssertEqual(launchCount, 1)
+        XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testStopOwnsInterruptionWhenSuspendedAttemptInstallLaterFails()
+        async throws
+    {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .complete(markdown: "must never launch"),
+            ]
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.persistence.scriptNextAttemptInstall(.failed)
+        await fixture.persistence.suspendNextAttemptInstall()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        await fixture.persistence.waitUntilNextAttemptInstallStarts()
+        let authority = await authorities.waitForAuthority()
+        let stopTask = Task {
+            await fixture.invocations.stop(
+                StopCoachInvocationRequest(
+                    library: fixture.scope,
+                    chatID: fixture.request.chatID,
+                    pendingUserTurnID: fixture.request.pendingUserTurnID
+                ),
+                authority: authority
+            )
+        }
+        await fixture.provider.waitUntilCancellationStarts()
+        await fixture.persistence.resumeNextAttemptInstall()
+
+        guard case let .interrupted(aggregate) = await stopTask.value else {
+            return XCTFail("Stop must own the terminal failure after revocation")
+        }
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInterrupted)
+        let invocationOutcome = await invocationTask.value
+        XCTAssertEqual(invocationOutcome, .stopped)
+        let activeInvocation = await fixture.persistence.activeInvocation
+        let launchCount = await fixture.provider.launchCount
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertNil(activeInvocation)
+        XCTAssertEqual(launchCount, 1)
+        XCTAssertEqual(publicationCount, 0)
+        XCTAssertEqual(
+            fixture.diagnostics.recordedEvents().map(\.reason),
+            [.providerAutoRetryable, .coachResponseStopped]
+        )
+    }
+
+    func testStopRejectsWrongRequestAndForgedAuthorityWithoutCancelling() async throws {
+        let fixture = try InvocationFixture(contextWindow: 100_000)
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.provider.suspendNextLaunch()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        await fixture.provider.waitUntilLaunchStarts()
+        let authority = await authorities.waitForAuthority()
+        let exactRequest = StopCoachInvocationRequest(
+            library: fixture.scope,
+            chatID: fixture.request.chatID,
+            pendingUserTurnID: fixture.request.pendingUserTurnID
+        )
+        let wrongRequest = StopCoachInvocationRequest(
+            library: fixture.scope,
+            chatID: try ChatID("cht-20260830T120000000Z-WXYZ"),
+            pendingUserTurnID: fixture.request.pendingUserTurnID
+        )
+        let forgedAuthority = InvocationStopAuthority(
+            testingRequest: exactRequest,
+            invocationID: authority.invocationID,
+            attemptID: authority.attemptID,
+            capabilityID: UUID()
+        )
+
+        let wrongRequestOutcome = await fixture.invocations.stop(
+            wrongRequest,
+            authority: authority
+        )
+        let forgedAuthorityOutcome = await fixture.invocations.stop(
+            exactRequest,
+            authority: forgedAuthority
+        )
+        XCTAssertEqual(wrongRequestOutcome, .staleAuthority)
+        XCTAssertEqual(forgedAuthorityOutcome, .staleAuthority)
+        let cancelledBeforeExactStop = await fixture.provider.cancelledAttemptIDs
+        XCTAssertEqual(cancelledBeforeExactStop, [])
+
+        guard case .interrupted = await fixture.invocations.stop(
+            exactRequest,
+            authority: authority
+        ) else { return XCTFail("the exact authority must remain usable") }
+        _ = await invocationTask.value
+    }
+
+    func testReplacementAttemptRejectsThePreviousStopAuthority() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .complete(markdown: "late second Attempt"),
+            ]
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.provider.suspendLaunch(ordinal: 2)
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        await fixture.provider.waitUntilLaunchCount(2)
+        let observed = await authorities.waitForDistinctAttempts(2)
+        let staleAuthority = try XCTUnwrap(observed.first)
+        let currentAuthority = try XCTUnwrap(observed.last)
+        XCTAssertNotEqual(staleAuthority.attemptID, currentAuthority.attemptID)
+        let request = StopCoachInvocationRequest(
+            library: fixture.scope,
+            chatID: fixture.request.chatID,
+            pendingUserTurnID: fixture.request.pendingUserTurnID
+        )
+
+        let staleOutcome = await fixture.invocations.stop(
+            request,
+            authority: staleAuthority
+        )
+        XCTAssertEqual(staleOutcome, .staleAuthority)
+        let cancelledAfterStaleStop = await fixture.provider.cancelledAttemptIDs
+        XCTAssertEqual(cancelledAfterStaleStop, [])
+
+        guard case .interrupted = await fixture.invocations.stop(
+            request,
+            authority: currentAuthority
+        ) else { return XCTFail("the replacement Attempt authority must stop") }
+        _ = await invocationTask.value
+        let cancelledAttemptIDs = await fixture.provider.cancelledAttemptIDs
+        XCTAssertEqual(cancelledAttemptIDs, [currentAuthority.attemptID])
+    }
+
     func testPreparedNewInvocationCapabilityIsExactOneShotAndCannotBeForged() async throws {
         let fixture = try InvocationFixture(contextWindow: 100_000)
         await fixture.persistence.resetForNewSend(fixture.unlocked)
@@ -1573,6 +2096,199 @@ final class DefaultInvocationsTests: XCTestCase {
     }
 }
 
+private func makePendingInvocationAggregate(
+    instant: UTCInstant,
+    chatID: String,
+    draftID: String,
+    memoryID: String,
+    pendingID: String,
+    responsePositionID: String,
+    draftText: String
+) throws -> ChatAggregate {
+    let empty = try ChatAggregate.emptyDevelopmentChat(
+        chatID: ChatID(chatID),
+        draftID: ChatDraftID(draftID),
+        memoryID: CoachMemoryID(memoryID),
+        instant: instant,
+        profileStatementGeneration: 7
+    )
+    let draft = try empty.chat.draft.edited(text: draftText, at: instant)
+    let unlocked = try ChatAggregate(
+        chat: empty.chat.replacingDraft(with: draft),
+        memory: empty.memory
+    )
+    let pending = PendingUserTurn(
+        id: try PendingUserTurnID(pendingID),
+        draftID: draft.draftID,
+        draftVersion: draft.version,
+        responsePositionID: try ChatResponsePositionID(responsePositionID)
+    )
+    return try ChatAggregate(
+        chat: unlocked.chat,
+        memory: unlocked.memory,
+        pendingUserTurn: pending
+    )
+}
+
+private struct LibraryRoutingInvocationPersistence: InvocationPersistencePort {
+    let routes: [LibraryID: MemoryInvocationPersistence]
+
+    func openNewPendingInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> InvocationPendingSessionPreparationOutcome {
+        guard let persistence = routes[request.library.libraryID] else {
+            return .unavailable
+        }
+        return await persistence.openNewPendingInvocation(request)
+    }
+
+    func openPendingInvocation(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationPendingSessionAcquisitionOutcome {
+        guard let persistence = routes[request.library.libraryID] else {
+            return .unavailable
+        }
+        return await persistence.openPendingInvocation(request)
+    }
+
+    func recoverPendingAfterTerminalFailure(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationPendingResolutionOutcome {
+        guard let persistence = routes[request.library.libraryID] else {
+            return .unavailable
+        }
+        return await persistence.recoverPendingAfterTerminalFailure(request)
+    }
+
+    func recoverPublishedInvocation(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome {
+        guard let persistence = routes[mutation.invocation.libraryID] else {
+            return .unavailable
+        }
+        return await persistence.recoverPublishedInvocation(mutation)
+    }
+}
+
+private actor TwoLibraryInvocationIdentities: InvocationIdentityGenerating {
+    private var invocationIDs: [CoachInvocationID]
+    private var attemptIdentities: [InvocationAttemptIdentity]
+
+    init() throws {
+        invocationIDs = [
+            try CoachInvocationID("inv-20260830T120000000Z-5KMN"),
+            try CoachInvocationID("inv-20260830T121000000Z-A234"),
+        ]
+        attemptIdentities = [
+            InvocationAttemptIdentity(
+                attemptID: try CoachProviderAttemptID(
+                    "atm-20260830T120000000Z-6NPQ"
+                ),
+                idempotencyValue: try ProviderIdempotencyValue(
+                    "synthetic-attempt-first"
+                ),
+                userMessageID: try ChatMessageID(
+                    "msg-20260830T120000000Z-7RST"
+                ),
+                coachMessageID: try ChatMessageID(
+                    "msg-20260830T120000000Z-8VWX"
+                ),
+                freshDraftID: try ChatDraftID(
+                    "drf-20260830T120000000Z-9YZ0"
+                )
+            ),
+            InvocationAttemptIdentity(
+                attemptID: try CoachProviderAttemptID(
+                    "atm-20260830T121000000Z-B345"
+                ),
+                idempotencyValue: try ProviderIdempotencyValue(
+                    "synthetic-attempt-second"
+                ),
+                userMessageID: try ChatMessageID(
+                    "msg-20260830T121000000Z-C456"
+                ),
+                coachMessageID: try ChatMessageID(
+                    "msg-20260830T121000000Z-D567"
+                ),
+                freshDraftID: try ChatDraftID(
+                    "drf-20260830T121000000Z-E678"
+                )
+            ),
+        ]
+    }
+
+    func generateInvocationID(at instant: UTCInstant) async -> CoachInvocationID {
+        precondition(!invocationIDs.isEmpty)
+        return invocationIDs.removeFirst()
+    }
+
+    func generateAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationAttemptIdentity {
+        precondition(ordinal == 1)
+        precondition(kind == .standard)
+        precondition(transcriptHandleCount == 0)
+        precondition(!attemptIdentities.isEmpty)
+        return attemptIdentities.removeFirst()
+    }
+}
+
+private actor TwoLibrarySuspendingProvider: SyntheticCoachProviderPort {
+    private var attemptsByLibrary: [
+        LibraryID: CoachProviderAttemptID
+    ] = [:]
+    private var continuations: [
+        CoachProviderAttemptID: CheckedContinuation<Void, Never>
+    ] = [:]
+    private var finishedAttemptIDs: Set<CoachProviderAttemptID> = []
+    private(set) var cancelledAttemptIDs: [CoachProviderAttemptID] = []
+
+    func run(
+        _ request: SyntheticCoachProviderRequest
+    ) async -> CoachProviderAttemptOutcome {
+        await withCheckedContinuation { continuation in
+            attemptsByLibrary[request.invocation.libraryID] = request.attempt.id
+            continuations[request.attempt.id] = continuation
+        }
+        finishedAttemptIDs.insert(request.attempt.id)
+        return .complete(markdown: "A complete response for its own Library.")
+    }
+
+    func cancelAndReap(
+        attemptID: CoachProviderAttemptID,
+        graceMilliseconds: Int64
+    ) async -> CoachProviderAttemptCancellationOutcome {
+        cancelledAttemptIDs.append(attemptID)
+        return .reaped
+    }
+
+    func waitUntilLaunchStarts(in library: LibraryScope) async {
+        while true {
+            if let attemptID = attemptsByLibrary[library.libraryID],
+               continuations[attemptID] != nil
+            {
+                return
+            }
+            await Task.yield()
+        }
+    }
+
+    func isRunSuspended(attemptID: CoachProviderAttemptID) -> Bool {
+        continuations[attemptID] != nil
+    }
+
+    func resume(attemptID: CoachProviderAttemptID) {
+        continuations.removeValue(forKey: attemptID)?.resume()
+    }
+
+    func waitUntilRunFinishes(attemptID: CoachProviderAttemptID) async {
+        while !finishedAttemptIDs.contains(attemptID) { await Task.yield() }
+    }
+}
+
 private final class InvocationFixture: @unchecked Sendable {
     let scope = LibraryScope(
         libraryID: try! LibraryID("lib-20260830T115900000Z-1ABC")
@@ -1606,6 +2322,7 @@ private final class InvocationFixture: @unchecked Sendable {
         ],
         includesOnDemandAttachment: Bool = false,
         identityGenerator: (any InvocationIdentityGenerating)? = nil,
+        invocationRetrySleeper: (any InvocationRetrySleeping)? = nil,
         retryTiming: (any InvocationRetryTiming)? = nil
     ) throws {
         let empty = try ChatAggregate.emptyDevelopmentChat(
@@ -1673,7 +2390,7 @@ private final class InvocationFixture: @unchecked Sendable {
             coachContext: DefaultCoachContextFeature(source: contextSource),
             clock: clock ?? FixedInvocationClock(instant: instant),
             identities: identityGenerator ?? defaultIdentities,
-            retrySleeper: sleeper,
+            retrySleeper: invocationRetrySleeper ?? sleeper,
             retryDiagnostics: diagnostics,
             retryTiming: retryTiming ?? ScriptedInvocationRetryTiming(
                 milliseconds: [0]
@@ -1789,6 +2506,9 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private(set) var lastPublication: PublishCoachInvocationMutation?
     private(set) var recoveredRequests: [PendingCoachInvocationRequest] = []
     private(set) var installedAttemptOrdinals: [UInt8] = []
+    private var shouldSuspendNextAttemptInstall = false
+    private var nextAttemptInstallStarted = false
+    private var nextAttemptInstallContinuation: CheckedContinuation<Void, Never>?
 
     init(initial: ChatAggregate) {
         aggregate = initial
@@ -1982,6 +2702,13 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         _ mutation: InstallNextCoachProviderAttemptMutation
     ) async -> InvocationNextAttemptInstallOutcome {
         guard activeInvocation == mutation.base else { return .stale(aggregate) }
+        if shouldSuspendNextAttemptInstall {
+            shouldSuspendNextAttemptInstall = false
+            nextAttemptInstallStarted = true
+            await withCheckedContinuation {
+                nextAttemptInstallContinuation = $0
+            }
+        }
         switch script.nextAttemptInstalls.next(defaultingTo: .installed) {
         case .installed:
             break
@@ -1999,6 +2726,19 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
                 processingAggregate: aggregate
             )
         )
+    }
+
+    func suspendNextAttemptInstall() {
+        shouldSuspendNextAttemptInstall = true
+    }
+
+    func waitUntilNextAttemptInstallStarts() async {
+        while !nextAttemptInstallStarted { await Task.yield() }
+    }
+
+    func resumeNextAttemptInstall() {
+        nextAttemptInstallContinuation?.resume()
+        nextAttemptInstallContinuation = nil
     }
 
     func cancelInvocationReservation(
@@ -2427,11 +3167,17 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
     private(set) var requests: [SyntheticCoachProviderRequest] = []
     private(set) var launchCount = 0
     private(set) var durableBeforeLaunch: [Bool] = []
+    private(set) var cancelledAttemptIDs: [CoachProviderAttemptID] = []
+    private(set) var cancellationGraceMilliseconds: [Int64] = []
     private var outcomes: [CoachProviderAttemptOutcome]
     private let persistence: MemoryInvocationPersistence
     private var shouldSuspend = false
+    private var suspendedAttemptOrdinals: Set<UInt8> = []
     private var launchStarted = false
     private var launchContinuation: CheckedContinuation<Void, Never>?
+    private var shouldSuspendCancellation = false
+    private var cancellationStarted = false
+    private var cancellationContinuation: CheckedContinuation<Void, Never>?
 
     init(
         outcomes: [CoachProviderAttemptOutcome],
@@ -2449,13 +3195,32 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
 
     func suspendNextLaunch() { shouldSuspend = true }
 
+    func suspendLaunch(ordinal: UInt8) {
+        suspendedAttemptOrdinals.insert(ordinal)
+    }
+
+    func suspendNextCancellation() { shouldSuspendCancellation = true }
+
     func waitUntilLaunchStarts() async {
         while !launchStarted { await Task.yield() }
+    }
+
+    func waitUntilLaunchCount(_ count: Int) async {
+        while launchCount < count { await Task.yield() }
     }
 
     func resumeLaunch() {
         launchContinuation?.resume()
         launchContinuation = nil
+    }
+
+    func waitUntilCancellationStarts() async {
+        while !cancellationStarted { await Task.yield() }
+    }
+
+    func resumeCancellation() {
+        cancellationContinuation?.resume()
+        cancellationContinuation = nil
     }
 
     func recordedAttemptKinds() -> [CoachProviderAttemptKind] {
@@ -2472,7 +3237,7 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
         requests.append(request)
         serializedRequests.append(Array(request.exchange.request))
         launchStarted = true
-        if shouldSuspend {
+        if shouldSuspend || suspendedAttemptOrdinals.remove(request.attempt.ordinal) != nil {
             shouldSuspend = false
             await withCheckedContinuation { launchContinuation = $0 }
         }
@@ -2481,6 +3246,41 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
         }
         return outcomes.removeFirst()
     }
+
+    func cancelAndReap(
+        attemptID: CoachProviderAttemptID,
+        graceMilliseconds: Int64
+    ) async -> CoachProviderAttemptCancellationOutcome {
+        cancelledAttemptIDs.append(attemptID)
+        cancellationGraceMilliseconds.append(graceMilliseconds)
+        launchContinuation?.resume()
+        launchContinuation = nil
+        cancellationStarted = true
+        if shouldSuspendCancellation {
+            shouldSuspendCancellation = false
+            await withCheckedContinuation { cancellationContinuation = $0 }
+        }
+        return .reaped
+    }
+}
+
+private actor InvocationStopAuthorityRecorder {
+    private var authorities: [InvocationStopAuthority] = []
+
+    func record(_ authority: InvocationStopAuthority) {
+        authorities.append(authority)
+    }
+
+    func waitForAuthority() async -> InvocationStopAuthority {
+        while authorities.isEmpty { await Task.yield() }
+        return authorities.removeFirst()
+    }
+
+    func waitForDistinctAttempts(_ count: Int) async -> [InvocationStopAuthority] {
+        while Set(authorities.map(\.attemptID)).count < count { await Task.yield() }
+        var seen: Set<CoachProviderAttemptID> = []
+        return authorities.filter { seen.insert($0.attemptID).inserted }
+    }
 }
 
 private actor RecordingInvocationRetrySleeper: InvocationRetrySleeping {
@@ -2488,8 +3288,17 @@ private actor RecordingInvocationRetrySleeper: InvocationRetrySleeping {
 
     private(set) var delaysMilliseconds: [Int64] = []
     private var failsNextSleep = false
+    private var shouldSuspend = false
+    private var sleepStarted = false
+    private var sleepContinuation: CheckedContinuation<Void, any Error>?
 
     func failNextSleep() { failsNextSleep = true }
+
+    func suspendNextSleep() { shouldSuspend = true }
+
+    func waitUntilSleepStarts() async {
+        while !sleepStarted { await Task.yield() }
+    }
 
     func sleep(milliseconds: Int64) async throws {
         delaysMilliseconds.append(milliseconds)
@@ -2497,9 +3306,51 @@ private actor RecordingInvocationRetrySleeper: InvocationRetrySleeping {
             failsNextSleep = false
             throw Failure.scripted
         }
+        guard shouldSuspend else { return }
+        shouldSuspend = false
+        sleepStarted = true
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                sleepContinuation = continuation
+            }
+        } onCancel: {
+            Task { await self.cancelSuspendedSleep() }
+        }
+    }
+
+    private func cancelSuspendedSleep() {
+        sleepContinuation?.resume(throwing: CancellationError())
+        sleepContinuation = nil
     }
 
     func recordedDelays() -> [Int64] { delaysMilliseconds }
+}
+
+private actor NonCooperativeInvocationRetrySleeper: InvocationRetrySleeping {
+    private var continuation: CheckedContinuation<Void, any Error>?
+    private var started = false
+    private var finished = false
+
+    var isSuspended: Bool { continuation != nil }
+
+    func sleep(milliseconds: Int64) async throws {
+        started = true
+        try await withCheckedThrowingContinuation { continuation = $0 }
+        finished = true
+    }
+
+    func waitUntilSleepStarts() async {
+        while !started || continuation == nil { await Task.yield() }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func waitUntilSleepFinishes() async {
+        while !finished { await Task.yield() }
+    }
 }
 
 private final class RecordingInvocationRetryDiagnostics:

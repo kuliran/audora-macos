@@ -1,4 +1,4 @@
-@testable @_spi(CoachContextQualification) @_spi(ChatCreationAuthorityTesting) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(ChatCreationAuthorityTesting) @_spi(InvocationTesting) import AudoraApplication
 import AudoraDomain
 import Foundation
 import XCTest
@@ -2076,6 +2076,381 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(preparations.first?.pendingUserTurn, pending)
     }
 
+    func testStopBypassesSuspendedSendAndPublishesOnlyInterruptedPending()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Stop this exact synthetic response."
+        )
+        let gateway = StoppableInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        async let sending: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        let authority = await gateway.waitUntilInvocationIsSuspended()
+        let processingState = await feature.currentState
+        XCTAssertEqual(processingState.coachInvocationStopAuthority, authority)
+        XCTAssertEqual(processingState.activity, .invokingCoach(aggregate.chat.id))
+
+        async let stopping: Void = feature.send(
+            .stopCoachResponse(Self.context, authority)
+        )
+        await gateway.waitUntilStopStarts()
+
+        let stoppingState = await feature.currentState
+        XCTAssertEqual(stoppingState.activity, .stoppingCoach(aggregate.chat.id))
+
+        await gateway.resumeReap()
+        await stopping
+        await sending
+
+        let finalState = await feature.currentState
+        guard case let .open(finalAggregate) = finalState.selection,
+              let pending = finalAggregate.pendingUserTurn
+        else { return XCTFail("Stop must retain the exact locked Pending") }
+        XCTAssertEqual(pending.failure, .coachResponseInterrupted)
+        XCTAssertEqual(finalAggregate.chat.messageIDs, [])
+        XCTAssertEqual(finalState.composer, .locked(finalAggregate.chat.draft, pending))
+        XCTAssertNil(finalState.activity)
+        XCTAssertNil(finalState.coachInvocationStopAuthority)
+        let stops = await gateway.stops
+        XCTAssertEqual(stops.count, 1)
+        XCTAssertEqual(stops.first?.authority, authority)
+        XCTAssertEqual(stops.first?.request.library, Self.scope)
+        XCTAssertEqual(stops.first?.request.chatID, aggregate.chat.id)
+        XCTAssertEqual(stops.first?.request.pendingUserTurnID, pending.id)
+    }
+
+    func testFilterChangePreservesSuspendedInvocationsExactStopAuthority()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Keep Stop available while filtering Chats."
+        )
+        let gateway = StoppableInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        async let sending: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        let authority = await gateway.waitUntilInvocationIsSuspended()
+
+        let filter = try ChatFilterQuery("not the selected Chat")
+        await feature.send(.setFilter(Self.context, filter))
+
+        let filteredState = await feature.currentState
+        XCTAssertEqual(filteredState.filterQuery, filter)
+        XCTAssertEqual(filteredState.coachInvocationStopAuthority, authority)
+        XCTAssertEqual(filteredState.activity, .invokingCoach(aggregate.chat.id))
+
+        async let stopping: Void = feature.send(
+            .stopCoachResponse(Self.context, authority)
+        )
+        await gateway.waitUntilStopStarts()
+        await gateway.resumeReap()
+        await stopping
+        await sending
+
+        let finalState = await feature.currentState
+        XCTAssertEqual(
+            Self.openAggregate(in: finalState)?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        let stops = await gateway.stops
+        XCTAssertEqual(stops.map(\.authority), [authority])
+    }
+
+    func testStopDuringRetryKeepsInterruptedStateAfterRetryContinuationFinishes()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Stop this retried synthetic response."
+        )
+        let failedPending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            ),
+            failure: .coachProviderError
+        )
+        let failedAggregate = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: failedPending
+        )
+        let gateway = StoppableRetryInvocationGateway(
+            failedAggregate: failedAggregate
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failedAggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        async let retrying: Void = feature.send(
+            .retryPendingUserTurn(Self.context, failedPending.id)
+        )
+        let authority = await gateway.waitUntilRetryIsSuspended()
+        let processingState = await feature.currentState
+        XCTAssertEqual(processingState.coachInvocationStopAuthority, authority)
+        XCTAssertEqual(processingState.activity, .invokingCoach(aggregate.chat.id))
+        XCTAssertNil(
+            Self.openAggregate(in: processingState)?.pendingUserTurn?.failure
+        )
+
+        async let stopping: Void = feature.send(
+            .stopCoachResponse(Self.context, authority)
+        )
+        await gateway.waitUntilStopStarts()
+        await gateway.resumeReap()
+        await stopping
+
+        let stoppedState = await feature.currentState
+        guard case let .open(stoppedAggregate) = stoppedState.selection,
+              let stoppedPending = stoppedAggregate.pendingUserTurn
+        else { return XCTFail("Stop must install the interrupted Retry state") }
+        XCTAssertEqual(stoppedPending.failure, .coachResponseInterrupted)
+        XCTAssertEqual(stoppedAggregate.chat.messageIDs, [])
+        XCTAssertNil(stoppedState.activity)
+        XCTAssertNil(stoppedState.coachInvocationStopAuthority)
+
+        await gateway.finishStoppedRetry()
+        await retrying
+
+        let finalState = await feature.currentState
+        XCTAssertEqual(finalState.selection, .open(stoppedAggregate))
+        XCTAssertEqual(
+            finalState.composer,
+            .locked(stoppedAggregate.chat.draft, stoppedPending)
+        )
+        XCTAssertNil(finalState.activity)
+        XCTAssertNil(finalState.coachInvocationStopAuthority)
+    }
+
+    func testStaleStopAuthorityCannotStopReplacementAttempt() async throws {
+        let aggregate = try Self.aggregate(
+            draftText: "Keep the replacement attempt authoritative."
+        )
+        let gateway = StoppableInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        async let sending: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        let authority = await gateway.waitUntilInvocationIsSuspended()
+        let forged = InvocationStopAuthority(
+            testingRequest: StopCoachInvocationRequest(
+                library: authority.library,
+                chatID: authority.chatID,
+                pendingUserTurnID: authority.pendingUserTurnID
+            ),
+            invocationID: authority.invocationID,
+            attemptID: authority.attemptID,
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000399"
+            )!
+        )
+
+        await feature.send(.stopCoachResponse(Self.context, forged))
+
+        let stops = await gateway.stops
+        let currentAuthority = await feature.currentState
+            .coachInvocationStopAuthority
+        XCTAssertEqual(stops.count, 0)
+        XCTAssertEqual(
+            currentAuthority,
+            authority
+        )
+        await gateway.finishWithoutStop()
+        await sending
+    }
+
+    func testOrderlyTerminationStopsAndReapsSuspendedCoachBeforeFlushing()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Stop this response before orderly termination."
+        )
+        let gateway = StoppableInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        async let sending: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        _ = await gateway.waitUntilInvocationIsSuspended()
+
+        async let terminationSucceeded: Bool = feature.flushForOrderlyTermination()
+        await gateway.waitUntilStopStarts()
+        let stoppingState = await feature.currentState
+        XCTAssertEqual(stoppingState.activity, .stoppingCoach(aggregate.chat.id))
+
+        await gateway.resumeReap()
+        let didTerminate = await terminationSucceeded
+        XCTAssertTrue(didTerminate)
+        await sending
+        let state = await feature.currentState
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        XCTAssertNil(state.activity)
+    }
+
+    func testOrderlyTerminationFailsClosedWhenCoachCannotBeReaped()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Keep this Draft locked when reaping cannot be proven."
+        )
+        let gateway = UnreapableStoppableInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        async let sending: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        _ = await gateway.waitUntilInvocationIsSuspended()
+
+        let mayTerminate = await feature.flushForOrderlyTermination()
+        await sending
+
+        XCTAssertFalse(mayTerminate)
+        let state = await feature.currentState
+        XCTAssertEqual(state.activity, .stoppingCoach(aggregate.chat.id))
+        XCTAssertNil(state.coachInvocationStopAuthority)
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.pendingUserTurn?.failure,
+            nil,
+            "an unreaped Invocation cannot fabricate a durable interruption"
+        )
+        let stopCount = await gateway.stopCount
+        XCTAssertEqual(stopCount, 1)
+    }
+
+    func testAdmissionRefreshCannotEraseAuthorityWhileUnreapableStopReturns()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Keep exact Stop authority through admission refresh."
+        )
+        let gateway = AdmissionRefreshDuringUnreapableStopGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        async let sending: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        let authority = await gateway.waitUntilInvocationIsSuspended()
+
+        async let mayTerminate: Bool = feature.flushForOrderlyTermination()
+        await gateway.waitUntilStopStarts()
+        await gateway.finishInvocationAsStopped()
+        await gateway.waitUntilAdmissionRefreshStarts()
+
+        let refreshingState = await feature.currentState
+        XCTAssertEqual(refreshingState.activity, .stoppingCoach(aggregate.chat.id))
+        XCTAssertEqual(
+            refreshingState.coachInvocationStopAuthority,
+            authority,
+            "the detached invocation's refresh must not erase in-flight Stop"
+        )
+
+        await gateway.resumeAdmissionRefresh()
+        await sending
+        let refreshedState = await feature.currentState
+        XCTAssertEqual(refreshedState.coachInvocationStopAuthority, authority)
+        XCTAssertEqual(refreshedState.activity, .stoppingCoach(aggregate.chat.id))
+
+        await gateway.finishStopAsUnableToReap()
+        let terminationAllowed = await mayTerminate
+
+        XCTAssertFalse(terminationAllowed)
+        let finalState = await feature.currentState
+        XCTAssertEqual(finalState.activity, .stoppingCoach(aggregate.chat.id))
+        XCTAssertNil(finalState.coachInvocationStopAuthority)
+        XCTAssertNil(
+            Self.openAggregate(in: finalState)?.pendingUserTurn?.failure
+        )
+    }
+
+    func testUnreapedStopLatchSurvivesSupersedingChatContext() async throws {
+        let aggregate = try Self.aggregate(
+            draftText: "Keep the unreaped provider latched across Libraries."
+        )
+        let gateway = AdmissionRefreshDuringUnreapableStopGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        async let sending: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        let authority = await gateway.waitUntilInvocationIsSuspended()
+        async let stopping: Void = feature.send(
+            .stopCoachResponse(Self.context, authority)
+        )
+        await gateway.waitUntilStopStarts()
+
+        await feature.send(.start(Self.secondContext))
+        await gateway.finishInvocationAsStopped()
+        await gateway.waitUntilAdmissionRefreshStarts()
+        await gateway.resumeAdmissionRefresh()
+        await sending
+
+        let oldContextState = await feature.currentState(in: Self.scope)
+        let replacementContextState = await feature.currentState(
+            in: Self.secondScope
+        )
+        XCTAssertNil(oldContextState)
+        XCTAssertNotNil(replacementContextState)
+        XCTAssertEqual(
+            replacementContextState?.selection,
+            ChatFeatureState.Selection.none
+        )
+        XCTAssertNil(replacementContextState?.coachInvocationStopAuthority)
+
+        await gateway.finishStopAsUnableToReap()
+        await stopping
+        let terminationAllowed = await feature.flushForOrderlyTermination()
+
+        XCTAssertFalse(
+            terminationAllowed,
+            "an unreaped provider outlives the superseded Chat presentation"
+        )
+        let finalState = await feature.currentState
+        XCTAssertEqual(finalState.selection, .none)
+        XCTAssertNil(finalState.coachInvocationStopAuthority)
+    }
+
     func testSendLeavesDraftEditableWhenAnotherInvocationOwnsTheLibrary() async throws {
         let aggregate = try Self.aggregate(draftText: "Keep this Draft editable.")
         let store = RecordingChatStore(catalog: [.available(aggregate)])
@@ -3064,6 +3439,441 @@ final class ChatFeatureTests: XCTestCase {
 /// Legacy Chat feature fixtures stop at the single typed Invocation boundary.
 /// The feature retains its already-installed lock while this recorder reports
 /// an interruption without fabricating provider execution in these tests.
+private actor StoppableInvocationGateway: Invocations {
+    struct StopCall: Equatable, Sendable {
+        let request: StopCoachInvocationRequest
+        let authority: InvocationStopAuthority
+    }
+
+    private var prepared: PreparedPendingCoachInvocation?
+    private var authority: InvocationStopAuthority?
+    private var invocationContinuation:
+        CheckedContinuation<InvocationTryOutcome, Never>?
+    private var reapContinuation: CheckedContinuation<Void, Never>?
+    private var stopStarted = false
+    private(set) var stops: [StopCall] = []
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared, observingStopAuthority: { _ in })
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        .rejected(nil, .eligibilityChanged)
+    }
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        self.prepared = prepared
+        let authority = InvocationStopAuthority(
+            testingRequest: StopCoachInvocationRequest(
+                library: prepared.request.library,
+                chatID: prepared.request.chatID,
+                pendingUserTurnID: prepared.request.pendingUserTurnID
+            ),
+            invocationID: try! CoachInvocationID(
+                "inv-20260830T120000000Z-5KMN"
+            ),
+            attemptID: try! CoachProviderAttemptID(
+                "atm-20260830T120000000Z-6NPQ"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000398"
+            )!
+        )
+        self.authority = authority
+        await observer(authority)
+        return await withCheckedContinuation { invocationContinuation = $0 }
+    }
+
+    func stop(
+        _ request: StopCoachInvocationRequest,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome {
+        stops.append(StopCall(request: request, authority: authority))
+        guard self.authority == authority,
+              authority.library == request.library,
+              authority.chatID == request.chatID,
+              authority.pendingUserTurnID == request.pendingUserTurnID,
+              let prepared,
+              let pending = prepared.aggregate.pendingUserTurn
+        else { return .staleAuthority }
+        stopStarted = true
+        await withCheckedContinuation { reapContinuation = $0 }
+        let terminal = try! ChatAggregate(
+            chat: prepared.aggregate.chat,
+            memory: prepared.aggregate.memory,
+            pendingUserTurn: pending.replacingFailure(
+                .coachResponseInterrupted
+            )
+        )
+        invocationContinuation?.resume(
+            returning: .interrupted(nil, .persistenceUnavailable)
+        )
+        invocationContinuation = nil
+        self.authority = nil
+        return .interrupted(terminal)
+    }
+
+    func waitUntilInvocationIsSuspended() async -> InvocationStopAuthority {
+        while authority == nil || invocationContinuation == nil {
+            await Task.yield()
+        }
+        return authority!
+    }
+
+    func waitUntilStopStarts() async {
+        while !stopStarted || reapContinuation == nil { await Task.yield() }
+    }
+
+    func resumeReap() {
+        reapContinuation?.resume()
+        reapContinuation = nil
+    }
+
+    func finishWithoutStop() {
+        invocationContinuation?.resume(
+            returning: .interrupted(nil, .providerFailed)
+        )
+        invocationContinuation = nil
+        authority = nil
+    }
+}
+
+private actor StoppableRetryInvocationGateway: Invocations {
+    private let failedAggregate: ChatAggregate
+    private var authority: InvocationStopAuthority?
+    private var retryContinuation:
+        CheckedContinuation<InvocationTryOutcome, Never>?
+    private var reapContinuation: CheckedContinuation<Void, Never>?
+    private var stopStarted = false
+
+    init(failedAggregate: ChatAggregate) {
+        self.failedAggregate = failedAggregate
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        .rejected(prepared.aggregate, .eligibilityChanged)
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(request, observingStopAuthority: { _ in })
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        guard request.chatID == failedAggregate.chat.id,
+              request.pendingUserTurnID == failedAggregate.pendingUserTurn?.id
+        else { return .rejected(nil, .eligibilityChanged) }
+        let authority = InvocationStopAuthority(
+            testingRequest: StopCoachInvocationRequest(
+                library: request.library,
+                chatID: request.chatID,
+                pendingUserTurnID: request.pendingUserTurnID
+            ),
+            invocationID: try! CoachInvocationID(
+                "inv-20260830T120000000Z-5KMN"
+            ),
+            attemptID: try! CoachProviderAttemptID(
+                "atm-20260830T120000000Z-6NPQ"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000397"
+            )!
+        )
+        self.authority = authority
+        await observer(authority)
+        return await withCheckedContinuation { retryContinuation = $0 }
+    }
+
+    func stop(
+        _ request: StopCoachInvocationRequest,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome {
+        guard self.authority == authority,
+              authority.library == request.library,
+              authority.chatID == request.chatID,
+              authority.pendingUserTurnID == request.pendingUserTurnID,
+              let pending = failedAggregate.pendingUserTurn
+        else { return .staleAuthority }
+        stopStarted = true
+        await withCheckedContinuation { reapContinuation = $0 }
+        self.authority = nil
+        return .interrupted(
+            try! ChatAggregate(
+                chat: failedAggregate.chat,
+                memory: failedAggregate.memory,
+                pendingUserTurn: pending.replacingFailure(
+                    .coachResponseInterrupted
+                )
+            )
+        )
+    }
+
+    func waitUntilRetryIsSuspended() async -> InvocationStopAuthority {
+        while authority == nil || retryContinuation == nil {
+            await Task.yield()
+        }
+        return authority!
+    }
+
+    func waitUntilStopStarts() async {
+        while !stopStarted || reapContinuation == nil { await Task.yield() }
+    }
+
+    func resumeReap() {
+        reapContinuation?.resume()
+        reapContinuation = nil
+    }
+
+    func finishStoppedRetry() {
+        retryContinuation?.resume(returning: .stopped)
+        retryContinuation = nil
+    }
+}
+
+private actor UnreapableStoppableInvocationGateway: Invocations {
+    private var authority: InvocationStopAuthority?
+    private var invocationContinuation:
+        CheckedContinuation<InvocationTryOutcome, Never>?
+    private(set) var stopCount = 0
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared, observingStopAuthority: { _ in })
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        .rejected(nil, .eligibilityChanged)
+    }
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        let authority = InvocationStopAuthority(
+            testingRequest: StopCoachInvocationRequest(
+                library: prepared.request.library,
+                chatID: prepared.request.chatID,
+                pendingUserTurnID: prepared.request.pendingUserTurnID
+            ),
+            invocationID: try! CoachInvocationID(
+                "inv-20260830T120000000Z-5KMN"
+            ),
+            attemptID: try! CoachProviderAttemptID(
+                "atm-20260830T120000000Z-6NPQ"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000396"
+            )!
+        )
+        self.authority = authority
+        await observer(authority)
+        return await withCheckedContinuation { invocationContinuation = $0 }
+    }
+
+    func stop(
+        _ request: StopCoachInvocationRequest,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome {
+        guard self.authority == authority,
+              authority.library == request.library,
+              authority.chatID == request.chatID,
+              authority.pendingUserTurnID == request.pendingUserTurnID
+        else { return .staleAuthority }
+        stopCount += 1
+        self.authority = nil
+        invocationContinuation?.resume(returning: .stopped)
+        invocationContinuation = nil
+        return .unableToReap
+    }
+
+    func waitUntilInvocationIsSuspended() async -> InvocationStopAuthority {
+        while authority == nil || invocationContinuation == nil {
+            await Task.yield()
+        }
+        return authority!
+    }
+}
+
+private actor AdmissionRefreshDuringUnreapableStopGateway: Invocations {
+    private var admissionCallCount = 0
+    private var admissionRefreshContinuation: CheckedContinuation<Void, Never>?
+    private var authority: InvocationStopAuthority?
+    private var invocationContinuation:
+        CheckedContinuation<InvocationTryOutcome, Never>?
+    private var stopContinuation: CheckedContinuation<Void, Never>?
+    private var stopStarted = false
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        admissionCallCount += 1
+        if admissionCallCount == 2 {
+            await withCheckedContinuation {
+                admissionRefreshContinuation = $0
+            }
+        }
+        return .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared, observingStopAuthority: { _ in })
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        .rejected(nil, .eligibilityChanged)
+    }
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        let authority = InvocationStopAuthority(
+            testingRequest: StopCoachInvocationRequest(
+                library: prepared.request.library,
+                chatID: prepared.request.chatID,
+                pendingUserTurnID: prepared.request.pendingUserTurnID
+            ),
+            invocationID: try! CoachInvocationID(
+                "inv-20260830T120000000Z-5KMN"
+            ),
+            attemptID: try! CoachProviderAttemptID(
+                "atm-20260830T120000000Z-6NPQ"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000395"
+            )!
+        )
+        self.authority = authority
+        await observer(authority)
+        return await withCheckedContinuation { invocationContinuation = $0 }
+    }
+
+    func stop(
+        _ request: StopCoachInvocationRequest,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome {
+        guard self.authority == authority,
+              authority.library == request.library,
+              authority.chatID == request.chatID,
+              authority.pendingUserTurnID == request.pendingUserTurnID
+        else { return .staleAuthority }
+        stopStarted = true
+        await withCheckedContinuation { stopContinuation = $0 }
+        self.authority = nil
+        return .unableToReap
+    }
+
+    func waitUntilInvocationIsSuspended() async -> InvocationStopAuthority {
+        while authority == nil || invocationContinuation == nil {
+            await Task.yield()
+        }
+        return authority!
+    }
+
+    func waitUntilStopStarts() async {
+        while !stopStarted || stopContinuation == nil { await Task.yield() }
+    }
+
+    func finishInvocationAsStopped() {
+        invocationContinuation?.resume(returning: .stopped)
+        invocationContinuation = nil
+    }
+
+    func waitUntilAdmissionRefreshStarts() async {
+        while admissionCallCount < 2 || admissionRefreshContinuation == nil {
+            await Task.yield()
+        }
+    }
+
+    func resumeAdmissionRefresh() {
+        admissionRefreshContinuation?.resume()
+        admissionRefreshContinuation = nil
+    }
+
+    func finishStopAsUnableToReap() {
+        stopContinuation?.resume()
+        stopContinuation = nil
+    }
+}
+
 private actor RecordingInterruptedInvocationGateway: Invocations {
     private(set) var preparations: [NewPendingCoachInvocationRequest] = []
     private(set) var requests: [PendingCoachInvocationRequest] = []

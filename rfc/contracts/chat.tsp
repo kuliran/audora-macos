@@ -203,6 +203,7 @@ namespace Audora.Contracts {
     editDraft: EditChatDraftScenarioCommand,
     refreshContextQuote: RefreshChatContextQuoteScenarioCommand,
     sendDraft: SendChatDraftScenarioCommand,
+    stopCoachResponse: StopCoachResponseScenarioCommand,
     retryPendingUserTurn: RetryPendingUserTurnScenarioCommand,
     createNewChatFromCapacityFailure: CreateNewChatFromCapacityFailureScenarioCommand,
     discardPendingUserTurn: DiscardPendingUserTurnScenarioCommand,
@@ -236,6 +237,9 @@ namespace Audora.Contracts {
     pendingUserTurnLocked: ChatStorePendingUserTurnLockedEvent,
     pendingUserTurnReplaced: ChatStorePendingUserTurnReplacedEvent,
     pendingUserTurnDiscarded: ChatStorePendingUserTurnDiscardedEvent,
+    coachProviderAttemptSuspended: CoachProviderAttemptSuspendedEvent,
+    coachProviderAttemptReaped: CoachProviderAttemptReapedEvent,
+    coachProviderLateResultRejected: CoachProviderLateResultRejectedEvent,
     profileStatementGenerationRead: ProfileStatementGenerationReadEvent,
     currentInstantRead: CurrentInstantReadEvent,
     chatIdGenerated: ChatIdGeneratedEvent,
@@ -261,6 +265,8 @@ namespace Audora.Contracts {
     pendingUserTurnId?: PendingUserTurnId;
     responsePositionId?: ChatResponsePositionId;
     pendingFailure?: PendingUserTurnFailure;
+    activity?: ChatScenarioActivity;
+    stopAuthorityAvailable?: boolean;
     notice?: ChatScenarioNotice;
     newChatPickerStatus?: NewChatPickerStatus;
     newChatFilterQuery?: NewChatAttachmentFilterText;
@@ -327,6 +333,12 @@ namespace Audora.Contracts {
 
   model SendChatDraftScenarioCommand {
     kind: "sendDraft";
+  }
+
+  /** Uses the process-live authority projected for the exact current Attempt. */
+  model StopCoachResponseScenarioCommand {
+    kind: "stopCoachResponse";
+    pendingUserTurnId: PendingUserTurnId;
   }
 
   model RefreshChatContextQuoteScenarioCommand {
@@ -554,6 +566,27 @@ namespace Audora.Contracts {
     outcome: "committed";
   }
 
+  /** The first Provider Attempt has started but has not returned a result. */
+  model CoachProviderAttemptSuspendedEvent {
+    port: "coachProvider";
+    effect: "run";
+    outcome: "suspended";
+  }
+
+  /** Stop cancelled the exact Attempt and confirmed its bounded reap. */
+  model CoachProviderAttemptReapedEvent {
+    port: "coachProvider";
+    effect: "cancelAndReap";
+    outcome: "reaped";
+  }
+
+  /** A non-cooperative result arrived after revocation and was not published. */
+  model CoachProviderLateResultRejectedEvent {
+    port: "coachProvider";
+    effect: "lateResult";
+    outcome: "rejected";
+  }
+
   model ProfileStatementGenerationReadEvent {
     port: "profileHead";
     effect: "readStatementGeneration";
@@ -610,6 +643,7 @@ namespace Audora.Contracts {
     firstCatalogLoad: "firstCatalogLoad",
     newChatQuoteAfterAttachmentResolution: "newChatQuoteAfterAttachmentResolution",
     firstAttachmentResolution: "firstAttachmentResolution",
+    firstProviderAttempt: "firstProviderAttempt",
   }
 
   union ChatScenarioCatalogStatus {
@@ -682,6 +716,16 @@ namespace Audora.Contracts {
     locked: "locked",
   }
 
+  union ChatScenarioActivity {
+    creating: "creating",
+    renaming: "renaming",
+    lockingDraft: "lockingDraft",
+    invokingCoach: "invokingCoach",
+    stoppingCoach: "stoppingCoach",
+    retryingPendingUserTurn: "retryingPendingUserTurn",
+    discardingPendingUserTurn: "discardingPendingUserTurn",
+  }
+
   union ChatScenarioFrozenReason {
     newerSchema: "newerSchema",
     unsupportedSchema: "unsupportedSchema",
@@ -705,6 +749,11 @@ namespace Audora.Contracts {
     pendingUserTurnFailed: "pendingUserTurnFailed",
     coachContextUnavailable: "coachContextUnavailable",
     messageMustBeShortened: "messageMustBeShortened",
+    coachBusy: "coachBusy",
+    coachAdmissionLimited: "coachAdmissionLimited",
+    coachSendUnavailable: "coachSendUnavailable",
+    coachRetryUnavailable: "coachRetryUnavailable",
+    coachResponseInterrupted: "coachResponseInterrupted",
     attachmentCatalogFailed: "attachmentCatalogFailed",
     qualifiedCoachConfigurationUnavailable: "qualifiedCoachConfigurationUnavailable",
   }

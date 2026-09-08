@@ -1238,6 +1238,7 @@ final class ContractResourcesTests: XCTestCase {
             .cancelDuringNewChatQuoteScenario,
             .cancelDuringAttachmentResolutionScenario,
             .suspendedLibrarySwitchChatScenario,
+            .stopReapsAndRejectsLateCoachResultScenario,
         ]
         for resource in resources {
             let object = try XCTUnwrap(
@@ -1249,6 +1250,7 @@ final class ContractResourcesTests: XCTestCase {
                 ContractResource.draftSendDiscardChatScenario,
                 .contextCapacityRecoveryChatScenario,
                 .fakeProviderSuccessDevelopmentChatScenario,
+                .stopReapsAndRejectsLateCoachResultScenario,
             ].contains(resource)
             XCTAssertEqual(
                 (object["expectedProviderCalls"] as? NSNumber)?.intValue,
@@ -1261,6 +1263,7 @@ final class ContractResourcesTests: XCTestCase {
             } else if [
                 ContractResource.draftSendDiscardChatScenario,
                 .fakeProviderSuccessDevelopmentChatScenario,
+                .stopReapsAndRejectsLateCoachResultScenario,
             ].contains(resource) {
                 1
             } else {
@@ -1274,7 +1277,9 @@ final class ContractResourcesTests: XCTestCase {
                 (object["expectedAdmissionCalls"] as? NSNumber)?.intValue,
                 executesProviderAttempt ? 1 : 0
             )
-            if resource == .fakeProviderSuccessDevelopmentChatScenario {
+            if resource == .fakeProviderSuccessDevelopmentChatScenario ||
+                resource == .stopReapsAndRejectsLateCoachResultScenario
+            {
                 XCTAssertEqual(object["providerAvailability"] as? String, "available")
             } else if [
                 ContractResource.draftSendDiscardChatScenario,
@@ -1389,6 +1394,8 @@ final class ContractResourcesTests: XCTestCase {
                 "chatFrozen", "catalogFailed", "readOnlyLibrary", "invalidDraft",
                 "draftSaveFailed", "draftChanged", "pendingUserTurnFailed",
                 "coachContextUnavailable", "messageMustBeShortened",
+                "coachBusy", "coachAdmissionLimited", "coachSendUnavailable",
+                "coachRetryUnavailable", "coachResponseInterrupted",
                 "attachmentCatalogFailed",
                 "qualifiedCoachConfigurationUnavailable",
             ]
@@ -1515,8 +1522,16 @@ final class ContractResourcesTests: XCTestCase {
             [
                 "firstCatalogLoad", "firstAttachmentResolution",
                 "newChatQuoteAfterAttachmentResolution",
+                "firstProviderAttempt",
             ]
         )
+
+        XCTAssertTrue(Set(commandKinds).contains("stopCoachResponse"))
+        XCTAssertTrue(Set(dependencyEffects).isSuperset(of: [
+            "run", "cancelAndReap", "lateResult",
+        ]))
+        XCTAssertNotNil(expectedState["activity"])
+        XCTAssertNotNil(expectedState["stopAuthorityAvailable"])
     }
 }
 

@@ -154,8 +154,12 @@ authority while the prepared semantic exchange remains frozen. Its only successf
 effect is one atomic user/Coach message pair plus a fresh Draft; pre-commit
 interruption, exhausted retries, an invalid complete response, or CAS conflict
 publishes neither message. Live composition still fails closed because the
-shipping Provider descriptor is not qualified. Stop, transcript tools, and Profile
-or Memory effects remain outside this slice.
+shipping Provider descriptor is not qualified. The current Attempt exposes one
+process-live Stop authority; Stop revokes publication first, cancels provider work
+or automatic-retry sleep, waits for a bounded reap while retaining Invocation
+liveness, and then persists the locked Pending as interrupted. Late or replaced
+Attempt results cannot publish. Transcript tools and Profile or Memory effects
+remain outside this slice.
 If the machine-local ledger rename succeeds but its parent-directory flush cannot
 prove durability, Audora treats the debit as possibly committed and preserves the
 exact Pending User Turn as interrupted and user-retryable; it never unlocks that
@@ -227,7 +231,10 @@ The native application has a reduced set of states:
   toast-only errors. A post-response Profile-publication failure remains a separate
   card on its already published coach Message. Chat rows project independent
   activity and Profile-update icons; one slow `processing` state covers provider
-  work and automatic retry delays. The Chat Draft is persisted periodically and
+  work and automatic retry delays. While processing, an accessible **Stop Coach
+  Response** action bypasses queued mutations; **Stopping Coach Response** remains
+  visible until the exact Attempt is reaped and interruption is durable. The Chat
+  Draft is persisted periodically and
   synchronously before Send. Send freezes its exact ID/version into one Pending
   User Turn but leaves the Draft text in the disabled composer. Retry reuses that
   exact trigger. Discard hides the failure and unlocks the same populated Draft for

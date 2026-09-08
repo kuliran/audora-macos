@@ -26,6 +26,7 @@ final class ChatFeatureScenarioTests: XCTestCase {
             .cancelDuringNewChatQuoteScenario,
             .cancelDuringAttachmentResolutionScenario,
             .suspendedLibrarySwitchChatScenario,
+            .stopReapsAndRejectsLateCoachResultScenario,
         ]
 
         for resource in resources {
@@ -60,7 +61,13 @@ final class ChatFeatureScenarioTests: XCTestCase {
                 try ScenarioFakeInvocationGateway(
                     store: store,
                     source: coachContextSource,
-                    providerIsAvailable: dto.providerAvailability == "available"
+                    providerIsAvailable: dto.providerAvailability == "available",
+                    providerEvents: dto.dependencyTrace.filter {
+                        $0.port == "coachProvider"
+                    },
+                    recorder: recorder,
+                    suspendFirstAttempt:
+                        dto.suspendedEffect == "firstProviderAttempt"
                 )
             let feature = DefaultChatFeature(
                 store: store,
@@ -189,6 +196,67 @@ final class ChatFeatureScenarioTests: XCTestCase {
                     )
                     await feature.send(applicationCommand)
                 }
+            } else if dto.suspendedEffect == "firstProviderAttempt" {
+                await feature.send(.start(commandContext))
+                guard let sendIndex = dto.commands.firstIndex(where: {
+                    $0.kind == "sendDraft"
+                }), sendIndex + 1 < dto.commands.count,
+                      dto.commands[sendIndex + 1].kind == "stopCoachResponse"
+                else {
+                    throw ScenarioFailure.script
+                }
+                for command in dto.commands[..<sendIndex] {
+                    let activeState = await feature.currentState
+                    let applicationCommand = try contextualizedCommand(
+                        command,
+                        activeState: activeState,
+                        activeContext: &commandContext,
+                        generation: &commandGeneration
+                    )
+                    await feature.send(applicationCommand)
+                }
+                let sendState = await feature.currentState
+                let sendCommand = try contextualizedCommand(
+                    dto.commands[sendIndex],
+                    activeState: sendState,
+                    activeContext: &commandContext,
+                    generation: &commandGeneration
+                )
+                let suspendedSend = Task { await feature.send(sendCommand) }
+                await invocations.waitUntilProviderAttemptStarts()
+
+                let stoppingState = await feature.currentState
+                XCTAssertNotNil(
+                    stoppingState.coachInvocationStopAuthority,
+                    dto.scenarioId
+                )
+                let activeChatID = try XCTUnwrap(selectedChat(stoppingState)?.chat.id)
+                XCTAssertEqual(
+                    stoppingState.activity,
+                    .invokingCoach(activeChatID),
+                    dto.scenarioId
+                )
+                let stopCommand = try contextualizedCommand(
+                    dto.commands[sendIndex + 1],
+                    activeState: stoppingState,
+                    activeContext: &commandContext,
+                    generation: &commandGeneration
+                )
+                await feature.send(stopCommand)
+                await invocations.releaseLateProviderResult()
+                await suspendedSend.value
+                await invocations.recordLateProviderResultRejected()
+
+                for command in dto.commands.dropFirst(sendIndex + 2) {
+                    let activeState = await feature.currentState
+                    let applicationCommand = try contextualizedCommand(
+                        command,
+                        activeState: activeState,
+                        activeContext: &commandContext,
+                        generation: &commandGeneration
+                    )
+                    await feature.send(applicationCommand)
+                }
             } else {
                 await feature.send(.start(commandContext))
                 for command in dto.commands {
@@ -290,6 +358,16 @@ final class ChatFeatureScenarioTests: XCTestCase {
             if let expected = dto.expectedState.pendingFailure {
                 XCTAssertEqual(
                     selectedChat(state)?.pendingUserTurn?.failure?.rawValue,
+                    expected,
+                    dto.scenarioId
+                )
+            }
+            if let expected = dto.expectedState.activity {
+                XCTAssertEqual(activity(state), expected, dto.scenarioId)
+            }
+            if let expected = dto.expectedState.stopAuthorityAvailable {
+                XCTAssertEqual(
+                    state.coachInvocationStopAuthority != nil,
                     expected,
                     dto.scenarioId
                 )
@@ -454,6 +532,19 @@ final class ChatFeatureScenarioTests: XCTestCase {
         }
     }
 
+    private func activity(_ state: ChatFeatureState) -> String? {
+        switch state.activity {
+        case .creating: "creating"
+        case .renaming: "renaming"
+        case .lockingDraft: "lockingDraft"
+        case .invokingCoach: "invokingCoach"
+        case .stoppingCoach: "stoppingCoach"
+        case .retryingPendingUserTurn: "retryingPendingUserTurn"
+        case .discardingPendingUserTurn: "discardingPendingUserTurn"
+        case .none: nil
+        }
+    }
+
     private func selectionAvailability(_ state: ChatFeatureState) -> String? {
         switch state.selection {
         case .open: "open"
@@ -595,6 +686,7 @@ private struct ChatScenarioCommandDTO: Decodable {
         context: ChatCommandContext,
         activeChatID: ChatID?,
         activeDraft: ChatDraft?,
+        stopAuthority: InvocationStopAuthority?,
         newChatConfirmationToken: NewChatConfirmationToken?
     ) throws -> ChatCommand {
         switch kind {
@@ -686,6 +778,17 @@ private struct ChatScenarioCommandDTO: Decodable {
                     throw ScenarioFailure.command
                 }
                 return .sendDraft(context, activeChatID, activeDraft)
+            case "stopCoachResponse":
+                guard libraryId == nil, chatId == nil, title == nil,
+                      expectedRevision == nil, query == nil, text == nil,
+                      let pendingUserTurnId, attachmentId == nil,
+                      let stopAuthority,
+                      stopAuthority.pendingUserTurnID ==
+                      (try PendingUserTurnID(pendingUserTurnId))
+                else {
+                    throw ScenarioFailure.command
+                }
+                return .stopCoachResponse(context, stopAuthority)
             case "refreshContextQuote":
                 guard libraryId == nil, chatId == nil, title == nil,
                       expectedRevision == nil, query == nil, text == nil,
@@ -774,6 +877,7 @@ private func contextualizedCommand(
         context: activeContext,
         activeChatID: identity?.0,
         activeDraft: identity?.1,
+        stopAuthority: activeState.coachInvocationStopAuthority,
         newChatConfirmationToken: {
             guard case let .ready(snapshot) = activeState.newChatPicker else {
                 return nil
@@ -887,6 +991,8 @@ private struct ChatScenarioStateDTO: Decodable {
     let pendingUserTurnId: String?
     let responsePositionId: String?
     let pendingFailure: String?
+    let activity: String?
+    let stopAuthorityAvailable: Bool?
     let notice: String?
     let newChatPickerStatus: String?
     let newChatFilterQuery: String?
@@ -1184,6 +1290,9 @@ private struct ScenarioInvocationCounts: Equatable, Sendable {
 private protocol ScenarioMeasuringInvocations: Invocations {
     func counts() async -> ScenarioInvocationCounts
     func waitUntilInvocationCompletes(_ count: Int) async
+    func waitUntilProviderAttemptStarts() async
+    func releaseLateProviderResult() async
+    func recordLateProviderResultRejected() async
 }
 
 private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
@@ -1199,11 +1308,19 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
     init(
         store: ChatScenarioStore,
         source: ScenarioCoachContextSnapshotPort,
-        providerIsAvailable: Bool
+        providerIsAvailable: Bool,
+        providerEvents: [ChatDependencyEventDTO],
+        recorder: ChatScenarioRecorder,
+        suspendFirstAttempt: Bool
     ) throws {
         let persistence = ScenarioInvocationPersistence(store: store)
         let admission = ScenarioInvocationAdmission()
-        let provider = ScenarioSyntheticProvider(isAvailable: providerIsAvailable)
+        let provider = ScenarioSyntheticProvider(
+            isAvailable: providerIsAvailable,
+            events: providerEvents,
+            recorder: recorder,
+            suspendFirstAttempt: suspendFirstAttempt
+        )
         self.admission = admission
         self.provider = provider
         coordinator = DefaultInvocations(
@@ -1219,6 +1336,19 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
         invocationCalls += 1
         let outcome = await coordinator.tryInvoke(request)
+        recordInvocationCompletion()
+        return outcome
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        invocationCalls += 1
+        let outcome = await coordinator.tryInvoke(
+            request,
+            observingStopAuthority: observer
+        )
         recordInvocationCompletion()
         return outcome
     }
@@ -1244,6 +1374,26 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
         return outcome
     }
 
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        invocationCalls += 1
+        let outcome = await coordinator.tryInvoke(
+            prepared,
+            observingStopAuthority: observer
+        )
+        recordInvocationCompletion()
+        return outcome
+    }
+
+    func stop(
+        _ request: StopCoachInvocationRequest,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome {
+        await coordinator.stop(request, authority: authority)
+    }
+
     func admissionAvailability(
         in library: LibraryScope
     ) async -> InvocationAdmissionAvailability {
@@ -1263,6 +1413,18 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
         await withCheckedContinuation { continuation in
             completionWaiters.append((count, continuation))
         }
+    }
+
+    func waitUntilProviderAttemptStarts() async {
+        await provider.waitUntilAttemptStarts()
+    }
+
+    func releaseLateProviderResult() async {
+        await provider.releaseLateResult()
+    }
+
+    func recordLateProviderResultRejected() async {
+        await provider.recordLateResultRejected()
     }
 
     private func recordInvocationCompletion() {
@@ -1707,16 +1869,107 @@ private actor ScenarioInvocationAdmission: InvocationAdmissionPort {
 
 private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
     private let isAvailable: Bool
+    private var events: [ChatDependencyEventDTO]
+    private let recorder: ChatScenarioRecorder
+    private let suspendFirstAttempt: Bool
     private(set) var callCount = 0
+    private var attemptStarted = false
+    private var attemptStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var lateResultContinuation: CheckedContinuation<Void, Never>?
 
-    init(isAvailable: Bool) {
+    init(
+        isAvailable: Bool,
+        events: [ChatDependencyEventDTO],
+        recorder: ChatScenarioRecorder,
+        suspendFirstAttempt: Bool
+    ) {
         self.isAvailable = isAvailable
+        self.events = events
+        self.recorder = recorder
+        self.suspendFirstAttempt = suspendFirstAttempt
     }
 
     func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome {
         callCount += 1
         guard isAvailable else { return .userRetryableFailure }
+        guard suspendFirstAttempt, callCount == 1 else {
+            return .complete(markdown: "A complete **synthetic** Coach response.")
+        }
+        guard let event = consume(effect: "run"),
+              event.outcome.rendered == "suspended"
+        else {
+            XCTFail("missing suspended Provider Attempt event")
+            return .userRetryableFailure
+        }
+        await record(event)
+        await withCheckedContinuation { continuation in
+            lateResultContinuation = continuation
+            attemptStarted = true
+            let waiters = attemptStartWaiters
+            attemptStartWaiters.removeAll(keepingCapacity: false)
+            for waiter in waiters { waiter.resume() }
+        }
         return .complete(markdown: "A complete **synthetic** Coach response.")
+    }
+
+    func cancelAndReap(
+        attemptID: CoachProviderAttemptID,
+        graceMilliseconds: Int64
+    ) async -> CoachProviderAttemptCancellationOutcome {
+        guard let expectedAttemptID = try? CoachProviderAttemptID(
+            "atm-20260830T120002000Z-6PQR"
+        ), attemptID == expectedAttemptID,
+              graceMilliseconds == DefaultInvocations.providerCancellationGraceMilliseconds
+        else {
+            XCTFail("Stop did not target the exact Attempt with the bounded grace")
+            return .unableToConfirm
+        }
+        guard let event = consume(effect: "cancelAndReap"),
+              event.outcome.rendered == "reaped"
+        else {
+            XCTFail("missing Provider reap event")
+            return .unableToConfirm
+        }
+        await record(event)
+        return .reaped
+    }
+
+    func waitUntilAttemptStarts() async {
+        guard !attemptStarted else { return }
+        await withCheckedContinuation { continuation in
+            attemptStartWaiters.append(continuation)
+        }
+    }
+
+    func releaseLateResult() {
+        let continuation = lateResultContinuation
+        lateResultContinuation = nil
+        continuation?.resume()
+    }
+
+    func recordLateResultRejected() async {
+        guard let event = consume(effect: "lateResult"),
+              event.outcome.rendered == "rejected"
+        else {
+            XCTFail("missing rejected late Provider result event")
+            return
+        }
+        await record(event)
+    }
+
+    private func consume(effect: String) -> ChatDependencyEventDTO? {
+        guard let index = events.firstIndex(where: { $0.effect == effect }) else {
+            return nil
+        }
+        return events.remove(at: index)
+    }
+
+    private func record(_ event: ChatDependencyEventDTO) async {
+        await recorder.append(
+            port: event.port,
+            effect: event.effect,
+            outcome: event.outcome.rendered
+        )
     }
 }
 
@@ -1772,7 +2025,7 @@ private actor ChatScenarioScript:
     init(events: [ChatDependencyEventDTO], recorder: ChatScenarioRecorder) {
         self.events = events.filter {
             $0.port != "chatStore" && $0.port != "attachmentSource" &&
-                $0.port != "coachContext"
+                $0.port != "coachContext" && $0.port != "coachProvider"
         }
         self.recorder = recorder
     }

@@ -144,6 +144,9 @@ public enum InvocationTryOutcome: Equatable, Sendable {
         PendingCoachInvocationRequest,
         InvocationInterruptionReason
     )
+    /// The exact Stop capability won. The Stop caller owns terminal state
+    /// publication; the original Invocation continuation must have no effect.
+    case stopped
 }
 
 public enum InvocationAdmissionAvailability: Equatable, Sendable {
@@ -151,6 +154,79 @@ public enum InvocationAdmissionAvailability: Equatable, Sendable {
     case cooldown(reopensAt: UTCInstant)
     case unavailable
 }
+
+public struct StopCoachInvocationRequest: Equatable, Sendable {
+    public let library: LibraryScope
+    public let chatID: ChatID
+    public let pendingUserTurnID: PendingUserTurnID
+
+    public init(
+        library: LibraryScope,
+        chatID: ChatID,
+        pendingUserTurnID: PendingUserTurnID
+    ) {
+        self.library = library
+        self.chatID = chatID
+        self.pendingUserTurnID = pendingUserTurnID
+    }
+}
+
+/// Opaque, process-live authority for stopping one exact Provider Attempt.
+/// A replacement Attempt always receives a different capability.
+public struct InvocationStopAuthority: Equatable, Sendable {
+    public let library: LibraryScope
+    public let chatID: ChatID
+    public let pendingUserTurnID: PendingUserTurnID
+    public let invocationID: CoachInvocationID
+    public let attemptID: CoachProviderAttemptID
+    fileprivate let capabilityID: UUID
+
+    fileprivate init(
+        request: StopCoachInvocationRequest,
+        invocationID: CoachInvocationID,
+        attemptID: CoachProviderAttemptID,
+        capabilityID: UUID = UUID()
+    ) {
+        library = request.library
+        chatID = request.chatID
+        pendingUserTurnID = request.pendingUserTurnID
+        self.invocationID = invocationID
+        self.attemptID = attemptID
+        self.capabilityID = capabilityID
+    }
+
+    @_spi(InvocationTesting)
+    public init(
+        testingRequest request: StopCoachInvocationRequest,
+        invocationID: CoachInvocationID,
+        attemptID: CoachProviderAttemptID,
+        capabilityID: UUID
+    ) {
+        self.init(
+            request: request,
+            invocationID: invocationID,
+            attemptID: attemptID,
+            capabilityID: capabilityID
+        )
+    }
+
+    fileprivate func matches(_ request: StopCoachInvocationRequest) -> Bool {
+        library == request.library &&
+            chatID == request.chatID &&
+            pendingUserTurnID == request.pendingUserTurnID
+    }
+}
+
+public enum InvocationStopOutcome: Equatable, Sendable {
+    case interrupted(ChatAggregate)
+    case staleAuthority
+    case noActiveInvocation
+    case unableToReap
+    case persistenceUnavailable(ChatAggregate?)
+}
+
+public typealias InvocationStopAuthorityObserver =
+    @Sendable (InvocationStopAuthority) async -> Void
 
 public protocol Invocations: Sendable {
     func admissionAvailability(
@@ -170,6 +246,21 @@ public protocol Invocations: Sendable {
     ) async -> InvocationTryOutcome
 
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome
+
+    func stop(
+        _ request: StopCoachInvocationRequest,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome
 }
 
 public extension Invocations {
@@ -177,6 +268,27 @@ public extension Invocations {
         in library: LibraryScope
     ) async -> InvocationAdmissionAvailability {
         .unavailable
+    }
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared)
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(request)
+    }
+
+    func stop(
+        _ request: StopCoachInvocationRequest,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome {
+        .noActiveInvocation
     }
 }
 
@@ -764,6 +876,12 @@ enum CoachProviderAttemptOutcome: Equatable, Sendable {
     case responseOverflow
 }
 
+enum CoachProviderAttemptCancellationOutcome: Equatable, Sendable {
+    case reaped
+    case alreadyAbsent
+    case unableToConfirm
+}
+
 struct SyntheticCoachProviderRequest: Sendable {
     let invocation: CoachInvocation
     let attempt: CoachProviderAttempt
@@ -776,6 +894,23 @@ struct SyntheticCoachProviderRequest: Sendable {
 
 protocol SyntheticCoachProviderPort: Sendable {
     func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome
+
+    /// Idempotently requests cooperative cancellation, then force-terminates
+    /// and reaps the exact Attempt within the supplied grace bound. Success is
+    /// returned only after process absence is proven.
+    func cancelAndReap(
+        attemptID: CoachProviderAttemptID,
+        graceMilliseconds: Int64
+    ) async -> CoachProviderAttemptCancellationOutcome
+}
+
+extension SyntheticCoachProviderPort {
+    func cancelAndReap(
+        attemptID: CoachProviderAttemptID,
+        graceMilliseconds: Int64
+    ) async -> CoachProviderAttemptCancellationOutcome {
+        .unableToConfirm
+    }
 }
 
 struct DeterministicSyntheticCoachProvider: SyntheticCoachProviderPort {
@@ -783,6 +918,13 @@ struct DeterministicSyntheticCoachProvider: SyntheticCoachProviderPort {
 
     func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome {
         .complete(markdown: Self.markdown)
+    }
+
+    func cancelAndReap(
+        attemptID: CoachProviderAttemptID,
+        graceMilliseconds: Int64
+    ) async -> CoachProviderAttemptCancellationOutcome {
+        .alreadyAbsent
     }
 }
 
@@ -838,6 +980,7 @@ public enum InvocationRetryDiagnosticReason: String, Equatable, Sendable {
     case admissionUnavailable
     case preparedContextStale
     case relaunchedInvocationInterrupted
+    case coachResponseStopped
     case providerAutoRetryable
     case providerUserRetryable
     case automaticRetriesExhausted
@@ -981,6 +1124,80 @@ public struct DiscardingInvocationRetryDiagnostics: InvocationRetryDiagnostics {
 }
 
 public actor DefaultInvocations: Invocations {
+    private actor ProviderAttemptCompletion {
+        enum Resolution: Sendable {
+            case provider(CoachProviderAttemptOutcome)
+            case stopped
+        }
+
+        private var resolution: Resolution?
+        private var waiters: [CheckedContinuation<Resolution, Never>] = []
+
+        func wait() async -> Resolution {
+            if let resolution { return resolution }
+            return await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func complete(_ resolution: Resolution) {
+            guard self.resolution == nil else { return }
+            self.resolution = resolution
+            let waiters = waiters
+            self.waiters.removeAll(keepingCapacity: false)
+            for waiter in waiters { waiter.resume(returning: resolution) }
+        }
+    }
+
+    private actor BackoffCompletion {
+        enum Resolution: Sendable {
+            case elapsed
+            case failed
+            case stopped
+        }
+
+        private var resolution: Resolution?
+        private var waiters: [CheckedContinuation<Resolution, Never>] = []
+
+        func wait() async -> Resolution {
+            if let resolution { return resolution }
+            return await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func complete(_ resolution: Resolution) {
+            guard self.resolution == nil else { return }
+            self.resolution = resolution
+            let waiters = waiters
+            self.waiters.removeAll(keepingCapacity: false)
+            for waiter in waiters { waiter.resume(returning: resolution) }
+        }
+    }
+
+    private enum ActiveInvocationWork {
+        case provider(Task<Void, Never>, ProviderAttemptCompletion)
+        case backoff(Task<Void, Never>, BackoffCompletion)
+        case transition(Task<NextAttemptResolution, Never>)
+        case stopping
+
+        func cancel() {
+            switch self {
+            case let .provider(task, _): task.cancel()
+            case let .backoff(task, _): task.cancel()
+            case let .transition(task): task.cancel()
+            case .stopping: break
+            }
+        }
+    }
+
+    private struct ActiveInvocationControl {
+        let runID: UUID
+        let authority: InvocationStopAuthority
+        var session: any InvocationActivePersistenceSession
+        let fallback: ChatAggregate
+        let diagnosticContext: InvocationRetryDiagnosticContext
+        let startedAtMilliseconds: UInt64
+        var work: ActiveInvocationWork
+        var isRevoked: Bool
+    }
+
     private struct PublicationRecoveryIntent: Sendable {
         let mutation: PublishCoachInvocationMutation
         let quote: CoachContextQuote
@@ -1002,6 +1219,7 @@ public actor DefaultInvocations: Invocations {
     private enum NextAttemptResolution {
         case installed(any InvocationActivePersistenceSession)
         case terminal(InvocationTryOutcome)
+        case revoked(any InvocationActivePersistenceSession)
     }
 
     private struct OperationalRetrySnapshot: Sendable {
@@ -1010,6 +1228,7 @@ public actor DefaultInvocations: Invocations {
     }
 
     static let maximumLaunchIdentityCandidates = 4
+    static let providerCancellationGraceMilliseconds: Int64 = 2_000
     static let automaticRetryDelaysMilliseconds: [Int64] = [5_000, 10_000, 15_000]
     static let shorterRepairInstruction = """
     The previous Attempt exceeded the response limit. Return a materially shorter \
@@ -1037,6 +1256,7 @@ public actor DefaultInvocations: Invocations {
     private var operationalRetrySnapshots: [
         PendingCoachInvocationRequest: OperationalRetrySnapshot
     ] = [:]
+    private var activeInvocationControls: [UUID: ActiveInvocationControl] = [:]
 
     init(
         persistence: any InvocationPersistencePort,
@@ -1122,6 +1342,13 @@ public actor DefaultInvocations: Invocations {
     public func tryInvoke(
         _ prepared: PreparedPendingCoachInvocation
     ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared, observingStopAuthority: { _ in })
+    }
+
+    public func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
         guard let session = preparedSessions[prepared.capabilityID],
               session.authority.request == prepared.request,
               session.authority.aggregate == prepared.aggregate
@@ -1136,11 +1363,18 @@ public actor DefaultInvocations: Invocations {
         }
         defer { inFlightRequests.remove(request) }
 
-        return await invoke(session)
+        return await invoke(session, observingStopAuthority: observer)
     }
 
     public func tryInvoke(
         _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(request, observingStopAuthority: { _ in })
+    }
+
+    public func tryInvoke(
+        _ request: PendingCoachInvocationRequest,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
     ) async -> InvocationTryOutcome {
         guard inFlightRequests.insert(request).inserted else {
             return .rejected(nil, .activeInvocation)
@@ -1163,11 +1397,12 @@ public actor DefaultInvocations: Invocations {
             return .rejected(nil, .persistenceUnavailable)
         }
 
-        return await invoke(session)
+        return await invoke(session, observingStopAuthority: observer)
     }
 
     private func invoke(
-        _ session: any InvocationPendingPersistenceSession
+        _ session: any InvocationPendingPersistenceSession,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
     ) async -> InvocationTryOutcome {
         let firstAuthority = session.authority
         let request = firstAuthority.request
@@ -1469,8 +1704,11 @@ public actor DefaultInvocations: Invocations {
 
         let completedProviderResponse: (
             markdown: String,
-            startedAtMilliseconds: UInt64
+            startedAtMilliseconds: UInt64,
+            stopAuthority: InvocationStopAuthority
         )
+        let runID = UUID()
+        defer { clearActiveInvocationControl(runID: runID) }
         providerAttempts: while true {
             let invocation = activeSession.invocation
             let attempt = invocation.attempt
@@ -1502,24 +1740,56 @@ public actor DefaultInvocations: Invocations {
             let pinnedInstruction = Self.pinnedInstruction(
                 outputTokenCeiling: outputTokenCeiling
             ) + attemptInstruction
-            let outcome = await provider.run(
-                SyntheticCoachProviderRequest(
-                    invocation: invocation,
-                    attempt: attempt,
-                    exchange: prepared.exchange,
-                    transcriptAccess: ProviderAttemptTranscriptAccess(
-                        handles: transportAuthority.transcriptHandles
-                    ),
-                    outputTokenCeiling: outputTokenCeiling,
-                    pinnedInstruction: pinnedInstruction,
-                    control: control
-                )
+            let providerRequest = SyntheticCoachProviderRequest(
+                invocation: invocation,
+                attempt: attempt,
+                exchange: prepared.exchange,
+                transcriptAccess: ProviderAttemptTranscriptAccess(
+                    handles: transportAuthority.transcriptHandles
+                ),
+                outputTokenCeiling: outputTokenCeiling,
+                pinnedInstruction: pinnedInstruction,
+                control: control
             )
+            let provider = self.provider
+            let providerCompletion = ProviderAttemptCompletion()
+            let providerTask = Task {
+                let outcome = await provider.run(providerRequest)
+                await providerCompletion.complete(.provider(outcome))
+            }
+            let stopAuthority = InvocationStopAuthority(
+                request: stopRequest(for: invocation),
+                invocationID: invocation.id,
+                attemptID: attempt.id
+            )
+            activeInvocationControls[stopAuthority.capabilityID] = ActiveInvocationControl(
+                runID: runID,
+                authority: stopAuthority,
+                session: activeSession,
+                fallback: processingAggregate,
+                diagnosticContext: diagnosticContext(for: prepared),
+                startedAtMilliseconds: attemptStartedAt,
+                work: .provider(providerTask, providerCompletion),
+                isRevoked: false
+            )
+            await observer(stopAuthority)
+            guard isCompletionAuthorized(runID: runID, authority: stopAuthority) else {
+                return stoppedInvocationOutcome(fallback: processingAggregate)
+            }
+            let completion = await providerCompletion.wait()
+            guard case let .provider(outcome) = completion,
+                  isCompletionAuthorized(runID: runID, authority: stopAuthority)
+            else {
+                return stoppedInvocationOutcome(fallback: processingAggregate)
+            }
             switch outcome {
             case let .complete(markdown):
-                completedProviderResponse = (markdown, attemptStartedAt)
+                completedProviderResponse = (markdown, attemptStartedAt, stopAuthority)
                 break providerAttempts
             case .userRetryableFailure:
+                guard claimCompletion(runID: runID, authority: stopAuthority) else {
+                    return stoppedInvocationOutcome(fallback: processingAggregate)
+                }
                 return await interruptAndAbortRecordingUserRetry(
                     activeSession,
                     fallback: processingAggregate,
@@ -1533,6 +1803,9 @@ public actor DefaultInvocations: Invocations {
                 guard attempt.kind == .standard,
                       attempt.ordinal < CoachProviderAttempt.maximumOrdinal
                 else {
+                    guard claimCompletion(runID: runID, authority: stopAuthority) else {
+                        return stoppedInvocationOutcome(fallback: processingAggregate)
+                    }
                     return await interruptAndAbortRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
@@ -1548,6 +1821,9 @@ public actor DefaultInvocations: Invocations {
                 let delayIndex = Int(attempt.ordinal - 1)
                 guard Self.automaticRetryDelaysMilliseconds.indices.contains(delayIndex)
                 else {
+                    guard claimCompletion(runID: runID, authority: stopAuthority) else {
+                        return stoppedInvocationOutcome(fallback: processingAggregate)
+                    }
                     return await interruptAndAbortRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
@@ -1566,11 +1842,47 @@ public actor DefaultInvocations: Invocations {
                     prepared: prepared,
                     startedAt: attemptStartedAt
                 )
-                do {
-                    try await retrySleeper.sleep(
-                        milliseconds: Self.automaticRetryDelaysMilliseconds[delayIndex]
-                    )
-                } catch {
+                guard isCompletionAuthorized(runID: runID, authority: stopAuthority) else {
+                    return stoppedInvocationOutcome(fallback: processingAggregate)
+                }
+                let retrySleeper = self.retrySleeper
+                let backoffCompletion = BackoffCompletion()
+                let backoffTask = Task {
+                    do {
+                        try await retrySleeper.sleep(
+                            milliseconds: Self.automaticRetryDelaysMilliseconds[delayIndex]
+                        )
+                        await backoffCompletion.complete(.elapsed)
+                    } catch {
+                        await backoffCompletion.complete(.failed)
+                    }
+                }
+                updateActiveInvocationWork(
+                    .backoff(backoffTask, backoffCompletion),
+                    runID: runID,
+                    authority: stopAuthority
+                )
+                await observer(stopAuthority)
+                guard isCompletionAuthorized(
+                    runID: runID,
+                    authority: stopAuthority
+                ) else {
+                    return stoppedInvocationOutcome(fallback: processingAggregate)
+                }
+                switch await backoffCompletion.wait() {
+                case .stopped:
+                    return stoppedInvocationOutcome(fallback: processingAggregate)
+                case .elapsed:
+                    guard isCompletionAuthorized(
+                        runID: runID,
+                        authority: stopAuthority
+                    ) else {
+                        return stoppedInvocationOutcome(fallback: processingAggregate)
+                    }
+                case .failed:
+                    guard claimCompletion(runID: runID, authority: stopAuthority) else {
+                        return stoppedInvocationOutcome(fallback: processingAggregate)
+                    }
                     return await interruptAndAbortRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
@@ -1581,20 +1893,40 @@ public actor DefaultInvocations: Invocations {
                         startedAt: attemptStartedAt
                     )
                 }
-                switch await installNextAttempt(
-                    after: activeSession,
-                    kind: .standard,
-                    prepared: prepared,
-                    fallback: processingAggregate,
-                    startedAt: attemptStartedAt
-                ) {
-                case let .installed(next): activeSession = next
-                case let .terminal(outcome): return outcome
+                let transitionTask = Task {
+                    await self.installNextAttempt(
+                        after: activeSession,
+                        kind: .standard,
+                        prepared: prepared,
+                        fallback: processingAggregate,
+                        startedAt: attemptStartedAt,
+                        runID: runID,
+                        authority: stopAuthority
+                    )
+                }
+                updateActiveInvocationWork(
+                    .transition(transitionTask),
+                    runID: runID,
+                    authority: stopAuthority
+                )
+                switch await transitionTask.value {
+                case let .installed(next):
+                    guard claimCompletion(runID: runID, authority: stopAuthority) else {
+                        return stoppedInvocationOutcome(fallback: processingAggregate)
+                    }
+                    activeSession = next
+                case let .terminal(outcome):
+                    return outcome
+                case .revoked:
+                    return stoppedInvocationOutcome(fallback: processingAggregate)
                 }
             case .responseOverflow:
                 guard attempt.kind == .standard,
                       attempt.ordinal < CoachProviderAttempt.maximumOrdinal
                 else {
+                    guard claimCompletion(runID: runID, authority: stopAuthority) else {
+                        return stoppedInvocationOutcome(fallback: processingAggregate)
+                    }
                     return await interruptAndAbortRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
@@ -1615,15 +1947,32 @@ public actor DefaultInvocations: Invocations {
                     prepared: prepared,
                     startedAt: attemptStartedAt
                 )
-                switch await installNextAttempt(
-                    after: activeSession,
-                    kind: .shorterRepair,
-                    prepared: prepared,
-                    fallback: processingAggregate,
-                    startedAt: attemptStartedAt
-                ) {
-                case let .installed(next): activeSession = next
-                case let .terminal(outcome): return outcome
+                let transitionTask = Task {
+                    await self.installNextAttempt(
+                        after: activeSession,
+                        kind: .shorterRepair,
+                        prepared: prepared,
+                        fallback: processingAggregate,
+                        startedAt: attemptStartedAt,
+                        runID: runID,
+                        authority: stopAuthority
+                    )
+                }
+                updateActiveInvocationWork(
+                    .transition(transitionTask),
+                    runID: runID,
+                    authority: stopAuthority
+                )
+                switch await transitionTask.value {
+                case let .installed(next):
+                    guard claimCompletion(runID: runID, authority: stopAuthority) else {
+                        return stoppedInvocationOutcome(fallback: processingAggregate)
+                    }
+                    activeSession = next
+                case let .terminal(outcome):
+                    return outcome
+                case .revoked:
+                    return stoppedInvocationOutcome(fallback: processingAggregate)
                 }
             }
         }
@@ -1639,6 +1988,12 @@ public actor DefaultInvocations: Invocations {
                 completedAt: completedAt
             )
         } catch {
+            guard claimCompletion(
+                runID: runID,
+                authority: completedProviderResponse.stopAuthority
+            ) else {
+                return stoppedInvocationOutcome(fallback: processingAggregate)
+            }
             return await interruptAndAbortRecordingUserRetry(
                 activeSession,
                 fallback: processingAggregate,
@@ -1650,6 +2005,12 @@ public actor DefaultInvocations: Invocations {
             )
         }
 
+        guard claimCompletion(
+            runID: runID,
+            authority: completedProviderResponse.stopAuthority
+        ) else {
+            return stoppedInvocationOutcome(fallback: processingAggregate)
+        }
         switch await activeSession.publish(publication) {
         case let .committed(aggregate):
             return .published(aggregate, prepared.quote)
@@ -1689,11 +2050,16 @@ public actor DefaultInvocations: Invocations {
         kind: CoachProviderAttemptKind,
         prepared: PreparedCoachLaunchContext,
         fallback: ChatAggregate,
-        startedAt: UInt64
+        startedAt: UInt64,
+        runID: UUID,
+        authority: InvocationStopAuthority
     ) async -> NextAttemptResolution {
         let ordinal = session.invocation.attempt.ordinal + 1
         var lastCollision: InvocationLaunchIdentityCollision?
         for _ in 0 ..< Self.maximumLaunchIdentityCandidates {
+            guard isCompletionAuthorized(runID: runID, authority: authority) else {
+                return .revoked(session)
+            }
             let identity = await identities.generateAttemptIdentity(
                 at: await clock.now(),
                 ordinal: ordinal,
@@ -1714,57 +2080,80 @@ public actor DefaultInvocations: Invocations {
                     continue
                 }
             } catch {
-                return .terminal(
-                    await interruptAndAbortRecordingUserRetry(
-                        session,
-                        fallback: fallback,
-                        reason: .persistenceUnavailable,
-                        diagnosticReason: .nextAttemptConstructionFailed,
-                        classification: .retryInfrastructureFailure,
-                        prepared: prepared,
-                        startedAt: startedAt
-                    )
+                return await finishFailedAttemptTransition(
+                    session,
+                    fallback: fallback,
+                    diagnosticReason: .nextAttemptConstructionFailed,
+                    prepared: prepared,
+                    startedAt: startedAt,
+                    runID: runID,
+                    authority: authority
                 )
+            }
+            guard isCompletionAuthorized(runID: runID, authority: authority) else {
+                return .revoked(session)
             }
             switch await session.installNextAttempt(mutation) {
             case let .installed(next):
+                guard isCompletionAuthorized(runID: runID, authority: authority) else {
+                    return .revoked(next)
+                }
                 return .installed(next)
             case let .collision(collision):
                 lastCollision = collision
                 continue
             case let .stale(current):
-                return .terminal(
-                    await interruptAndAbortRecordingUserRetry(
-                        session,
-                        fallback: current ?? fallback,
-                        reason: .persistenceUnavailable,
-                        diagnosticReason: .nextAttemptBecameStale,
-                        classification: .retryInfrastructureFailure,
-                        prepared: prepared,
-                        startedAt: startedAt
-                    )
+                return await finishFailedAttemptTransition(
+                    session,
+                    fallback: current ?? fallback,
+                    diagnosticReason: .nextAttemptBecameStale,
+                    prepared: prepared,
+                    startedAt: startedAt,
+                    runID: runID,
+                    authority: authority
                 )
             case .failed:
-                return .terminal(
-                    await interruptAndAbortRecordingUserRetry(
-                        session,
-                        fallback: fallback,
-                        reason: .persistenceUnavailable,
-                        diagnosticReason: .nextAttemptInstallationFailed,
-                        classification: .retryInfrastructureFailure,
-                        prepared: prepared,
-                        startedAt: startedAt
-                    )
+                return await finishFailedAttemptTransition(
+                    session,
+                    fallback: fallback,
+                    diagnosticReason: .nextAttemptInstallationFailed,
+                    prepared: prepared,
+                    startedAt: startedAt,
+                    runID: runID,
+                    authority: authority
                 )
             }
         }
         _ = lastCollision
+        return await finishFailedAttemptTransition(
+            session,
+            fallback: fallback,
+            diagnosticReason: .nextAttemptIdentityCollisionExhausted,
+            prepared: prepared,
+            startedAt: startedAt,
+            runID: runID,
+            authority: authority
+        )
+    }
+
+    private func finishFailedAttemptTransition(
+        _ session: any InvocationActivePersistenceSession,
+        fallback: ChatAggregate,
+        diagnosticReason: InvocationRetryDiagnosticReason,
+        prepared: PreparedCoachLaunchContext,
+        startedAt: UInt64,
+        runID: UUID,
+        authority: InvocationStopAuthority
+    ) async -> NextAttemptResolution {
+        guard claimCompletion(runID: runID, authority: authority) else {
+            return .revoked(session)
+        }
         return .terminal(
             await interruptAndAbortRecordingUserRetry(
                 session,
                 fallback: fallback,
                 reason: .persistenceUnavailable,
-                diagnosticReason: .nextAttemptIdentityCollisionExhausted,
+                diagnosticReason: diagnosticReason,
                 classification: .retryInfrastructureFailure,
                 prepared: prepared,
                 startedAt: startedAt
@@ -1881,7 +2270,7 @@ public actor DefaultInvocations: Invocations {
                 current?.pendingUserTurn?.failure != nil
         case let .operationallyInterrupted(_, retryRequest, _):
             return retryRequest == request
-        case .published:
+        case .published, .stopped:
             return false
         }
     }
@@ -1897,6 +2286,260 @@ public actor DefaultInvocations: Invocations {
     ) async -> InvocationAdmissionAvailability {
         let instant = await clock.now()
         return await admission.availability(library: library, at: instant)
+    }
+
+    public func stop(
+        _ request: StopCoachInvocationRequest,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome {
+        guard var control = activeInvocationControls[authority.capabilityID] else {
+            return activeInvocationControls.values.contains { candidate in
+                candidate.authority.matches(request)
+            } ? .staleAuthority : .noActiveInvocation
+        }
+        guard !control.isRevoked,
+              control.authority == authority,
+              authority.matches(request)
+        else { return .staleAuthority }
+
+        // Stop wins at this actor-isolated assignment. Every provider/backoff
+        // continuation checks this fence before it can advance or publish.
+        control.isRevoked = true
+        let work = control.work
+        control.work = .stopping
+        activeInvocationControls[authority.capabilityID] = control
+        switch work {
+        case let .provider(_, completion):
+            await completion.complete(.stopped)
+        case let .backoff(_, completion):
+            await completion.complete(.stopped)
+        case .transition, .stopping:
+            break
+        }
+        work.cancel()
+
+        let cancellation = await provider.cancelAndReap(
+            attemptID: authority.attemptID,
+            graceMilliseconds: Self.providerCancellationGraceMilliseconds
+        )
+
+        var sessionToAbort: any InvocationActivePersistenceSession = control.session
+        if case let .transition(transitionTask) = work {
+            switch await transitionTask.value {
+            case let .installed(next):
+                sessionToAbort = next
+                retainRevokedInvocationSession(
+                    next,
+                    runID: control.runID,
+                    authority: authority
+                )
+            case let .terminal(outcome):
+                guard cancellation == .reaped || cancellation == .alreadyAbsent else {
+                    return .unableToReap
+                }
+                return await completeStoppedInvocation(
+                    stopOutcome(
+                        from: outcome,
+                        request: request,
+                        fallback: control.fallback
+                    ),
+                    control: control,
+                    authority: authority
+                )
+            case let .revoked(current):
+                sessionToAbort = current
+                retainRevokedInvocationSession(
+                    current,
+                    runID: control.runID,
+                    authority: authority
+                )
+            }
+        }
+
+        guard cancellation == .reaped || cancellation == .alreadyAbsent else {
+            // The process may still exist. Keep the exact current persistence
+            // session and Library liveness lease behind the revoked fence.
+            return .unableToReap
+        }
+
+        let terminal = await sessionToAbort.abort(
+            failure: .coachResponseInterrupted
+        )
+        let outcome: InvocationStopOutcome = switch terminal {
+        case let .committed(aggregate):
+            .interrupted(aggregate)
+        case let .stale(current):
+            if let current,
+               current.chat.id == request.chatID,
+               current.pendingUserTurn?.id == request.pendingUserTurnID,
+               current.pendingUserTurn?.failure == .coachResponseInterrupted
+            {
+                .interrupted(current)
+            } else {
+                .persistenceUnavailable(current ?? control.fallback)
+            }
+        case let .recovered(.eligible(pendingAuthority)):
+            pendingAuthority.pendingUserTurn.failure == .coachResponseInterrupted
+                ? .interrupted(pendingAuthority.aggregate)
+                : .persistenceUnavailable(pendingAuthority.aggregate)
+        case let .recovered(.ineligible(current)):
+            .persistenceUnavailable(current)
+        case .recovered(.unavailable):
+            .persistenceUnavailable(control.fallback)
+        }
+        return await completeStoppedInvocation(
+            outcome,
+            control: control,
+            authority: authority
+        )
+    }
+
+    private func completeStoppedInvocation(
+        _ outcome: InvocationStopOutcome,
+        control: ActiveInvocationControl,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome {
+        finishStoppedInvocation(authority: authority)
+        let presentsExactRetry: Bool = switch outcome {
+        case .interrupted:
+            true
+        case let .persistenceUnavailable(current):
+            current?.chat.id == authority.chatID &&
+                current?.pendingUserTurn?.id == authority.pendingUserTurnID &&
+                current?.pendingUserTurn?.failure == nil
+        case .staleAuthority, .noActiveInvocation, .unableToReap:
+            false
+        }
+        if presentsExactRetry {
+            await recordRetryDiagnostic(
+                reason: .coachResponseStopped,
+                classification: .interruption,
+                disposition: .userRetryableFailure,
+                invocation: control.session.invocation,
+                context: control.diagnosticContext,
+                durationMilliseconds: elapsedMilliseconds(
+                    since: control.startedAtMilliseconds
+                )
+            )
+        }
+        return outcome
+    }
+
+    private func stopOutcome(
+        from outcome: InvocationTryOutcome,
+        request: StopCoachInvocationRequest,
+        fallback: ChatAggregate
+    ) -> InvocationStopOutcome {
+        switch outcome {
+        case let .interrupted(current, _):
+            guard let current,
+                  current.chat.id == request.chatID,
+                  current.pendingUserTurn?.id == request.pendingUserTurnID,
+                  current.pendingUserTurn?.failure == .coachResponseInterrupted
+            else { return .persistenceUnavailable(current ?? fallback) }
+            return .interrupted(current)
+        case let .operationallyInterrupted(current, retryRequest, _)
+            where retryRequest.library == request.library &&
+            retryRequest.chatID == request.chatID &&
+            retryRequest.pendingUserTurnID == request.pendingUserTurnID:
+            return .persistenceUnavailable(current ?? fallback)
+        case let .rejected(current, _):
+            return .persistenceUnavailable(current ?? fallback)
+        case let .contextCapacityFailure(current, _):
+            return .persistenceUnavailable(current)
+        case let .published(current, _):
+            return .persistenceUnavailable(current)
+        case .operationallyInterrupted, .stopped:
+            return .persistenceUnavailable(fallback)
+        }
+    }
+
+    private func stopRequest(
+        for invocation: CoachInvocation
+    ) -> StopCoachInvocationRequest {
+        StopCoachInvocationRequest(
+            library: LibraryScope(libraryID: invocation.libraryID),
+            chatID: invocation.chatID,
+            pendingUserTurnID: invocation.pendingUserTurnID
+        )
+    }
+
+    private func isCompletionAuthorized(
+        runID: UUID,
+        authority: InvocationStopAuthority
+    ) -> Bool {
+        guard let control = activeInvocationControls[authority.capabilityID] else {
+            return false
+        }
+        return control.runID == runID &&
+            control.authority == authority &&
+            !control.isRevoked
+    }
+
+    private func updateActiveInvocationWork(
+        _ work: ActiveInvocationWork,
+        runID: UUID,
+        authority: InvocationStopAuthority
+    ) {
+        guard var control = activeInvocationControls[authority.capabilityID],
+              control.runID == runID,
+              control.authority == authority,
+              !control.isRevoked
+        else { return }
+        control.work = work
+        activeInvocationControls[authority.capabilityID] = control
+    }
+
+    private func retainRevokedInvocationSession(
+        _ session: any InvocationActivePersistenceSession,
+        runID: UUID,
+        authority: InvocationStopAuthority
+    ) {
+        guard var control = activeInvocationControls[authority.capabilityID],
+              control.runID == runID,
+              control.authority == authority,
+              control.isRevoked
+        else { return }
+        control.session = session
+        activeInvocationControls[authority.capabilityID] = control
+    }
+
+    private func claimCompletion(
+        runID: UUID,
+        authority: InvocationStopAuthority
+    ) -> Bool {
+        guard isCompletionAuthorized(runID: runID, authority: authority) else {
+            return false
+        }
+        activeInvocationControls.removeValue(forKey: authority.capabilityID)
+        return true
+    }
+
+    private func clearActiveInvocationControl(runID: UUID) {
+        guard let control = activeInvocationControls.values.first(where: {
+            $0.runID == runID
+        }),
+              control.runID == runID,
+              !control.isRevoked
+        else { return }
+        activeInvocationControls.removeValue(forKey: control.authority.capabilityID)
+    }
+
+    private func finishStoppedInvocation(authority: InvocationStopAuthority) {
+        guard let control = activeInvocationControls[authority.capabilityID],
+              control.authority == authority,
+              control.isRevoked
+        else { return }
+        activeInvocationControls.removeValue(forKey: authority.capabilityID)
+    }
+
+    private func stoppedInvocationOutcome(
+        fallback _: ChatAggregate
+    ) -> InvocationTryOutcome {
+        // The Stop caller alone owns installation of its post-reap terminal
+        // aggregate. The original invocation task must not race that durable
+        // result with its older processing snapshot.
+        .stopped
     }
 
     private func interruptAndAbort(
@@ -2027,7 +2670,7 @@ public actor DefaultInvocations: Invocations {
                 current?.pendingUserTurn?.failure != nil
         case let .operationallyInterrupted(_, retryRequest, _):
             return retryRequest == request
-        case .published, .contextCapacityFailure, .rejected:
+        case .published, .contextCapacityFailure, .rejected, .stopped:
             return false
         }
     }

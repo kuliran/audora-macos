@@ -1,4 +1,4 @@
-@testable import AudoraApplication
+@testable @_spi(InvocationTesting) import AudoraApplication
 import AudoraDomain
 import XCTest
 
@@ -197,6 +197,69 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         XCTAssertEqual(
             commands,
             [.confirmNewChat(context, token), .cancelNewChat(context)]
+        )
+    }
+
+    func testCoachStopBypassesSuspendedSendInApplicationFIFO() async throws {
+        let trace = LibrarySelectionTrace()
+        let chat = SuspendedCoachApplicationChatFeature()
+        let feature = DefaultApplicationCommandFeature(
+            library: SelectionLibraryFeature(trace: trace),
+            chat: chat
+        )
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let context = ChatCommandContext(libraryScope: scope, generation: 1)
+        let chatID = try ChatID("cht-20260830T120000000Z-2ABC")
+        let pendingID = try PendingUserTurnID(
+            "ptu-20260830T120000000Z-5KMN"
+        )
+        let draft = try ChatDraft(
+            draftID: ChatDraftID("drf-20260830T120000000Z-3DEF"),
+            version: 0,
+            text: "Stop while this Send is suspended.",
+            updatedAt: UTCInstant("2026-08-30T12:00:00.000Z")
+        )
+        let authority = InvocationStopAuthority(
+            testingRequest: StopCoachInvocationRequest(
+                library: scope,
+                chatID: chatID,
+                pendingUserTurnID: pendingID
+            ),
+            invocationID: try CoachInvocationID(
+                "inv-20260830T120000000Z-5KMN"
+            ),
+            attemptID: try CoachProviderAttemptID(
+                "atm-20260830T120000000Z-6NPQ"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000397"
+            )!
+        )
+
+        let send = feature.enqueue(.sendDraft(context, chatID, draft))
+        XCTAssertTrue(feature.admissionState.isChatBoundaryPending)
+        await chat.waitUntilSendStarts()
+
+        let stop = feature.enqueue(.stopCoachResponse(context, authority))
+        for _ in 0 ..< 100 { await Task.yield() }
+        let stopArrivedBeforeSendFinished = await chat.stopReceived
+        if !stopArrivedBeforeSendFinished {
+            await chat.forceResumeSend()
+        }
+        await stop.value
+        await send.value
+
+        let commands = await chat.commands
+        XCTAssertTrue(stopArrivedBeforeSendFinished)
+        XCTAssertFalse(feature.admissionState.isChatBoundaryPending)
+        XCTAssertEqual(
+            commands,
+            [
+                .sendDraft(context, chatID, draft),
+                .stopCoachResponse(context, authority),
+            ]
         )
     }
 
@@ -896,6 +959,47 @@ private actor SuspendedNewChatPickerApplicationChatFeature: ChatFeature {
     func forceResumeConfirmation() {
         confirmationContinuation?.resume()
         confirmationContinuation = nil
+    }
+}
+
+private actor SuspendedCoachApplicationChatFeature: ChatFeature {
+    nonisolated let states = AsyncStream<ChatFeatureState> { continuation in
+        continuation.finish()
+    }
+
+    private var sendStarted = false
+    private var sendContinuation: CheckedContinuation<Void, Never>?
+    private(set) var stopReceived = false
+    private(set) var commands: [ChatCommand] = []
+
+    var currentState: ChatFeatureState { ChatFeatureState() }
+
+    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+
+    func send(_ command: ChatCommand) async {
+        commands.append(command)
+        switch command {
+        case .sendDraft:
+            sendStarted = true
+            await withCheckedContinuation { sendContinuation = $0 }
+        case .stopCoachResponse:
+            stopReceived = true
+            sendContinuation?.resume()
+            sendContinuation = nil
+        default:
+            break
+        }
+    }
+
+    func flushForOrderlyTermination() async -> Bool { true }
+
+    func waitUntilSendStarts() async {
+        while !sendStarted { await Task.yield() }
+    }
+
+    func forceResumeSend() {
+        sendContinuation?.resume()
+        sendContinuation = nil
     }
 }
 

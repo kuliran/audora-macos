@@ -187,6 +187,9 @@
                     "$ref": "#/$defs/SendChatDraftScenarioCommand"
                 },
                 {
+                    "$ref": "#/$defs/StopCoachResponseScenarioCommand"
+                },
+                {
                     "$ref": "#/$defs/RetryPendingUserTurnScenarioCommand"
                 },
                 {
@@ -278,6 +281,15 @@
                     "$ref": "#/$defs/ChatStorePendingUserTurnDiscardedEvent"
                 },
                 {
+                    "$ref": "#/$defs/CoachProviderAttemptSuspendedEvent"
+                },
+                {
+                    "$ref": "#/$defs/CoachProviderAttemptReapedEvent"
+                },
+                {
+                    "$ref": "#/$defs/CoachProviderLateResultRejectedEvent"
+                },
+                {
                     "$ref": "#/$defs/ProfileStatementGenerationReadEvent"
                 },
                 {
@@ -356,6 +368,12 @@
                 },
                 "pendingFailure": {
                     "$ref": "#/$defs/PendingUserTurnFailure"
+                },
+                "activity": {
+                    "$ref": "#/$defs/ChatScenarioActivity"
+                },
+                "stopAuthorityAvailable": {
+                    "type": "boolean"
                 },
                 "notice": {
                     "$ref": "#/$defs/ChatScenarioNotice"
@@ -450,6 +468,10 @@
                 {
                     "type": "string",
                     "const": "firstAttachmentResolution"
+                },
+                {
+                    "type": "string",
+                    "const": "firstProviderAttempt"
                 }
             ]
         },
@@ -719,6 +741,26 @@
             "unevaluatedProperties": {
                 "not": {}
             }
+        },
+        "StopCoachResponseScenarioCommand": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "stopCoachResponse"
+                },
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                }
+            },
+            "required": [
+                "kind",
+                "pendingUserTurnId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "Uses the process-live authority projected for the exact current Attempt."
         },
         "RetryPendingUserTurnScenarioCommand": {
             "type": "object",
@@ -1465,6 +1507,84 @@
                 "not": {}
             }
         },
+        "CoachProviderAttemptSuspendedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "coachProvider"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "run"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "suspended"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "The first Provider Attempt has started but has not returned a result."
+        },
+        "CoachProviderAttemptReapedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "coachProvider"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "cancelAndReap"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "reaped"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "Stop cancelled the exact Attempt and confirmed its bounded reap."
+        },
+        "CoachProviderLateResultRejectedEvent": {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "string",
+                    "const": "coachProvider"
+                },
+                "effect": {
+                    "type": "string",
+                    "const": "lateResult"
+                },
+                "outcome": {
+                    "type": "string",
+                    "const": "rejected"
+                }
+            },
+            "required": [
+                "port",
+                "effect",
+                "outcome"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "A non-cooperative result arrived after revocation and was not published."
+        },
         "ProfileStatementGenerationReadEvent": {
             "type": "object",
             "properties": {
@@ -1713,6 +1833,38 @@
                 }
             ]
         },
+        "ChatScenarioActivity": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "creating"
+                },
+                {
+                    "type": "string",
+                    "const": "renaming"
+                },
+                {
+                    "type": "string",
+                    "const": "lockingDraft"
+                },
+                {
+                    "type": "string",
+                    "const": "invokingCoach"
+                },
+                {
+                    "type": "string",
+                    "const": "stoppingCoach"
+                },
+                {
+                    "type": "string",
+                    "const": "retryingPendingUserTurn"
+                },
+                {
+                    "type": "string",
+                    "const": "discardingPendingUserTurn"
+                }
+            ]
+        },
         "ChatScenarioNotice": {
             "anyOf": [
                 {
@@ -1778,6 +1930,26 @@
                 {
                     "type": "string",
                     "const": "messageMustBeShortened"
+                },
+                {
+                    "type": "string",
+                    "const": "coachBusy"
+                },
+                {
+                    "type": "string",
+                    "const": "coachAdmissionLimited"
+                },
+                {
+                    "type": "string",
+                    "const": "coachSendUnavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "coachRetryUnavailable"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInterrupted"
                 },
                 {
                     "type": "string",

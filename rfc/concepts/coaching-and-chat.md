@@ -44,13 +44,14 @@ Attempts, cancellation, and terminal failure creation. Chat, Proposal, and futur
 maintenance use cases submit stable entity IDs and an `InvocationIntent`; they do
 not duplicate these checks or construct provider DTOs.
 
-The current #23 vertical slice implements `answerPendingUserTurn` with a bounded
+The current #24 vertical slice implements `answerPendingUserTurn` with a bounded
 deterministic synthetic provider. It durably claims the rolling ledger, installs
 one portable Invocation, persists each fresh Provider Attempt before launch,
 retries transient failures on the 5/10/15-second schedule, permits at most one
-shorter complete repair, and atomically publishes the two-message fake turn. Real
-provider adapters, Stop, transcript tools, Reconsider, and Profile or Memory
-effects remain owned by their later slices.
+shorter complete repair, exposes exact process-live Stop authority for the current
+Attempt, and atomically publishes the two-message fake turn only while that
+authority remains current. Real provider adapters, transcript tools, Reconsider,
+and Profile or Memory effects remain owned by their later slices.
 
 ```text
 InvocationIntent
@@ -161,6 +162,20 @@ Draft or stale Reconsider Proposal remains in an interrupted UserRetryable state
 with the ordinary **Retry** and **Discard** actions. Discard unlocks an answer
 Draft; for Reconsider it removes only the failure and restores the stale Proposal's
 **Reconsider** and **Discard** actions.
+
+Stop is an immediate control command: it bypasses both the Application command
+queue and the Chat mutation queue. The UI replaces **Stop** with an accessible
+**Stopping Coach Response** state while cancellation and reap are pending. The
+result-publication gate is revoked before cancellation begins, and the active
+Invocation persistence session retains the Library liveness lease until reap is
+confirmed and the interrupted Pending is durable. A stale authority, wrong
+Library/Chat/Pending scope, or authority from a replaced Attempt has no effect.
+
+Orderly termination uses this same Stop path before flushing Chat state. Relaunch
+never recreates a timer, provider task, transport capability, or publication gate:
+portable active Invocation records are reconciled to
+`coachResponseInterrupted`, preserving the locked intent for a fresh
+Retry or Discard.
 
 ## Chats and Session attachments
 

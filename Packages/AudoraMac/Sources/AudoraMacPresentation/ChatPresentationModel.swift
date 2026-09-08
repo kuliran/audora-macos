@@ -219,6 +219,13 @@ public final class ChatPresentationModel: ObservableObject {
         send(.sendDraft(context, aggregate.chat.id, draft))
     }
 
+    public func stopCoachResponse() {
+        guard let context = commandContext,
+              let authority = snapshot.coachInvocationStopAuthority
+        else { return }
+        send(.stopCoachResponse(context, authority))
+    }
+
     /// Re-resolves current Profile, Memory, history, attachments, and provider
     /// configuration without changing the Chat or invoking a provider.
     public func refreshContextQuote() {

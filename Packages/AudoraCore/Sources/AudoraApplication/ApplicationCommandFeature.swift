@@ -162,6 +162,10 @@ public final class DefaultApplicationCommandFeature: ApplicationCommandFeature {
             let chat = chat
             return ApplicationCommandReceipt(task: Task { await chat.send(command) })
         }
+        if case .stopCoachResponse = command {
+            let chat = chat
+            return ApplicationCommandReceipt(task: Task { await chat.send(command) })
+        }
         guard !admissionState.isLibraryNavigationPending,
               !admissionState.isChatBoundaryPending
         else {
@@ -373,7 +377,8 @@ private extension ChatCommand {
         case .start, .beginNewChat, .setNewChatAttachmentFilter,
              .toggleNewChatAttachment, .cancelNewChat,
              .rename, .setFilter, .editDraft, .refreshContextQuote,
-             .createNewChatFromCapacityFailure, .discardPendingUserTurn:
+             .stopCoachResponse, .createNewChatFromCapacityFailure,
+             .discardPendingUserTurn:
             false
         }
     }

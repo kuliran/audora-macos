@@ -59,6 +59,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case cancelDuringNewChatQuoteScenario
     case cancelDuringAttachmentResolutionScenario
     case suspendedLibrarySwitchChatScenario
+    case stopReapsAndRejectsLateCoachResultScenario
     case libraryLaunchNoSelectionScenario
     case libraryCreateScenario
     case libraryRelaunchScenario
@@ -295,6 +296,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "cancel-during-attachment-resolution.v1.json"
         case .suspendedLibrarySwitchChatScenario:
             "library-switch-during-suspended-load.v1.json"
+        case .stopReapsAndRejectsLateCoachResultScenario:
+            "stop-reaps-and-rejects-late-result.v1.json"
         case .libraryLaunchNoSelectionScenario:
             "library-launch-no-selection.v1.json"
         case .libraryCreateScenario:
@@ -554,7 +557,8 @@ public enum ContractResource: CaseIterable, Sendable {
              .attachmentDisappearsDuringCreateChatScenario,
              .cancelDuringNewChatQuoteScenario,
              .cancelDuringAttachmentResolutionScenario,
-             .suspendedLibrarySwitchChatScenario:
+             .suspendedLibrarySwitchChatScenario,
+             .stopReapsAndRejectsLateCoachResultScenario:
             "Scenarios/Chat"
         case .libraryLaunchNoSelectionScenario:
             "Scenarios"

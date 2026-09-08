@@ -120,6 +120,7 @@ public struct ChatFeatureState: Equatable, Sendable {
         case renaming(ChatID)
         case lockingDraft(ChatID)
         case invokingCoach(ChatID)
+        case stoppingCoach(ChatID)
         case retryingPendingUserTurn(ChatID)
         case discardingPendingUserTurn(ChatID)
     }
@@ -134,6 +135,9 @@ public struct ChatFeatureState: Equatable, Sendable {
     /// An exact retry authority held only in Application memory when
     /// persistence could not prove its terminal interruption write.
     public let operationallyInterruptedInvocation: PendingCoachInvocationRequest?
+    /// Process-live, Attempt-scoped capability presented only while the exact
+    /// active Coach response can still be stopped.
+    public let coachInvocationStopAuthority: InvocationStopAuthority?
     public let newChatPicker: NewChatAttachmentPickerState
     public let openedAttachments: OpenedChatAttachmentsState
     public let activity: Activity?
@@ -148,6 +152,7 @@ public struct ChatFeatureState: Equatable, Sendable {
         admissionAvailability: InvocationAdmissionAvailability? = nil,
         createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
         operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
+        coachInvocationStopAuthority: InvocationStopAuthority? = nil,
         newChatPicker: NewChatAttachmentPickerState = .closed,
         openedAttachments: OpenedChatAttachmentsState = .notRequested,
         activity: Activity? = nil,
@@ -161,6 +166,7 @@ public struct ChatFeatureState: Equatable, Sendable {
         self.admissionAvailability = admissionAvailability
         self.createNewChatRecoveryIntent = createNewChatRecoveryIntent
         self.operationallyInterruptedInvocation = operationallyInterruptedInvocation
+        self.coachInvocationStopAuthority = coachInvocationStopAuthority
         self.newChatPicker = newChatPicker
         self.openedAttachments = openedAttachments
         self.activity = activity

@@ -36,8 +36,12 @@ Markdown Coach message behind a single Chat-manifest CAS; pre-commit crashes and
 CAS conflicts publish neither. The current live composition still fails closed at
 context qualification because no production provider descriptor is qualified. The
 synthetic vertical slice owns the exact bounded 5/10/15-second Attempt schedule
-and one shorter complete repair; real provider adapters, Stop, transcript tools,
-and Profile or Memory effects remain later vertical slices.
+and one shorter complete repair. Its process-live Stop authority bypasses queued
+Chat mutations, revokes result publication before cancellation, and retains
+Invocation liveness until the exact Attempt is reaped and the Pending User Turn is
+durably interrupted. Retry builds a fresh Invocation from current context; Discard
+restores the unchanged Draft. Real provider adapters, transcript tools, and Profile
+or Memory effects remain later vertical slices.
 
 ## Requirements
 

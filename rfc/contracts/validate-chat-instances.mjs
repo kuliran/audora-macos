@@ -62,6 +62,7 @@ const scenarioInventory = [
   "relaunch-reopens-exact-aggregate.v1.json",
   "rename-preserves-identity.v1.json",
   "stale-rename-cannot-overwrite.v1.json",
+  "stop-reaps-and-rejects-late-result.v1.json",
   "wrong-library-load-fails.v1.json",
 ];
 const schemaInvalidChatFixtures = [

@@ -1,4 +1,4 @@
-@_spi(ChatConfirmationTesting) import AudoraApplication
+@_spi(ChatConfirmationTesting) @_spi(InvocationTesting) import AudoraApplication
 import AudoraDomain
 @testable import AudoraMacPresentation
 import Foundation
@@ -81,7 +81,7 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
-    func testProcessingPendingTurnExposesNoRecoveryOrAccessibilityActions() throws {
+    func testProcessingPendingTurnExposesOnlyStopWithAccessibleLabel() throws {
         let scope = LibraryScope(
             libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
         )
@@ -105,6 +105,22 @@ final class ChatPresentationModelTests: XCTestCase {
             memory: base.memory,
             pendingUserTurn: pending
         )
+        let authority = InvocationStopAuthority(
+            testingRequest: StopCoachInvocationRequest(
+                library: scope,
+                chatID: processing.chat.id,
+                pendingUserTurnID: pending.id
+            ),
+            invocationID: try CoachInvocationID(
+                "inv-20260830T120000000Z-5KMN"
+            ),
+            attemptID: try CoachProviderAttemptID(
+                "atm-20260830T120000000Z-6NPQ"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000324"
+            )!
+        )
         let row = ChatRowSnapshot(aggregate: processing)
         let state = ChatFeatureState(
             catalog: .ready(
@@ -113,6 +129,7 @@ final class ChatPresentationModelTests: XCTestCase {
             selection: .open(processing),
             composer: .locked(processing.chat.draft, pending),
             admissionAvailability: .unavailable,
+            coachInvocationStopAuthority: authority,
             activity: .invokingCoach(processing.chat.id)
         )
 
@@ -123,11 +140,125 @@ final class ChatPresentationModelTests: XCTestCase {
 
         XCTAssertEqual(presentation, .processing)
         XCTAssertFalse(presentation.showsAdmissionUnavailableReason)
-        XCTAssertEqual(presentation.recoveryActions, [])
+        XCTAssertEqual(presentation.recoveryActions, [.stopCoachResponse])
         XCTAssertEqual(
             presentation.recoveryActions.map(\.accessibilityLabel),
-            [],
-            "processing must expose zero terminal accessibility actions"
+            ["Stop Coach Response"]
+        )
+
+        let stoppingState = ChatFeatureState(
+            catalog: state.catalog,
+            selection: state.selection,
+            composer: state.composer,
+            admissionAvailability: state.admissionAvailability,
+            activity: .stoppingCoach(processing.chat.id)
+        )
+        let stoppingPresentation = PendingUserTurnPresentation.project(
+            pending,
+            state: stoppingState
+        )
+        XCTAssertEqual(stoppingPresentation, .stopping)
+        XCTAssertFalse(stoppingPresentation.showsAdmissionUnavailableReason)
+        XCTAssertEqual(stoppingPresentation.recoveryActions, [])
+
+        let duringApplicationBoundary = CoachResponseStopInteractionPresentation(
+            admissionState: ApplicationCommandAdmissionState(
+                isChatBoundaryPending: true
+            ),
+            chatState: state
+        )
+        XCTAssertTrue(
+            duringApplicationBoundary.isEnabled,
+            "Stop bypasses the active Send boundary and admission availability"
+        )
+        XCTAssertFalse(
+            CoachResponseStopInteractionPresentation(
+                admissionState: ApplicationCommandAdmissionState(
+                    isOrderlyTerminationPending: true
+                ),
+                chatState: state
+            ).isEnabled
+        )
+        XCTAssertFalse(
+            CoachResponseStopInteractionPresentation(
+                admissionState: .idle,
+                chatState: ChatFeatureState(
+                    catalog: state.catalog,
+                    selection: state.selection,
+                    composer: state.composer,
+                    coachInvocationStopAuthority: authority,
+                    activity: .stoppingCoach(processing.chat.id)
+                )
+            ).isEnabled
+        )
+    }
+
+    func testStopActionCapturesCurrentContextAndOpaqueAuthority() async throws {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let aggregate = try aggregate(
+            in: scope,
+            chatID: "cht-20260830T120000000Z-2ABC",
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "Stopping"
+        )
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            )
+        )
+        let processing = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: pending
+        )
+        let authority = InvocationStopAuthority(
+            testingRequest: StopCoachInvocationRequest(
+                library: scope,
+                chatID: processing.chat.id,
+                pendingUserTurnID: pending.id
+            ),
+            invocationID: try CoachInvocationID(
+                "inv-20260830T120000000Z-5KMN"
+            ),
+            attemptID: try CoachProviderAttemptID(
+                "atm-20260830T120000000Z-6NPQ"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000325"
+            )!
+        )
+        let row = ChatRowSnapshot(aggregate: processing)
+        let feature = RecordingPresentationChatFeature(
+            initial: ChatFeatureState(
+                catalog: .ready(
+                    ChatCatalogSnapshot(allRows: [row], visibleRows: [row])
+                ),
+                selection: .open(processing),
+                composer: .locked(processing.chat.draft, pending),
+                coachInvocationStopAuthority: authority,
+                activity: .invokingCoach(processing.chat.id)
+            )
+        )
+        let model = makeChatPresentationModel(feature: feature)
+        await model.start(in: scope)
+        let initialCommands = await feature.commands
+        let context = try XCTUnwrap(
+            startContexts(in: initialCommands).first
+        )
+
+        model.stopCoachResponse()
+        await waitForCommandCount(2, in: feature)
+
+        let commands = await feature.commands
+        XCTAssertEqual(
+            commands,
+            [.start(context), .stopCoachResponse(context, authority)]
         )
     }
 
@@ -954,6 +1085,7 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
              .cancelNewChat, .confirmNewChat,
              .rename, .open, .editDraft,
              .refreshContextQuote, .sendDraft,
+             .stopCoachResponse,
              .retryPendingUserTurn, .createNewChatFromCapacityFailure,
              .discardPendingUserTurn:
             break
