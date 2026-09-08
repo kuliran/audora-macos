@@ -664,6 +664,10 @@ public enum InvocationPublicationError: Error, Equatable, Sendable {
     case userTextMismatch
     case duplicateMessageID
     case freshDraftRequired
+    case replacementMemoryOwnerMismatch
+    case replacementMemoryIdentityReused
+    case replacementMemoryContentUnchanged
+    case replacementMemoryAttachmentMismatch
     case manifestRevisionOverflow
 }
 
@@ -675,6 +679,7 @@ public extension ChatAggregate {
         userMessage: ChatMessage,
         coachMessage: ChatMessage,
         freshDraft: ChatDraft,
+        replacementMemory: CoachMemory? = nil,
         at instant: UTCInstant
     ) throws -> ChatAggregate {
         try invocation.validate(against: self)
@@ -718,6 +723,23 @@ public extension ChatAggregate {
         else {
             throw InvocationPublicationError.freshDraftRequired
         }
+        if let replacementMemory {
+            guard replacementMemory.chatID == chat.id else {
+                throw InvocationPublicationError.replacementMemoryOwnerMismatch
+            }
+            guard replacementMemory.memoryID != memory.memoryID else {
+                throw InvocationPublicationError.replacementMemoryIdentityReused
+            }
+            guard !replacementMemory.hasSameCanonicalContent(as: memory) else {
+                throw InvocationPublicationError.replacementMemoryContentUnchanged
+            }
+            let attachmentIDs = Set(chat.attachments.values.map(\.attachmentID))
+            guard replacementMemory.sessionSummaries.allSatisfy({
+                attachmentIDs.contains($0.sessionAttachmentID)
+            }) else {
+                throw InvocationPublicationError.replacementMemoryAttachmentMismatch
+            }
+        }
         let (revision, overflow) = chat.manifestRevision.addingReportingOverflow(1)
         guard !overflow else { throw InvocationPublicationError.manifestRevisionOverflow }
         let replacement = try Chat(
@@ -731,8 +753,11 @@ public extension ChatAggregate {
             attachments: chat.attachments,
             draft: freshDraft,
             messageIDs: chat.messageIDs + [userMessage.id, coachMessage.id],
-            currentMemoryID: chat.currentMemoryID
+            currentMemoryID: replacementMemory?.memoryID ?? chat.currentMemoryID
         )
-        return try ChatAggregate(chat: replacement, memory: memory)
+        return try ChatAggregate(
+            chat: replacement,
+            memory: replacementMemory ?? memory
+        )
     }
 }

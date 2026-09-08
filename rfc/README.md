@@ -150,8 +150,9 @@ before its deterministic synthetic Provider can run. One stable Invocation may
 install at most four durable Provider Attempts, waiting exactly 5, 10, and 15
 seconds before transient retries and requesting at most one materially shorter
 complete response after overflow. Each Attempt has fresh Provider and publication
-authority while the prepared semantic exchange remains frozen. Its only successful
-effect is one atomic user/Coach message pair plus a fresh Draft; pre-commit
+authority while the prepared semantic exchange remains frozen. Its successful
+effect is one atomic user/Coach message pair, optional complete Coach Memory
+replacement, and a fresh Draft; pre-commit
 interruption, exhausted retries, an invalid complete response, or CAS conflict
 publishes neither message. Live composition still fails closed because the
 shipping Provider descriptor is not qualified. The current Attempt exposes one
@@ -164,17 +165,21 @@ receive fresh opaque handles, and one atomic all-or-none batch read may disclose
 only the allowlisted canonical transcript fields. The broker permits one exact
 transport replay, rejects any second semantic request, and revokes its capability
 when the Attempt ends. Live composition still does not launch because the shipping
-Provider descriptor remains unqualified; Profile and Memory response effects
-remain outside this executable slice. Every complete provider response remains
+Provider descriptor remains unqualified; evidence-block and Profile response
+effects remain outside this executable slice. Every complete provider response remains
 opaque until Application validates its closed schema, collector and token limits,
 passive Markdown, response-position authority, Memory bounds, evidence pointers,
 active Profile targets, and effect conflicts as one indivisible batch. Ordinary
 answers require at least one message block; the future Reconsider trigger may
-return none. The current publisher accepts only one plain Markdown block and fails
-closed on every otherwise-valid component assigned to later persistence slices;
-invalid or unsupported batches publish no message or state effect, receive no
-automatic repair Attempt, and retain only closed metadata diagnostics behind the
-bounded Pending-turn **Retry** and **Discard** card.
+return none. The current publisher accepts one plain Markdown block with an
+optional bounded Memory replacement. Omission or canonical equality retains the
+existing snapshot identity; a changed value is staged and selected by the same
+Chat-manifest compare-and-swap as the message pair, after which pointer-led recovery
+removes the superseded snapshot. It fails closed on evidence and Profile components
+assigned to later persistence slices. Invalid or unsupported batches publish no
+message or state effect, receive no automatic repair Attempt, and retain only
+closed metadata diagnostics behind the bounded Pending-turn **Retry** and
+**Discard** card.
 If the machine-local ledger rename succeeds but its parent-directory flush cannot
 prove durability, Audora treats the debit as possibly committed and preserves the
 exact Pending User Turn as interrupted and user-retryable; it never unlocks that

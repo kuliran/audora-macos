@@ -85,7 +85,12 @@ final class CoachContextPlannerTests: XCTestCase {
             profile: .object(["statements": .array([])]),
             memory: .object([
                 "generalNotes": .string("Memory"),
-                "sessionSummaries": .array([]),
+                "sessionSummaries": .array([
+                    .object([
+                        "notes": .string("Small Session summary"),
+                        "sessionAttachmentId": .string("attachment-small"),
+                    ]),
+                ]),
             ]),
             history: [
                 .user(text: "  exact user text\n"),
@@ -147,6 +152,12 @@ final class CoachContextPlannerTests: XCTestCase {
         XCTAssertTrue(request.contains(#"{"role":"coach","text":"First block\n\nSecond block"}"#))
         XCTAssertTrue(request.contains(#""trigger":{"kind":"userMessage","text":"Current Draft"}"#))
         XCTAssertEqual(request.components(separatedBy: "Current Draft").count - 1, 1)
+        XCTAssertTrue(
+            request.contains(
+                #""memory":{"generalNotes":"Memory","sessionSummaries":[{"notes":"Small Session summary","sessionAttachmentId":"attachment-small"}]}"#
+            )
+        )
+        XCTAssertEqual(request.components(separatedBy: "Small Session summary").count - 1, 1)
         let transcriptReadRequest = try XCTUnwrap(
             prepared.exchange.transcriptReadRequest
         )

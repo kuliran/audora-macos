@@ -754,6 +754,9 @@ final class DefaultInvocationsTests: XCTestCase {
             ),
             clock: FixedInvocationClock(instant: first.instant),
             identities: identities,
+            memoryIDGenerator: FixedInvocationMemoryIDs(
+                memoryID: first.replacementMemoryID
+            ),
             retrySleeper: RecordingInvocationRetrySleeper(),
             retryDiagnostics: RecordingInvocationRetryDiagnostics(),
             retryTiming: ScriptedInvocationRetryTiming(milliseconds: [0])
@@ -2016,22 +2019,82 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(events.first?.disposition, .userRetryableFailure)
     }
 
+    func testValidChangedMemoryPublishesWithTheCompleteTurn() async throws {
+        let raw = """
+        {
+          "messageBlocks":[{"kind":"markdown","markdown":"Use one deliberate pause."}],
+          "newMemory":{
+            "generalNotes":"Practice a deliberate pause before transitions.",
+            "sessionSummaries":[]
+          }
+        }
+        """
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .complete(CoachProviderCompleteResponse(body: Data(raw.utf8))),
+            ]
+        )
+
+        guard case let .published(published, _) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("valid changed Memory must publish atomically") }
+
+        XCTAssertEqual(
+            published.chat.messageIDs,
+            [fixture.userMessageID, fixture.coachMessageID]
+        )
+        XCTAssertEqual(
+            published.memory.memoryID,
+            fixture.replacementMemoryID
+        )
+        XCTAssertEqual(
+            published.memory.generalNotes,
+            "Practice a deliberate pause before transitions."
+        )
+        XCTAssertEqual(
+            published.chat.currentMemoryID,
+            fixture.replacementMemoryID
+        )
+        XCTAssertNil(published.pendingUserTurn)
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(publicationCount, 1)
+    }
+
+    func testOmittedOrCanonicallyEqualMemoryRetainsTheCurrentSnapshotIdentity()
+        async throws
+    {
+        let responses = [
+            #"{"messageBlocks":[{"kind":"markdown","markdown":"No replacement."}]}"#,
+            #"{"messageBlocks":[{"kind":"markdown","markdown":"Same replacement."}],"newMemory":{"generalNotes":"","sessionSummaries":[]}}"#,
+        ]
+
+        for raw in responses {
+            let fixture = try InvocationFixture(
+                contextWindow: 100_000,
+                providerOutcomes: [
+                    .complete(CoachProviderCompleteResponse(body: Data(raw.utf8))),
+                ]
+            )
+
+            guard case let .published(published, _) =
+                await fixture.invocations.tryInvoke(fixture.request)
+            else { return XCTFail("retained Memory response must publish") }
+
+            XCTAssertEqual(published.memory, fixture.initial.memory)
+            XCTAssertEqual(
+                published.chat.currentMemoryID,
+                fixture.initial.chat.currentMemoryID
+            )
+        }
+    }
+
     func testValidatedButUnsupportedEffectsFailClosedWithoutPartialMessagePublication()
         async throws
     {
         let validUnsupportedResponses: [
             (body: String, includesTranscript: Bool, activeProfileIDs: [String])
         ] = [
-            (
-                """
-                {
-                  "messageBlocks":[{"kind":"markdown","markdown":"Do not publish alone."}],
-                  "newMemory":{"generalNotes":"Remember this.","sessionSummaries":[]}
-                }
-                """,
-                false,
-                []
-            ),
             (
                 """
                 {
@@ -3213,6 +3276,9 @@ private final class InvocationFixture: @unchecked Sendable {
     let userMessageID = try! ChatMessageID("msg-20260830T120000000Z-7RST")
     let coachMessageID = try! ChatMessageID("msg-20260830T120000000Z-8VWX")
     let freshDraftID = try! ChatDraftID("drf-20260830T120000000Z-9YZ0")
+    let replacementMemoryID = try! CoachMemoryID(
+        "mem-20260830T120001000Z-1BCD"
+    )
 
     init(
         contextWindow: Int,
@@ -3323,6 +3389,9 @@ private final class InvocationFixture: @unchecked Sendable {
             coachContext: DefaultCoachContextFeature(source: contextSource),
             clock: clock ?? FixedInvocationClock(instant: instant),
             identities: identityGenerator ?? defaultIdentities,
+            memoryIDGenerator: FixedInvocationMemoryIDs(
+                memoryID: replacementMemoryID
+            ),
             retrySleeper: invocationRetrySleeper ?? sleeper,
             retryDiagnostics: diagnostics,
             retryTiming: retryTiming ?? ScriptedInvocationRetryTiming(
@@ -3330,6 +3399,14 @@ private final class InvocationFixture: @unchecked Sendable {
             ),
             transcriptAvailability: transcriptAvailability
         )
+    }
+}
+
+private struct FixedInvocationMemoryIDs: CoachMemoryIDGenerator {
+    let memoryID: CoachMemoryID
+
+    func generateCoachMemoryID(at instant: UTCInstant) async -> CoachMemoryID {
+        memoryID
     }
 }
 

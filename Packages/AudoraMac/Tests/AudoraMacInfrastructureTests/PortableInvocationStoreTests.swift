@@ -27,6 +27,140 @@ private extension PortableInvocationStore {
 }
 
 final class PortableInvocationStoreTests: XCTestCase {
+    func testPublicationAtomicallySwitchesMemoryAndRemovesSupersededSnapshot()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(in: parent)
+            let store = PortableInvocationStore(workspace: fixture.workspace)
+            guard case let .opened(pendingSession) = await store
+                .openPendingInvocation(fixture.install.authority.request),
+                case let .installed(activeSession) = await pendingSession.install(
+                    fixture.install
+                )
+            else { return XCTFail("Invocation was not installed") }
+
+            let priorMemoryID = fixture.locked.memory.memoryID
+            let replacementMemory = try CoachMemory(
+                memoryID: CoachMemoryID("mem-20260830T120004000Z-3DEF"),
+                chatID: fixture.locked.chat.id,
+                generalNotes: "Remember the transition pause.",
+                sessionSummaries: [],
+                attachments: fixture.locked.chat.attachments
+            )
+            let publication = try PublishCoachInvocationMutation(
+                base: activeSession.processingAggregate,
+                invocation: activeSession.invocation,
+                coachMarkdown: "Use one deliberate pause.",
+                replacementMemory: replacementMemory,
+                completedAt: UTCInstant("2026-08-30T12:00:04.000Z")
+            )
+
+            guard case let .committed(published) = await activeSession.publish(
+                publication
+            ) else { return XCTFail("Memory replacement did not commit") }
+
+            XCTAssertEqual(published.memory, replacementMemory)
+            XCTAssertEqual(
+                published.chat.currentMemoryID,
+                replacementMemory.memoryID
+            )
+            let memoryRoot = fixture.root
+                .appendingPathComponent("chats", isDirectory: true)
+                .appendingPathComponent(published.chat.id.rawValue, isDirectory: true)
+                .appendingPathComponent("memory", isDirectory: true)
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(atPath: memoryRoot.path),
+                ["\(replacementMemory.memoryID.rawValue).json"]
+            )
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: memoryRoot
+                        .appendingPathComponent("\(priorMemoryID.rawValue).json")
+                        .path
+                )
+            )
+        }
+    }
+
+    func testMemoryPublicationCrashRecoveryKeepsOnlyThePointerSelectedSnapshot()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let precommitParent = parent.appendingPathComponent(
+                "memory-precommit",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: precommitParent,
+                withIntermediateDirectories: false
+            )
+            let precommit = try replacementMemoryFixture(
+                await makeInvocationStoreFixture(
+                    in: precommitParent,
+                    libraryID: "lib-20260830T120100000Z-2ABC"
+                )
+            )
+            let precommitCrash = await leavePrecommitPublicationForRelaunch(
+                precommit,
+                at: .afterMemoryInstall
+            )
+            XCTAssertEqual(precommitCrash.outcome, .failed)
+            let precommitWorkspace = try await relaunchedWorkspace(for: precommit)
+            let precommitStore = PortableChatStore(workspace: precommitWorkspace)
+            guard case let .loaded(precommitReopened) = await precommitStore.load(
+                precommit.locked.chat.id,
+                in: precommit.scope
+            ) else { return XCTFail("precommit Memory crash froze the Chat") }
+            XCTAssertEqual(precommitReopened.memory, precommit.locked.memory)
+            XCTAssertEqual(precommitReopened.chat.messageIDs, [])
+            try assertOnlyCurrentMemoryExists(
+                in: precommit,
+                currentMemoryID: precommit.locked.memory.memoryID
+            )
+
+            let committedParent = parent.appendingPathComponent(
+                "memory-committed",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: committedParent,
+                withIntermediateDirectories: false
+            )
+            let committed = try replacementMemoryFixture(
+                await makeInvocationStoreFixture(
+                    in: committedParent,
+                    libraryID: "lib-20260830T120200000Z-2ABC"
+                )
+            )
+            let committedCrash = await leaveCommittedPublicationForRelaunch(
+                committed
+            )
+            XCTAssertEqual(committedCrash.outcome, .failed)
+            let committedWorkspace = try await relaunchedWorkspace(for: committed)
+            let committedStore = PortableChatStore(workspace: committedWorkspace)
+            guard case let .loaded(committedReopened) = await committedStore.load(
+                committed.locked.chat.id,
+                in: committed.scope
+            ) else { return XCTFail("committed Memory crash froze the Chat") }
+            let expectedMemory = try XCTUnwrap(
+                committed.publication.replacementMemory
+            )
+            XCTAssertEqual(committedReopened.memory, expectedMemory)
+            XCTAssertEqual(
+                committedReopened.chat.messageIDs,
+                [
+                    committed.publication.userMessage.id,
+                    committed.publication.coachMessage.id,
+                ]
+            )
+            try assertOnlyCurrentMemoryExists(
+                in: committed,
+                currentMemoryID: expectedMemory.memoryID
+            )
+        }
+    }
+
     func testV4InvocationAndProofPersistNoProviderTransportAuthority() async throws {
         try await withTemporaryParent { parent in
             let handle = try CoachProviderTranscriptHandle(
@@ -5819,6 +5953,61 @@ final class PortableInvocationStoreTests: XCTestCase {
         }
         await release.waitUntilReleased()
         return (outcome, true)
+    }
+
+    private func replacementMemoryFixture(
+        _ fixture: InvocationStoreFixture
+    ) throws -> InvocationStoreFixture {
+        let memory = try CoachMemory(
+            memoryID: CoachMemoryID("mem-20260830T120004000Z-3DEF"),
+            chatID: fixture.locked.chat.id,
+            generalNotes: "Remember the transition pause.",
+            sessionSummaries: [],
+            attachments: fixture.locked.chat.attachments
+        )
+        return InvocationStoreFixture(
+            root: fixture.root,
+            scope: fixture.scope,
+            workspace: fixture.workspace,
+            locked: fixture.locked,
+            install: fixture.install,
+            publication: try PublishCoachInvocationMutation(
+                base: fixture.install.processingAggregate,
+                invocation: fixture.install.invocation,
+                coachMarkdown: "Use one deliberate pause.",
+                replacementMemory: memory,
+                completedAt: UTCInstant("2026-08-30T12:00:04.000Z")
+            ),
+            competingAuthority: nil
+        )
+    }
+
+    private func relaunchedWorkspace(
+        for fixture: InvocationStoreFixture
+    ) async throws -> PortableLibraryWorkspace {
+        let workspace = PortableLibraryWorkspace(
+            locations: QueueLocations(existing: [fixture.root]),
+            bookmarks: SyntheticBookmarks(),
+            access: RecordingAccessGrantor(),
+            locatorStore: MemoryLocatorStore(),
+            revealer: RecordingRevealer()
+        )
+        _ = await workspace.chooseLibrary()
+        return workspace
+    }
+
+    private func assertOnlyCurrentMemoryExists(
+        in fixture: InvocationStoreFixture,
+        currentMemoryID: CoachMemoryID
+    ) throws {
+        let memoryRoot = fixture.root
+            .appendingPathComponent("chats", isDirectory: true)
+            .appendingPathComponent(fixture.locked.chat.id.rawValue, isDirectory: true)
+            .appendingPathComponent("memory", isDirectory: true)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: memoryRoot.path),
+            ["\(currentMemoryID.rawValue).json"]
+        )
     }
 
     private func makeInvocationStoreFixture(

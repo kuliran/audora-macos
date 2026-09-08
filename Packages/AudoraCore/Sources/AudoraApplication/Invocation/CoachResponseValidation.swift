@@ -194,6 +194,34 @@ struct ValidatedCoachResponseMemory: Equatable, Sendable {
             }),
         ])
     }
+
+    func hasSameCanonicalContent(as memory: CoachMemory) -> Bool {
+        generalNotes == memory.generalNotes &&
+            sessionSummaries == memory.sessionSummaries.map {
+                ValidatedCoachResponseMemorySummary(
+                    sessionAttachmentID: $0.sessionAttachmentID,
+                    notes: $0.notes
+                )
+            }
+    }
+
+    func materialize(
+        memoryID: CoachMemoryID,
+        for aggregate: ChatAggregate
+    ) throws -> CoachMemory {
+        try CoachMemory(
+            memoryID: memoryID,
+            chatID: aggregate.chat.id,
+            generalNotes: generalNotes,
+            sessionSummaries: sessionSummaries.map {
+                CoachMemorySessionSummary(
+                    sessionAttachmentID: $0.sessionAttachmentID,
+                    notes: $0.notes
+                )
+            },
+            attachments: aggregate.chat.attachments
+        )
+    }
 }
 
 enum ValidatedCoachProfileEdit: Equatable, Sendable {
@@ -232,12 +260,11 @@ struct ValidatedCoachResponse: Equatable, Sendable {
         return messageBlocks.map(\.markdown).joined(separator: "\n\n")
     }
 
-    /// #28, #29, and #30 add durable Memory, evidence-block, and Profile-effect
-    /// publication. Until then, fail closed rather than silently dropping a
-    /// validated component while publishing its message.
+    /// #29 and #30 add evidence-block and Profile-effect publication. Until
+    /// then, fail closed rather than silently dropping a validated component
+    /// while publishing its message and optional Memory replacement.
     var isSupportedByCurrentPublicationSlice: Bool {
-        newMemory == nil &&
-            proposedProfileEdits.isEmpty &&
+        proposedProfileEdits.isEmpty &&
             appendedProfileEvidence.isEmpty &&
             messageBlocks.count == 1 &&
             messageBlocks.allSatisfy(\.isPlainMarkdown)

@@ -101,6 +101,7 @@ struct AudoraApp: App {
             admission: MachineInvocationAdmissionFactory.live(),
             clock: SystemLibraryClock(),
             identities: RandomInvocationIdentityGenerator(),
+            memoryIDGenerator: chatIdentityGenerator,
             retryDiagnostics: retryDiagnostics,
             transcriptAvailability:
                 PortableAttemptTranscriptAvailabilitySource.make(

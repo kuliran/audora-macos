@@ -599,6 +599,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
     public let userMessage: ChatMessage
     public let coachMessage: ChatMessage
     public let freshDraft: ChatDraft
+    public let replacementMemory: CoachMemory?
     public let replacement: ChatAggregate
 
     /// Internal construction seam for persistence tests over app-owned
@@ -608,6 +609,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         base: ChatAggregate,
         invocation: CoachInvocation,
         coachMarkdown: String,
+        replacementMemory: CoachMemory? = nil,
         completedAt: UTCInstant
     ) throws {
         self.base = base
@@ -634,11 +636,13 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
             text: "",
             updatedAt: completedAt
         )
+        self.replacementMemory = replacementMemory
         replacement = try base.publishingTurn(
             invocation: invocation,
             userMessage: userMessage,
             coachMessage: coachMessage,
             freshDraft: freshDraft,
+            replacementMemory: replacementMemory,
             at: completedAt
         )
     }
@@ -647,10 +651,16 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         base: ChatAggregate,
         invocation: CoachInvocation,
         validatedResponse: ValidatedCoachResponse,
+        replacementMemory: CoachMemory?,
         completedAt: UTCInstant
     ) throws {
         guard validatedResponse.isSupportedByCurrentPublicationSlice,
-              let markdown = validatedResponse.publicationMarkdown
+              let markdown = validatedResponse.publicationMarkdown,
+              Self.matchesValidatedMemory(
+                  validatedResponse.newMemory,
+                  replacement: replacementMemory,
+                  base: base.memory
+              )
         else {
             throw PublishCoachInvocationMutationError.unsupportedResponseComponent
         }
@@ -658,8 +668,22 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
             base: base,
             invocation: invocation,
             coachMarkdown: markdown,
+            replacementMemory: replacementMemory,
             completedAt: completedAt
         )
+    }
+
+    private static func matchesValidatedMemory(
+        _ validated: ValidatedCoachResponseMemory?,
+        replacement: CoachMemory?,
+        base: CoachMemory
+    ) -> Bool {
+        guard let validated else { return replacement == nil }
+        if validated.hasSameCanonicalContent(as: base) {
+            return replacement == nil
+        }
+        guard let replacement else { return false }
+        return validated.hasSameCanonicalContent(as: replacement)
     }
 
     init(
@@ -1488,6 +1512,7 @@ public actor DefaultInvocations: Invocations {
     private let coachContext: any CoachContextCoordinating
     private let clock: any ChatClock
     private let identities: any InvocationIdentityGenerating
+    private let memoryIDGenerator: any CoachMemoryIDGenerator
     private let retrySleeper: any InvocationRetrySleeping
     private let retryDiagnostics: any InvocationRetryDiagnostics
     private let retryTiming: any InvocationRetryTiming
@@ -1512,6 +1537,7 @@ public actor DefaultInvocations: Invocations {
         coachContext: any CoachContextCoordinating,
         clock: any ChatClock,
         identities: any InvocationIdentityGenerating,
+        memoryIDGenerator: any CoachMemoryIDGenerator,
         retrySleeper: any InvocationRetrySleeping = TaskInvocationRetrySleeper(),
         retryDiagnostics: any InvocationRetryDiagnostics =
             DiscardingInvocationRetryDiagnostics(),
@@ -1524,6 +1550,7 @@ public actor DefaultInvocations: Invocations {
         self.coachContext = coachContext
         self.clock = clock
         self.identities = identities
+        self.memoryIDGenerator = memoryIDGenerator
         self.retrySleeper = retrySleeper
         self.retryDiagnostics = retryDiagnostics
         self.retryTiming = retryTiming
@@ -1539,6 +1566,7 @@ public actor DefaultInvocations: Invocations {
         admission: any InvocationAdmissionPort,
         clock: any ChatClock,
         identities: any InvocationIdentityGenerating,
+        memoryIDGenerator: any CoachMemoryIDGenerator,
         retrySleeper: any InvocationRetrySleeping = TaskInvocationRetrySleeper(),
         retryDiagnostics: any InvocationRetryDiagnostics =
             DiscardingInvocationRetryDiagnostics(),
@@ -1551,6 +1579,7 @@ public actor DefaultInvocations: Invocations {
         coachContext = DefaultCoachContextFeature()
         self.clock = clock
         self.identities = identities
+        self.memoryIDGenerator = memoryIDGenerator
         self.retrySleeper = retrySleeper
         self.retryDiagnostics = retryDiagnostics
         self.retryTiming = retryTiming
@@ -2478,10 +2507,16 @@ public actor DefaultInvocations: Invocations {
                 completedProviderResponse.response,
                 in: validationContext
             )
+            let replacementMemory = try await replacementMemory(
+                from: validatedResponse,
+                base: processingAggregate,
+                at: completedAt
+            )
             publication = try PublishCoachInvocationMutation(
                 base: processingAggregate,
                 invocation: invocation,
                 validatedResponse: validatedResponse,
+                replacementMemory: replacementMemory,
                 completedAt: completedAt
             )
         } catch {
@@ -2541,6 +2576,23 @@ public actor DefaultInvocations: Invocations {
                 startedAt: completedProviderResponse.startedAtMilliseconds
             )
         }
+    }
+
+    private func replacementMemory(
+        from response: ValidatedCoachResponse,
+        base: ChatAggregate,
+        at instant: UTCInstant
+    ) async throws -> CoachMemory? {
+        guard let value = response.newMemory,
+              !value.hasSameCanonicalContent(as: base.memory)
+        else { return nil }
+
+        for _ in 0 ..< Self.maximumLaunchIdentityCandidates {
+            let memoryID = await memoryIDGenerator.generateCoachMemoryID(at: instant)
+            guard memoryID != base.memory.memoryID else { continue }
+            return try value.materialize(memoryID: memoryID, for: base)
+        }
+        throw InvocationPublicationError.replacementMemoryIdentityReused
     }
 
     private static func completeResponseDiagnosticReason(

@@ -1394,6 +1394,50 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
+    func testCorruptCurrentMemoryFreezesWithoutFallingBackToAHealthySnapshot()
+        throws
+    {
+        try withCreatedChat { root, scope, aggregate in
+            let memoryRoot = chatRoot(root, aggregate.chat.id)
+                .appendingPathComponent("memory", isDirectory: true)
+            let healthyPrior = try CoachMemory(
+                memoryID: CoachMemoryID("mem-20260830T120100000Z-5KMN"),
+                chatID: aggregate.chat.id,
+                generalNotes: "A healthy but unreferenced prior snapshot.",
+                sessionSummaries: [],
+                attachments: aggregate.chat.attachments
+            )
+            let healthyPriorURL = memoryRoot.appendingPathComponent(
+                "\(healthyPrior.memoryID.rawValue).json"
+            )
+            try PortableChatPersistence().encodeMemory(healthyPrior).write(
+                to: healthyPriorURL
+            )
+            let currentURL = memoryRoot.appendingPathComponent(
+                "\(aggregate.memory.memoryID.rawValue).json"
+            )
+            let corruptBytes = Data(#"{"schemaVersion":1,"broken":true}"#.utf8)
+            try corruptBytes.write(to: currentURL)
+
+            XCTAssertEqual(
+                try PortableChatPersistence().load(
+                    aggregate.chat.id,
+                    at: root,
+                    in: scope
+                ),
+                .frozen(FrozenChatSnapshot(
+                    chatID: aggregate.chat.id,
+                    reason: .corrupt
+                ))
+            )
+            XCTAssertEqual(try Data(contentsOf: currentURL), corruptBytes)
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: healthyPriorURL.path),
+                "freezing must not select or clean a different Memory snapshot"
+            )
+        }
+    }
+
     func testRelaunchStructurallyRemovesUnreferencedChatArtifactsWithoutRecencySelection() throws {
         try withCreatedChat { root, scope, aggregate in
             let publications = root.appendingPathComponent("staging/publications", isDirectory: true)

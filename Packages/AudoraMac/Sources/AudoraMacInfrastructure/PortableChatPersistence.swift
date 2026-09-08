@@ -4266,6 +4266,16 @@ public struct PortableChatPersistence: @unchecked Sendable {
         else { return .stale(current) }
         try installPublicationProof(proof, under: invocationRoot)
 
+        let memoryDescriptor = try openDirectory(named: "memory", under: chatDescriptor)
+        defer { Darwin.close(memoryDescriptor) }
+        if let replacementMemory = mutation.replacementMemory {
+            try revalidateLiveness()
+            try installMemory(
+                replacementMemory,
+                under: memoryDescriptor
+            )
+        }
+
         let messagesDescriptor = try openDirectory(named: "messages", under: chatDescriptor)
         defer { Darwin.close(messagesDescriptor) }
         try revalidateLiveness()
@@ -6568,6 +6578,33 @@ public struct PortableChatPersistence: @unchecked Sendable {
         partialExists = false
         try flushDescriptor(messagesDescriptor)
         try fault(installedFault)
+    }
+
+    private func installMemory(
+        _ memory: CoachMemory,
+        under memoryDescriptor: Int32
+    ) throws {
+        let finalName = "\(memory.memoryID.rawValue).json"
+        if try entryExists(named: finalName, under: memoryDescriptor) {
+            guard try boundedData(named: finalName, under: memoryDescriptor) ==
+                (try encodeMemory(memory))
+            else {
+                throw PortableChatPersistenceError.collision
+            }
+            return
+        }
+        try writeNewRoot(
+            encodeMemory(memory),
+            named: finalName,
+            under: memoryDescriptor,
+            points: (
+                .beforeMemoryPartialWrite,
+                .afterMemoryPartialWrite,
+                .afterMemoryFileFlush,
+                .afterMemoryInstall,
+                .afterMemoryDirectoryFlush
+            )
+        )
     }
 
     private func installPublicationProof(

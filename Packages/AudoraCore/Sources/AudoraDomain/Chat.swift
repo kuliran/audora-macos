@@ -499,6 +499,13 @@ public struct CoachMemory: Equatable, Sendable {
         self.generalNotes = generalNotes
         self.sessionSummaries = sessionSummaries
     }
+
+    /// Compares the canonical provider-authored payload while deliberately
+    /// ignoring the app-assigned snapshot identity and owning Chat identity.
+    public func hasSameCanonicalContent(as other: CoachMemory) -> Bool {
+        generalNotes == other.generalNotes &&
+            sessionSummaries == other.sessionSummaries
+    }
 }
 
 public enum ChatAggregateError: Error, Equatable, Sendable {

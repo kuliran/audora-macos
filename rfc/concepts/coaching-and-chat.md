@@ -44,7 +44,7 @@ Attempts, cancellation, and terminal failure creation. Chat, Proposal, and futur
 maintenance use cases submit stable entity IDs and an `InvocationIntent`; they do
 not duplicate these checks or construct provider DTOs.
 
-The current #27 vertical slice implements `answerPendingUserTurn` with a bounded
+The current #28 vertical slice implements `answerPendingUserTurn` with a bounded
 deterministic synthetic provider. It durably claims the rolling ledger, installs
 one portable Invocation, persists each fresh Provider Attempt before launch,
 retries transient failures on the 5/10/15-second schedule, permits at most one
@@ -56,9 +56,12 @@ It treats the complete provider result as opaque bytes until one whole-response
 trust gate has checked encoding, duplicate keys, closed schema, exact admitted
 byte/token limits, Markdown, Memory, evidence, Profile targets, and effect
 conflicts. The current publisher can durably represent exactly one plain Markdown
-block; any otherwise-valid structured block, Memory, or Profile effect fails
-closed as one batch until its later persistence slice exists. Real provider
-adapters and Reconsider remain owned by their later slices.
+block plus an optional complete Memory replacement. Omission or canonical equality
+retains the selected snapshot; a changed value switches with the successful turn
+and pointer-led recovery deletes staged or superseded snapshots. Any otherwise-valid
+structured evidence block or Profile effect fails closed as one batch until its
+later persistence slice exists. Real provider adapters and Reconsider remain owned
+by their later slices.
 
 ```text
 InvocationIntent
@@ -498,10 +501,11 @@ grounds attached-Session claims only in complete supplied transcripts, requests 
 needed on-demand handles in one logical call, and forbids split, reordered, narrowed,
 or retried semantic reads. A non-complete read must not be answered around, and a
 detected Session conflation asks the user to send the message again. The adapter and
-broker independently enforce the atomic batch and sole exact transport redelivery;
-Session-analysis Memory/Profile publication remains outside this slice, but the
-complete response validator still rejects invalid Memory, evidence, and Profile
-components before any message may publish.
+broker independently enforce the atomic batch and sole exact transport redelivery.
+The complete response validator rejects invalid Memory, evidence, and Profile
+components before any message may publish; valid Memory replacement is now part of
+the turn transaction, while evidence and Profile publication remain outside this
+slice.
 
 A non-complete read does not permit an incomplete coach answer. Audora terminates
 the Attempt and creates a user-retryable application failure. For unavailable

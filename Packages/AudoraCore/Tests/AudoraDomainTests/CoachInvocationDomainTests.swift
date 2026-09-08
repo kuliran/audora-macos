@@ -46,6 +46,44 @@ final class CoachInvocationDomainTests: XCTestCase {
         XCTAssertEqual(published.memory, fixture.aggregate.memory)
     }
 
+    func testPublicationAtomicallySwitchesToAReplacementCoachMemory() throws {
+        let fixture = try Fixture()
+        let replacementMemory = try CoachMemory(
+            memoryID: CoachMemoryID("mem-20260830T120001000Z-1BCD"),
+            chatID: fixture.aggregate.chat.id,
+            generalNotes: "Practice a deliberate pause before transitions.",
+            sessionSummaries: [],
+            attachments: fixture.aggregate.chat.attachments
+        )
+
+        let published = try fixture.aggregate.publishingTurn(
+            invocation: fixture.invocation(),
+            userMessage: ChatMessage(
+                id: fixture.userMessageID,
+                responsePositionID: fixture.pending.responsePositionID,
+                content: .user(text: fixture.aggregate.chat.draft.text),
+                createdAt: fixture.instant
+            ),
+            coachMessage: ChatMessage(
+                id: fixture.coachMessageID,
+                responsePositionID: fixture.pending.responsePositionID,
+                content: .coach(markdown: "A concise answer."),
+                coachProfile: fixture.profile,
+                createdAt: fixture.instant
+            ),
+            freshDraft: fixture.freshDraft(),
+            replacementMemory: replacementMemory,
+            at: fixture.instant
+        )
+
+        XCTAssertEqual(published.memory, replacementMemory)
+        XCTAssertEqual(
+            published.chat.currentMemoryID,
+            replacementMemory.memoryID
+        )
+        XCTAssertNil(published.pendingUserTurn)
+    }
+
     func testPublicationRejectsStaleResponsePositionAndWrongUserText() throws {
         let fixture = try Fixture()
         let invocation = try fixture.invocation()

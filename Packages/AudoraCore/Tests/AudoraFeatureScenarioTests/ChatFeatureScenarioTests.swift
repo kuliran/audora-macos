@@ -1423,6 +1423,7 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
             coachContext: DefaultCoachContextFeature(source: source),
             clock: ScenarioInvocationClock(),
             identities: try ScenarioInvocationIdentities(),
+            memoryIDGenerator: ScenarioInvocationMemoryIDs(),
             transcriptAvailability: transcriptAvailability
         )
     }
@@ -2150,6 +2151,12 @@ private struct ScenarioInvocationIdentities: InvocationIdentityGenerating {
                 )
             }
         )
+    }
+}
+
+private struct ScenarioInvocationMemoryIDs: CoachMemoryIDGenerator {
+    func generateCoachMemoryID(at instant: UTCInstant) async -> CoachMemoryID {
+        try! CoachMemoryID("mem-20260830T120004000Z-3DEF")
     }
 }
 
