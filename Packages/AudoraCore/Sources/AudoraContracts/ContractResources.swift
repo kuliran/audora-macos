@@ -60,6 +60,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case cancelDuringAttachmentResolutionScenario
     case suspendedLibrarySwitchChatScenario
     case stopReapsAndRejectsLateCoachResultScenario
+    case invalidCompleteResponseRejectsBatchScenario
     case onDemandTranscriptMixedAvailabilityChatScenario
     case libraryLaunchNoSelectionScenario
     case libraryCreateScenario
@@ -139,6 +140,14 @@ public enum ContractResource: CaseIterable, Sendable {
     case pendingUserTurnLegacyV3Example
     case pendingUserTurnTranscriptReadFailureExample
     case coachContextQuoteExample
+    case coachResponseAnswerExample
+    case coachResponseFullBatchExample
+    case coachResponseReconsiderNoMessageExample
+    case rejectedCoachResponseEmptyMessageBlocks
+    case rejectedCoachResponseMissingMarkdown
+    case rejectedCoachResponseNullMemory
+    case rejectedCoachResponseUnknownKey
+    case rejectedCoachResponseWrongKind
     case renamedEmptyDevelopmentChatExample
     case sessionAnalysisChatExample
     case rejectedChatExplicitNullOrigin
@@ -303,6 +312,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "library-switch-during-suspended-load.v1.json"
         case .stopReapsAndRejectsLateCoachResultScenario:
             "stop-reaps-and-rejects-late-result.v1.json"
+        case .invalidCompleteResponseRejectsBatchScenario:
+            "invalid-complete-response-rejects-batch.v1.json"
         case .onDemandTranscriptMixedAvailabilityChatScenario:
             "on-demand-transcript-mixed-availability.v1.json"
         case .libraryLaunchNoSelectionScenario:
@@ -455,6 +466,22 @@ public enum ContractResource: CaseIterable, Sendable {
             "pending-user-turn-transcript-read-failure.json"
         case .coachContextQuoteExample:
             "quote.json"
+        case .coachResponseAnswerExample:
+            "answer.json"
+        case .coachResponseFullBatchExample:
+            "full-batch.json"
+        case .coachResponseReconsiderNoMessageExample:
+            "reconsider-no-message.json"
+        case .rejectedCoachResponseEmptyMessageBlocks:
+            "empty-message-blocks.json"
+        case .rejectedCoachResponseMissingMarkdown:
+            "missing-markdown.json"
+        case .rejectedCoachResponseNullMemory:
+            "null-memory.json"
+        case .rejectedCoachResponseUnknownKey:
+            "unknown-key.json"
+        case .rejectedCoachResponseWrongKind:
+            "wrong-kind.json"
         case .renamedEmptyDevelopmentChatExample:
             "renamed-chat.json"
         case .sessionAnalysisChatExample:
@@ -574,6 +601,7 @@ public enum ContractResource: CaseIterable, Sendable {
              .cancelDuringAttachmentResolutionScenario,
              .suspendedLibrarySwitchChatScenario,
              .stopReapsAndRejectsLateCoachResultScenario,
+             .invalidCompleteResponseRejectsBatchScenario,
              .onDemandTranscriptMixedAvailabilityChatScenario:
             "Scenarios/Chat"
         case .libraryLaunchNoSelectionScenario:
@@ -642,6 +670,15 @@ public enum ContractResource: CaseIterable, Sendable {
             "Examples/Invocation/v1"
         case .coachContextQuoteExample:
             "Examples/CoachContext/v1"
+        case .coachResponseAnswerExample, .coachResponseFullBatchExample,
+             .coachResponseReconsiderNoMessageExample:
+            "Examples/CoachResponse/v1"
+        case .rejectedCoachResponseEmptyMessageBlocks,
+             .rejectedCoachResponseMissingMarkdown,
+             .rejectedCoachResponseNullMemory,
+             .rejectedCoachResponseUnknownKey,
+             .rejectedCoachResponseWrongKind:
+            "Examples/CoachResponse/v1/rejected"
         case .rejectedChatExplicitNullOrigin, .rejectedChatMissingAttachments,
              .rejectedNewChatWithOrigin, .rejectedNewerChatSchema,
              .rejectedChatUnknownKey, .rejectedDanglingMemorySummary:

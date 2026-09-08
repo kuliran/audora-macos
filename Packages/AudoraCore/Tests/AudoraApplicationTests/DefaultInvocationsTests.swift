@@ -1460,9 +1460,9 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(requests.map(\.attemptKind), [
             .standard, .standard, .shorterRepair,
         ])
-        XCTAssertEqual(requests.map(\.outputTokenCeiling), [4, 4, 4])
+        XCTAssertEqual(requests.map(\.outputTokenCeiling), [512, 512, 512])
         let baseInstruction = DefaultInvocations.pinnedInstruction(
-            outputTokenCeiling: 4
+            outputTokenCeiling: 512
         )
         XCTAssertEqual(
             requests.map(\.pinnedInstruction),
@@ -1961,6 +1961,168 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(ordinals, [1])
         XCTAssertEqual(delays, [])
         XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testInvalidOptionalResponseComponentRejectsWholeBatchWithoutLeakingProviderProse()
+        async throws
+    {
+        let sentinel = "PRIVATE-PROVIDER-PROSE-MUST-NOT-PUBLISH"
+        let raw = """
+        {
+          "messageBlocks":[{"kind":"markdown","markdown":"\(sentinel)"}],
+          "newMemory":{
+            "generalNotes":"valid",
+            "sessionSummaries":[
+              {"sessionAttachmentId":"not-attached","notes":"invalid target"}
+            ]
+          }
+        }
+        """
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .complete(CoachProviderCompleteResponse(body: Data(raw.utf8))),
+            ]
+        )
+
+        guard case let .interrupted(aggregate, .invalidProviderResponse) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("one invalid component must reject the whole batch") }
+
+        let interrupted = try XCTUnwrap(aggregate)
+        XCTAssertEqual(interrupted.chat.messageIDs, [])
+        XCTAssertEqual(interrupted.chat.draft, fixture.initial.chat.draft)
+        XCTAssertEqual(interrupted.memory, fixture.initial.memory)
+        XCTAssertEqual(interrupted.pendingUserTurn?.id, fixture.pending.id)
+        XCTAssertEqual(
+            interrupted.pendingUserTurn?.failure,
+            .coachResponseInvalid
+        )
+        XCTAssertFalse(
+            interrupted.chat.messageIDs.contains(where: {
+                $0.rawValue.contains(sentinel)
+            })
+        )
+        let ordinals = await fixture.provider.recordedAttemptOrdinals()
+        let delays = await fixture.sleeper.recordedDelays()
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(ordinals, [1])
+        XCTAssertEqual(delays, [])
+        XCTAssertEqual(publicationCount, 0)
+        let events = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.reason, .responseMemoryInvalid)
+        XCTAssertEqual(events.first?.classification, .invalidProviderResponse)
+        XCTAssertEqual(events.first?.disposition, .userRetryableFailure)
+    }
+
+    func testValidatedButUnsupportedEffectsFailClosedWithoutPartialMessagePublication()
+        async throws
+    {
+        let validUnsupportedResponses: [
+            (body: String, includesTranscript: Bool, activeProfileIDs: [String])
+        ] = [
+            (
+                """
+                {
+                  "messageBlocks":[{"kind":"markdown","markdown":"Do not publish alone."}],
+                  "newMemory":{"generalNotes":"Remember this.","sessionSummaries":[]}
+                }
+                """,
+                false,
+                []
+            ),
+            (
+                """
+                {
+                  "messageBlocks":[{"kind":"markdown","markdown":"Do not publish alone."}],
+                  "proposeProfileEdits":[{
+                    "edit":{
+                      "kind":"add",
+                      "statementKind":"growthDirection",
+                      "wording":"Pause before each new point."
+                    }
+                  }]
+                }
+                """,
+                false,
+                []
+            ),
+            (
+                """
+                {
+                  "messageBlocks":[{
+                    "kind":"evidenceObservation",
+                    "markdown":"Do not publish alone.",
+                    "evidence":[{
+                      "sessionAttachmentId":"attachment-1",
+                      "target":{"kind":"wordRange","startWordId":"word-1","endWordId":"word-1"}
+                    }]
+                  }]
+                }
+                """,
+                true,
+                []
+            ),
+            (
+                """
+                {
+                  "messageBlocks":[{"kind":"markdown","markdown":"Do not publish alone."}],
+                  "appendProfileEvidence":[{
+                    "targetStatementId":"profile-1",
+                    "evidence":[{
+                      "sessionAttachmentId":"attachment-1",
+                      "target":{"kind":"audioEvent","audioEventId":"audio-1"}
+                    }]
+                  }]
+                }
+                """,
+                true,
+                ["profile-1"]
+            ),
+        ]
+
+        for (index, response) in validUnsupportedResponses.enumerated() {
+            let fixture = try InvocationFixture(
+                contextWindow: 100_000,
+                providerOutcomes: [
+                    .complete(
+                        CoachProviderCompleteResponse(
+                            body: Data(response.body.utf8)
+                        )
+                    ),
+                ],
+                includesOnDemandAttachment: response.includesTranscript,
+                activeProfileStatementIDs: response.activeProfileIDs
+            )
+
+            let outcome = await fixture.invocations.tryInvoke(fixture.request)
+            guard case let .interrupted(aggregate, .invalidProviderResponse) =
+                outcome
+            else {
+                XCTFail(
+                    "unsupported response \(index) must fail closed"
+                )
+                continue
+            }
+            XCTAssertEqual(aggregate?.chat.messageIDs, [])
+            XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
+            XCTAssertEqual(aggregate?.memory, fixture.initial.memory)
+            XCTAssertEqual(
+                aggregate?.pendingUserTurn?.failure,
+                .coachResponseInvalid
+            )
+            let publicationCount = await fixture.persistence.publicationCount
+            let ordinals = await fixture.provider.recordedAttemptOrdinals()
+            let delays = await fixture.sleeper.recordedDelays()
+            XCTAssertEqual(publicationCount, 0)
+            XCTAssertEqual(ordinals, [1])
+            XCTAssertEqual(delays, [])
+            XCTAssertEqual(
+                fixture.diagnostics.recordedEvents().first?.reason,
+                .responsePublicationUnsupported
+            )
+        }
     }
 
     func testContextCapacityFailureIsDurableAndConsumesNoAdmissionOrProviderLaunch() async throws {
@@ -2504,7 +2666,7 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertNil(active)
         let events = fixture.diagnostics.recordedEvents()
         XCTAssertEqual(events.count, 1)
-        XCTAssertEqual(events.first?.reason, .invalidCompleteResponse)
+        XCTAssertEqual(events.first?.reason, .responseSchemaInvalid)
         XCTAssertEqual(events.first?.classification, .invalidProviderResponse)
         XCTAssertEqual(events.first?.disposition, .userRetryableFailure)
         XCTAssertEqual(events.first?.attemptOrdinal, 1)
@@ -3069,6 +3231,7 @@ private final class InvocationFixture: @unchecked Sendable {
             .reaped,
         ],
         tokenEstimator: CoachTokenEstimator = .utf8ByteUpperBound(),
+        activeProfileStatementIDs: [String] = [],
         identityGenerator: (any InvocationIdentityGenerating)? = nil,
         invocationRetrySleeper: (any InvocationRetrySleeping)? = nil,
         retryTiming: (any InvocationRetryTiming)? = nil
@@ -3136,7 +3299,8 @@ private final class InvocationFixture: @unchecked Sendable {
             contextWindow: contextWindow,
             isCurrent: contextIsCurrent,
             includesOnDemandAttachment: includesOnDemandAttachment,
-            tokenEstimator: tokenEstimator
+            tokenEstimator: tokenEstimator,
+            activeProfileStatementIDs: activeProfileStatementIDs
         )
         let defaultIdentities = FixedInvocationIdentities(
             invocationID: try CoachInvocationID(
@@ -4368,6 +4532,7 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
     private let current: Bool
     private let includesOnDemandAttachment: Bool
     private let tokenEstimator: CoachTokenEstimator
+    private let activeProfileStatementIDs: [String]
     private(set) var pendingResolutionCount = 0
     private var currentCheckCount = 0
     nonisolated let profile = CoachProfileProvenance(
@@ -4379,12 +4544,14 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
         contextWindow: Int,
         isCurrent: Bool,
         includesOnDemandAttachment: Bool = false,
-        tokenEstimator: CoachTokenEstimator = .utf8ByteUpperBound()
+        tokenEstimator: CoachTokenEstimator = .utf8ByteUpperBound(),
+        activeProfileStatementIDs: [String] = []
     ) {
         self.contextWindow = contextWindow
         current = isCurrent
         self.includesOnDemandAttachment = includesOnDemandAttachment
         self.tokenEstimator = tokenEstimator
+        self.activeProfileStatementIDs = activeProfileStatementIDs
     }
 
     func resolveNewChat(
@@ -4403,7 +4570,18 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object(["statements": .array([])]),
+                        profile: .object([
+                            "statements": .array(
+                                activeProfileStatementIDs.map { statementID in
+                                    .object([
+                                        "statementId": .string(statementID),
+                                        "statementKind": .string("goal"),
+                                        "wording": .string("Speak with clarity."),
+                                        "supportingSessionCount": .integer(0),
+                                    ])
+                                }
+                            ),
+                        ]),
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -4426,8 +4604,35 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                                 transcriptDisclosure: .object([
                                     "sessionAttachmentId": .string("attachment-1"),
                                     "transcript": .object([
-                                        "lines": .array([]),
-                                        "audioEvents": .array([]),
+                                        "lines": .array([
+                                            .object([
+                                                "text": .string("Pause."),
+                                                "timeRange": .object([
+                                                    "startMs": .integer(0),
+                                                    "endMs": .integer(1_000),
+                                                ]),
+                                                "words": .array([
+                                                    .object([
+                                                        "wordId": .string("word-1"),
+                                                        "text": .string("Pause"),
+                                                        "timeRange": .object([
+                                                            "startMs": .integer(0),
+                                                            "endMs": .integer(900),
+                                                        ]),
+                                                    ]),
+                                                ]),
+                                            ]),
+                                        ]),
+                                        "audioEvents": .array([
+                                            .object([
+                                                "audioEventId": .string("audio-1"),
+                                                "category": .string("silentPause"),
+                                                "timeRange": .object([
+                                                    "startMs": .integer(1_000),
+                                                    "endMs": .integer(1_500),
+                                                ]),
+                                            ]),
+                                        ]),
                                     ]),
                                 ]),
                                 sourceAttachment: ChatSessionAttachment(
@@ -4435,10 +4640,10 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                                         "attachment-1"
                                     ),
                                     sessionID: try SessionID(
-                                        "ses-20260830T120000000Z-3DEF"
+                                        "ses-20260830T115900000Z-1ABC"
                                     ),
                                     transcriptRevisionID: try TranscriptRevisionID(
-                                        "trv-20260830T121000000Z-4FGH"
+                                        "trv-20260830T115900000Z-2DEF"
                                     )
                                 ),
                                 revisionSHA256: String(repeating: "1", count: 64)
@@ -4450,10 +4655,13 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                             displayName: "Synthetic fixture",
                             contextBudget: CoachContextBudget(
                                 contextWindowTokens: contextWindow,
-                                responseReservedTokens: min(4, max(1, contextWindow - 2)),
+                                responseReservedTokens: min(
+                                    512,
+                                    max(1, contextWindow - 2)
+                                ),
                                 safetyMarginTokens: 1
                             ),
-                            coachMemoryMaxTokens: 1
+                            coachMemoryMaxTokens: 512
                         ),
                         policy: CoachProviderEstimationPolicy(
                             providerIdentifier: "synthetic-fixture-v1",

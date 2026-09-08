@@ -165,7 +165,16 @@ only the allowlisted canonical transcript fields. The broker permits one exact
 transport replay, rejects any second semantic request, and revokes its capability
 when the Attempt ends. Live composition still does not launch because the shipping
 Provider descriptor remains unqualified; Profile and Memory response effects
-remain outside this executable slice.
+remain outside this executable slice. Every complete provider response remains
+opaque until Application validates its closed schema, collector and token limits,
+passive Markdown, response-position authority, Memory bounds, evidence pointers,
+active Profile targets, and effect conflicts as one indivisible batch. Ordinary
+answers require at least one message block; the future Reconsider trigger may
+return none. The current publisher accepts only one plain Markdown block and fails
+closed on every otherwise-valid component assigned to later persistence slices;
+invalid or unsupported batches publish no message or state effect, receive no
+automatic repair Attempt, and retain only closed metadata diagnostics behind the
+bounded Pending-turn **Retry** and **Discard** card.
 If the machine-local ledger rename succeeds but its parent-directory flush cannot
 prove durability, Audora treats the debit as possibly committed and preserves the
 exact Pending User Turn as interrupted and user-retryable; it never unlocks that

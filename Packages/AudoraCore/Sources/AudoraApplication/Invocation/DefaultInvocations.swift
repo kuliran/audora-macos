@@ -586,6 +586,13 @@ public enum InvocationNextAttemptInstallOutcome: Sendable {
 }
 
 @_spi(InvocationInfrastructure)
+public enum PublishCoachInvocationMutationError: Error, Equatable, Sendable {
+    /// The validated batch contains state whose durable publication belongs to
+    /// a later vertical slice. Publishing only its prose would be partial.
+    case unsupportedResponseComponent
+}
+
+@_spi(InvocationInfrastructure)
 public struct PublishCoachInvocationMutation: Equatable, Sendable {
     public let base: ChatAggregate
     public let invocation: CoachInvocation
@@ -594,7 +601,10 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
     public let freshDraft: ChatDraft
     public let replacement: ChatAggregate
 
-    public init(
+    /// Internal construction seam for persistence tests over app-owned
+    /// Markdown. External infrastructure cannot manufacture a publication;
+    /// untrusted provider bytes enter only through the whole-batch validator.
+    init(
         base: ChatAggregate,
         invocation: CoachInvocation,
         coachMarkdown: String,
@@ -633,7 +643,26 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         )
     }
 
-    public init(
+    init(
+        base: ChatAggregate,
+        invocation: CoachInvocation,
+        validatedResponse: ValidatedCoachResponse,
+        completedAt: UTCInstant
+    ) throws {
+        guard validatedResponse.isSupportedByCurrentPublicationSlice,
+              let markdown = validatedResponse.publicationMarkdown
+        else {
+            throw PublishCoachInvocationMutationError.unsupportedResponseComponent
+        }
+        try self.init(
+            base: base,
+            invocation: invocation,
+            coachMarkdown: markdown,
+            completedAt: completedAt
+        )
+    }
+
+    init(
         base: ChatAggregate,
         invocation: CoachInvocation,
         identity: InvocationLaunchIdentity,
@@ -1064,10 +1093,16 @@ enum CoachProviderAttemptControl: Equatable, Sendable {
 }
 
 enum CoachProviderAttemptOutcome: Equatable, Sendable {
-    case complete(markdown: String)
+    case complete(CoachProviderCompleteResponse)
     case autoRetryableFailure
     case userRetryableFailure
     case responseOverflow
+
+    /// Convenience for deterministic provider doubles. The coordinator still
+    /// receives opaque JSON bytes and applies the complete response validator.
+    static func complete(markdown: String) -> Self {
+        .complete(.singleMarkdown(markdown))
+    }
 }
 
 enum CoachProviderAttemptCancellationOutcome: Equatable, Sendable {
@@ -1196,6 +1231,18 @@ public enum InvocationRetryDiagnosticReason: String, Equatable, Sendable {
     case nextAttemptConstructionFailed
     case nextAttemptInstallationFailed
     case nextAttemptBecameStale
+    case responseValidationUnavailable
+    case responseCollectorLimitExceeded
+    case responseTokenLimitExceeded
+    case responseEncodingInvalid
+    case responseSchemaInvalid
+    case responseMarkdownUnsafe
+    case responseMemoryInvalid
+    case responseMemoryLimitExceeded
+    case responseEvidenceInvalid
+    case responseProfileTargetInvalid
+    case responseProfileEffectsConflict
+    case responsePublicationUnsupported
     case invalidCompleteResponse
     case publicationConflict
     case publicationPersistenceUnavailable
@@ -1954,7 +2001,7 @@ public actor DefaultInvocations: Invocations {
         }
 
         let completedProviderResponse: (
-            markdown: String,
+            response: CoachProviderCompleteResponse,
             startedAtMilliseconds: UInt64,
             stopAuthority: InvocationStopAuthority
         )
@@ -2224,8 +2271,8 @@ public actor DefaultInvocations: Invocations {
                 preconditionFailure("terminal transcript completion was not handled")
             }
             switch outcome {
-            case let .complete(markdown):
-                completedProviderResponse = (markdown, attemptStartedAt, stopAuthority)
+            case let .complete(response):
+                completedProviderResponse = (response, attemptStartedAt, stopAuthority)
                 break providerAttempts
             case .userRetryableFailure:
                 guard claimCompletion(runID: runID, authority: stopAuthority) else {
@@ -2422,13 +2469,23 @@ public actor DefaultInvocations: Invocations {
         let invocation = activeSession.invocation
         let publication: PublishCoachInvocationMutation
         do {
+            try invocation.validate(against: processingAggregate)
+            let validationContext = try CoachResponseValidationContext(
+                prepared: prepared,
+                base: processingAggregate
+            )
+            let validatedResponse = try CoachResponseValidator().validate(
+                completedProviderResponse.response,
+                in: validationContext
+            )
             publication = try PublishCoachInvocationMutation(
                 base: processingAggregate,
                 invocation: invocation,
-                coachMarkdown: completedProviderResponse.markdown,
+                validatedResponse: validatedResponse,
                 completedAt: completedAt
             )
         } catch {
+            let diagnosticReason = Self.completeResponseDiagnosticReason(error)
             guard claimCompletion(
                 runID: runID,
                 authority: completedProviderResponse.stopAuthority
@@ -2439,7 +2496,7 @@ public actor DefaultInvocations: Invocations {
                 activeSession,
                 fallback: processingAggregate,
                 reason: .invalidProviderResponse,
-                diagnosticReason: .invalidCompleteResponse,
+                diagnosticReason: diagnosticReason,
                 classification: .invalidProviderResponse,
                 prepared: prepared,
                 startedAt: completedProviderResponse.startedAtMilliseconds
@@ -2484,6 +2541,44 @@ public actor DefaultInvocations: Invocations {
                 startedAt: completedProviderResponse.startedAtMilliseconds
             )
         }
+    }
+
+    private static func completeResponseDiagnosticReason(
+        _ error: any Error
+    ) -> InvocationRetryDiagnosticReason {
+        if let validation = error as? CoachResponseValidationError {
+            return switch validation {
+            case .missingValidationAuthority, .invalidPreparedContext:
+                .responseValidationUnavailable
+            case .responseByteLimitExceeded:
+                .responseCollectorLimitExceeded
+            case .responseTokenLimitExceeded:
+                .responseTokenLimitExceeded
+            case .invalidUTF8:
+                .responseEncodingInvalid
+            case .invalidJSON, .duplicateJSONKey, .schemaMismatch,
+                 .messageBlocksRequired:
+                .responseSchemaInvalid
+            case .unsafeMarkdown:
+                .responseMarkdownUnsafe
+            case .invalidMemory:
+                .responseMemoryInvalid
+            case .memoryTokenLimitExceeded:
+                .responseMemoryLimitExceeded
+            case .invalidEvidencePointer:
+                .responseEvidenceInvalid
+            case .danglingProfileTarget:
+                .responseProfileTargetInvalid
+            case .conflictingProfileEffects:
+                .responseProfileEffectsConflict
+            }
+        }
+        if let publication = error as? PublishCoachInvocationMutationError,
+           publication == .unsupportedResponseComponent
+        {
+            return .responsePublicationUnsupported
+        }
+        return .invalidCompleteResponse
     }
 
     private func installNextAttempt(

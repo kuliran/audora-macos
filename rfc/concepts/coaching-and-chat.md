@@ -44,7 +44,7 @@ Attempts, cancellation, and terminal failure creation. Chat, Proposal, and futur
 maintenance use cases submit stable entity IDs and an `InvocationIntent`; they do
 not duplicate these checks or construct provider DTOs.
 
-The current #26 vertical slice implements `answerPendingUserTurn` with a bounded
+The current #27 vertical slice implements `answerPendingUserTurn` with a bounded
 deterministic synthetic provider. It durably claims the rolling ledger, installs
 one portable Invocation, persists each fresh Provider Attempt before launch,
 retries transient failures on the 5/10/15-second schedule, permits at most one
@@ -52,8 +52,13 @@ shorter complete repair, exposes exact process-live Stop authority for the curre
 Attempt, and atomically publishes the two-message fake turn only while that
 authority remains current. Its Attempt-scoped transcript broker serves one atomic,
 all-or-none on-demand read through fresh opaque handles and a hidden capability.
-Real provider adapters, Reconsider, and Profile or Memory response effects remain
-owned by their later slices.
+It treats the complete provider result as opaque bytes until one whole-response
+trust gate has checked encoding, duplicate keys, closed schema, exact admitted
+byte/token limits, Markdown, Memory, evidence, Profile targets, and effect
+conflicts. The current publisher can durably represent exactly one plain Markdown
+block; any otherwise-valid structured block, Memory, or Profile effect fails
+closed as one batch until its later persistence slice exists. Real provider
+adapters and Reconsider remain owned by their later slices.
 
 ```text
 InvocationIntent
@@ -494,7 +499,9 @@ needed on-demand handles in one logical call, and forbids split, reordered, narr
 or retried semantic reads. A non-complete read must not be answered around, and a
 detected Session conflation asks the user to send the message again. The adapter and
 broker independently enforce the atomic batch and sole exact transport redelivery;
-Session-analysis Memory/Profile effects remain outside this slice.
+Session-analysis Memory/Profile publication remains outside this slice, but the
+complete response validator still rejects invalid Memory, evidence, and Profile
+components before any message may publish.
 
 A non-complete read does not permit an incomplete coach answer. Audora terminates
 the Attempt and creates a user-retryable application failure. For unavailable
@@ -590,6 +597,33 @@ Profile edits, or oversized Memory reject the complete response. Valid exact
 duplicates and no-ops may normalize away. The app never accepts a valid message
 while discarding an invalid Profile effect from the same response.
 
+Validation success and publication capability are both all-or-nothing. If the
+active publication transaction cannot durably represent every validated
+component, Application rejects the complete response as `coachResponseInvalid`;
+it does not publish a supported message while dropping an otherwise-valid Memory,
+Evidence Observation, Proposal, or Evidence Append. Later persistence slices
+expand the batches that can commit without weakening validation or changing the
+provider schema.
+
+A complete-response validation or publication-support failure is terminal for
+that Invocation and receives no automatic repair Attempt. Application retains the
+exact Pending User Turn or stale Reconsider Proposal and exposes only the
+app-authored **Coach response couldn't be used** card with **Retry** and
+**Discard**. Raw response bytes and provider prose enter neither Presentation nor
+logs; diagnostics retain only a closed reason code and bounded metadata.
+
+Provider Markdown is a passive formatting surface. Plain Unicode prose and
+formatting such as paragraphs, headings, lists, quotations, code, and emphasis are
+allowed. Provider-authored links, images, autolinks, reference-link definitions,
+raw HTML, and bare `scheme://` destinations are rejected; evidence navigation is
+available only through app-owned structured Evidence controls. NUL and C0/C1
+controls are rejected except horizontal tab, line feed, and carriage return.
+Directional controls U+061C, U+200E–U+200F, U+202A–U+202E, and
+U+2066–U+206F are rejected. Escaping is interpreted by backslash parity, so one
+backslash can make an angle bracket literal while two cannot hide active markup.
+Ordinary prose labels such as `Data:` and `File:` are not URI destinations and
+remain valid.
+
 `CoachResponseBlockMarkdown` is ordinary text, advice, exercises, synthesis, or
 transitions that do not need app-resolvable evidence controls. An Evidence
 Observation contains interpretation plus one or more pointers:
@@ -629,6 +663,14 @@ The app validates every pointer against canonical local data:
 - that attachment names the immutable Transcript Revision used by the Chat;
 - both Word IDs or the Audio Event ID exist in that canonical transcript; and
 - a Word range is ordered and belongs to that transcript.
+
+`muted` and `captureGap` remain valid canonical Audio Event targets for a message
+Evidence Observation—for example, to explain unavailable audio—but they are never
+eligible positive Profile support. If either appears in a Profile edit proposal or
+Evidence Append, the complete response is invalid; Application never strips that
+pointer and publishes the remainder. `nonSpeech`, `silentPause`, and
+`untranscribedVoicedInterval` may support a Profile effect when the other evidence
+admission rules hold.
 
 The coach may return a pointer from the structured transcript context or preserve
 canonical IDs in Memory for later use. Reused, new, and changed pointers follow the
@@ -704,6 +746,14 @@ split retire/add could partially apply or lose the intended relationship. Retire
 removes an exact target from current coaching context. Replace and Retire use a
 current Statement ID; Add and Replace receive a new app-assigned ID only after
 validation.
+
+Within one response, distinct semantic edits cannot target the same current
+Statement. Thus two different replacements, or Replace plus Retire, conflict.
+Exact duplicate semantic edits are valid and may normalize later. A standalone
+Evidence Append conflicts with Replace or Retire of that same target in the batch;
+multiple appends to an otherwise-unchanged active target remain valid and preserve
+provider order for later deduplication. Add has no provider-supplied target and
+does not participate in a target conflict.
 
 The provider returns all Profile effects in the same response as its message and
 optional Memory. Application validates that batch atomically, then classifies the

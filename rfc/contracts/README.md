@@ -451,6 +451,15 @@ Markdown block is ordinary coaching prose. An Evidence Observation is prose that
 Presentation renders with evidence controls. The output limit and whole-response
 validation bound the batch; there is no independent block-size limit.
 
+Markdown is passive. Paragraphs, headings, lists, quotations, code, emphasis, and
+ordinary Unicode prose are allowed. Provider-authored links, images, autolinks,
+reference-link definitions, raw HTML, and bare ASCII `scheme://` destinations are
+rejected; navigation is available only through structured, app-resolved Evidence
+controls. NUL and C0/C1 controls are rejected except U+0009, U+000A, and U+000D.
+U+061C, U+200E–U+200F, U+202A–U+202E, and U+2066–U+206F are also rejected.
+Backslash parity determines whether an angle bracket is escaped. Labels such as
+`Data:` and `File:` are ordinary prose rather than destinations.
+
 Every `CoachEvidencePointer` is semantically untrusted. Application accepts one
 only when:
 
@@ -472,6 +481,13 @@ wholly evidence-only response may be committed silently. If any semantic edit
 survives normalization, every surviving effect becomes one reviewed Proposal.
 Application deduplicates evidence by `(statementId, Session)` using provider order.
 
+Two distinct Replace/Retire edits for the same active target conflict; exact
+duplicate semantic edits may normalize. An Evidence Append also conflicts with
+Replace or Retire of its target in the same batch. Multiple appends to an otherwise
+unchanged target are valid and retain provider order for deduplication. Audio
+Events categorized as `muted` or `captureGap` may be cited in a message
+observation but never count as positive Profile support.
+
 A Reconsider trigger supplies the complete prior `CoachProfileEditProposal`
 values, including their evidence. When targets became inactive, it also supplies
 their `ProfileStatement` snapshots and any pending standalone evidence through
@@ -484,3 +500,14 @@ rejects it atomically when schema, Memory, evidence, edit, conflict, or size
 validation fails. For an ordinary user-message trigger, Application additionally
 requires `messageBlocks`. Reconsider may validly return no message and no Profile
 effect, which withdraws the old Proposal without publishing an empty Chat message.
+The executable publisher must also fail closed when a validated component has no
+durable representation in the current slice; it never flattens structured blocks
+or publishes prose while dropping Memory or Profile effects.
+
+A complete-response validation or publication-support failure receives no
+automatic repair Attempt and maps to the generic user-retryable invalid-response
+presentation. No message, Memory replacement, Proposal, or Evidence Append
+publishes. Raw response bytes and provider prose are neither presented nor logged;
+diagnostics contain only a closed reason code and bounded metadata. Adding a later
+persistence path expands publication support without altering the `CoachResponse`
+contract.

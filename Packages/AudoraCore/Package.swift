@@ -30,7 +30,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AudoraApplicationTests",
-            dependencies: ["AudoraApplication", "AudoraDomain"]
+            dependencies: ["AudoraApplication", "AudoraContracts", "AudoraDomain"]
         ),
         .testTarget(
             name: "AudoraContractsTests",

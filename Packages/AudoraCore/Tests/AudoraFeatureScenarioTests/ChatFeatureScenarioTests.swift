@@ -27,6 +27,7 @@ final class ChatFeatureScenarioTests: XCTestCase {
             .cancelDuringAttachmentResolutionScenario,
             .suspendedLibrarySwitchChatScenario,
             .stopReapsAndRejectsLateCoachResultScenario,
+            .invalidCompleteResponseRejectsBatchScenario,
             .onDemandTranscriptMixedAvailabilityChatScenario,
         ]
 
@@ -70,6 +71,8 @@ final class ChatFeatureScenarioTests: XCTestCase {
                     store: store,
                     source: coachContextSource,
                     providerIsAvailable: dto.providerAvailability == "available",
+                    providerReturnsInvalidComplete:
+                        dto.providerResponse == "invalidComplete",
                     providerEvents: dto.dependencyTrace.filter {
                         $0.port == "coachProvider"
                     },
@@ -668,7 +671,6 @@ final class ChatFeatureScenarioTests: XCTestCase {
     private func pendingRecoveryActions(_ state: ChatFeatureState) -> [String]? {
         guard case let .open(aggregate) = state.selection,
               let pending = aggregate.pendingUserTurn,
-              pending.failure?.transcriptReadFailureSummary != nil,
               state.isCoachResponseRetryableFailure(pending),
               case .locked = state.composer
         else { return nil }
@@ -688,6 +690,7 @@ private struct ChatFeatureScenarioDTO: Decodable {
     let expectedInvocationCalls: Int
     let expectedAdmissionCalls: Int
     let providerAvailability: String?
+    let providerResponse: String?
     let contextCapacityMode: String?
     let suspendedEffect: String?
     let attemptTranscriptAvailability: [ChatOpenedAttachmentStatusDTO]?
@@ -1375,6 +1378,7 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
         store: ChatScenarioStore,
         source: ScenarioCoachContextSnapshotPort,
         providerIsAvailable: Bool,
+        providerReturnsInvalidComplete: Bool,
         providerEvents: [ChatDependencyEventDTO],
         recorder: ChatScenarioRecorder,
         suspendFirstAttempt: Bool,
@@ -1384,6 +1388,7 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
         let admission = ScenarioInvocationAdmission()
         let provider = ScenarioSyntheticProvider(
             isAvailable: providerIsAvailable,
+            returnsInvalidComplete: providerReturnsInvalidComplete,
             events: providerEvents,
             recorder: recorder,
             suspendFirstAttempt: suspendFirstAttempt
@@ -1958,6 +1963,7 @@ private actor ScenarioInvocationAdmission: InvocationAdmissionPort {
 
 private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
     private let isAvailable: Bool
+    private let returnsInvalidComplete: Bool
     private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder
     private let suspendFirstAttempt: Bool
@@ -1968,11 +1974,13 @@ private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
 
     init(
         isAvailable: Bool,
+        returnsInvalidComplete: Bool,
         events: [ChatDependencyEventDTO],
         recorder: ChatScenarioRecorder,
         suspendFirstAttempt: Bool
     ) {
         self.isAvailable = isAvailable
+        self.returnsInvalidComplete = returnsInvalidComplete
         self.events = events
         self.recorder = recorder
         self.suspendFirstAttempt = suspendFirstAttempt
@@ -2005,6 +2013,11 @@ private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
             }
         }
         guard suspendFirstAttempt, callCount == 1 else {
+            if returnsInvalidComplete {
+                return .complete(
+                    CoachProviderCompleteResponse(body: Data("{}".utf8))
+                )
+            }
             return .complete(markdown: "A complete **synthetic** Coach response.")
         }
         guard let event = consume(effect: "run"),
@@ -2517,7 +2530,7 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
     ) async -> CoachContextSnapshotOutcome {
         pendingResolutionCount += 1
         let contextWindow = mode == "cannotFitThenFits" && pendingResolutionCount == 1
-            ? 64
+            ? 560
             : 100_000
         return snapshot(
             for: request.draft,
@@ -2753,7 +2766,7 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
                             displayName: "Synthetic scenario fixture",
                             contextBudget: CoachContextBudget(
                                 contextWindowTokens: contextWindow,
-                                responseReservedTokens: 16,
+                                responseReservedTokens: 512,
                                 safetyMarginTokens: 8
                             ),
                             coachMemoryMaxTokens: 1

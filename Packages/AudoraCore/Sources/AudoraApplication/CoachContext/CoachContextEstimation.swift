@@ -514,6 +514,10 @@ public struct CanonicalCoachExchange: Equatable, Sendable {
     let preparedTranscriptRoutes: [CanonicalCoachTranscriptRoute]
     let transcriptResponseBudgetAuthority:
         AttemptTranscriptResponseBudgetAuthority?
+    /// Frozen qualified limits used to treat the provider's complete output as
+    /// untrusted bytes. Provider adapters cannot replace these values after
+    /// context admission.
+    let responseValidationAuthority: CoachResponseValidationAuthority?
 
     public init(
         pinnedInstruction: String,
@@ -534,6 +538,7 @@ public struct CanonicalCoachExchange: Equatable, Sendable {
         structuralRequest = nil
         preparedTranscriptRoutes = []
         transcriptResponseBudgetAuthority = nil
+        responseValidationAuthority = nil
     }
 
     init(
@@ -547,7 +552,8 @@ public struct CanonicalCoachExchange: Equatable, Sendable {
         structuralRequest: CanonicalJSONValue,
         preparedTranscriptRoutes: [CanonicalCoachTranscriptRoute],
         transcriptResponseBudgetAuthority:
-            AttemptTranscriptResponseBudgetAuthority?
+            AttemptTranscriptResponseBudgetAuthority?,
+        responseValidationAuthority: CoachResponseValidationAuthority? = nil
     ) {
         self.pinnedInstruction = pinnedInstruction
         self.request = request
@@ -559,6 +565,7 @@ public struct CanonicalCoachExchange: Equatable, Sendable {
         self.structuralRequest = structuralRequest
         self.preparedTranscriptRoutes = preparedTranscriptRoutes
         self.transcriptResponseBudgetAuthority = transcriptResponseBudgetAuthority
+        self.responseValidationAuthority = responseValidationAuthority
     }
 }
 
@@ -684,7 +691,14 @@ public struct CoachContextPlanner: Sendable {
                     pinnedInstructionFrame: Data(pinnedInstruction.utf8),
                     framing: policy.framing,
                     tokenEstimator: policy.tokenEstimator
-                )
+                ),
+            responseValidationAuthority: CoachResponseValidationAuthority(
+                responseReservedTokens: descriptor.contextBudget.responseReservedTokens,
+                responseCollectorByteCeiling: policy.responseCollectorByteCeiling,
+                coachMemoryMaxTokens: descriptor.coachMemoryMaxTokens,
+                framing: policy.framing,
+                tokenEstimator: policy.tokenEstimator
+            )
         )
 
         var componentCosts: [CoachContextCostCategory: CoachContextComponentCost] = [:]

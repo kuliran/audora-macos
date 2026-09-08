@@ -233,9 +233,15 @@ execution profile.
   and no answer around a non-complete result. If it detects that it conflated two
   Sessions, it asks the user to send the message again rather than presenting the
   confused answer as grounded.
-- Session-analysis Memory/Profile effects remain a later slice. When introduced,
-  validation and deduplication may correctly leave no effective Proposal or
-  Evidence Append.
+- Complete provider output remains opaque until Application validates its bytes,
+  tokens, encoding, duplicate keys, closed schema, passive Markdown, Memory,
+  evidence, Profile targets, and effect conflicts against the frozen Invocation
+  context. Any failure rejects the entire batch and exposes only app-authored
+  Retry/Discard recovery.
+- Session-analysis Memory/Profile publication remains a later slice. The current
+  trust gate validates those components, then fails closed rather than publishing
+  only their prose. Later normalization may correctly leave no effective Proposal
+  or Evidence Append.
 
 ## Coach Memory
 

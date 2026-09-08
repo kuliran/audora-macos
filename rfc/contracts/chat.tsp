@@ -224,6 +224,7 @@ namespace Audora.Contracts {
     expectedInvocationCalls: NonnegativeWholeNumber;
     expectedAdmissionCalls: NonnegativeWholeNumber;
     providerAvailability?: ChatScenarioProviderAvailability;
+    providerResponse?: ChatScenarioProviderResponse;
     contextCapacityMode?: ChatScenarioContextCapacityMode;
     suspendedEffect?: ChatScenarioSuspendedEffect;
 
@@ -707,6 +708,11 @@ namespace Audora.Contracts {
   union ChatScenarioProviderAvailability {
     available: "available",
     unavailable: "unavailable",
+  }
+
+  union ChatScenarioProviderResponse {
+    valid: "valid",
+    invalidComplete: "invalidComplete",
   }
 
   union ChatScenarioContextCapacityMode {

@@ -21,6 +21,14 @@ const coachContextExamplesDirectory = path.join(
   resourcesDirectory,
   "Examples/CoachContext/v1",
 );
+const coachResponseExamplesDirectory = path.join(
+  resourcesDirectory,
+  "Examples/CoachResponse/v1",
+);
+const rejectedCoachResponseExamplesDirectory = path.join(
+  coachResponseExamplesDirectory,
+  "rejected",
+);
 const invocationExamplesDirectory = path.join(
   resourcesDirectory,
   "Examples/Invocation/v1",
@@ -59,6 +67,7 @@ const scenarioInventory = [
   "draft-send-discard.v1.json",
   "fake-provider-success.v1.json",
   "filter-is-pure.v1.json",
+  "invalid-complete-response-rejects-batch.v1.json",
   "invalid-context-blocks-new-chat.v1.json",
   "library-switch-during-suspended-load.v1.json",
   "newer-chat-freezes.v1.json",
@@ -82,6 +91,19 @@ const rejectedInventory = [
   ...schemaInvalidChatFixtures,
   ...schemaValidRuntimeRejectedFixtures,
 ].sort();
+const coachResponseInventory = [
+  "answer.json",
+  "full-batch.json",
+  "reconsider-no-message.json",
+  "rejected",
+];
+const rejectedCoachResponseInventory = [
+  "empty-message-blocks.json",
+  "missing-markdown.json",
+  "null-memory.json",
+  "unknown-key.json",
+  "wrong-kind.json",
+];
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 
@@ -140,6 +162,7 @@ const coachInvocation = await validator("CoachInvocation.json");
 const invocationAdmissionLedger = await validator("InvocationAdmissionLedger.json");
 const chatFeatureScenario = await validator("ChatFeatureScenario.json");
 const coachContextQuote = await validator("CoachContextQuote.json");
+const coachResponse = await validator("CoachResponse.json");
 
 await assertExactInventory(
   coachContextExamplesDirectory,
@@ -152,6 +175,32 @@ assertValidation(
   true,
   "coach-context/quote.json",
 );
+await assertExactInventory(
+  coachResponseExamplesDirectory,
+  coachResponseInventory,
+  "Coach response fixture",
+);
+await assertExactInventory(
+  rejectedCoachResponseExamplesDirectory,
+  rejectedCoachResponseInventory,
+  "rejected Coach response fixture",
+);
+for (const name of coachResponseInventory.filter((name) => name !== "rejected")) {
+  assertValidation(
+    coachResponse,
+    await loadJSON(path.join(coachResponseExamplesDirectory, name)),
+    true,
+    `coach-response/${name}`,
+  );
+}
+for (const name of rejectedCoachResponseInventory) {
+  assertValidation(
+    coachResponse,
+    await loadJSON(path.join(rejectedCoachResponseExamplesDirectory, name)),
+    false,
+    `coach-response/rejected/${name}`,
+  );
+}
 await assertExactInventory(
   invocationExamplesDirectory,
   ["admission-ledger.json"],

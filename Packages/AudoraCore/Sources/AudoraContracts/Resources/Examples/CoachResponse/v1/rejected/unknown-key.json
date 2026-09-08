@@ -1,0 +1,9 @@
+{
+  "messageBlocks": [
+    {
+      "kind": "markdown",
+      "markdown": "This otherwise looks valid."
+    }
+  ],
+  "untrustedExtra": true
+}

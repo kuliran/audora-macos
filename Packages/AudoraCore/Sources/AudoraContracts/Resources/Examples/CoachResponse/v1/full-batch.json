@@ -1,0 +1,64 @@
+{
+  "messageBlocks": [
+    {
+      "kind": "markdown",
+      "markdown": "Here is the main pattern I noticed:"
+    },
+    {
+      "kind": "evidenceObservation",
+      "markdown": "The transition arrives before the previous point has landed.",
+      "evidence": [
+        {
+          "sessionAttachmentId": "planning-reflection",
+          "target": {
+            "kind": "wordRange",
+            "startWordId": "word-12",
+            "endWordId": "word-18"
+          }
+        }
+      ]
+    }
+  ],
+  "newMemory": {
+    "generalNotes": "The Speaker is practicing deliberate transitions.",
+    "sessionSummaries": [
+      {
+        "sessionAttachmentId": "planning-reflection",
+        "notes": "Several major points were joined without a pause."
+      }
+    ]
+  },
+  "proposeProfileEdits": [
+    {
+      "edit": {
+        "kind": "add",
+        "statementKind": "growthDirection",
+        "wording": "Pause briefly before each new major point."
+      },
+      "evidence": [
+        {
+          "sessionAttachmentId": "planning-reflection",
+          "target": {
+            "kind": "audioEvent",
+            "audioEventId": "event-3"
+          }
+        }
+      ]
+    }
+  ],
+  "appendProfileEvidence": [
+    {
+      "targetStatementId": "statement-7",
+      "evidence": [
+        {
+          "sessionAttachmentId": "demo-practice",
+          "target": {
+            "kind": "wordRange",
+            "startWordId": "word-31",
+            "endWordId": "word-34"
+          }
+        }
+      ]
+    }
+  ]
+}

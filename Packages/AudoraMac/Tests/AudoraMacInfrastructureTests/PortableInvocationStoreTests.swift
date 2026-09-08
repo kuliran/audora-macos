@@ -1,4 +1,4 @@
-@_spi(InvocationInfrastructure) import AudoraApplication
+@testable @_spi(InvocationInfrastructure) import AudoraApplication
 import AudoraDomain
 @testable @_spi(InvocationInfrastructure) import AudoraMacInfrastructure
 import CryptoKit

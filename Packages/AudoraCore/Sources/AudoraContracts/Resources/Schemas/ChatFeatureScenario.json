@@ -46,6 +46,9 @@
         "providerAvailability": {
             "$ref": "#/$defs/ChatScenarioProviderAvailability"
         },
+        "providerResponse": {
+            "$ref": "#/$defs/ChatScenarioProviderResponse"
+        },
         "contextCapacityMode": {
             "$ref": "#/$defs/ChatScenarioContextCapacityMode"
         },
@@ -461,6 +464,18 @@
                 {
                     "type": "string",
                     "const": "unavailable"
+                }
+            ]
+        },
+        "ChatScenarioProviderResponse": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "valid"
+                },
+                {
+                    "type": "string",
+                    "const": "invalidComplete"
                 }
             ]
         },
