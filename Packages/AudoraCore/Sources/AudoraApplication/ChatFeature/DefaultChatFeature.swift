@@ -120,7 +120,7 @@ public actor DefaultChatFeature: ChatFeature {
     private var isOrderlyTerminationPending = false
     private var coachStopsInFlight: [InvocationStopAuthority] = []
     private var coachStopIdleWaiters: [CheckedContinuation<Void, Never>] = []
-    private var hasUnreapedCoachInvocation = false
+    private var unreapedCoachInvocationAuthorities: [InvocationStopAuthority] = []
     private var state = ChatFeatureState()
     private var operationInFlight = false
     private var operationIdleWaiters: [CheckedContinuation<Void, Never>] = []
@@ -1398,7 +1398,12 @@ public actor DefaultChatFeature: ChatFeature {
         while !coachStopsInFlight.isEmpty {
             await withCheckedContinuation { coachStopIdleWaiters.append($0) }
         }
-        guard !hasUnreapedCoachInvocation else {
+        // A presented authority was already attempted by
+        // beginOrderlyTermination above. Retry only exact authorities whose
+        // Chat context was replaced, preserving eventual liveness without
+        // making stale cancellation state visible in the replacement Library.
+        await retryUnreapedCoachInvocationsWithoutPresentation()
+        guard unreapedCoachInvocationAuthorities.isEmpty else {
             isOrderlyTerminationPending = false
             return false
         }
@@ -1412,6 +1417,27 @@ public actor DefaultChatFeature: ChatFeature {
             guard let activeContext else { return true }
             guard await flushSelectedDraft(in: activeContext) else { return false }
             if queuedActions.isEmpty, pendingStart == nil { return true }
+        }
+    }
+
+    private func retryUnreapedCoachInvocationsWithoutPresentation() async {
+        let presentedAuthority = state.coachInvocationStopAuthority
+        let detachedAuthorities = unreapedCoachInvocationAuthorities.filter {
+            $0 != presentedAuthority
+        }
+        for authority in detachedAuthorities {
+            coachStopsInFlight.append(authority)
+            let request = StopCoachInvocationRequest(
+                library: authority.library,
+                chatID: authority.chatID,
+                pendingUserTurnID: authority.pendingUserTurnID
+            )
+            let outcome = await invocations.stop(request, authority: authority)
+            finishCoachStop(authority)
+            if case .unableToReap = outcome {
+                continue
+            }
+            unreapedCoachInvocationAuthorities.removeAll { $0 == authority }
         }
     }
 
@@ -1630,6 +1656,20 @@ public actor DefaultChatFeature: ChatFeature {
         guard ChatInteractionPolicy.allowsCoachInvocation(in: state) else {
             return
         }
+        guard coachStopsInFlight.isEmpty else {
+            state = replacing(activity: nil, notice: .coachBusy)
+            publish()
+            return
+        }
+        await retryUnreapedCoachInvocationsWithoutPresentation()
+        guard isActive(context) else { return }
+        guard coachStopsInFlight.isEmpty,
+              unreapedCoachInvocationAuthorities.isEmpty
+        else {
+            state = replacing(activity: nil, notice: .coachBusy)
+            publish()
+            return
+        }
         guard isActive(context),
               case let .open(aggregate) = state.selection,
               aggregate.chat.id == expectedChatID,
@@ -1770,6 +1810,7 @@ public actor DefaultChatFeature: ChatFeature {
                 )
             }
         )
+        retainProviderReapAuthority(from: outcome)
         guard isActive(context) else { return }
         applyInvocationOutcome(outcome)
         await refreshSelectionIfInvocationEligibilityVanished(
@@ -1815,13 +1856,15 @@ public actor DefaultChatFeature: ChatFeature {
         context: ChatCommandContext
     ) async {
         guard isCurrent(context),
+              !coachStopsInFlight.contains(authority),
               state.coachInvocationStopAuthority == authority,
               case let .open(aggregate) = state.selection,
               let pending = aggregate.pendingUserTurn,
               aggregate.chat.id == authority.chatID,
               pending.id == authority.pendingUserTurnID,
               authority.library == context.libraryScope,
-              state.activity == .invokingCoach(aggregate.chat.id)
+              state.activity == .invokingCoach(aggregate.chat.id) ||
+                  state.activity == .stoppingCoach(aggregate.chat.id)
         else { return }
 
         coachStopsInFlight.append(authority)
@@ -1845,7 +1888,13 @@ public actor DefaultChatFeature: ChatFeature {
             // Process-liveness safety outlives the selected Chat context. A
             // superseding start may change presentation, but must not let a
             // later Library transition or termination claim safe quiescence.
-            hasUnreapedCoachInvocation = true
+            if !unreapedCoachInvocationAuthorities.contains(authority) {
+                unreapedCoachInvocationAuthorities.append(authority)
+            }
+        } else {
+            // Every other Stop outcome confirms that this exact authority no
+            // longer owns an unproven provider process.
+            unreapedCoachInvocationAuthorities.removeAll { $0 == authority }
         }
         guard isActive(context) else { return }
         switch outcome {
@@ -1913,7 +1962,7 @@ public actor DefaultChatFeature: ChatFeature {
             // successor while the provider cannot prove process reaping.
             guard state.coachInvocationStopAuthority == authority else { return }
             state = replacing(
-                coachInvocationStopAuthority: nil,
+                coachInvocationStopAuthority: authority,
                 replacesCoachInvocationStopAuthority: true,
                 activity: .stoppingCoach(aggregate.chat.id),
                 notice: .coachResponseInterrupted
@@ -1942,6 +1991,15 @@ public actor DefaultChatFeature: ChatFeature {
             // The concurrent Stop command exclusively installs (or retains)
             // the post-reap terminal state. This stale continuation is fenced.
             return
+        case let .providerReapPending(authority):
+            guard state.coachInvocationStopAuthority == authority else { return }
+            state = replacing(
+                coachInvocationStopAuthority: authority,
+                replacesCoachInvocationStopAuthority: true,
+                activity: .stoppingCoach(authority.chatID),
+                notice: .coachResponseInterrupted
+            )
+            publish()
         case let .published(current, quote):
             state = replacing(
                 contextAdvisory: .available(quote),
@@ -1996,7 +2054,8 @@ public actor DefaultChatFeature: ChatFeature {
             }
         case let .interrupted(current, _):
             let notice: ChatNotice? = switch current?.pendingUserTurn?.failure {
-            case .coachProviderError, .coachResponseInvalid:
+            case .coachProviderError, .coachResponseInvalid,
+                 .coachTranscriptReadFailed:
                 nil
             case .coachContextCannotFit, .coachResponseInterrupted, .none:
                 .coachResponseInterrupted
@@ -2032,6 +2091,13 @@ public actor DefaultChatFeature: ChatFeature {
                 publish()
             }
         }
+    }
+
+    private func retainProviderReapAuthority(from outcome: InvocationTryOutcome) {
+        guard case let .providerReapPending(authority) = outcome,
+              !unreapedCoachInvocationAuthorities.contains(authority)
+        else { return }
+        unreapedCoachInvocationAuthorities.append(authority)
     }
 
     private func preferredOperationalInterruptionAggregate(
@@ -2175,6 +2241,7 @@ public actor DefaultChatFeature: ChatFeature {
                 )
             }
         )
+        retainProviderReapAuthority(from: outcome)
         guard isActive(context) else { return }
         let presentedOutcome: InvocationTryOutcome
         if case let .interrupted(nil, reason) = outcome,

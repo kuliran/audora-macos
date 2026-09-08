@@ -10,6 +10,12 @@
         },
         {
             "$ref": "#/$defs/CoachInvocationV3"
+        },
+        {
+            "$ref": "#/$defs/CoachInvocationV4"
+        },
+        {
+            "$ref": "#/$defs/CoachInvocationTranscriptReadFailureV4"
         }
     ],
     "$defs": {
@@ -179,7 +185,7 @@
                     "$ref": "#/$defs/NonnegativeWholeNumber"
                 },
                 "terminalFailure": {
-                    "$ref": "#/$defs/CoachInvocationTerminalFailure"
+                    "$ref": "#/$defs/CoachInvocationTerminalFailureV3"
                 },
                 "attempts": {
                     "type": "array",
@@ -203,6 +209,152 @@
                 "schemaVersion",
                 "profileStatementGeneration",
                 "attempts"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachInvocationV4": {
+            "type": "object",
+            "properties": {
+                "invocationId": {
+                    "$ref": "#/$defs/CoachInvocationId"
+                },
+                "libraryId": {
+                    "$ref": "#/$defs/LibraryId"
+                },
+                "chatId": {
+                    "$ref": "#/$defs/ChatId"
+                },
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                },
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "draftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "expectedManifestRevision": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "admittedAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 4
+                },
+                "profileRevisionId": {
+                    "$ref": "#/$defs/ProfileRevisionId"
+                },
+                "profileStatementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "attempts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachProviderAttempt"
+                    },
+                    "minItems": 1,
+                    "maxItems": 4
+                },
+                "terminalFailure": {
+                    "$ref": "#/$defs/CoachInvocationTerminalFailureV4"
+                }
+            },
+            "required": [
+                "invocationId",
+                "libraryId",
+                "chatId",
+                "pendingUserTurnId",
+                "draftId",
+                "draftVersion",
+                "responsePositionId",
+                "expectedManifestRevision",
+                "admittedAt",
+                "schemaVersion",
+                "profileStatementGeneration",
+                "attempts"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachInvocationTranscriptReadFailureV4": {
+            "type": "object",
+            "properties": {
+                "invocationId": {
+                    "$ref": "#/$defs/CoachInvocationId"
+                },
+                "libraryId": {
+                    "$ref": "#/$defs/LibraryId"
+                },
+                "chatId": {
+                    "$ref": "#/$defs/ChatId"
+                },
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                },
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "draftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "expectedManifestRevision": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "admittedAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 4
+                },
+                "profileRevisionId": {
+                    "$ref": "#/$defs/ProfileRevisionId"
+                },
+                "profileStatementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "attempts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachProviderAttempt"
+                    },
+                    "minItems": 1,
+                    "maxItems": 4
+                },
+                "terminalFailure": {
+                    "type": "string",
+                    "const": "coachTranscriptReadFailed"
+                },
+                "transcriptReadFailure": {
+                    "$ref": "#/$defs/CoachTranscriptReadFailureSummary"
+                }
+            },
+            "required": [
+                "invocationId",
+                "libraryId",
+                "chatId",
+                "pendingUserTurnId",
+                "draftId",
+                "draftVersion",
+                "responsePositionId",
+                "expectedManifestRevision",
+                "admittedAt",
+                "schemaVersion",
+                "profileStatementGeneration",
+                "attempts",
+                "terminalFailure",
+                "transcriptReadFailure"
             ],
             "unevaluatedProperties": {
                 "not": {}
@@ -254,7 +406,7 @@
             "type": "string",
             "pattern": "^prf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
         },
-        "CoachInvocationTerminalFailure": {
+        "CoachInvocationTerminalFailureV3": {
             "anyOf": [
                 {
                     "type": "string",
@@ -306,6 +458,36 @@
                 "not": {}
             }
         },
+        "CoachInvocationTerminalFailureV4": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "coachContextCannotFit"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInterrupted"
+                },
+                {
+                    "type": "string",
+                    "const": "coachProviderError"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInvalid"
+                }
+            ]
+        },
+        "CoachTranscriptReadFailureSummary": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/CompleteCoachTranscriptReadFailureSummary"
+                },
+                {
+                    "$ref": "#/$defs/TruncatedCoachTranscriptReadFailureSummary"
+                }
+            ]
+        },
         "CoachProviderAttemptKind": {
             "anyOf": [
                 {
@@ -321,6 +503,87 @@
         "ChatMessageId": {
             "type": "string",
             "pattern": "^msg-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "CompleteCoachTranscriptReadFailureSummary": {
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachTranscriptReadFailureSession"
+                    },
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "uniqueItems": true
+                },
+                "additionalSessionCount": {
+                    "type": "number",
+                    "const": 0
+                }
+            },
+            "required": [
+                "sessions",
+                "additionalSessionCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TruncatedCoachTranscriptReadFailureSummary": {
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachTranscriptReadFailureSession"
+                    },
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "uniqueItems": true
+                },
+                "additionalSessionCount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 125
+                }
+            },
+            "required": [
+                "sessions",
+                "additionalSessionCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachTranscriptReadFailureSession": {
+            "type": "object",
+            "properties": {
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                },
+                "displayLabel": {
+                    "$ref": "#/$defs/CoachTranscriptReadFailureDisplayLabel"
+                }
+            },
+            "required": [
+                "sessionAttachmentId",
+                "displayLabel"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatSessionAttachmentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[0-9A-Za-z_-]+$"
+        },
+        "CoachTranscriptReadFailureDisplayLabel": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
         }
     }
 }

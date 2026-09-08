@@ -69,6 +69,26 @@ public struct CoachTokenEstimator: Sendable {
     }
 }
 
+/// The exact base provider-visible instruction shared by context measurement
+/// and Attempt launch. Keeping it here prevents transcript policy from drifting
+/// outside the frozen model-input budget.
+@_spi(CoachContextQualification)
+public enum CoachProviderPinnedInstruction {
+    public static func standard(outputTokenCeiling: Int) -> String {
+        "Return one complete structured response that fits within the " +
+            "\(outputTokenCeiling)-token output allowance. Ground claims about " +
+            "attached Sessions only in complete transcripts supplied inline or " +
+            "returned by read_session_transcripts. When the request needs " +
+            "evidence from on-demand Session attachments, request every needed " +
+            "handle together in one read_session_transcripts call. Do not split, " +
+            "reorder, shrink, or retry that logical read. If a transcript read " +
+            "does not return complete transcripts, do not answer around missing " +
+            "evidence. If you detect that you conflated two Sessions, ask the " +
+            "user to send the message again instead of presenting the answer as " +
+            "grounded."
+    }
+}
+
 @_spi(CoachContextQualification)
 public enum CompleteToolResponseBudgetError: Error, Equatable, Sendable {
     case negativeRemainingInputTokens
@@ -126,6 +146,132 @@ public struct CompleteToolResponseBudget: Sendable {
     }
 }
 
+/// Process-local authority for remeasuring an Attempt's exact fresh-handle
+/// frames before any on-demand transcript bytes are disclosed.
+///
+/// Fresh handles have a fixed wire length, but an exact provider tokenizer may
+/// still tokenize their contents differently. Keeping the qualified framing
+/// and estimator here prevents the invocation coordinator from guessing a
+/// remaining budget from byte counts or from the earlier planning handles.
+struct AttemptTranscriptResponseBudgetAuthority: Equatable, Sendable {
+    let inputCeilingTokens: Int
+    let pinnedInstructionFrame: Data
+    let framing: CoachProviderFraming
+    let tokenEstimator: CoachTokenEstimator
+
+    static func == (
+        lhs: AttemptTranscriptResponseBudgetAuthority,
+        rhs: AttemptTranscriptResponseBudgetAuthority
+    ) -> Bool {
+        lhs.inputCeilingTokens == rhs.inputCeilingTokens &&
+            lhs.pinnedInstructionFrame == rhs.pinnedInstructionFrame &&
+            lhs.framing == rhs.framing &&
+            lhs.tokenEstimator.identifier == rhs.tokenEstimator.identifier &&
+            lhs.tokenEstimator.mode == rhs.tokenEstimator.mode &&
+            lhs.tokenEstimator.maximumUTF8BytesPerToken ==
+            rhs.tokenEstimator.maximumUTF8BytesPerToken
+    }
+
+    func budget(
+        reboundInitialRequest: Data,
+        transcriptReadRequest: Data
+    ) throws -> CompleteToolResponseBudget? {
+        let instructionTokens = try tokenEstimator.tokenCount(
+            forUTF8: pinnedInstructionFrame
+        )
+        let initialFrame = framed(
+            prefix: framing.initialRequestPrefix,
+            body: reboundInitialRequest,
+            suffix: framing.initialRequestSuffix
+        )
+        let readRequestFrame = framed(
+            prefix: framing.transcriptReadRequestPrefix,
+            body: transcriptReadRequest,
+            suffix: framing.transcriptReadRequestSuffix
+        )
+        let initialTokens = try tokenEstimator.tokenCount(forUTF8: initialFrame)
+        let readRequestTokens = try tokenEstimator.tokenCount(forUTF8: readRequestFrame)
+        let visibleRequest = instructionTokens.addingReportingOverflow(initialTokens)
+        guard !visibleRequest.overflow else {
+            throw CompleteToolResponseBudgetError.integerOverflow
+        }
+        let visible = visibleRequest.partialValue.addingReportingOverflow(
+            readRequestTokens
+        )
+        guard !visible.overflow else {
+            throw CompleteToolResponseBudgetError.integerOverflow
+        }
+        let beforeResponse = visible.partialValue.addingReportingOverflow(
+            framing.initialRequestHiddenTokens
+        )
+        guard !beforeResponse.overflow,
+              beforeResponse.partialValue <= inputCeilingTokens
+        else {
+            return nil
+        }
+        return try CompleteToolResponseBudget(
+            remainingInputTokens: inputCeilingTokens - beforeResponse.partialValue,
+            responsePrefix: framing.transcriptReadResponsePrefix,
+            responseSuffix: framing.transcriptReadResponseSuffix,
+            hiddenTokens: framing.transcriptReadExchangeHiddenTokens,
+            tokenEstimator: tokenEstimator
+        )
+    }
+
+    func replacingPinnedInstruction(_ instruction: String) -> Self {
+        AttemptTranscriptResponseBudgetAuthority(
+            inputCeilingTokens: inputCeilingTokens,
+            pinnedInstructionFrame: Data(instruction.utf8),
+            framing: framing,
+            tokenEstimator: tokenEstimator
+        )
+    }
+
+    func admitsInitialRequest(_ reboundInitialRequest: Data) throws -> Bool {
+        let instructionTokens = try tokenEstimator.tokenCount(
+            forUTF8: pinnedInstructionFrame
+        )
+        let initialFrame = framed(
+            prefix: framing.initialRequestPrefix,
+            body: reboundInitialRequest,
+            suffix: framing.initialRequestSuffix
+        )
+        let initialTokens = try tokenEstimator.tokenCount(forUTF8: initialFrame)
+        let visible = instructionTokens.addingReportingOverflow(initialTokens)
+        guard !visible.overflow else {
+            throw CompleteToolResponseBudgetError.integerOverflow
+        }
+        let total = visible.partialValue.addingReportingOverflow(
+            framing.initialRequestHiddenTokens
+        )
+        guard !total.overflow else {
+            throw CompleteToolResponseBudgetError.integerOverflow
+        }
+        return total.partialValue <= inputCeilingTokens
+    }
+
+    func admitsMaximumTranscriptExchange(
+        reboundInitialRequest: Data,
+        transcriptReadRequest: Data,
+        transcriptReadResponse: Data
+    ) throws -> Bool {
+        guard let responseBudget = try budget(
+            reboundInitialRequest: reboundInitialRequest,
+            transcriptReadRequest: transcriptReadRequest
+        ) else { return false }
+        return try responseBudget.admits(canonicalResponse: transcriptReadResponse)
+    }
+
+    private func framed(prefix: Data, body: Data, suffix: Data) -> Data {
+        var result = Data()
+        result.reserveCapacity(prefix.count + body.count + suffix.count)
+        result.append(prefix)
+        result.append(body)
+        result.append(suffix)
+        return result
+    }
+}
+
 @_spi(CoachContextQualification)
 public struct CoachContextBudget: Equatable, Sendable {
     public let contextWindowTokens: Int
@@ -163,8 +309,9 @@ public struct CoachProviderDescriptor: Equatable, Sendable {
 
 /// Provider and adapter bytes that are outside the Coach JSON contracts.
 ///
-/// Prefixes and suffixes include pinned instructions, tool definitions, role
-/// wrappers, and adapter syntax that is actually visible to the provider model.
+/// Prefixes and suffixes include tool definitions, role wrappers, and adapter
+/// syntax that is actually visible to the provider model. The shared pinned
+/// instruction is measured as its own exact provider message.
 /// Hidden token counts cover provider special tokens that have no UTF-8 spelling.
 @_spi(CoachContextQualification)
 public struct CoachProviderFraming: Equatable, Sendable {
@@ -176,6 +323,8 @@ public struct CoachProviderFraming: Equatable, Sendable {
     public let transcriptReadResponseSuffix: Data
     public let minimumResponsePrefix: Data
     public let minimumResponseSuffix: Data
+    /// Hidden special-token overhead for the pinned-instruction message and
+    /// the structured initial-request message together.
     public let initialRequestHiddenTokens: Int
     public let transcriptReadExchangeHiddenTokens: Int
     public let minimumResponseHiddenTokens: Int
@@ -249,14 +398,16 @@ public enum PreparedCoachAttachment: Equatable, Sendable {
     case onDemand(
         requestValue: CanonicalJSONValue,
         sessionTranscriptHandle: PreparedCoachTranscriptHandle,
-        transcriptDisclosure: CanonicalJSONValue
+        transcriptDisclosure: CanonicalJSONValue,
+        sourceAttachment: ChatSessionAttachment,
+        revisionSHA256: String
     )
 
     func authoritativeRequestValue() throws -> CanonicalJSONValue {
         switch self {
         case let .inline(requestValue):
             return requestValue
-        case let .onDemand(requestValue, handle, _):
+        case let .onDemand(requestValue, handle, _, _, _):
             guard case var .object(fields) = requestValue,
                   fields["sessionTranscriptHandle"] == .string(handle.rawValue)
             else {
@@ -342,6 +493,7 @@ struct CoachContextCapacityLowerBoundEstimate: Equatable, Sendable {
 
 @_spi(CoachContextQualification)
 public struct CanonicalCoachExchange: Equatable, Sendable {
+    public let pinnedInstruction: String
     public let request: Data
     public let transcriptReadRequest: Data?
     public let transcriptReadResponse: Data?
@@ -355,7 +507,16 @@ public struct CanonicalCoachExchange: Equatable, Sendable {
     /// transport seam without rebuilding semantic context.
     public let preparedTranscriptHandles: [PreparedCoachTranscriptHandle]
 
+    /// The typed request and disclosure routes are deliberately kept behind the
+    /// Application boundary. Attempt setup uses them to replace only descriptor
+    /// handle fields; provider adapters never parse or rewrite frozen JSON bytes.
+    let structuralRequest: CanonicalJSONValue?
+    let preparedTranscriptRoutes: [CanonicalCoachTranscriptRoute]
+    let transcriptResponseBudgetAuthority:
+        AttemptTranscriptResponseBudgetAuthority?
+
     public init(
+        pinnedInstruction: String,
         request: Data,
         transcriptReadRequest: Data?,
         transcriptReadResponse: Data?,
@@ -363,13 +524,50 @@ public struct CanonicalCoachExchange: Equatable, Sendable {
         completeModelInput: Data,
         preparedTranscriptHandles: [PreparedCoachTranscriptHandle] = []
     ) {
+        self.pinnedInstruction = pinnedInstruction
         self.request = request
         self.transcriptReadRequest = transcriptReadRequest
         self.transcriptReadResponse = transcriptReadResponse
         self.modelInputFrames = modelInputFrames
         self.completeModelInput = completeModelInput
         self.preparedTranscriptHandles = preparedTranscriptHandles
+        structuralRequest = nil
+        preparedTranscriptRoutes = []
+        transcriptResponseBudgetAuthority = nil
     }
+
+    init(
+        pinnedInstruction: String,
+        request: Data,
+        transcriptReadRequest: Data?,
+        transcriptReadResponse: Data?,
+        modelInputFrames: [Data],
+        completeModelInput: Data,
+        preparedTranscriptHandles: [PreparedCoachTranscriptHandle],
+        structuralRequest: CanonicalJSONValue,
+        preparedTranscriptRoutes: [CanonicalCoachTranscriptRoute],
+        transcriptResponseBudgetAuthority:
+            AttemptTranscriptResponseBudgetAuthority?
+    ) {
+        self.pinnedInstruction = pinnedInstruction
+        self.request = request
+        self.transcriptReadRequest = transcriptReadRequest
+        self.transcriptReadResponse = transcriptReadResponse
+        self.modelInputFrames = modelInputFrames
+        self.completeModelInput = completeModelInput
+        self.preparedTranscriptHandles = preparedTranscriptHandles
+        self.structuralRequest = structuralRequest
+        self.preparedTranscriptRoutes = preparedTranscriptRoutes
+        self.transcriptResponseBudgetAuthority = transcriptResponseBudgetAuthority
+    }
+}
+
+struct CanonicalCoachTranscriptRoute: Equatable, Sendable {
+    let requestAttachmentIndex: Int
+    let preparedHandle: PreparedCoachTranscriptHandle
+    let disclosure: CanonicalJSONValue
+    let sourceAttachment: ChatSessionAttachment
+    let revisionSHA256: String
 }
 
 @_spi(CoachContextQualification)
@@ -438,16 +636,14 @@ public struct CoachContextPlanner: Sendable {
             throw CoachContextEstimationError.invalidDescriptor(descriptorError)
         }
 
-        let prepared = try buildSegments(context: context, framing: policy.framing)
-        let exchange = CanonicalCoachExchange(
-            request: prepared.request,
-            transcriptReadRequest: prepared.transcriptReadRequest,
-            transcriptReadResponse: prepared.transcriptReadResponse,
-            modelInputFrames: prepared.tokenizationUnits,
-            completeModelInput: prepared.completeInput,
-            preparedTranscriptHandles: prepared.handles
+        let pinnedInstruction = CoachProviderPinnedInstruction.standard(
+            outputTokenCeiling: descriptor.contextBudget.responseReservedTokens
         )
-
+        let prepared = try buildSegments(
+            context: context,
+            framing: policy.framing,
+            pinnedInstruction: pinnedInstruction
+        )
         var completeInputTokens = 0
         for unit in prepared.tokenizationUnits {
             completeInputTokens = try checkedAdd(
@@ -472,6 +668,24 @@ public struct CoachContextPlanner: Sendable {
         )
         let inputCeiling = descriptor.contextBudget.contextWindowTokens - reservedAndMargin
         let totalContextTokens = try checkedAdd(completeInputTokens, reservedAndMargin)
+        let exchange = CanonicalCoachExchange(
+            pinnedInstruction: pinnedInstruction,
+            request: prepared.request,
+            transcriptReadRequest: prepared.transcriptReadRequest,
+            transcriptReadResponse: prepared.transcriptReadResponse,
+            modelInputFrames: prepared.tokenizationUnits,
+            completeModelInput: prepared.completeInput,
+            preparedTranscriptHandles: prepared.handles,
+            structuralRequest: prepared.structuralRequest,
+            preparedTranscriptRoutes: prepared.transcriptRoutes,
+            transcriptResponseBudgetAuthority:
+                AttemptTranscriptResponseBudgetAuthority(
+                    inputCeilingTokens: inputCeiling,
+                    pinnedInstructionFrame: Data(pinnedInstruction.utf8),
+                    framing: policy.framing,
+                    tokenEstimator: policy.tokenEstimator
+                )
+        )
 
         var componentCosts: [CoachContextCostCategory: CoachContextComponentCost] = [:]
         for component in CoachContextCostCategory.allCases {
@@ -536,7 +750,14 @@ public struct CoachContextPlanner: Sendable {
             throw CoachContextEstimationError.invalidDescriptor(descriptorError)
         }
 
-        let prepared = try buildSegments(context: context, framing: policy.framing)
+        let pinnedInstruction = CoachProviderPinnedInstruction.standard(
+            outputTokenCeiling: descriptor.contextBudget.responseReservedTokens
+        )
+        let prepared = try buildSegments(
+            context: context,
+            framing: policy.framing,
+            pinnedInstruction: pinnedInstruction
+        )
         let maximumBytesPerToken = policy.tokenEstimator.maximumUTF8BytesPerToken
         var minimumCompleteInputTokens = 0
         for unit in prepared.tokenizationUnits {
@@ -622,7 +843,8 @@ public struct CoachContextPlanner: Sendable {
 
     private func buildSegments(
         context: PreparedCoachContext,
-        framing: CoachProviderFraming
+        framing: CoachProviderFraming,
+        pinnedInstruction: String
     ) throws -> PreparedSegments {
         let history = CanonicalJSON.serialize(.array(context.history))
         let memory = CanonicalJSON.serialize(context.memory)
@@ -643,6 +865,7 @@ public struct CoachContextPlanner: Sendable {
 
         var handles: [PreparedCoachTranscriptHandle] = []
         var disclosures: [CanonicalJSONValue] = []
+        var transcriptRoutes: [CanonicalCoachTranscriptRoute] = []
         var seenHandles: Set<String> = []
         for (index, attachment) in context.attachments.enumerated() {
             if index > 0 {
@@ -654,7 +877,9 @@ public struct CoachContextPlanner: Sendable {
                 requestSegments.append(
                     LabeledSegment(.attachments, CanonicalJSON.serialize(requestValue))
                 )
-            case let .onDemand(_, handle, disclosure):
+            case let .onDemand(
+                _, handle, disclosure, sourceAttachment, revisionSHA256
+            ):
                 guard seenHandles.insert(handle.rawValue).inserted else {
                     throw CoachContextEstimationError.duplicateSessionTranscriptHandle
                 }
@@ -663,14 +888,22 @@ public struct CoachContextPlanner: Sendable {
                 )
                 handles.append(handle)
                 disclosures.append(disclosure)
+                transcriptRoutes.append(
+                    CanonicalCoachTranscriptRoute(
+                        requestAttachmentIndex: index,
+                        preparedHandle: handle,
+                        disclosure: disclosure,
+                        sourceAttachment: sourceAttachment,
+                        revisionSHA256: revisionSHA256
+                    )
+                )
             }
         }
         requestSegments.append(LabeledSegment(.framing, Data("]}".utf8)))
 
         let request = joined(requestSegments)
-        let canonicalRequest = CanonicalJSON.serialize(
-            try requestValue(context: context)
-        )
+        let structuralRequest = try requestValue(context: context)
+        let canonicalRequest = CanonicalJSON.serialize(structuralRequest)
         precondition(request == canonicalRequest, "segmented request must remain canonical")
 
         var initialRequestSegments: [LabeledSegment] = [
@@ -678,8 +911,16 @@ public struct CoachContextPlanner: Sendable {
         ]
         initialRequestSegments.append(contentsOf: requestSegments)
         initialRequestSegments.append(LabeledSegment(.framing, framing.initialRequestSuffix))
-        var completeSegments = initialRequestSegments
-        var tokenizationUnits = [joined(initialRequestSegments)]
+        let pinnedInstructionSegment = LabeledSegment(
+            .framing,
+            Data(pinnedInstruction.utf8)
+        )
+        var completeSegments = [pinnedInstructionSegment]
+        completeSegments.append(contentsOf: initialRequestSegments)
+        var tokenizationUnits = [
+            pinnedInstructionSegment.data,
+            joined(initialRequestSegments),
+        ]
 
         var readRequest: Data?
         var readResponse: Data?
@@ -725,7 +966,9 @@ public struct CoachContextPlanner: Sendable {
             completeInput: joined(completeSegments),
             tokenizationUnits: tokenizationUnits,
             componentData: componentData,
-            handles: handles
+            handles: handles,
+            structuralRequest: structuralRequest,
+            transcriptRoutes: transcriptRoutes
         )
     }
 
@@ -926,6 +1169,8 @@ private struct PreparedSegments {
     let tokenizationUnits: [Data]
     let componentData: [CoachContextCostCategory: Data]
     let handles: [PreparedCoachTranscriptHandle]
+    let structuralRequest: CanonicalJSONValue
+    let transcriptRoutes: [CanonicalCoachTranscriptRoute]
 }
 
 private func joined(_ segments: [LabeledSegment]) -> Data {

@@ -27,7 +27,7 @@ private extension PortableInvocationStore {
 }
 
 final class PortableInvocationStoreTests: XCTestCase {
-    func testV3InvocationAndProofPersistNoProviderTransportAuthority() async throws {
+    func testV4InvocationAndProofPersistNoProviderTransportAuthority() async throws {
         try await withTemporaryParent { parent in
             let handle = try CoachProviderTranscriptHandle(
                 "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -290,6 +290,103 @@ final class PortableInvocationStoreTests: XCTestCase {
                 .coachResponseInvalid
             )
             XCTAssertEqual(reopened.chat.messageIDs, [])
+        }
+    }
+
+    func testRelaunchRecoversRichTranscriptFailureFromDurableTerminalIntent()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makeInvocationStoreFixture(
+                in: parent,
+                includesTranscriptAttachment: true
+            )
+            let attachment = try XCTUnwrap(
+                fixture.locked.chat.attachments.values.first
+            )
+            let summary = try CoachTranscriptReadFailureSummary(
+                sessions: [
+                    CoachTranscriptReadFailureSession(
+                        sessionAttachmentID: attachment.attachmentID,
+                        displayLabel: "Fixture Session"
+                    ),
+                ],
+                additionalSessionCount: 0
+            )
+            let failure = PendingUserTurnFailure.coachTranscriptReadFailed(summary)
+            let fault = OneShot()
+            let persistence = PortableChatPersistence { point in
+                if point == .afterInvocationTerminalIntentDirectoryFlush,
+                   fault.take()
+                {
+                    throw PortableChatPersistenceError.injectedFault(point)
+                }
+            }
+            let lease = try XCTUnwrap(
+                persistence.acquireInvocationLivenessLease(
+                    at: fixture.root,
+                    in: fixture.scope,
+                    for: fixture.install.authority.request
+                )
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: fixture.root,
+                holding: lease
+            ) else { return XCTFail("Invocation was not installed") }
+
+            XCTAssertThrowsError(
+                try persistence.abortInstalledNewSend(
+                    fixture.install.invocation,
+                    failure: failure,
+                    at: fixture.root,
+                    in: fixture.scope,
+                    holding: lease
+                )
+            )
+            XCTAssertFalse(fault.take(), "terminal-intent fault was not reached")
+            let invocationURL = fixture.root
+                .appendingPathComponent("invocations", isDirectory: true)
+                .appendingPathComponent(
+                    fixture.install.invocation.id.rawValue,
+                    isDirectory: true
+                )
+                .appendingPathComponent("invocation.json")
+            let invocationObject = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: Data(contentsOf: invocationURL)
+                ) as? [String: Any]
+            )
+            XCTAssertEqual(invocationObject["schemaVersion"] as? Int, 4)
+            XCTAssertEqual(
+                invocationObject["terminalFailure"] as? String,
+                "coachTranscriptReadFailed"
+            )
+            XCTAssertNotNil(invocationObject["transcriptReadFailure"])
+            lease.release()
+
+            let relaunchedWorkspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [fixture.root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await relaunchedWorkspace.chooseLibrary()
+            let chats = PortableChatStore(workspace: relaunchedWorkspace)
+            guard case let .loaded(reopened) = await chats.load(
+                fixture.locked.chat.id,
+                in: fixture.scope
+            ) else { return XCTFail("relaunch did not reconcile rich terminal intent") }
+
+            XCTAssertEqual(reopened.pendingUserTurn?.failure, failure)
+            XCTAssertEqual(reopened.chat.messageIDs, [])
+            XCTAssertFalse(
+                try PortableChatPersistence().hasActiveInvocation(
+                    at: fixture.root,
+                    in: fixture.scope
+                )
+            )
         }
     }
 
@@ -587,7 +684,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                     with: Data(contentsOf: invocationURL)
                 ) as? [String: Any]
             )
-            XCTAssertEqual(object["schemaVersion"] as? Int, 3)
+            XCTAssertEqual(object["schemaVersion"] as? Int, 4)
             XCTAssertEqual((object["attempts"] as? [[String: Any]])?.count, 2)
 
             guard case let .committed(aggregate) = await nextSession.abort(
@@ -3915,7 +4012,7 @@ final class PortableInvocationStoreTests: XCTestCase {
         }
     }
 
-    func testRelaunchRecognizesCommittedV3RetryPublicationForTypedFailures() async throws {
+    func testRelaunchRecognizesCommittedV4RetryPublicationForTypedFailures() async throws {
         let priorFailures: [PendingUserTurnFailure] = [
             .coachContextCannotFit,
             .coachResponseInterrupted,
@@ -3998,7 +4095,7 @@ final class PortableInvocationStoreTests: XCTestCase {
             ).write(to: invocationURL, options: .atomic)
 
             // Reproduce the prior binary's exact v2 Retry boundary: the
-            // committed proof hashes an interrupted Pending rather than the v3
+            // committed proof hashes an interrupted Pending rather than the v4
             // failure-free processing projection.
             let pendingURL = fixture.root
                 .appendingPathComponent("chats", isDirectory: true)
@@ -4200,7 +4297,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                 if mode == "newer" {
                     data = Data(
                         """
-                        {"schemaVersion":4,"invocationId":"\(invocation.id.rawValue)","libraryId":"\(fixture.scope.libraryID.rawValue)","chatId":"\(fixture.locked.chat.id.rawValue)","futureBody":"first","futureBody":"second"}
+                        {"schemaVersion":5,"invocationId":"\(invocation.id.rawValue)","libraryId":"\(fixture.scope.libraryID.rawValue)","chatId":"\(fixture.locked.chat.id.rawValue)","futureBody":"first","futureBody":"second"}
                         """.utf8
                     )
                 } else {
@@ -4353,7 +4450,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                 case "duplicate-common-key":
                     data = Data(
                         """
-                        {"schemaVersion":4,"invocationId":"\(invocationID.rawValue)","libraryId":"\(fixture.scope.libraryID.rawValue)","chatId":"\(fixture.locked.chat.id.rawValue)","chatId":"\(fixture.locked.chat.id.rawValue)"}
+                        {"schemaVersion":5,"invocationId":"\(invocationID.rawValue)","libraryId":"\(fixture.scope.libraryID.rawValue)","chatId":"\(fixture.locked.chat.id.rawValue)","chatId":"\(fixture.locked.chat.id.rawValue)"}
                         """.utf8
                     )
                 case "non-object-root":
@@ -5729,7 +5826,8 @@ final class PortableInvocationStoreTests: XCTestCase {
         libraryID: String = "lib-20260830T120000000Z-2ABC",
         includeCompetingPending: Bool = false,
         pendingFailure: PendingUserTurnFailure? = nil,
-        transcriptHandles: [CoachProviderTranscriptHandle] = []
+        transcriptHandles: [CoachProviderTranscriptHandle] = [],
+        includesTranscriptAttachment: Bool = false
     ) async throws -> InvocationStoreFixture {
         let root = parent.appendingPathComponent("Invocation.audoralibrary")
         let library = try PortableLibraryPersistence().create(
@@ -5746,7 +5844,19 @@ final class PortableInvocationStoreTests: XCTestCase {
         )
         _ = await workspace.chooseLibrary()
         let persistence = PortableChatPersistence()
-        let seed = try makeChatSeed(scope: scope)
+        let attachments: ChatAttachments = if includesTranscriptAttachment {
+            try await ChatAttachments(
+                validating: [
+                    installRecordedChatAttachmentFixture(
+                        at: root,
+                        in: scope
+                    ),
+                ]
+            )
+        } else {
+            .empty
+        }
+        let seed = try makeChatSeed(scope: scope, attachments: attachments)
         let created = try persistence.create(seed, at: root)
         let editedDraft = try created.chat.draft.edited(
             text: "Please help me say this more naturally.",

@@ -286,6 +286,120 @@ final class CoachInvocationDomainTests: XCTestCase {
             )
         )
     }
+
+    func testTranscriptReadTerminalIntentSurvivesDurableProjection() throws {
+        let fixture = try Fixture()
+        let summary = try CoachTranscriptReadFailureSummary(
+            sessions: [
+                CoachTranscriptReadFailureSession(
+                    sessionAttachmentID: ChatSessionAttachmentID("attachment_1"),
+                    displayLabel: "Practice Session"
+                ),
+            ],
+            additionalSessionCount: 0
+        )
+        let failure = PendingUserTurnFailure.coachTranscriptReadFailed(summary)
+        let terminal = try fixture.invocation().recordingTerminalFailure(failure)
+        let durable = try terminal.durableProjection()
+
+        XCTAssertEqual(terminal.terminalFailure, failure)
+        XCTAssertEqual(durable.terminalFailure, failure)
+        XCTAssertNil(durable.attempt.transportAuthority)
+        XCTAssertThrowsError(try terminal.validateIntent(against: fixture.aggregate)) {
+            error in
+            XCTAssertEqual(
+                error as? CoachInvocationError,
+                .transcriptReadFailureAttachmentMismatch
+            )
+        }
+    }
+
+    func testTranscriptTerminalIntentRejectsCountBeyondChatAttachments() throws {
+        let fixture = try Fixture()
+        let attachments = try ChatAttachments(
+            validating: try (1 ... 3).map { index in
+                ChatSessionAttachment(
+                    attachmentID: try ChatSessionAttachmentID("attachment_\(index)"),
+                    sessionID: try SessionID(
+                        "ses-20260830T110000000Z-\(index)KMN"
+                    ),
+                    transcriptRevisionID: try TranscriptRevisionID(
+                        "trv-20260830T111000000Z-\(index)PQR"
+                    )
+                )
+            }
+        )
+        let baseChat = fixture.aggregate.chat
+        let chat = try Chat(
+            id: baseChat.id,
+            manifestRevision: baseChat.manifestRevision,
+            title: baseChat.title,
+            createdAt: baseChat.createdAt,
+            updatedAt: baseChat.updatedAt,
+            creation: baseChat.creation,
+            profileStatementGenerationAtCreation:
+                baseChat.profileStatementGenerationAtCreation,
+            attachments: attachments,
+            draft: baseChat.draft,
+            messageIDs: baseChat.messageIDs,
+            currentMemoryID: baseChat.currentMemoryID
+        )
+        let aggregate = try ChatAggregate(
+            chat: chat,
+            memory: fixture.aggregate.memory,
+            pendingUserTurn: fixture.pending
+        )
+        let summary = try CoachTranscriptReadFailureSummary(
+            sessions: try attachments.values.map {
+                try CoachTranscriptReadFailureSession(
+                    sessionAttachmentID: $0.attachmentID,
+                    displayLabel: "Practice Session"
+                )
+            },
+            additionalSessionCount: 1
+        )
+        let terminal = try fixture.invocation().recordingTerminalFailure(
+            .coachTranscriptReadFailed(summary)
+        )
+
+        XCTAssertThrowsError(try terminal.validateIntent(against: aggregate)) {
+            error in
+            XCTAssertEqual(
+                error as? CoachInvocationError,
+                .transcriptReadFailureAttachmentMismatch
+            )
+        }
+    }
+
+    func testLegacyV3InvocationRejectsTranscriptReadTerminalIntent() throws {
+        let fixture = try Fixture()
+        let summary = try CoachTranscriptReadFailureSummary(
+            sessions: [
+                CoachTranscriptReadFailureSession(
+                    sessionAttachmentID: ChatSessionAttachmentID("attachment_1"),
+                    displayLabel: "Practice Session"
+                ),
+            ],
+            additionalSessionCount: 0
+        )
+
+        XCTAssertThrowsError(
+            try CoachInvocation(
+                schemaVersion: CoachInvocation.attemptSequenceSchemaVersion,
+                id: fixture.invocationID,
+                attempts: [fixture.attempt()],
+                library: fixture.library,
+                chatID: fixture.aggregate.chat.id,
+                pendingUserTurn: fixture.pending,
+                preparedProfile: fixture.profile,
+                expectedManifestRevision: fixture.aggregate.chat.manifestRevision,
+                admittedAt: fixture.instant,
+                terminalFailure: .coachTranscriptReadFailed(summary)
+            )
+        ) { error in
+            XCTAssertEqual(error as? CoachInvocationError, .invalidTerminalFailure)
+        }
+    }
 }
 
 private struct Fixture {

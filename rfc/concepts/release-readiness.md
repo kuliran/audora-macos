@@ -217,20 +217,25 @@ execution profile.
 - Token estimates and remaining budgets stay app-side. The transcript-read Request
   contains neither token estimate nor available-read budget.
 - The transcript read is all-or-nothing for its requested subset. Application owns
-  transport retries, fit checks, and fallback. It never relies on the coach to
-  retry the tool.
+  transport retries, fit checks, and fallback. Storage resolves the ordered subset
+  under one Library fence and one stable-order shared lock set covering every
+  requested Session; independently timed Session checks cannot form a successful
+  batch. Shared-lock acquisition is nonblocking and bounded to three cancellable
+  local attempts before the whole subset fails closed. It never relies on the
+  coach to retry the tool.
 - `sessionUnavailable` or defensive `contextCannotFit` aborts the Coach response
   and becomes a turn-level UserRetryable error. It names at most three unavailable
   Sessions as accessible links and asks the user to retry or discard. The model
   does not generate an incomplete excuse.
-- The Coach instruction requires transcript grounding. If current Memory and input
-  contain no sufficient knowledge, it reads every attached Session needed for the
-  request and stores useful per-Session summaries in optional `newMemory`. If it
-  detects that it conflated two Sessions, it asks the user to send the message
-  again rather than presenting the confused answer as grounded.
-- On the first response in a Session Analysis Chat, the Coach attempts any useful
-  evidence-backed Profile effects in the same batch. Validation and deduplication
-  may correctly leave no effective Proposal or Evidence Append.
+- The exact Coach instruction bytes are included in context measurement. The
+  instruction requires transcript grounding, one logical read containing every
+  needed on-demand Session handle, no split/narrow/reordered/retried semantic read,
+  and no answer around a non-complete result. If it detects that it conflated two
+  Sessions, it asks the user to send the message again rather than presenting the
+  confused answer as grounded.
+- Session-analysis Memory/Profile effects remain a later slice. When introduced,
+  validation and deduplication may correctly leave no effective Proposal or
+  Evidence Append.
 
 ## Coach Memory
 
@@ -281,8 +286,9 @@ execution profile.
   handles, one-time transcript access, and publication authority. User Retry creates
   a new Invocation and fresh first Attempt values. Idempotency values, handles,
   and bearer access are process-live only and never persisted or logged. Invocation
-  v3 embeds only the bounded ordered safe Attempt projection (ID, ordinal/kind,
-  and publication authority); nested Attempts inherit v3.
+  v4 embeds only the bounded ordered safe Attempt projection (ID, ordinal/kind,
+  and publication authority) plus a bounded transcript-read terminal summary when
+  needed; nested Attempts retain the layout introduced in v3.
 - Retry installs and flushes the Invocation generation marker, durably clears the
   old Pending failure, and rebinds its exact inode lease before provider authority
   returns. Typed terminal intent is itself CASed and flushed before Pending changes,
@@ -301,16 +307,20 @@ execution profile.
   explicitly tells the coach to return a shorter valid complete response; partial
   prior output is not replayed. A repeat becomes UserRetryable.
 - Every Attempt configures the provider output-token ceiling at or below
-  `responseReservedTokens`, and the pinned instruction tells the Coach that its
-  complete structured response must fit. Collector-byte and schema checks still
-  reject overflow or truncation atomically.
+  `responseReservedTokens`; the exact measured pinned instruction tells the Coach
+  that its complete structured response must fit. Collector-byte and schema checks
+  still reject overflow or truncation atomically.
 - Every UserRetryable outcome logs its normalized reason. Safe displayed provider
   text comes from a structured provider error field or an adapter-owned sanitized
   mapping; raw CLI stderr is never displayed or logged.
 - Stop terminates and reaps the active Attempt before a successor can start. A late
   result cannot publish unless the response position still names its Invocation and
-  Attempt. Stop publishes nothing and leaves the locked Draft or stale Reconsider
-  Proposal under the ordinary interrupted UserRetryable **Retry**/**Discard** state.
+  Attempt. An unconfirmed reap remains a process-wide start fence even if explicit
+  Stop or automatic transcript-read failure is followed by a Library selection
+  change; the app retries that exact hidden authority before admitting a replacement
+  Library's Coach request. Stop publishes nothing and leaves the
+  locked Draft or stale Reconsider Proposal under the ordinary interrupted
+  UserRetryable **Retry**/**Discard** state.
   Discard unlocks an answer Draft or restores the stale Proposal actions; it does
   not silently discard the Proposal itself.
 - Relaunch converts every active Invocation into interruption, preserves its locked

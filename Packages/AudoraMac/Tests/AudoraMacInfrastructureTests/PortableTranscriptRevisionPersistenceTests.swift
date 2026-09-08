@@ -2675,7 +2675,7 @@ private func withImportedSession(
     try await body(root, libraryID, installed.session)
 }
 
-private final class CooperatingSessionTrashMove: @unchecked Sendable {
+final class CooperatingSessionTrashMove: @unchecked Sendable {
     private enum MoveFailure: Error {
         case openFailed
         case lockFailed

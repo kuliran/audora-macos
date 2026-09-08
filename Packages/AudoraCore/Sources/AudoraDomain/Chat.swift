@@ -303,15 +303,113 @@ public struct ChatDraft: Equatable, Sendable {
     }
 }
 
-public enum PendingUserTurnFailure: String, Equatable, Sendable {
+public enum CoachTranscriptReadFailureSummaryError: Error, Equatable, Sendable {
+    case invalidDisplayLabel
+    case invalidSessionCount
+    case duplicateSessionAttachment
+    case invalidAdditionalSessionCount
+}
+
+/// A privacy-bounded, durable link to one affected Chat attachment.
+///
+/// The Chat-scoped attachment ID is the only identity retained. Session,
+/// Transcript Revision, Library, storage, and provider transport identities
+/// remain outside this value.
+public struct CoachTranscriptReadFailureSession: Equatable, Sendable {
+    public static let maximumDisplayLabelUnicodeScalars = 256
+
+    public let sessionAttachmentID: ChatSessionAttachmentID
+    public let displayLabel: String
+
+    public init(
+        sessionAttachmentID: ChatSessionAttachmentID,
+        displayLabel: String
+    ) throws {
+        guard !displayLabel.isEmpty,
+              displayLabel.unicodeScalars.count <=
+              Self.maximumDisplayLabelUnicodeScalars,
+              !displayLabel.unicodeScalars.contains(where: {
+                  $0.value == 0 || $0.properties.generalCategory == .control
+              })
+        else {
+            throw CoachTranscriptReadFailureSummaryError.invalidDisplayLabel
+        }
+        self.sessionAttachmentID = sessionAttachmentID
+        self.displayLabel = displayLabel
+    }
+}
+
+/// The complete durable UI summary for an atomic transcript-read failure.
+///
+/// At most three Sessions become links. A positive remainder is valid only
+/// after all three link slots are occupied, preventing malformed summaries
+/// from understating the affected set.
+public struct CoachTranscriptReadFailureSummary: Equatable, Sendable {
+    public static let maximumLinkedSessionCount = 3
+    public static let maximumAdditionalSessionCount =
+        ChatAttachments.maximumCount - maximumLinkedSessionCount
+
+    public let sessions: [CoachTranscriptReadFailureSession]
+    public let additionalSessionCount: UInt8
+
+    public init(
+        sessions: [CoachTranscriptReadFailureSession],
+        additionalSessionCount: UInt8
+    ) throws {
+        guard (1 ... Self.maximumLinkedSessionCount).contains(sessions.count) else {
+            throw CoachTranscriptReadFailureSummaryError.invalidSessionCount
+        }
+        guard Set(sessions.map(\.sessionAttachmentID)).count == sessions.count else {
+            throw CoachTranscriptReadFailureSummaryError.duplicateSessionAttachment
+        }
+        guard Int(additionalSessionCount) <= Self.maximumAdditionalSessionCount,
+              additionalSessionCount == 0 ||
+              sessions.count == Self.maximumLinkedSessionCount
+        else {
+            throw CoachTranscriptReadFailureSummaryError.invalidAdditionalSessionCount
+        }
+        self.sessions = sessions
+        self.additionalSessionCount = additionalSessionCount
+    }
+}
+
+public enum PendingUserTurnFailure: RawRepresentable, Equatable, Sendable {
     case coachContextCannotFit
     case coachResponseInterrupted
     case coachProviderError
     case coachResponseInvalid
+    case coachTranscriptReadFailed(CoachTranscriptReadFailureSummary)
+
+    public init?(rawValue: String) {
+        switch rawValue {
+        case "coachContextCannotFit": self = .coachContextCannotFit
+        case "coachResponseInterrupted": self = .coachResponseInterrupted
+        case "coachProviderError": self = .coachProviderError
+        case "coachResponseInvalid": self = .coachResponseInvalid
+        // This kind is invalid without its required privacy-bounded summary.
+        case "coachTranscriptReadFailed": return nil
+        default: return nil
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .coachContextCannotFit: "coachContextCannotFit"
+        case .coachResponseInterrupted: "coachResponseInterrupted"
+        case .coachProviderError: "coachProviderError"
+        case .coachResponseInvalid: "coachResponseInvalid"
+        case .coachTranscriptReadFailed: "coachTranscriptReadFailed"
+        }
+    }
+
+    public var transcriptReadFailureSummary: CoachTranscriptReadFailureSummary? {
+        guard case let .coachTranscriptReadFailed(summary) = self else { return nil }
+        return summary
+    }
 }
 
 public struct PendingUserTurn: Equatable, Sendable {
-    public static let schemaVersion: UInt32 = 3
+    public static let schemaVersion: UInt32 = 4
 
     public let id: PendingUserTurnID
     public let draftID: ChatDraftID
@@ -408,6 +506,7 @@ public enum ChatAggregateError: Error, Equatable, Sendable {
     case draftIdentityChanged
     case draftVersionDidNotAdvance
     case pendingDraftMismatch
+    case pendingFailureAttachmentMismatch
     case memoryPointerMismatch
     case memoryOwnerMismatch
     case manifestRevisionOverflow
@@ -527,6 +626,17 @@ public struct ChatAggregate: Equatable, Sendable {
                   pendingUserTurn.draftVersion == chat.draft.version
             else {
                 throw ChatAggregateError.pendingDraftMismatch
+            }
+            if let summary = pendingUserTurn.failure?.transcriptReadFailureSummary {
+                let attachmentIDs = Set(chat.attachments.values.map(\.attachmentID))
+                guard summary.sessions.allSatisfy({
+                    attachmentIDs.contains($0.sessionAttachmentID)
+                }),
+                    summary.sessions.count + Int(summary.additionalSessionCount) <=
+                    attachmentIDs.count
+                else {
+                    throw ChatAggregateError.pendingFailureAttachmentMismatch
+                }
             }
         }
         self.chat = chat

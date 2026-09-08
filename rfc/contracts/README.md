@@ -35,9 +35,10 @@ at runtime.
 
 `PendingUserTurn.json` is a versioned union: strict legacy v1 permits no failure
 or `coachContextCannotFit`; legacy v2 additionally permits
-`coachResponseInterrupted`; current v3 also distinguishes retryable Provider
-failure from an invalid complete response. The committed examples cover the
-current terminal reasons and legacy v1.
+`coachResponseInterrupted`; v3 distinguishes retryable Provider failure from an
+invalid complete response; and current v4 adds transcript-read failure paired with
+its required privacy-bounded Session-link summary. The committed examples cover
+the current terminal reasons and legacy compatibility.
 
 - [`AudioImportFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioImportFeatureScenario.json)
 - [`AudioManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json)
@@ -287,10 +288,12 @@ and attached Chats, including the New Chat attachment picker. Checked-in fixture
 cover create, rename, filter, relaunch, stale rename, final attachment disappearance
 with an atomic no-Chat result and retained selection, immediate cancellation of
 exact attachment resolution, cancellation of the post-resolution precommit quote,
-and the Draft lock-and-discard lifecycle in
+an atomic mixed-availability on-demand transcript failure with zero publication,
+three bounded recovery links plus an additional count, and the Draft
+lock-and-discard lifecycle in
 [`draft-send-discard.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/Chat/draft-send-discard.v1.json).
-Each scenario declares exact provider, Invocation, and admission call totals. The
-three scenarios containing Send cross the single Invocation gateway, while
+Each scenario declares exact provider, Invocation, and admission call totals. Every
+scenario containing Send crosses the single Invocation gateway, while
 non-Send scenarios declare zero calls. Rejected examples cover ambiguous creation
 shapes, unknown keys, missing attachments, dangling Memory summaries, and newer
 schemas that must remain byte-identical while frozen.
@@ -307,12 +310,15 @@ and one admission call.
 `ChatMessage.json` seals the mutually exclusive stored user-text and Coach-Markdown
 shapes. `CoachInvocation.json` is the portable launch authority bound to one
 Library, Chat, Pending User Turn, Draft version, response position, and expected
-manifest revision. Its current v3 record contains one to four durable Provider
-Attempts; each inherits v3 and carries only a fresh Attempt ID, ordinal/kind, and
-message/Draft publication authority. Provider idempotency values and opaque
-transcript handles are live transport authority and occur in neither this root nor
-its publication proof. Legacy v1/v2 records retain their strict historical flat
-single-Attempt shape only for safe relaunch retirement. `InvocationAdmissionLedger.json` is machine-local rather than
+manifest revision. Its current v4 record contains one to four durable Provider
+Attempts and may pair transcript-read terminal failure with its required bounded
+Session-link summary. Each nested Attempt retains the layout introduced in v3 and
+carries only a fresh Attempt ID, ordinal/kind, and message/Draft publication
+authority. Provider idempotency values and opaque transcript handles are live
+transport authority and occur in neither this root nor its publication proof.
+Legacy v1/v2 records retain their strict historical flat single-Attempt shape and
+v3 retains the first nested shape, only for safe relaunch retirement.
+`InvocationAdmissionLedger.json` is machine-local rather than
 portable Library content; it permits at most 4,096 Library debits and stores the
 last admitted UTC instant used by the conservative rolling-window policy. The
 Application additionally enforces UTF-8 byte ceilings and exact aggregate

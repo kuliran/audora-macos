@@ -218,7 +218,7 @@ public struct TranscriptReadBrokerLimits: Equatable, Sendable {
 
     public init(
         maximumRequestBytes: Int = 16 * 1_024,
-        maximumRequestedHandles: Int = 32,
+        maximumRequestedHandles: Int = 128,
         maximumDeliveries: Int = 2
     ) {
         self.maximumRequestBytes = maximumRequestBytes
@@ -262,6 +262,20 @@ public enum TranscriptReadRejection: String, Equatable, Sendable {
 public enum TranscriptReadResult: Equatable, Sendable {
     case delivered(TranscriptReadDelivery)
     case rejected(TranscriptReadRejection)
+}
+
+public struct TranscriptReadTransportRequestID: Equatable, Sendable {
+    public let rawValue: String
+
+    public init?(_ rawValue: String) {
+        guard !rawValue.isEmpty,
+              rawValue.utf8.count <= 128,
+              !rawValue.unicodeScalars.contains(where: {
+                  $0.value == 0 || $0.properties.generalCategory == .control
+              })
+        else { return nil }
+        self.rawValue = rawValue
+    }
 }
 
 public enum TranscriptReadRevocationReason: String, CaseIterable, Equatable, Sendable {
@@ -388,7 +402,8 @@ public actor TranscriptReadBroker {
     private enum State {
         case open
         case replayable(
-            requestHandles: [String],
+            transportRequestID: TranscriptReadTransportRequestID,
+            requestBody: Data,
             responseBody: Data,
             deliveriesRemaining: Int
         )
@@ -420,6 +435,7 @@ public actor TranscriptReadBroker {
     /// so a concurrent revocation linearizes wholly before or after disclosure.
     public func read(
         capability: TranscriptReadCapability,
+        transportRequestID: TranscriptReadTransportRequestID,
         requestBody: Data
     ) -> TranscriptReadResult {
         guard case .revoked = state else {
@@ -438,9 +454,21 @@ public actor TranscriptReadBroker {
 
             switch state {
             case .open:
-                return performFirstRead(handles: request.handles)
-            case let .replayable(firstHandles, responseBody, deliveriesRemaining):
-                guard request.handles == firstHandles, deliveriesRemaining > 0 else {
+                return performFirstRead(
+                    transportRequestID: transportRequestID,
+                    requestBody: requestBody,
+                    handles: request.handles
+                )
+            case let .replayable(
+                firstRequestID,
+                firstRequestBody,
+                responseBody,
+                deliveriesRemaining
+            ):
+                guard transportRequestID == firstRequestID,
+                      requestBody == firstRequestBody,
+                      deliveriesRemaining > 0
+                else {
                     revokeNow()
                     return .rejected(.closed)
                 }
@@ -450,7 +478,8 @@ public actor TranscriptReadBroker {
                     revokeNow()
                 } else {
                     state = .replayable(
-                        requestHandles: firstHandles,
+                        transportRequestID: firstRequestID,
+                        requestBody: firstRequestBody,
                         responseBody: responseBody,
                         deliveriesRemaining: deliveriesAfterThisOne
                     )
@@ -478,14 +507,18 @@ public actor TranscriptReadBroker {
         switch state {
         case .open:
             .open
-        case let .replayable(_, _, deliveriesRemaining):
+        case let .replayable(_, _, _, deliveriesRemaining):
             .replayable(deliveriesRemaining: deliveriesRemaining)
         case .revoked:
             .revoked
         }
     }
 
-    private func performFirstRead(handles: [String]) -> TranscriptReadResult {
+    private func performFirstRead(
+        transportRequestID: TranscriptReadTransportRequestID,
+        requestBody: Data,
+        handles: [String]
+    ) -> TranscriptReadResult {
         var requested: [(handle: String, attachment: FrozenTranscriptAttachment)] = []
         for handle in handles {
             guard let attachment = frozenByHandle[handle] else {
@@ -572,7 +605,8 @@ public actor TranscriptReadBroker {
             revokeNow()
         } else {
             state = .replayable(
-                requestHandles: handles,
+                transportRequestID: transportRequestID,
+                requestBody: requestBody,
                 responseBody: completeBody,
                 deliveriesRemaining: deliveriesRemaining
             )

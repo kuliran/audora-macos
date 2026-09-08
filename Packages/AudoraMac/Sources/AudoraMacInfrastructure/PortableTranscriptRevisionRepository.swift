@@ -55,6 +55,16 @@ struct PortableChatAttachmentFingerprint: Equatable, Sendable {
     let revisionSHA256: String
 }
 
+enum PortableChatAttachmentFingerprintAvailability: Equatable, Sendable {
+    case available
+    case unavailable
+}
+
+private enum ChatAttachmentLockMode {
+    case blocking
+    case nonblocking
+}
+
 /// The one persistence boundary that turns a validated Transcript Revision into
 /// selected portable Session state. Revision bytes are installed immutably before
 /// the Session manifest's logical compare-and-swap commit. All Audora Session
@@ -613,12 +623,82 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         underRootDescriptor rootDescriptor: Int32,
         install: () throws -> Result
     ) throws -> Result? {
-        let rootIdentity = try Self.identity(of: rootDescriptor)
-        while transcriptRevisionFlock(rootDescriptor, LOCK_SH) != 0 {
-            guard errno == EINTR else {
-                throw TranscriptRevisionRepositoryFailure.writeFailed
+        try withLockedChatAttachmentsSynchronously(
+            attachments,
+            underRootDescriptor: rootDescriptor
+        ) { reads in
+            if let expectedFingerprints,
+               expectedFingerprints.map(\.attachment) != attachments.values
+            {
+                return nil
             }
+            for (index, attachment) in attachments.values.enumerated() {
+                guard case let .available(evidence, revisionSHA256) = reads[index],
+                      evidence.revision.sessionID == attachment.sessionID,
+                      evidence.revision.revisionID == attachment.transcriptRevisionID,
+                      expectedFingerprints.map({
+                          $0[index].revisionSHA256 == revisionSHA256
+                      }) ?? true
+                else {
+                    return nil
+                }
+            }
+            return try install()
         }
+    }
+
+    /// Resolves one ordered attachment set under one root fence and the complete
+    /// stable-order Session lock set. A caller can therefore decide whether a
+    /// transcript batch is complete without combining observations from
+    /// different storage snapshots.
+    func inspectChatAttachmentFingerprintsSynchronously(
+        _ expectedFingerprints: [PortableChatAttachmentFingerprint]
+    ) throws -> [PortableChatAttachmentFingerprintAvailability]? {
+        let attachments = try ChatAttachments(
+            validating: expectedFingerprints.map(\.attachment)
+        )
+        let rootAuthority = try openRoot()
+        defer {
+            Darwin.close(rootAuthority.rootDescriptor)
+            Darwin.close(rootAuthority.parentDescriptor)
+        }
+        if let atomic = try withLockedChatAttachmentsSynchronously(
+            attachments,
+            underRootDescriptor: rootAuthority.rootDescriptor,
+            lockMode: .nonblocking,
+            operation: { reads -> [PortableChatAttachmentFingerprintAvailability]? in
+                zip(expectedFingerprints, reads).map { expected, read
+                    -> PortableChatAttachmentFingerprintAvailability in
+                    guard case let .available(evidence, revisionSHA256) = read,
+                          evidence.revision.sessionID ==
+                            expected.attachment.sessionID,
+                          evidence.revision.revisionID ==
+                            expected.attachment.transcriptRevisionID,
+                          revisionSHA256 == expected.revisionSHA256
+                    else {
+                        return .unavailable
+                    }
+                    return .available
+                }
+            }
+        ) {
+            return atomic
+        }
+        return nil
+    }
+
+    private func withLockedChatAttachmentsSynchronously<Result>(
+        _ attachments: ChatAttachments,
+        underRootDescriptor rootDescriptor: Int32,
+        lockMode: ChatAttachmentLockMode = .blocking,
+        operation: ([PortableChatAttachmentRead]) throws -> Result?
+    ) throws -> Result? {
+        let rootIdentity = try Self.identity(of: rootDescriptor)
+        guard try acquireChatAttachmentLock(
+            rootDescriptor,
+            operation: LOCK_SH,
+            mode: lockMode
+        ) else { return nil }
         defer { _ = transcriptRevisionFlock(rootDescriptor, LOCK_UN) }
         do {
             let loaded = try PortableLibraryPersistence().load(
@@ -651,6 +731,7 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         )
         var lockedAuthorities: [LockedSessionAuthority] = []
         var authoritiesBySession: [SessionID: LockedSessionAuthority] = [:]
+        var unavailableSessionIDs: Set<SessionID> = []
         defer {
             for authority in lockedAuthorities.reversed() {
                 _ = transcriptRevisionFlock(authority.sessionDescriptor, LOCK_UN)
@@ -669,14 +750,18 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     under: sessionsDescriptor
                 )
             } catch {
-                return nil
+                unavailableSessionIDs.insert(sessionID)
+                continue
             }
             var lockAcquired = false
             do {
-                while transcriptRevisionFlock(descriptor, LOCK_SH) != 0 {
-                    guard errno == EINTR else {
-                        throw TranscriptRevisionRepositoryFailure.writeFailed
-                    }
+                guard try acquireChatAttachmentLock(
+                    descriptor,
+                    operation: LOCK_SH,
+                    mode: lockMode
+                ) else {
+                    Darwin.close(descriptor)
+                    return nil
                 }
                 lockAcquired = true
                 let authority = LockedSessionAuthority(
@@ -698,14 +783,14 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
             }
         }
 
-        if let expectedFingerprints,
-           expectedFingerprints.map(\.attachment) != attachments.values
-        {
-            return nil
-        }
-        for (index, attachment) in attachments.values.enumerated() {
-            guard let authority = authoritiesBySession[attachment.sessionID] else {
-                return nil
+        var reads: [PortableChatAttachmentRead] = []
+        reads.reserveCapacity(attachments.values.count)
+        for attachment in attachments.values {
+            guard !unavailableSessionIDs.contains(attachment.sessionID),
+                  let authority = authoritiesBySession[attachment.sessionID]
+            else {
+                reads.append(.unavailable(.missing))
+                continue
             }
             let read: PortableChatAttachmentRead
             do {
@@ -714,21 +799,19 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     transcriptRevisionID: attachment.transcriptRevisionID,
                     authority: authority
                 )
+            } catch TranscriptRevisionRepositoryFailure.unsupportedSchema {
+                read = .unavailable(.unsupportedSchema)
+            } catch TranscriptRevisionRepositoryFailure.sessionUnavailable {
+                read = .unavailable(.missing)
             } catch {
                 return nil
             }
-            guard case let .available(evidence, revisionSHA256) = read,
-                  evidence.revision.sessionID == attachment.sessionID,
-                  evidence.revision.revisionID == attachment.transcriptRevisionID,
-                  expectedFingerprints.map({
-                      $0[index].revisionSHA256 == revisionSHA256
-                  }) ?? true
-            else {
-                return nil
-            }
+            reads.append(read)
         }
-        for (sessionID, authority) in zip(sessionIDs, lockedAuthorities) {
-            try revalidate(authority, expectedSessionID: sessionID)
+        for sessionID in sessionIDs {
+            if let authority = authoritiesBySession[sessionID] {
+                try revalidate(authority, expectedSessionID: sessionID)
+            }
         }
         guard try Self.identity(of: rootDescriptor) == rootIdentity,
               try Self.identity(
@@ -739,7 +822,32 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         else {
             throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
         }
-        return try install()
+        return try operation(reads)
+    }
+
+    private func acquireChatAttachmentLock(
+        _ descriptor: Int32,
+        operation: Int32,
+        mode: ChatAttachmentLockMode
+    ) throws -> Bool {
+        switch mode {
+        case .blocking:
+            while transcriptRevisionFlock(descriptor, operation) != 0 {
+                try Task.checkCancellation()
+                guard errno == EINTR else {
+                    throw TranscriptRevisionRepositoryFailure.writeFailed
+                }
+            }
+            return true
+        case .nonblocking:
+            try Task.checkCancellation()
+            guard transcriptRevisionFlock(descriptor, operation | LOCK_NB) != 0
+            else { return true }
+            if errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR {
+                return false
+            }
+            throw TranscriptRevisionRepositoryFailure.writeFailed
+        }
     }
 
     private func activeSessionIDsSynchronously() throws -> [SessionID] {
@@ -924,7 +1032,8 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         return .available(
             ChatAttachmentEvidence(
                 displayLabel: loaded.manifest.chatDisplayLabel,
-                revision: installed.revision
+                revision: installed.revision,
+                revisionSHA256: installed.sha256
             ),
             revisionSHA256: installed.sha256
         )

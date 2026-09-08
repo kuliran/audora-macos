@@ -88,16 +88,20 @@ public struct TranscriptReadQualificationRunner: Sendable {
         let request = Self.requestBody(
             handle: first.providerAttachments[0].sessionTranscriptHandle
         )
+        let firstTransportRequestID = TranscriptReadTransportRequestID("read-1")!
         let initial = await first.broker.read(
             capability: first.capability,
+            transportRequestID: firstTransportRequestID,
             requestBody: request
         )
         let replay = await first.broker.read(
             capability: first.capability,
+            transportRequestID: firstTransportRequestID,
             requestBody: request
         )
         let overDelivery = await first.broker.read(
             capability: first.capability,
+            transportRequestID: TranscriptReadTransportRequestID("read-2")!,
             requestBody: request
         )
         guard case let .delivered(initialDelivery) = initial,
@@ -117,6 +121,7 @@ public struct TranscriptReadQualificationRunner: Sendable {
         )
         let unavailableResult = await unavailable.broker.read(
             capability: unavailable.capability,
+            transportRequestID: TranscriptReadTransportRequestID("read-1")!,
             requestBody: Self.requestBody(
                 handle: unavailable.providerAttachments[0].sessionTranscriptHandle
             )

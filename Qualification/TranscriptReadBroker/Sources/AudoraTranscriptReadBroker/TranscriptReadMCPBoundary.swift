@@ -54,6 +54,11 @@ public enum TranscriptReadMCPClosedReason: String, Equatable, Sendable {
 /// may feed this value type, but no filesystem or generic Library operation is
 /// reachable through it.
 public actor TranscriptReadMCPBoundary {
+    private struct ToolCallIdentity: Equatable {
+        let rpcID: TranscriptReadTransportRequestID
+        let arguments: Data
+    }
+
     private enum ProtocolState: Equatable {
         case awaitingInitialize
         case initialized
@@ -67,6 +72,7 @@ public actor TranscriptReadMCPBoundary {
     private var protocolState: ProtocolState = .awaitingInitialize
     private var closedReason: TranscriptReadMCPClosedReason?
     private var receivedInitializedNotification = false
+    private var firstToolCallIdentity: ToolCallIdentity?
 
     init(
         broker: TranscriptReadBroker,
@@ -122,7 +128,10 @@ public actor TranscriptReadMCPBoundary {
             return TranscriptReadHTTPResponse(statusCode: 202, contentType: nil, body: Data())
         }
 
-        guard let id = canonicalRPCID(object["id"]) else {
+        guard let id = canonicalRPCID(object["id"]),
+              let transportRequestID = (object["id"] as? String)
+                .flatMap(TranscriptReadTransportRequestID.init)
+        else {
             return await stopWithClosedError(statusCode: 400, reason: .messageShape)
         }
 
@@ -191,8 +200,24 @@ public actor TranscriptReadMCPBoundary {
                 return await stopWithClosedError(statusCode: 400, reason: .protocolState)
             }
 
+            let identity = ToolCallIdentity(
+                rpcID: transportRequestID,
+                arguments: argumentsData
+            )
+            if let firstToolCallIdentity {
+                guard identity == firstToolCallIdentity else {
+                    return await stopWithClosedError(
+                        statusCode: 400,
+                        reason: .protocolState
+                    )
+                }
+            } else {
+                firstToolCallIdentity = identity
+            }
+
             let readResult = await broker.read(
                 capability: capability,
+                transportRequestID: transportRequestID,
                 requestBody: argumentsData
             )
             guard case let .delivered(delivery) = readResult,
@@ -336,8 +361,10 @@ public actor TranscriptReadMCPBoundary {
                     "items": .object([
                         "$ref": .string("#/$defs/SessionTranscriptHandle"),
                     ]),
+                    "maxItems": .integer(128),
                     "minItems": .integer(1),
                     "type": .string("array"),
+                    "uniqueItems": .boolean(true),
                 ]),
             ]),
             "required": .array([.string("sessionTranscriptHandles")]),
@@ -354,13 +381,9 @@ private func canonicalRPCID(_ value: Any?) -> CanonicalJSONValue? {
     if let string = value as? String, !string.isEmpty, string.utf8.count <= 128 {
         return .string(string)
     }
-    if let number = value as? NSNumber,
-       !(number is Bool),
-       number.doubleValue.isFinite,
-       number.doubleValue.rounded(.towardZero) == number.doubleValue
-    {
-        return .integer(number.int64Value)
-    }
+    // This closed local boundary intentionally accepts bounded string IDs only.
+    // Foundation JSON number parsing does not preserve exact numeric identity,
+    // so large distinct numeric IDs must never alias as a transport replay.
     return nil
 }
 

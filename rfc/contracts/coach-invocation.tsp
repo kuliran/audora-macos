@@ -73,7 +73,9 @@ namespace Audora.Contracts {
   union CoachInvocation {
     legacyV1: CoachInvocationV1,
     legacyV2: CoachInvocationV2,
-    current: CoachInvocationV3,
+    legacyV3: CoachInvocationV3,
+    current: CoachInvocationV4,
+    currentTranscriptReadFailure: CoachInvocationTranscriptReadFailureV4,
   }
 
   model CoachInvocationV1 {
@@ -93,7 +95,29 @@ namespace Audora.Contracts {
     schemaVersion: 3;
     profileRevisionId?: ProfileRevisionId;
     profileStatementGeneration: NonnegativeWholeNumber;
-    terminalFailure?: CoachInvocationTerminalFailure;
+    terminalFailure?: CoachInvocationTerminalFailureV3;
+
+    @minItems(1)
+    @maxItems(4)
+    attempts: CoachProviderAttempt[];
+  }
+
+  model CoachInvocationV4 {
+    ...CoachInvocationV4Fields;
+    terminalFailure?: CoachInvocationTerminalFailureV4;
+  }
+
+  model CoachInvocationTranscriptReadFailureV4 {
+    ...CoachInvocationV4Fields;
+    terminalFailure: "coachTranscriptReadFailed";
+    transcriptReadFailure: CoachTranscriptReadFailureSummary;
+  }
+
+  model CoachInvocationV4Fields {
+    ...CoachInvocationFields;
+    schemaVersion: 4;
+    profileRevisionId?: ProfileRevisionId;
+    profileStatementGeneration: NonnegativeWholeNumber;
 
     @minItems(1)
     @maxItems(4)
@@ -136,7 +160,14 @@ namespace Audora.Contracts {
     shorterRepair: "shorterRepair",
   }
 
-  union CoachInvocationTerminalFailure {
+  union CoachInvocationTerminalFailureV4 {
+    coachContextCannotFit: "coachContextCannotFit",
+    coachResponseInterrupted: "coachResponseInterrupted",
+    coachProviderError: "coachProviderError",
+    coachResponseInvalid: "coachResponseInvalid",
+  }
+
+  union CoachInvocationTerminalFailureV3 {
     coachResponseInterrupted: "coachResponseInterrupted",
     coachProviderError: "coachProviderError",
     coachResponseInvalid: "coachResponseInvalid",

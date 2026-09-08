@@ -45,8 +45,7 @@ namespace Audora.Contracts {
     schemaVersion: 1;
   }
 
-  model ControlledTranscriptionJobManifest
-    extends TranscriptionJobManifestBody {
+  model ControlledTranscriptionJobManifest extends TranscriptionJobManifestBody {
     schemaVersion: 2;
     expectedSelectedRevisionId: TranscriptRevisionId | null;
     cancellationAuthorityId: TranscriptionCancellationAuthorityId;
@@ -171,15 +170,8 @@ namespace Audora.Contracts {
   }
 
   model SessionProcessingScenarioRace {
-    kind:
-      | "candidateVsCancel"
-      | "engineFailureVsCancel"
-      | "candidateRejectionVsCancel";
-    firstDurableWinner:
-      | "candidate"
-      | "engineFailure"
-      | "candidateRejection"
-      | "cancellation";
+    kind: "candidateVsCancel" | "engineFailureVsCancel" | "candidateRejectionVsCancel";
+    firstDurableWinner: "candidate" | "engineFailure" | "candidateRejection" | "cancellation";
     losingCompareAndSwap: "stale";
   }
 
@@ -382,8 +374,7 @@ namespace Audora.Contracts {
     etaSeconds?: integer;
   }
 
-  model TranscriptionWorkerCandidateReady
-    extends TranscriptionWorkerMessageBase {
+  model TranscriptionWorkerCandidateReady extends TranscriptionWorkerMessageBase {
     type: "candidate_ready";
     result: "result.json";
     sha256: Sha256Hex;

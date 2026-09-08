@@ -1027,7 +1027,8 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
                     ),
                 ],
                 audioEvents: []
-            )
+            ),
+            revisionSHA256: String(repeating: "1", count: 64)
         )
     }
 }
@@ -1281,7 +1282,9 @@ private actor ChangingAttachmentConfigurationSource: CoachContextSnapshotPort {
                             attachment.attachmentID.rawValue
                         ),
                         "transcript": .object(["lines": .array([])]),
-                    ])
+                    ]),
+                    sourceAttachment: attachment,
+                    revisionSHA256: String(repeating: "1", count: 64)
                 )
             }
             return .resolved(

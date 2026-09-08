@@ -158,19 +158,26 @@ shipping Provider descriptor is not qualified. The current Attempt exposes one
 process-live Stop authority; Stop revokes publication first, cancels provider work
 or automatic-retry sleep, waits for a bounded reap while retaining Invocation
 liveness, and then persists the locked Pending as interrupted. Late or replaced
-Attempt results cannot publish. Transcript tools and Profile or Memory effects
-remain outside this slice.
+Attempt results cannot publish. Transcript tools are now represented by an
+Attempt-scoped transcript broker: small transcripts stay inline, large transcripts
+receive fresh opaque handles, and one atomic all-or-none batch read may disclose
+only the allowlisted canonical transcript fields. The broker permits one exact
+transport replay, rejects any second semantic request, and revokes its capability
+when the Attempt ends. Live composition still does not launch because the shipping
+Provider descriptor remains unqualified; Profile and Memory response effects
+remain outside this executable slice.
 If the machine-local ledger rename succeeds but its parent-directory flush cannot
 prove durability, Audora treats the debit as possibly committed and preserves the
 exact Pending User Turn as interrupted and user-retryable; it never unlocks that
 Draft as a pre-admission rejection.
 Invocation liveness is acquired atomically with the first exact Pending
 resolution, so concurrent catalog recovery cannot interrupt a live Send between
-resolution and reservation. Pending User Turn schema v3 persists context-fit,
-interrupted, Provider-error, and invalid-response failures. Strict v1 compatibility
-permits only no failure or the context-fit failure; v2 additionally permits the
-interrupted failure. Valid legacy Pending state upgrades to v3 when it is next
-written; a root newer than v3 freezes only its own Chat.
+resolution and reservation. Pending User Turn schema v4 persists context-fit,
+interrupted, Provider-error, invalid-response, and privacy-bounded transcript-read
+failures. Strict v1 compatibility permits only no failure or the context-fit
+failure; v2 additionally permits interruption, and v3 adds Provider and invalid
+response failures. Valid legacy Pending state upgrades to v4 when it is next
+written; a root newer than v4 freezes only its own Chat.
 If response publication commits but immediate reconciliation is interrupted,
 Infrastructure proves the exact immutable user/Coach message pair, response
 position, consumed Pending, and fresh-Draft lineage before reporting success. A

@@ -316,14 +316,24 @@ public struct ChatAttachmentEvidence: Equatable, Sendable {
 
     public let displayLabel: String
     public let revision: TranscriptRevision
+    /// SHA-256 of the exact immutable portable Revision bytes that produced
+    /// `revision`. It stays inside the local Application boundary and lets a
+    /// later Attempt prove that it is reopening the same content, not merely a
+    /// reused Session/Revision identifier.
+    public let revisionSHA256: String
 
     public var sessionID: SessionID { revision.sessionID }
     public var transcriptRevisionID: TranscriptRevisionID { revision.revisionID }
     public var durationMilliseconds: UInt64 { revision.durationMilliseconds }
 
-    public init(displayLabel: String, revision: TranscriptRevision) {
+    public init(
+        displayLabel: String,
+        revision: TranscriptRevision,
+        revisionSHA256: String
+    ) {
         self.displayLabel = displayLabel
         self.revision = revision
+        self.revisionSHA256 = revisionSHA256
     }
 }
 
@@ -344,7 +354,8 @@ public struct ResolvedChatAttachmentEvidence: Equatable, Sendable {
     ) throws {
         if case let .available(evidence) = resolution {
             guard evidence.sessionID == attachment.sessionID,
-                  evidence.transcriptRevisionID == attachment.transcriptRevisionID
+                  evidence.transcriptRevisionID == attachment.transcriptRevisionID,
+                  AudioArtifactFingerprint.isSHA256(evidence.revisionSHA256)
             else {
                 throw ChatAttachmentResolutionError.identityMismatch
             }

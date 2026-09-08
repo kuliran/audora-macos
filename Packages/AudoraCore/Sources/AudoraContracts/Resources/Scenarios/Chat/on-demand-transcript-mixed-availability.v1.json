@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "on-demand-transcript-mixed-availability",
+  "libraryId": "lib-20260830T100000000Z-1ABC",
+  "providerAvailability": "available",
+  "attemptTranscriptAvailability": [
+    { "attachmentId": "attachment-000001", "status": "missing" },
+    { "attachmentId": "attachment-000002", "status": "missing" },
+    { "attachmentId": "attachment-000003", "status": "missing" },
+    { "attachmentId": "attachment-000004", "status": "missing" },
+    { "attachmentId": "attachment-000005", "status": "missing" },
+    { "attachmentId": "attachment-000006", "status": "available" }
+  ],
+  "initialChats": [
+    {
+      "chatId": "cht-20260830T120000000Z-2ABC",
+      "draftId": "drf-20260830T120000000Z-3DEF",
+      "memoryId": "mem-20260830T120000000Z-4GHJ",
+      "manifestRevision": 0,
+      "title": "Attached Sessions",
+      "createdAt": "2026-08-30T12:00:00.000Z",
+      "updatedAt": "2026-08-30T12:00:00.000Z",
+      "creationKind": "newChat",
+      "attachments": [
+        { "attachmentId": "attachment-000001", "sessionId": "ses-20260830T110001000Z-1ABC", "transcriptRevisionId": "trv-20260830T113001000Z-1ABC" },
+        { "attachmentId": "attachment-000002", "sessionId": "ses-20260830T110002000Z-2DEF", "transcriptRevisionId": "trv-20260830T113002000Z-2DEF" },
+        { "attachmentId": "attachment-000003", "sessionId": "ses-20260830T110003000Z-3GHJ", "transcriptRevisionId": "trv-20260830T113003000Z-3GHJ" },
+        { "attachmentId": "attachment-000004", "sessionId": "ses-20260830T110004000Z-4JKM", "transcriptRevisionId": "trv-20260830T113004000Z-4JKM" },
+        { "attachmentId": "attachment-000005", "sessionId": "ses-20260830T110005000Z-5NPQ", "transcriptRevisionId": "trv-20260830T113005000Z-5NPQ" },
+        { "attachmentId": "attachment-000006", "sessionId": "ses-20260830T110006000Z-6RST", "transcriptRevisionId": "trv-20260830T113006000Z-6RST" }
+      ],
+      "draftText": "",
+      "draftVersion": 0,
+      "messageIds": [],
+      "memoryGeneralNotes": "",
+      "memorySessionSummaries": []
+    }
+  ],
+  "commands": [
+    { "kind": "open", "chatId": "cht-20260830T120000000Z-2ABC" },
+    { "kind": "editDraft", "text": "Compare every attached Session." },
+    { "kind": "sendDraft" }
+  ],
+  "dependencyTrace": [
+    { "port": "chatStore", "effect": "loadCatalog", "outcome": "loaded" },
+    { "port": "chatStore", "effect": "load", "outcome": "loaded" },
+    {
+      "port": "attachmentSource",
+      "effect": "resolveAttachments",
+      "outcome": "resolved",
+      "resolutions": [
+        {
+          "attachment": { "attachmentId": "attachment-000001", "sessionId": "ses-20260830T110001000Z-1ABC", "transcriptRevisionId": "trv-20260830T113001000Z-1ABC" },
+          "status": "available",
+          "candidate": { "sessionId": "ses-20260830T110001000Z-1ABC", "transcriptRevisionId": "trv-20260830T113001000Z-1ABC", "displayLabel": "Session One", "durationMilliseconds": 90000, "approximateTranscriptTokens": 9000, "delivery": "onDemand" }
+        },
+        {
+          "attachment": { "attachmentId": "attachment-000002", "sessionId": "ses-20260830T110002000Z-2DEF", "transcriptRevisionId": "trv-20260830T113002000Z-2DEF" },
+          "status": "available",
+          "candidate": { "sessionId": "ses-20260830T110002000Z-2DEF", "transcriptRevisionId": "trv-20260830T113002000Z-2DEF", "displayLabel": "Session Two", "durationMilliseconds": 90000, "approximateTranscriptTokens": 9000, "delivery": "onDemand" }
+        },
+        {
+          "attachment": { "attachmentId": "attachment-000003", "sessionId": "ses-20260830T110003000Z-3GHJ", "transcriptRevisionId": "trv-20260830T113003000Z-3GHJ" },
+          "status": "available",
+          "candidate": { "sessionId": "ses-20260830T110003000Z-3GHJ", "transcriptRevisionId": "trv-20260830T113003000Z-3GHJ", "displayLabel": "Session Three", "durationMilliseconds": 90000, "approximateTranscriptTokens": 9000, "delivery": "onDemand" }
+        },
+        {
+          "attachment": { "attachmentId": "attachment-000004", "sessionId": "ses-20260830T110004000Z-4JKM", "transcriptRevisionId": "trv-20260830T113004000Z-4JKM" },
+          "status": "available",
+          "candidate": { "sessionId": "ses-20260830T110004000Z-4JKM", "transcriptRevisionId": "trv-20260830T113004000Z-4JKM", "displayLabel": "Session Four", "durationMilliseconds": 90000, "approximateTranscriptTokens": 9000, "delivery": "onDemand" }
+        },
+        {
+          "attachment": { "attachmentId": "attachment-000005", "sessionId": "ses-20260830T110005000Z-5NPQ", "transcriptRevisionId": "trv-20260830T113005000Z-5NPQ" },
+          "status": "available",
+          "candidate": { "sessionId": "ses-20260830T110005000Z-5NPQ", "transcriptRevisionId": "trv-20260830T113005000Z-5NPQ", "displayLabel": "Session Five", "durationMilliseconds": 90000, "approximateTranscriptTokens": 9000, "delivery": "onDemand" }
+        },
+        {
+          "attachment": { "attachmentId": "attachment-000006", "sessionId": "ses-20260830T110006000Z-6RST", "transcriptRevisionId": "trv-20260830T113006000Z-6RST" },
+          "status": "available",
+          "candidate": { "sessionId": "ses-20260830T110006000Z-6RST", "transcriptRevisionId": "trv-20260830T113006000Z-6RST", "displayLabel": "Session Six", "durationMilliseconds": 90000, "approximateTranscriptTokens": 9000, "delivery": "onDemand" }
+        }
+      ]
+    },
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:01:00.000Z" },
+    { "port": "chatStore", "effect": "saveDraft", "outcome": "committed" },
+    { "port": "clock", "effect": "now", "outcome": "2026-08-30T12:02:00.000Z" },
+    { "port": "pendingUserTurnIdGenerator", "effect": "next", "outcome": "ptu-20260830T120002000Z-5KMN" },
+    { "port": "chatResponsePositionIdGenerator", "effect": "next", "outcome": "rsp-20260830T120002000Z-6PQR" },
+    { "port": "chatStore", "effect": "lockPendingUserTurn", "outcome": "committed" },
+    { "port": "coachProvider", "effect": "cancelAndReap", "outcome": "reaped" },
+    { "port": "chatStore", "effect": "replacePendingUserTurn", "outcome": "committed" }
+  ],
+  "expectedState": {
+    "allChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "visibleChatIds": ["cht-20260830T120000000Z-2ABC"],
+    "selectedChatId": "cht-20260830T120000000Z-2ABC",
+    "selectedTitle": "Attached Sessions",
+    "selectedRevision": 1,
+    "selectedDraftText": "Compare every attached Session.",
+    "selectedDraftVersion": 1,
+    "selectedMessageIds": [],
+    "composerStatus": "locked",
+    "pendingUserTurnId": "ptu-20260830T120002000Z-5KMN",
+    "responsePositionId": "rsp-20260830T120002000Z-6PQR",
+    "pendingFailure": "coachTranscriptReadFailed",
+    "pendingTranscriptReadFailure": {
+      "sessions": [
+        { "sessionAttachmentId": "attachment-000001", "displayLabel": "Session One" },
+        { "sessionAttachmentId": "attachment-000002", "displayLabel": "Session Two" },
+        { "sessionAttachmentId": "attachment-000003", "displayLabel": "Session Three" }
+      ],
+      "additionalSessionCount": 2
+    },
+    "pendingRecoveryActions": ["retryPendingUserTurn", "discardPendingUserTurn"],
+    "stopAuthorityAvailable": false
+  },
+  "expectedProviderCalls": 1,
+  "expectedInvocationCalls": 1,
+  "expectedAdmissionCalls": 1
+}

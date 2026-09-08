@@ -51,6 +51,15 @@
         },
         "suspendedEffect": {
             "$ref": "#/$defs/ChatScenarioSuspendedEffect"
+        },
+        "attemptTranscriptAvailability": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/ChatOpenedAttachmentStatus"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "description": "Attempt-time revalidation after the Chat was opened successfully."
         }
     },
     "required": [
@@ -369,6 +378,18 @@
                 "pendingFailure": {
                     "$ref": "#/$defs/PendingUserTurnFailure"
                 },
+                "pendingTranscriptReadFailure": {
+                    "$ref": "#/$defs/CoachTranscriptReadFailureSummary"
+                },
+                "pendingRecoveryActions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ChatScenarioPendingRecoveryAction"
+                    },
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "uniqueItems": true
+                },
                 "activity": {
                     "$ref": "#/$defs/ChatScenarioActivity"
                 },
@@ -474,6 +495,24 @@
                     "const": "firstProviderAttempt"
                 }
             ]
+        },
+        "ChatOpenedAttachmentStatus": {
+            "type": "object",
+            "properties": {
+                "attachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                },
+                "status": {
+                    "$ref": "#/$defs/ChatOpenedAttachmentAvailability"
+                }
+            },
+            "required": [
+                "attachmentId",
+                "status"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
         },
         "ChatId": {
             "type": "string",
@@ -1830,6 +1869,32 @@
                 {
                     "type": "string",
                     "const": "coachResponseInvalid"
+                },
+                {
+                    "type": "string",
+                    "const": "coachTranscriptReadFailed"
+                }
+            ]
+        },
+        "CoachTranscriptReadFailureSummary": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/CompleteCoachTranscriptReadFailureSummary"
+                },
+                {
+                    "$ref": "#/$defs/TruncatedCoachTranscriptReadFailureSummary"
+                }
+            ]
+        },
+        "ChatScenarioPendingRecoveryAction": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "retryPendingUserTurn"
+                },
+                {
+                    "type": "string",
+                    "const": "discardPendingUserTurn"
                 }
             ]
         },
@@ -2060,23 +2125,29 @@
                 }
             ]
         },
-        "ChatOpenedAttachmentStatus": {
-            "type": "object",
-            "properties": {
-                "attachmentId": {
-                    "$ref": "#/$defs/ChatSessionAttachmentId"
+        "ChatOpenedAttachmentAvailability": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "available"
                 },
-                "status": {
-                    "$ref": "#/$defs/ChatOpenedAttachmentAvailability"
+                {
+                    "type": "string",
+                    "const": "missing"
+                },
+                {
+                    "type": "string",
+                    "const": "inTrash"
+                },
+                {
+                    "type": "string",
+                    "const": "corrupt"
+                },
+                {
+                    "type": "string",
+                    "const": "unsupportedSchema"
                 }
-            },
-            "required": [
-                "attachmentId",
-                "status"
-            ],
-            "unevaluatedProperties": {
-                "not": {}
-            }
+            ]
         },
         "SessionId": {
             "type": "string",
@@ -2154,29 +2225,56 @@
                 }
             ]
         },
-        "ChatOpenedAttachmentAvailability": {
-            "anyOf": [
-                {
-                    "type": "string",
-                    "const": "available"
+        "CompleteCoachTranscriptReadFailureSummary": {
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachTranscriptReadFailureSession"
+                    },
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "uniqueItems": true
                 },
-                {
-                    "type": "string",
-                    "const": "missing"
-                },
-                {
-                    "type": "string",
-                    "const": "inTrash"
-                },
-                {
-                    "type": "string",
-                    "const": "corrupt"
-                },
-                {
-                    "type": "string",
-                    "const": "unsupportedSchema"
+                "additionalSessionCount": {
+                    "type": "number",
+                    "const": 0
                 }
-            ]
+            },
+            "required": [
+                "sessions",
+                "additionalSessionCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TruncatedCoachTranscriptReadFailureSummary": {
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachTranscriptReadFailureSession"
+                    },
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "uniqueItems": true
+                },
+                "additionalSessionCount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 125
+                }
+            },
+            "required": [
+                "sessions",
+                "additionalSessionCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
         },
         "NewChatAttachmentDisplayLabel": {
             "type": "string",
@@ -2237,6 +2335,24 @@
                 "not": {}
             }
         },
+        "CoachTranscriptReadFailureSession": {
+            "type": "object",
+            "properties": {
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                },
+                "displayLabel": {
+                    "$ref": "#/$defs/CoachTranscriptReadFailureDisplayLabel"
+                }
+            },
+            "required": [
+                "sessionAttachmentId",
+                "displayLabel"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "ChatAttachmentUnavailableReason": {
             "anyOf": [
                 {
@@ -2256,6 +2372,12 @@
                     "const": "unsupportedSchema"
                 }
             ]
+        },
+        "CoachTranscriptReadFailureDisplayLabel": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
         }
     }
 }

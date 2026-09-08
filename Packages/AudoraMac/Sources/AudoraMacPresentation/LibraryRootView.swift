@@ -2,6 +2,20 @@ import AudoraApplication
 import AudoraDomain
 import SwiftUI
 
+@MainActor
+struct LibrarySessionLinkRouting {
+    let scope: LibraryScope
+    let selectProcessing: (SessionProcessingSelection) -> Void
+    let selectReview: (ReviewSelection) -> Void
+
+    func openSession(_ sessionID: SessionID) {
+        selectProcessing(
+            SessionProcessingSelection(scope: scope, sessionID: sessionID)
+        )
+        selectReview(ReviewSelection(scope: scope, sessionID: sessionID))
+    }
+}
+
 public struct LibraryRootView: View {
     @StateObject private var model: LibraryPresentationModel
     @StateObject private var audioImportModel: AudioImportPresentationModel
@@ -79,6 +93,12 @@ public struct LibraryRootView: View {
                 .disabled(chatDispatcher.isChatBoundaryPending)
 
             case let .some(.active(library)):
+                let activeScope = LibraryScope(libraryID: library.libraryID)
+                let sessionLinkRouting = LibrarySessionLinkRouting(
+                    scope: activeScope,
+                    selectProcessing: sessionProcessingModel.selectSession,
+                    selectReview: reviewModel.selectSession
+                )
                 Image(systemName: "waveform.circle.fill")
                     .font(.system(size: 54))
                     .foregroundStyle(.tint)
@@ -104,12 +124,15 @@ public struct LibraryRootView: View {
                 SessionProcessingView(model: sessionProcessingModel)
                 ReviewView(model: reviewModel)
                 Divider()
+                // ChatRootView applies the active boundary per control. Its
+                // Stop action must remain enabled while the Send receipt owns
+                // that same boundary.
                 ChatRootView(
                     dispatcher: chatDispatcher,
-                    scope: LibraryScope(libraryID: library.libraryID)
+                    scope: activeScope,
+                    onOpenSession: sessionLinkRouting.openSession
                 )
                 .id(library.libraryID.rawValue)
-                .disabled(chatDispatcher.isChatBoundaryPending)
 
             case .some(.readOnly):
                 ContentUnavailableView(

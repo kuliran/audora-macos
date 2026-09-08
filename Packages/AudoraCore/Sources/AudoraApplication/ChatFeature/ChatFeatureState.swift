@@ -180,7 +180,8 @@ public struct ChatFeatureState: Equatable, Sendable {
     public func isCoachResponseRetryableFailure(_ pending: PendingUserTurn) -> Bool {
         if pending.failure == .coachResponseInterrupted ||
             pending.failure == .coachProviderError ||
-            pending.failure == .coachResponseInvalid
+            pending.failure == .coachResponseInvalid ||
+            pending.failure?.transcriptReadFailureSummary != nil
         {
             return true
         }

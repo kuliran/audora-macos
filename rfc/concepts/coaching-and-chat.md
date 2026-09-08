@@ -44,14 +44,16 @@ Attempts, cancellation, and terminal failure creation. Chat, Proposal, and futur
 maintenance use cases submit stable entity IDs and an `InvocationIntent`; they do
 not duplicate these checks or construct provider DTOs.
 
-The current #24 vertical slice implements `answerPendingUserTurn` with a bounded
+The current #26 vertical slice implements `answerPendingUserTurn` with a bounded
 deterministic synthetic provider. It durably claims the rolling ledger, installs
 one portable Invocation, persists each fresh Provider Attempt before launch,
 retries transient failures on the 5/10/15-second schedule, permits at most one
 shorter complete repair, exposes exact process-live Stop authority for the current
 Attempt, and atomically publishes the two-message fake turn only while that
-authority remains current. Real provider adapters, transcript tools, Reconsider,
-and Profile or Memory effects remain owned by their later slices.
+authority remains current. Its Attempt-scoped transcript broker serves one atomic,
+all-or-none on-demand read through fresh opaque handles and a hidden capability.
+Real provider adapters, Reconsider, and Profile or Memory response effects remain
+owned by their later slices.
 
 ```text
 InvocationIntent
@@ -115,12 +117,13 @@ Attempt.
 
 Those provider idempotency values, transcript handles, and bearer capabilities
 exist only in the live Attempt transport authority and are never persisted or
-logged. Portable Invocation schema v3 embeds an ordered bounded Attempt history
+logged. Portable Invocation schema v4 embeds an ordered bounded Attempt history
 containing only Attempt ID, ordinal/kind, and message/fresh-Draft publication
-authority; nested Attempts inherit v3 and have no `schemaVersion`. Legacy
-Invocation v1/v2 keeps its strict historical flat Attempt fields for read-only
-retirement compatibility. Relaunch never reconstructs live transport authority or
-resumes provider work.
+authority, plus a privacy-bounded transcript-read terminal summary when needed.
+Nested Attempts retain the layout introduced in v3 and have no `schemaVersion`.
+Legacy Invocation v1/v2 keeps its strict historical flat Attempt fields, while v3
+keeps the first nested layout, for read-only retirement compatibility. Relaunch
+never reconstructs live transport authority or resumes provider work.
 
 One Invocation may make at most four Attempts. Transient provider failures use
 5-, 10-, and 15-second delays before the remaining Attempts. Automatic retry keeps
@@ -162,6 +165,12 @@ Draft or stale Reconsider Proposal remains in an interrupted UserRetryable state
 with the ordinary **Retry** and **Discard** actions. Discard unlocks an answer
 Draft; for Reconsider it removes only the failure and restores the stale Proposal's
 **Reconsider** and **Discard** actions.
+
+An unconfirmed reap remains a process-wide Coach-start fence when Library selection
+changes, whether explicit Stop or an automatic transcript-read failure initiated
+reaping. Presentation may hide the old Library's Stop authority, but the app keeps
+that exact authority and retries it before a replacement Library can launch another
+provider Attempt.
 
 Stop is an immediate control command: it bypasses both the Application command
 queue and the Chat mutation queue. The UI replaces **Stop** with an accessible
@@ -284,15 +293,15 @@ If the first Invocation preflight instead loses an eligibility, concurrency, or
 admission race, the provisional Pending User Turn is removed and the Draft is
 immediately unlocked; the fleeting notice is not a Failure Descriptor.
 
-The persisted Pending User Turn is currently schema v3. Legacy v1 may omit a
+The persisted Pending User Turn is currently schema v4. Legacy v1 may omit a
 failure or carry only `coachContextCannotFit`; v2 additionally accepts
-`coachResponseInterrupted`. Current v3 adds `coachProviderError` when the Provider
-cannot complete the response, including an immediate Provider-declared
-UserRetryable result or exhausted bounded retries, and `coachResponseInvalid` for
-an invalid complete response or failed shorter-response repair. All four failure
-descriptors are UserRetryable and publish no partial turn. If persistence cannot
-prove the terminal v3 write, Application may display Retry for the exact Pending
-identity as transient operational state, but it does not rewrite the last
+`coachResponseInterrupted`; and v3 adds `coachProviderError` and
+`coachResponseInvalid`. Current v4 adds `coachTranscriptReadFailed` paired with a
+bounded summary containing one to three stable Chat attachment IDs and safe Session
+labels, plus an additional count only when three links are already present. All
+failure descriptors are UserRetryable and publish no partial turn. If persistence
+cannot prove the terminal v4 write, Application may display Retry for the exact
+Pending identity as transient operational state, but it does not rewrite the last
 observed aggregate in memory as though that durable failure had committed.
 
 Only a valid complete Coach Response publishes a turn. One atomic Chat commit
@@ -347,9 +356,10 @@ CoachContextBudget
 
 The response reserve protects the current structured response. The safety margin
 covers hidden framing and estimator uncertainty. A conservative estimator measures
-the exact serialized request, JSON escaping, known provider framing, inline
-transcripts, and the maximum complete on-demand transcript exchange. Model-facing
-contracts contain no estimator ID, token estimate, or read budget.
+the exact pinned instruction bytes, serialized request, JSON escaping, known
+provider framing, inline transcripts, and the maximum complete on-demand transcript
+exchange. Model-facing contracts contain no estimator ID, token estimate, or read
+budget.
 
 Every Attempt configures the provider's output-token ceiling no higher than
 `responseReservedTokens`, and the pinned coach instruction states that the complete
@@ -468,25 +478,23 @@ routes, not bearer credentials. The endpoint stops when the Attempt ends.
 
 The coach may make one logical batch request for any nonempty subset of on-demand
 attachments. Audora validates the handles, performs bounded local transport/storage
-retry, rechecks the complete response budget, and returns all requested transcripts
-or no transcript bytes. Transport redelivery of the same logical call may replay
-its cached response; a second semantic call is rejected.
+retry, resolves the complete ordered subset under one Library fence and one
+stable-order shared lock set for all requested Sessions, rechecks the complete
+response budget, and returns all requested transcripts or no transcript bytes.
+Shared-lock acquisition is nonblocking and bounded to three cancellable attempts;
+an external writer cannot hold the provider read open indefinitely. Separate
+per-Session observations may never be combined into a successful batch.
+Transport redelivery of the same logical call may replay its cached response; a
+second semantic call is rejected.
 
-The pinned coach instruction says:
-
-- if the answer depends on Session content and Memory contains no adequate analysis,
-  read every relevant on-demand Session;
-- if it has no transcript knowledge yet for a broad analysis request, read all
-  on-demand attachments and preserve useful conclusions in `newMemory`;
-- for the first response in a Session Analysis Chat, attempt any useful
-  evidence-backed Profile effects in the same response;
-- never guess which Session a remembered conclusion belongs to; if uncertain, ask
-  the Speaker to send the message again; and
-- do not retry, split, reorder, or shrink a failed tool request.
-
-The Analysis instruction does not require a visible Proposal. The coach may find
-nothing worth remembering, and valid normalization or evidence deduplication may
-remove every returned effect.
+The executable slice measures and sends the same exact pinned instruction bytes. It
+requires one complete structured response within the admitted output allowance,
+grounds attached-Session claims only in complete supplied transcripts, requests all
+needed on-demand handles in one logical call, and forbids split, reordered, narrowed,
+or retried semantic reads. A non-complete read must not be answered around, and a
+detected Session conflation asks the user to send the message again. The adapter and
+broker independently enforce the atomic batch and sole exact transport redelivery;
+Session-analysis Memory/Profile effects remain outside this slice.
 
 A non-complete read does not permit an incomplete coach answer. Audora terminates
 the Attempt and creates a user-retryable application failure. For unavailable

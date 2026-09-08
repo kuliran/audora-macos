@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 
 @_spi(CoachContextQualification) import AudoraApplication
+import AudoraDomain
 @testable import AudoraCodexCLIQualification
 
 final class CoachContextEstimationTests: XCTestCase {
@@ -173,10 +174,19 @@ final class CoachContextEstimationTests: XCTestCase {
             policy: policy(tokenEstimator: oneTokenPerMessage)
         )
 
-        // Initial request, tool call, and tool result are independently framed
-        // messages. Their eight configured hidden tokens are counted separately.
-        XCTAssertEqual(result.exchange.modelInputFrames.count, 3)
-        XCTAssertEqual(result.completeInputTokens, 11)
+        // The exact pinned instruction, initial request, tool call, and tool
+        // result are independently framed messages. Their eight configured
+        // hidden tokens are counted separately.
+        XCTAssertEqual(result.exchange.modelInputFrames.count, 4)
+        XCTAssertEqual(result.completeInputTokens, 12)
+        let expectedInstruction = CoachProviderPinnedInstruction.standard(
+            outputTokenCeiling: 200
+        )
+        XCTAssertEqual(result.exchange.pinnedInstruction, expectedInstruction)
+        XCTAssertEqual(
+            result.exchange.modelInputFrames.first,
+            Data(expectedInstruction.utf8)
+        )
     }
 
     func testDuplicateOnDemandHandleIsRejectedBeforeEstimation() throws {
@@ -470,7 +480,10 @@ final class CoachContextEstimationTests: XCTestCase {
                 transcriptReadExchangeHiddenTokens: 5,
                 minimumResponseHiddenTokens: 2
             ),
-            tokenEstimator: tokenEstimator ?? byteEstimator
+            attachmentProjectionPolicy: try! CoachAttachmentProjectionPolicy(
+                maximumInlineTranscriptTokens: 8_192,
+                tokenEstimator: tokenEstimator ?? byteEstimator
+            )
         )
     }
 
@@ -534,7 +547,17 @@ final class CoachContextEstimationTests: XCTestCase {
             transcriptDisclosure: .object([
                 "sessionAttachmentId": .string(attachmentID),
                 "transcript": transcript(text: transcriptText),
-            ])
+            ]),
+            sourceAttachment: ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID(attachmentID),
+                sessionID: try SessionID(
+                    "ses-20260830T120000000Z-3DEF"
+                ),
+                transcriptRevisionID: try TranscriptRevisionID(
+                    "trv-20260830T121000000Z-4FGH"
+                )
+            ),
+            revisionSHA256: String(repeating: "1", count: 64)
         )
     }
 

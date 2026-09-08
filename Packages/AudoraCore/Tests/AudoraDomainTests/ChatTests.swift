@@ -2,6 +2,147 @@ import AudoraDomain
 import XCTest
 
 final class ChatTests: XCTestCase {
+    func testTranscriptReadFailureSummaryIsPrivacyBounded() throws {
+        let sessions = try (1 ... 3).map { index in
+            try CoachTranscriptReadFailureSession(
+                sessionAttachmentID: ChatSessionAttachmentID("attachment_\(index)"),
+                displayLabel: "Practice Session \(index)"
+            )
+        }
+        let summary = try CoachTranscriptReadFailureSummary(
+            sessions: sessions,
+            additionalSessionCount: 5
+        )
+        let failure = PendingUserTurnFailure.coachTranscriptReadFailed(summary)
+
+        XCTAssertEqual(failure.rawValue, "coachTranscriptReadFailed")
+        XCTAssertEqual(failure.transcriptReadFailureSummary, summary)
+        XCTAssertNil(PendingUserTurnFailure(rawValue: failure.rawValue))
+        XCTAssertEqual(summary.sessions.count, 3)
+        XCTAssertEqual(summary.additionalSessionCount, 5)
+    }
+
+    func testTranscriptReadFailureSummaryRejectsMalformedBounds() throws {
+        let first = try CoachTranscriptReadFailureSession(
+            sessionAttachmentID: ChatSessionAttachmentID("attachment_1"),
+            displayLabel: "Practice Session"
+        )
+        XCTAssertThrowsError(
+            try CoachTranscriptReadFailureSession(
+                sessionAttachmentID: ChatSessionAttachmentID("attachment_2"),
+                displayLabel: "unsafe\u{0000}label"
+            )
+        )
+        XCTAssertThrowsError(
+            try CoachTranscriptReadFailureSummary(
+                sessions: [],
+                additionalSessionCount: 0
+            )
+        )
+        XCTAssertThrowsError(
+            try CoachTranscriptReadFailureSummary(
+                sessions: [first, first],
+                additionalSessionCount: 0
+            )
+        )
+        XCTAssertThrowsError(
+            try CoachTranscriptReadFailureSummary(
+                sessions: [first],
+                additionalSessionCount: 1
+            )
+        )
+    }
+
+    func testAggregateRejectsDanglingTranscriptReadFailureLink() throws {
+        let original = try makeAggregate()
+        let summary = try CoachTranscriptReadFailureSummary(
+            sessions: [
+                CoachTranscriptReadFailureSession(
+                    sessionAttachmentID: ChatSessionAttachmentID("attachment_missing"),
+                    displayLabel: "Missing Session"
+                ),
+            ],
+            additionalSessionCount: 0
+        )
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: original.chat.draft.draftID,
+            draftVersion: original.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            ),
+            failure: .coachTranscriptReadFailed(summary)
+        )
+
+        XCTAssertThrowsError(
+            try ChatAggregate(
+                chat: original.chat,
+                memory: original.memory,
+                pendingUserTurn: pending
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ChatAggregateError,
+                .pendingFailureAttachmentMismatch
+            )
+        }
+    }
+
+    func testAggregateRejectsTranscriptFailureCountBeyondChatAttachments() throws {
+        let attachments = try ChatAttachments(
+            validating: try (1 ... 3).map { index in
+                ChatSessionAttachment(
+                    attachmentID: try ChatSessionAttachmentID("attachment_\(index)"),
+                    sessionID: try SessionID(
+                        "ses-20260830T110000000Z-\(index)KMN"
+                    ),
+                    transcriptRevisionID: try TranscriptRevisionID(
+                        "trv-20260830T111000000Z-\(index)PQR"
+                    )
+                )
+            }
+        )
+        let original = try ChatAggregate.newChat(
+            chatID: ChatID("cht-20260830T120000000Z-2ABC"),
+            draftID: ChatDraftID("drf-20260830T120000000Z-3DEF"),
+            memoryID: CoachMemoryID("mem-20260830T120000000Z-4GHJ"),
+            instant: UTCInstant("2026-08-30T12:00:00.000Z"),
+            profileStatementGeneration: 7,
+            attachments: attachments
+        )
+        let summary = try CoachTranscriptReadFailureSummary(
+            sessions: try attachments.values.map {
+                try CoachTranscriptReadFailureSession(
+                    sessionAttachmentID: $0.attachmentID,
+                    displayLabel: "Practice Session"
+                )
+            },
+            additionalSessionCount: 1
+        )
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: original.chat.draft.draftID,
+            draftVersion: original.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            ),
+            failure: .coachTranscriptReadFailed(summary)
+        )
+
+        XCTAssertThrowsError(
+            try ChatAggregate(
+                chat: original.chat,
+                memory: original.memory,
+                pendingUserTurn: pending
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ChatAggregateError,
+                .pendingFailureAttachmentMismatch
+            )
+        }
+    }
+
     func testCapacityFailureReplacementPreservesPendingTurnIdentity() throws {
         let pending = PendingUserTurn(
             id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),

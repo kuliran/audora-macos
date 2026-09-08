@@ -60,6 +60,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case cancelDuringAttachmentResolutionScenario
     case suspendedLibrarySwitchChatScenario
     case stopReapsAndRejectsLateCoachResultScenario
+    case onDemandTranscriptMixedAvailabilityChatScenario
     case libraryLaunchNoSelectionScenario
     case libraryCreateScenario
     case libraryRelaunchScenario
@@ -126,6 +127,8 @@ public enum ContractResource: CaseIterable, Sendable {
     case developmentChatUserMessageExample
     case developmentChatCoachMessageExample
     case developmentChatCoachInvocationExample
+    case coachInvocationLegacyV3Example
+    case coachInvocationTranscriptReadFailureExample
     case invocationAdmissionLedgerExample
     case pendingUserTurnExample
     case pendingUserTurnCapacityFailureExample
@@ -133,6 +136,8 @@ public enum ContractResource: CaseIterable, Sendable {
     case pendingUserTurnProviderFailureExample
     case pendingUserTurnInvalidResponseExample
     case pendingUserTurnLegacyV1Example
+    case pendingUserTurnLegacyV3Example
+    case pendingUserTurnTranscriptReadFailureExample
     case coachContextQuoteExample
     case renamedEmptyDevelopmentChatExample
     case sessionAnalysisChatExample
@@ -298,6 +303,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "library-switch-during-suspended-load.v1.json"
         case .stopReapsAndRejectsLateCoachResultScenario:
             "stop-reaps-and-rejects-late-result.v1.json"
+        case .onDemandTranscriptMixedAvailabilityChatScenario:
+            "on-demand-transcript-mixed-availability.v1.json"
         case .libraryLaunchNoSelectionScenario:
             "library-launch-no-selection.v1.json"
         case .libraryCreateScenario:
@@ -424,6 +431,10 @@ public enum ContractResource: CaseIterable, Sendable {
             "coach-message.json"
         case .developmentChatCoachInvocationExample:
             "coach-invocation.json"
+        case .coachInvocationLegacyV3Example:
+            "coach-invocation-legacy-v3.json"
+        case .coachInvocationTranscriptReadFailureExample:
+            "coach-invocation-transcript-read-failure.json"
         case .invocationAdmissionLedgerExample:
             "admission-ledger.json"
         case .pendingUserTurnExample:
@@ -438,6 +449,10 @@ public enum ContractResource: CaseIterable, Sendable {
             "pending-user-turn-invalid-response.json"
         case .pendingUserTurnLegacyV1Example:
             "pending-user-turn-legacy-v1.json"
+        case .pendingUserTurnLegacyV3Example:
+            "pending-user-turn-legacy-v3.json"
+        case .pendingUserTurnTranscriptReadFailureExample:
+            "pending-user-turn-transcript-read-failure.json"
         case .coachContextQuoteExample:
             "quote.json"
         case .renamedEmptyDevelopmentChatExample:
@@ -558,7 +573,8 @@ public enum ContractResource: CaseIterable, Sendable {
              .cancelDuringNewChatQuoteScenario,
              .cancelDuringAttachmentResolutionScenario,
              .suspendedLibrarySwitchChatScenario,
-             .stopReapsAndRejectsLateCoachResultScenario:
+             .stopReapsAndRejectsLateCoachResultScenario,
+             .onDemandTranscriptMixedAvailabilityChatScenario:
             "Scenarios/Chat"
         case .libraryLaunchNoSelectionScenario:
             "Scenarios"
@@ -611,11 +627,15 @@ public enum ContractResource: CaseIterable, Sendable {
         case .emptyDevelopmentChatExample, .emptyDevelopmentChatMemoryExample,
              .developmentChatUserMessageExample, .developmentChatCoachMessageExample,
              .developmentChatCoachInvocationExample,
+             .coachInvocationLegacyV3Example,
+             .coachInvocationTranscriptReadFailureExample,
              .pendingUserTurnExample, .pendingUserTurnCapacityFailureExample,
              .pendingUserTurnInterruptedExample,
              .pendingUserTurnProviderFailureExample,
              .pendingUserTurnInvalidResponseExample,
              .pendingUserTurnLegacyV1Example,
+             .pendingUserTurnLegacyV3Example,
+             .pendingUserTurnTranscriptReadFailureExample,
              .renamedEmptyDevelopmentChatExample, .sessionAnalysisChatExample:
             "Examples/Chat/v1"
         case .invocationAdmissionLedgerExample:

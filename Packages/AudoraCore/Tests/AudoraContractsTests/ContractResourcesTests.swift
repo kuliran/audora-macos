@@ -1161,7 +1161,7 @@ final class ContractResourcesTests: XCTestCase {
             pending["responsePositionId"] as? String,
             "rsp-20260830T120001000Z-6PQR"
         )
-        XCTAssertEqual((pending["schemaVersion"] as? NSNumber)?.uint32Value, 3)
+        XCTAssertEqual((pending["schemaVersion"] as? NSNumber)?.uint32Value, 4)
         XCTAssertNil(pending["failure"])
 
         let failed = try jsonObject(.pendingUserTurnCapacityFailureExample)
@@ -1173,7 +1173,7 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(failed["responsePositionId"] as? String,
                        pending["responsePositionId"] as? String)
         XCTAssertEqual(failed["failure"] as? String, "coachContextCannotFit")
-        XCTAssertEqual((failed["schemaVersion"] as? NSNumber)?.uint32Value, 3)
+        XCTAssertEqual((failed["schemaVersion"] as? NSNumber)?.uint32Value, 4)
 
         let interrupted = try jsonObject(.pendingUserTurnInterruptedExample)
         XCTAssertEqual(
@@ -1182,26 +1182,46 @@ final class ContractResourcesTests: XCTestCase {
         )
         XCTAssertEqual(
             (interrupted["schemaVersion"] as? NSNumber)?.uint32Value,
-            3
+            4
         )
 
         let providerFailure = try jsonObject(.pendingUserTurnProviderFailureExample)
         XCTAssertEqual(providerFailure["failure"] as? String, "coachProviderError")
         XCTAssertEqual(
             (providerFailure["schemaVersion"] as? NSNumber)?.uint32Value,
-            3
+            4
         )
 
         let invalid = try jsonObject(.pendingUserTurnInvalidResponseExample)
         XCTAssertEqual(invalid["failure"] as? String, "coachResponseInvalid")
         XCTAssertEqual(
             (invalid["schemaVersion"] as? NSNumber)?.uint32Value,
-            3
+            4
         )
 
         let legacy = try jsonObject(.pendingUserTurnLegacyV1Example)
         XCTAssertEqual((legacy["schemaVersion"] as? NSNumber)?.uint32Value, 1)
         XCTAssertEqual(legacy["failure"] as? String, "coachContextCannotFit")
+
+        let legacyV3 = try jsonObject(.pendingUserTurnLegacyV3Example)
+        XCTAssertEqual((legacyV3["schemaVersion"] as? NSNumber)?.uint32Value, 3)
+        XCTAssertEqual(legacyV3["failure"] as? String, "coachProviderError")
+
+        let transcriptRead = try jsonObject(
+            .pendingUserTurnTranscriptReadFailureExample
+        )
+        XCTAssertEqual(
+            transcriptRead["failure"] as? String,
+            "coachTranscriptReadFailed"
+        )
+        let transcriptReadSummary = try XCTUnwrap(
+            transcriptRead["transcriptReadFailure"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            (transcriptReadSummary["sessions"] as? [[String: Any]])?.count,
+            3
+        )
+        XCTAssertEqual(transcriptReadSummary["additionalSessionCount"] as? Int, 2)
 
         let schema = try XCTUnwrap(
             String(
@@ -1215,6 +1235,8 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(schema.contains("coachResponseInterrupted"))
         XCTAssertTrue(schema.contains("coachProviderError"))
         XCTAssertTrue(schema.contains("coachResponseInvalid"))
+        XCTAssertTrue(schema.contains("coachTranscriptReadFailed"))
+        XCTAssertTrue(schema.contains("additionalSessionCount"))
         XCTAssertTrue(schema.contains("unevaluatedProperties"))
     }
 
@@ -1239,6 +1261,7 @@ final class ContractResourcesTests: XCTestCase {
             .cancelDuringAttachmentResolutionScenario,
             .suspendedLibrarySwitchChatScenario,
             .stopReapsAndRejectsLateCoachResultScenario,
+            .onDemandTranscriptMixedAvailabilityChatScenario,
         ]
         for resource in resources {
             let object = try XCTUnwrap(
@@ -1251,6 +1274,7 @@ final class ContractResourcesTests: XCTestCase {
                 .contextCapacityRecoveryChatScenario,
                 .fakeProviderSuccessDevelopmentChatScenario,
                 .stopReapsAndRejectsLateCoachResultScenario,
+                .onDemandTranscriptMixedAvailabilityChatScenario,
             ].contains(resource)
             XCTAssertEqual(
                 (object["expectedProviderCalls"] as? NSNumber)?.intValue,
@@ -1264,6 +1288,7 @@ final class ContractResourcesTests: XCTestCase {
                 ContractResource.draftSendDiscardChatScenario,
                 .fakeProviderSuccessDevelopmentChatScenario,
                 .stopReapsAndRejectsLateCoachResultScenario,
+                .onDemandTranscriptMixedAvailabilityChatScenario,
             ].contains(resource) {
                 1
             } else {
@@ -1278,7 +1303,8 @@ final class ContractResourcesTests: XCTestCase {
                 executesProviderAttempt ? 1 : 0
             )
             if resource == .fakeProviderSuccessDevelopmentChatScenario ||
-                resource == .stopReapsAndRejectsLateCoachResultScenario
+                resource == .stopReapsAndRejectsLateCoachResultScenario ||
+                resource == .onDemandTranscriptMixedAvailabilityChatScenario
             {
                 XCTAssertEqual(object["providerAvailability"] as? String, "available")
             } else if [
@@ -1288,6 +1314,22 @@ final class ContractResourcesTests: XCTestCase {
                 XCTAssertEqual(object["providerAvailability"] as? String, "unavailable")
             }
         }
+
+        let transcriptFailure = try jsonObject(
+            .onDemandTranscriptMixedAvailabilityChatScenario
+        )
+        let expectedState = try XCTUnwrap(
+            transcriptFailure["expectedState"] as? [String: Any]
+        )
+        let summary = try XCTUnwrap(
+            expectedState["pendingTranscriptReadFailure"] as? [String: Any]
+        )
+        XCTAssertEqual((summary["sessions"] as? [[String: Any]])?.count, 3)
+        XCTAssertEqual(summary["additionalSessionCount"] as? Int, 2)
+        XCTAssertEqual(
+            expectedState["pendingRecoveryActions"] as? [String],
+            ["retryPendingUserTurn", "discardPendingUserTurn"]
+        )
     }
 
     func testInvocationGoldensBindOneResponsePositionAndMachineLocalDebit() throws {
@@ -1308,7 +1350,7 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(invocation["expectedManifestRevision"] as? Int, 1)
         XCTAssertEqual(user["schemaVersion"] as? Int, 2)
         XCTAssertEqual(coach["schemaVersion"] as? Int, 2)
-        XCTAssertEqual(invocation["schemaVersion"] as? Int, 3)
+        XCTAssertEqual(invocation["schemaVersion"] as? Int, 4)
         let attempts = try XCTUnwrap(invocation["attempts"] as? [[String: Any]])
         XCTAssertEqual(attempts.map { $0["ordinal"] as? Int }, [1, 2])
         XCTAssertEqual(attempts.map { $0["kind"] as? String }, [
@@ -1331,6 +1373,17 @@ final class ContractResourcesTests: XCTestCase {
             XCTAssertNil(attempt["transcriptHandles"])
             XCTAssertNil(attempt["schemaVersion"])
         }
+        let legacyInvocation = try jsonObject(.coachInvocationLegacyV3Example)
+        XCTAssertEqual(legacyInvocation["schemaVersion"] as? Int, 3)
+        let failedInvocation = try jsonObject(
+            .coachInvocationTranscriptReadFailureExample
+        )
+        XCTAssertEqual(failedInvocation["schemaVersion"] as? Int, 4)
+        XCTAssertEqual(
+            failedInvocation["terminalFailure"] as? String,
+            "coachTranscriptReadFailed"
+        )
+        XCTAssertNotNil(failedInvocation["transcriptReadFailure"])
         XCTAssertEqual(
             coach["profileRevisionId"] as? String,
             invocation["profileRevisionId"] as? String

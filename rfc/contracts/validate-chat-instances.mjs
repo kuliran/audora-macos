@@ -31,13 +31,17 @@ const scenariosDirectory = path.join(resourcesDirectory, "Scenarios/Chat");
 const positiveInventory = [
   "chat.json",
   "coach-invocation.json",
+  "coach-invocation-legacy-v3.json",
+  "coach-invocation-transcript-read-failure.json",
   "coach-message.json",
   "memory.json",
   "pending-user-turn-capacity-failure.json",
   "pending-user-turn-interrupted.json",
   "pending-user-turn-invalid-response.json",
   "pending-user-turn-legacy-v1.json",
+  "pending-user-turn-legacy-v3.json",
   "pending-user-turn-provider-failure.json",
+  "pending-user-turn-transcript-read-failure.json",
   "pending-user-turn.json",
   "rejected",
   "renamed-chat.json",
@@ -58,6 +62,7 @@ const scenarioInventory = [
   "invalid-context-blocks-new-chat.v1.json",
   "library-switch-during-suspended-load.v1.json",
   "newer-chat-freezes.v1.json",
+  "on-demand-transcript-mixed-availability.v1.json",
   "provider-unavailable-creates-locally.v1.json",
   "relaunch-reopens-exact-aggregate.v1.json",
   "rename-preserves-identity.v1.json",
@@ -105,6 +110,21 @@ function assertValidation(validate, instance, expected, label) {
       .map((error) => error.keyword)
       .join(",");
     throw new Error(`${label}: expected valid=${expected}; keywords=${keywords}`);
+  }
+}
+
+function assertTranscriptFailureLinkIdentityValidation(
+  validate,
+  instance,
+  expected,
+  label,
+) {
+  const schemaValid = validate(instance);
+  const sessions = instance.transcriptReadFailure?.sessions ?? [];
+  const identities = sessions.map((session) => session.sessionAttachmentId);
+  const valid = schemaValid && new Set(identities).size === identities.length;
+  if (valid !== expected) {
+    throw new Error(`${label}: expected valid=${expected}`);
   }
 }
 
@@ -166,19 +186,27 @@ for (const name of ["user-message.json", "coach-message.json"]) {
     name,
   );
 }
-assertValidation(
-  coachInvocation,
-  await loadJSON(path.join(examplesDirectory, "coach-invocation.json")),
-  true,
+for (const name of [
   "coach-invocation.json",
-);
+  "coach-invocation-legacy-v3.json",
+  "coach-invocation-transcript-read-failure.json",
+]) {
+  assertValidation(
+    coachInvocation,
+    await loadJSON(path.join(examplesDirectory, name)),
+    true,
+    name,
+  );
+}
 for (const name of [
   "pending-user-turn.json",
   "pending-user-turn-capacity-failure.json",
   "pending-user-turn-interrupted.json",
   "pending-user-turn-invalid-response.json",
   "pending-user-turn-legacy-v1.json",
+  "pending-user-turn-legacy-v3.json",
   "pending-user-turn-provider-failure.json",
+  "pending-user-turn-transcript-read-failure.json",
 ]) {
   assertValidation(
     pendingUserTurn,
@@ -200,7 +228,7 @@ assertValidation(
 const unknownNewerPending = await loadJSON(
   path.join(examplesDirectory, "pending-user-turn-interrupted.json"),
 );
-unknownNewerPending.schemaVersion = 4;
+unknownNewerPending.schemaVersion = 5;
 assertValidation(
   pendingUserTurn,
   unknownNewerPending,
@@ -216,6 +244,120 @@ assertValidation(
   legacyV2ProviderFailure,
   false,
   "synthetic legacy-v2 provider failure Pending",
+);
+const transcriptReadPending = await loadJSON(
+  path.join(examplesDirectory, "pending-user-turn-transcript-read-failure.json"),
+);
+const missingTranscriptReadSummary = structuredClone(transcriptReadPending);
+delete missingTranscriptReadSummary.transcriptReadFailure;
+assertValidation(
+  pendingUserTurn,
+  missingTranscriptReadSummary,
+  false,
+  "synthetic transcript failure without summary",
+);
+const unrelatedPendingWithTranscriptReadSummary = structuredClone(transcriptReadPending);
+unrelatedPendingWithTranscriptReadSummary.failure = "coachProviderError";
+assertValidation(
+  pendingUserTurn,
+  unrelatedPendingWithTranscriptReadSummary,
+  false,
+  "synthetic unrelated Pending failure with transcript summary",
+);
+const tooManyTranscriptReadLinks = structuredClone(transcriptReadPending);
+tooManyTranscriptReadLinks.transcriptReadFailure.sessions.push({
+  displayLabel: "Fourth Session",
+  sessionAttachmentId: "attachment_4",
+});
+assertValidation(
+  pendingUserTurn,
+  tooManyTranscriptReadLinks,
+  false,
+  "synthetic transcript failure with four links",
+);
+const duplicateTranscriptReadLinks = structuredClone(transcriptReadPending);
+duplicateTranscriptReadLinks.transcriptReadFailure.sessions[1] = structuredClone(
+  duplicateTranscriptReadLinks.transcriptReadFailure.sessions[0],
+);
+assertValidation(
+  pendingUserTurn,
+  duplicateTranscriptReadLinks,
+  false,
+  "synthetic transcript failure with duplicate links",
+);
+const duplicateTranscriptReadIdentities = structuredClone(transcriptReadPending);
+duplicateTranscriptReadIdentities.transcriptReadFailure.sessions[1].sessionAttachmentId =
+  duplicateTranscriptReadIdentities.transcriptReadFailure.sessions[0].sessionAttachmentId;
+duplicateTranscriptReadIdentities.transcriptReadFailure.sessions[1].displayLabel =
+  "Same Session, different label";
+assertTranscriptFailureLinkIdentityValidation(
+  pendingUserTurn,
+  duplicateTranscriptReadIdentities,
+  false,
+  "synthetic transcript failure with duplicate Session identity",
+);
+const incompleteTranscriptReadOverflow = structuredClone(transcriptReadPending);
+incompleteTranscriptReadOverflow.transcriptReadFailure.sessions.pop();
+assertValidation(
+  pendingUserTurn,
+  incompleteTranscriptReadOverflow,
+  false,
+  "synthetic positive additional count with fewer than three links",
+);
+
+const transcriptReadInvocation = await loadJSON(
+  path.join(examplesDirectory, "coach-invocation-transcript-read-failure.json"),
+);
+const missingInvocationTranscriptReadSummary = structuredClone(transcriptReadInvocation);
+delete missingInvocationTranscriptReadSummary.transcriptReadFailure;
+assertValidation(
+  coachInvocation,
+  missingInvocationTranscriptReadSummary,
+  false,
+  "synthetic Invocation transcript failure without summary",
+);
+const unrelatedInvocationWithTranscriptReadSummary = structuredClone(transcriptReadInvocation);
+unrelatedInvocationWithTranscriptReadSummary.terminalFailure = "coachProviderError";
+assertValidation(
+  coachInvocation,
+  unrelatedInvocationWithTranscriptReadSummary,
+  false,
+  "synthetic unrelated Invocation failure with transcript summary",
+);
+const duplicateInvocationTranscriptReadLinks = structuredClone(transcriptReadInvocation);
+duplicateInvocationTranscriptReadLinks.transcriptReadFailure.sessions[1] = structuredClone(
+  duplicateInvocationTranscriptReadLinks.transcriptReadFailure.sessions[0],
+);
+assertValidation(
+  coachInvocation,
+  duplicateInvocationTranscriptReadLinks,
+  false,
+  "synthetic Invocation transcript failure with duplicate links",
+);
+const duplicateInvocationTranscriptReadIdentities = structuredClone(
+  transcriptReadInvocation,
+);
+duplicateInvocationTranscriptReadIdentities.transcriptReadFailure.sessions[1] =
+  structuredClone(
+    duplicateInvocationTranscriptReadIdentities.transcriptReadFailure.sessions[0],
+  );
+duplicateInvocationTranscriptReadIdentities.transcriptReadFailure.sessions[1].sessionAttachmentId =
+  duplicateInvocationTranscriptReadIdentities.transcriptReadFailure.sessions[0].sessionAttachmentId;
+duplicateInvocationTranscriptReadIdentities.transcriptReadFailure.sessions[1].displayLabel =
+  "Same Session, different label";
+assertTranscriptFailureLinkIdentityValidation(
+  coachInvocation,
+  duplicateInvocationTranscriptReadIdentities,
+  false,
+  "synthetic Invocation transcript failure with duplicate Session identity",
+);
+const incompleteInvocationTranscriptReadOverflow = structuredClone(transcriptReadInvocation);
+incompleteInvocationTranscriptReadOverflow.transcriptReadFailure.sessions.pop();
+assertValidation(
+  coachInvocation,
+  incompleteInvocationTranscriptReadOverflow,
+  false,
+  "synthetic Invocation positive additional count with fewer than three links",
 );
 
 for (const name of scenarioInventory) {

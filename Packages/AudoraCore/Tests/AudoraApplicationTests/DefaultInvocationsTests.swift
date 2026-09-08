@@ -1,10 +1,14 @@
 @testable @_spi(CoachContextQualification) @_spi(InvocationInfrastructure) @_spi(InvocationTesting) import AudoraApplication
 import AudoraDomain
+import Foundation
 import XCTest
 
 final class DefaultInvocationsTests: XCTestCase {
     func testStopRevokesAndReapsSuspendedProviderBeforePersistingInterruption() async throws {
-        let fixture = try InvocationFixture(contextWindow: 100_000)
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true
+        )
         let authorities = InvocationStopAuthorityRecorder()
         await fixture.provider.suspendNextLaunch()
 
@@ -56,6 +60,654 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(stopDiagnostic.disposition, .userRetryableFailure)
         XCTAssertEqual(stopDiagnostic.invocationID, authority.invocationID)
         XCTAssertEqual(stopDiagnostic.attemptID, authority.attemptID)
+        let stoppedRequests = await fixture.provider.requests
+        let providerRequest = try XCTUnwrap(stoppedRequests.first)
+        let transcriptAccess = try XCTUnwrap(providerRequest.transcriptAccess)
+        let lateRead = await transcriptAccess.read(
+            transportRequestID: AttemptTranscriptTransportRequestID("late-read")!,
+            handles: transcriptAccess.handles
+        )
+        XCTAssertEqual(lateRead, .rejected(.closed))
+    }
+
+    func testOrdinaryStopRetriesUnconfirmedReapAsInterruption() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerCancellationOutcomes: [.unableToConfirm, .reaped]
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.provider.suspendNextLaunch()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        let authority = await authorities.waitForAuthority()
+        let request = StopCoachInvocationRequest(
+            library: fixture.scope,
+            chatID: fixture.request.chatID,
+            pendingUserTurnID: fixture.request.pendingUserTurnID
+        )
+
+        let firstOutcome = await fixture.invocations.stop(
+            request,
+            authority: authority
+        )
+        XCTAssertEqual(firstOutcome, .unableToReap)
+
+        let secondOutcome = await fixture.invocations.stop(
+            request,
+            authority: authority
+        )
+        guard case let .interrupted(aggregate) = secondOutcome else {
+            return XCTFail("the exact authority must retry process reaping")
+        }
+        XCTAssertEqual(
+            aggregate.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        _ = await invocationTask.value
+        XCTAssertEqual(
+            fixture.diagnostics.recordedEvents().last?.reason,
+            .coachResponseStopped
+        )
+    }
+
+    func testCompleteAttemptTranscriptReadPublishesThenRevokesAccess() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .all
+        )
+
+        guard case .published = await fixture.invocations.tryInvoke(fixture.request) else {
+            return XCTFail("a complete atomic transcript read must permit publication")
+        }
+
+        let results = await fixture.provider.transcriptReadResults
+        guard case let .delivered(delivery) = try XCTUnwrap(results.first) else {
+            return XCTFail("the provider must receive one complete transcript delivery")
+        }
+        XCTAssertEqual(delivery.kind, .complete)
+        XCTAssertFalse(delivery.isReplay)
+        XCTAssertFalse(delivery.terminatesAttempt)
+        let body = String(decoding: delivery.responseBody, as: UTF8.self)
+        XCTAssertTrue(body.contains(#""sessionAttachmentId":"attachment-1""#))
+        XCTAssertFalse(body.contains("ses-"))
+        XCTAssertFalse(body.contains("trv-"))
+        XCTAssertFalse(body.contains("library"))
+        XCTAssertFalse(body.contains("path"))
+        XCTAssertFalse(body.contains("confidence"))
+        XCTAssertFalse(body.contains("textualEvents"))
+        XCTAssertFalse(body.contains("rawAudio"))
+
+        let providerRequests = await fixture.provider.requests
+        let request = try XCTUnwrap(providerRequests.first)
+        XCTAssertEqual(
+            Set(Mirror(reflecting: request).children.compactMap(\.label)),
+            Set([
+                "attemptID",
+                "attemptOrdinal",
+                "attemptKind",
+                "providerIdempotencyValue",
+                "exchange",
+                "transcriptAccess",
+                "outputTokenCeiling",
+                "pinnedInstruction",
+                "control",
+            ])
+        )
+        XCTAssertEqual(
+            Set(Mirror(reflecting: request.exchange).children.compactMap(\.label)),
+            Set(["request", "transcriptHandles"])
+        )
+        let lateRead = await request.transcriptAccess?.read(
+            transportRequestID: AttemptTranscriptTransportRequestID("late-read")!,
+            handles: request.exchange.transcriptHandles
+        )
+        XCTAssertEqual(lateRead, .rejected(.closed))
+    }
+
+    func testUnavailableAttemptTranscriptReadPersistsBoundedStableFailure() async throws {
+        let unavailableID = try ChatSessionAttachmentID("attachment-1")
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .all,
+            transcriptAvailability: AttemptTranscriptAvailabilitySource { query in
+                query.sessionAttachmentID == unavailableID ? .unavailable : .available
+            }
+        )
+        await fixture.provider.suspendNextLaunch()
+
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(fixture.request)
+        }
+        await fixture.provider.waitUntilCancellationStarts()
+        guard case let .interrupted(aggregate?, .providerFailed) =
+            await invocationTask.value
+        else {
+            return XCTFail("an unavailable transcript must abort without publication")
+        }
+        guard case let .coachTranscriptReadFailed(summary)? =
+            aggregate.pendingUserTurn?.failure
+        else {
+            return XCTFail("the durable Pending must retain safe recovery links")
+        }
+        XCTAssertEqual(
+            summary.sessions,
+            [
+                try CoachTranscriptReadFailureSession(
+                    sessionAttachmentID: unavailableID,
+                    displayLabel: "Fixture Session"
+                ),
+            ]
+        )
+        XCTAssertEqual(summary.additionalSessionCount, 0)
+        let publicationCount = await fixture.persistence.publicationCount
+        let cancelledAttemptIDs = await fixture.provider.cancelledAttemptIDs
+        let providerRequests = await fixture.provider.requests
+        XCTAssertEqual(publicationCount, 0)
+        XCTAssertEqual(
+            cancelledAttemptIDs,
+            [try XCTUnwrap(providerRequests.first?.attemptID)]
+        )
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().last)
+        XCTAssertEqual(event.reason, .transcriptSessionUnavailable)
+        XCTAssertEqual(event.classification, .transcriptReadFailure)
+    }
+
+    func testStopWinningDuringTranscriptTerminalReapPreservesRichFailure()
+        async throws
+    {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .all,
+            transcriptAvailability: AttemptTranscriptAvailabilitySource { _ in
+                .unavailable
+            },
+            providerCancellationOutcomes: [.reaped, .reaped]
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.provider.suspendNextLaunch()
+        await fixture.provider.suspendNextCancellation()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        let authority = await authorities.waitForAuthority()
+        await fixture.provider.waitUntilCancellationStarts()
+
+        let stopOutcome = await fixture.invocations.stop(
+            StopCoachInvocationRequest(
+                library: fixture.scope,
+                chatID: fixture.request.chatID,
+                pendingUserTurnID: fixture.request.pendingUserTurnID
+            ),
+            authority: authority
+        )
+        await fixture.provider.resumeCancellation()
+        _ = await invocationTask.value
+
+        guard case let .interrupted(aggregate) = stopOutcome,
+              case let .coachTranscriptReadFailed(summary)? =
+              aggregate.pendingUserTurn?.failure
+        else {
+            return XCTFail("Stop must persist the terminal transcript summary")
+        }
+        XCTAssertEqual(
+            summary.sessions.map(\.sessionAttachmentID),
+            [try ChatSessionAttachmentID("attachment-1")]
+        )
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testStopCapturesTranscriptTerminalBeforeCoordinatorReport() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .terminalBeforeCoordinatorReport,
+            transcriptAvailability: AttemptTranscriptAvailabilitySource { _ in
+                .unavailable
+            }
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.provider.suspendNextLaunch()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        let authority = await authorities.waitForAuthority()
+        await fixture.provider.waitUntilTranscriptReadCount(1)
+
+        let stopOutcome = await fixture.invocations.stop(
+            StopCoachInvocationRequest(
+                library: fixture.scope,
+                chatID: fixture.request.chatID,
+                pendingUserTurnID: fixture.request.pendingUserTurnID
+            ),
+            authority: authority
+        )
+        _ = await invocationTask.value
+
+        guard case let .interrupted(aggregate) = stopOutcome,
+              case let .coachTranscriptReadFailed(summary)? =
+              aggregate.pendingUserTurn?.failure
+        else {
+            return XCTFail("Stop must capture an already-terminal broker summary")
+        }
+        XCTAssertEqual(summary.additionalSessionCount, 0)
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testTranscriptFailureRetainsLivenessUntilExactReapCanBeConfirmed()
+        async throws
+    {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .all,
+            transcriptAvailability: AttemptTranscriptAvailabilitySource { _ in
+                .unavailable
+            },
+            providerCancellationOutcomes: [
+                .unableToConfirm,
+                .unableToConfirm,
+                .reaped,
+            ]
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.provider.suspendNextLaunch()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        let authority = await authorities.waitForAuthority()
+        await fixture.provider.waitUntilCancellationStarts()
+
+        let invocationOutcome = await invocationTask.value
+        let retainedInvocation = await fixture.persistence.activeInvocation
+        let retainedAggregate = await fixture.persistence.aggregateSnapshot()
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(invocationOutcome, .providerReapPending(authority))
+        XCTAssertNotNil(retainedInvocation)
+        XCTAssertNil(retainedAggregate.pendingUserTurn?.failure)
+        XCTAssertEqual(publicationCount, 0)
+
+        let blockedSuccessor = await fixture.invocations.tryInvoke(
+            fixture.request
+        )
+        XCTAssertEqual(
+            blockedSuccessor,
+            .rejected(nil, .activeInvocation)
+        )
+        let launchesWhileUnreaped = await fixture.provider.requests.count
+        XCTAssertEqual(
+            launchesWhileUnreaped,
+            1,
+            "no successor provider may start behind an unreaped authority"
+        )
+
+        let firstStopOutcome = await fixture.invocations.stop(
+            StopCoachInvocationRequest(
+                library: fixture.scope,
+                chatID: fixture.request.chatID,
+                pendingUserTurnID: fixture.request.pendingUserTurnID
+            ),
+            authority: authority
+        )
+        XCTAssertEqual(firstStopOutcome, .unableToReap)
+        let stillActiveInvocation = await fixture.persistence.activeInvocation
+        XCTAssertNotNil(stillActiveInvocation)
+
+        let stopOutcome = await fixture.invocations.stop(
+            StopCoachInvocationRequest(
+                library: fixture.scope,
+                chatID: fixture.request.chatID,
+                pendingUserTurnID: fixture.request.pendingUserTurnID
+            ),
+            authority: authority
+        )
+
+        guard case let .interrupted(terminal) = stopOutcome else {
+            return XCTFail("the retained authority must allow exact reap retry")
+        }
+        guard case let .coachTranscriptReadFailed(summary)? =
+            terminal.pendingUserTurn?.failure
+        else { return XCTFail("the retained terminal summary must survive reap retry") }
+        XCTAssertEqual(
+            summary.sessions.map(\.sessionAttachmentID),
+            [try ChatSessionAttachmentID("attachment-1")]
+        )
+        XCTAssertEqual(summary.additionalSessionCount, 0)
+        let activeInvocation = await fixture.persistence.activeInvocation
+        let cancelledAttemptIDs = await fixture.provider.cancelledAttemptIDs
+        XCTAssertNil(activeInvocation)
+        XCTAssertEqual(
+            cancelledAttemptIDs,
+            [authority.attemptID, authority.attemptID, authority.attemptID]
+        )
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().last)
+        XCTAssertEqual(event.reason, .transcriptSessionUnavailable)
+        XCTAssertEqual(event.classification, .transcriptReadFailure)
+    }
+
+    func testTranscriptFailureRetryUsesFreshAuthorityAndStableAttachmentIdentity()
+        async throws
+    {
+        let availability = SequencedTranscriptAvailability(
+            results: [.unavailable, .available]
+        )
+        let identities = RetryInvocationIdentities()
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .complete(markdown: "discarded first result"),
+                .complete(markdown: "Retry succeeds."),
+            ],
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .all,
+            transcriptAvailability: AttemptTranscriptAvailabilitySource { query in
+                await availability.inspect(query)
+            },
+            identityGenerator: identities
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+
+        let first = await fixture.invocations.tryInvoke(
+            fixture.request,
+            observingStopAuthority: { authority in
+                await authorities.record(authority)
+            }
+        )
+        guard case let .interrupted(firstAggregate?, .providerFailed) = first,
+              case let .coachTranscriptReadFailed(summary)? =
+              firstAggregate.pendingUserTurn?.failure
+        else { return XCTFail("the first read must retain a Retryable failure") }
+        let firstRequests = await fixture.provider.requests
+        let firstRequest = try XCTUnwrap(firstRequests.first)
+        let firstAccess = try XCTUnwrap(firstRequest.transcriptAccess)
+
+        guard case .published = await fixture.invocations.tryInvoke(
+            fixture.request,
+            observingStopAuthority: { authority in
+                await authorities.record(authority)
+            }
+        ) else { return XCTFail("Retry must publish after storage recovers") }
+
+        let requests = await fixture.provider.requests
+        let attempts = await authorities.waitForDistinctAttempts(2)
+        let readResults = await fixture.provider.transcriptReadResults
+        let queries = await availability.queries
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(Set(attempts.map(\.invocationID)).count, 2)
+        XCTAssertEqual(Set(attempts.map(\.attemptID)).count, 2)
+        XCTAssertNotEqual(
+            requests[0].transcriptAccess?.handles,
+            requests[1].transcriptAccess?.handles
+        )
+        XCTAssertEqual(
+            try requests.map(maskingTranscriptDescriptorHandles(in:)),
+            Array(
+                repeating: try maskingTranscriptDescriptorHandles(in: requests[0]),
+                count: 2
+            )
+        )
+        XCTAssertEqual(
+            summary.sessions.map(\.sessionAttachmentID),
+            [try ChatSessionAttachmentID("attachment-1")]
+        )
+        XCTAssertEqual(
+            queries.map(\.sessionAttachmentID),
+            Array(
+                repeating: try ChatSessionAttachmentID("attachment-1"),
+                count: 2
+            )
+        )
+        guard case let .delivered(retryDelivery) = try XCTUnwrap(readResults.last) else {
+            return XCTFail("Retry must receive one complete atomic response")
+        }
+        XCTAssertTrue(
+            String(decoding: retryDelivery.responseBody, as: UTF8.self)
+                .contains(#""sessionAttachmentId":"attachment-1""#)
+        )
+        let oldCapabilityResult = await firstAccess.read(
+            transportRequestID: AttemptTranscriptTransportRequestID("late-read")!,
+            handles: firstAccess.handles
+        )
+        XCTAssertEqual(oldCapabilityResult, .rejected(.closed))
+    }
+
+    func testFreshHandleBudgetFailureBecomesDurableContextCapacityFailure()
+        async throws
+    {
+        let estimator = try CoachTokenEstimator(
+            identifier: "fresh-handle-penalty-fixture-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { data in
+                data.count + (String(decoding: data, as: UTF8.self).contains(
+                    "00000000-0000-0000-0001-"
+                ) ? 1_000_000 : 0)
+            }
+        )
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .all,
+            tokenEstimator: estimator
+        )
+        guard case let .contextCapacityFailure(aggregate, _) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else {
+            return XCTFail("fresh transport bytes must be remeasured exactly")
+        }
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachContextCannotFit)
+        let publicationCount = await fixture.persistence.publicationCount
+        let transcriptReadResults = await fixture.provider.transcriptReadResults
+        let providerRequests = await fixture.provider.requests
+        let cancelledAttemptIDs = await fixture.provider.cancelledAttemptIDs
+        let admissionCount = await fixture.admission.claimCount
+        XCTAssertEqual(publicationCount, 0)
+        XCTAssertTrue(transcriptReadResults.isEmpty)
+        XCTAssertTrue(providerRequests.isEmpty)
+        XCTAssertTrue(cancelledAttemptIDs.isEmpty)
+        XCTAssertEqual(admissionCount, 0)
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().last)
+        XCTAssertEqual(event.reason, .transcriptContextCannotFit)
+        XCTAssertEqual(event.classification, .contextCapacity)
+    }
+
+    func testUnmeasuredShorterRepairInstructionCannotLaunchPastInputCeiling()
+        async throws
+    {
+        let estimator = try CoachTokenEstimator(
+            identifier: "repair-instruction-penalty-fixture-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { data in
+                data.count + (String(decoding: data, as: UTF8.self).contains(
+                    "The previous Attempt exceeded the response limit."
+                ) ? 1_000_000 : 0)
+            }
+        )
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [.responseOverflow],
+            tokenEstimator: estimator
+        )
+
+        guard case let .contextCapacityFailure(aggregate, _) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else {
+            return XCTFail("repair instructions must be remeasured before install")
+        }
+
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachContextCannotFit)
+        let providerRequests = await fixture.provider.requests
+        let installedOrdinals = await fixture.persistence.installedAttemptOrdinals
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(providerRequests.count, 1)
+        XCTAssertEqual(installedOrdinals, [1])
+        XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testInvalidAttemptTranscriptReadIsTerminalWithoutPublication() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .duplicateFirst
+        )
+        await fixture.provider.suspendNextLaunch()
+
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(fixture.request)
+        }
+        await fixture.provider.waitUntilCancellationStarts()
+        guard case let .interrupted(aggregate?, .invalidProviderResponse) =
+            await invocationTask.value
+        else {
+            return XCTFail("a malformed transcript request must close the Attempt")
+        }
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInvalid)
+        let publicationCount = await fixture.persistence.publicationCount
+        let transcriptReadResults = await fixture.provider.transcriptReadResults
+        XCTAssertEqual(publicationCount, 0)
+        XCTAssertEqual(
+            try XCTUnwrap(transcriptReadResults.first),
+            .rejected(.closed)
+        )
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().last)
+        XCTAssertEqual(event.reason, .transcriptAccessProtocolFailure)
+        XCTAssertEqual(event.classification, .invalidProviderResponse)
+    }
+
+    func testThirdExactTranscriptReadIsTerminalWithoutPublication() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .threeExactReads
+        )
+
+        guard case let .interrupted(aggregate?, .invalidProviderResponse) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else {
+            return XCTFail("a third read after the one replay must close the Attempt")
+        }
+
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInvalid)
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(publicationCount, 0)
+        let results = await fixture.provider.transcriptReadResults
+        XCTAssertEqual(results.count, 3)
+        guard case let .delivered(first) = results[0],
+              case let .delivered(replay) = results[1]
+        else { return XCTFail("the first read and one exact replay must be delivered") }
+        XCTAssertFalse(first.isReplay)
+        XCTAssertTrue(replay.isReplay)
+        XCTAssertEqual(results[2], .rejected(.closed))
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().last)
+        XCTAssertEqual(event.reason, .transcriptAccessProtocolFailure)
+        XCTAssertEqual(event.classification, .invalidProviderResponse)
+    }
+
+    func testSecondSemanticTranscriptReadIsTerminalWithoutPublication()
+        async throws
+    {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .secondSemanticExactRead
+        )
+
+        guard case let .interrupted(aggregate?, .invalidProviderResponse) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else {
+            return XCTFail("a new transport identity must be a second semantic call")
+        }
+
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInvalid)
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(publicationCount, 0)
+        let results = await fixture.provider.transcriptReadResults
+        XCTAssertEqual(results.count, 2)
+        guard case let .delivered(first) = results[0] else {
+            return XCTFail("the first semantic read must be delivered")
+        }
+        XCTAssertFalse(first.isReplay)
+        XCTAssertEqual(results[1], .rejected(.closed))
+    }
+
+    func testProviderCompletionWhileTranscriptAvailabilityIsCheckingIsTerminal()
+        async throws
+    {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .completeWhileReadChecksAvailability,
+            transcriptAvailability: AttemptTranscriptAvailabilitySource { _ in
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+                return .available
+            }
+        )
+
+        guard case let .interrupted(aggregate?, .invalidProviderResponse) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else {
+            return XCTFail("a provider cannot complete around an unfinished read")
+        }
+
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInvalid)
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(publicationCount, 0)
+        let results = await fixture.provider.drainPendingTranscriptReadResults()
+        XCTAssertEqual(results, [.rejected(.closed)])
+        let cancelledAttemptCount = await fixture.provider.cancelledAttemptIDs.count
+        XCTAssertEqual(cancelledAttemptCount, 1)
+    }
+
+    func testProviderCompletionBeforeFinalTranscriptAuthorizationIsTerminal()
+        async throws
+    {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            includesOnDemandAttachment: true,
+            providerTranscriptReadPlan: .completeBeforeReadAuthorization
+        )
+
+        guard case let .interrupted(aggregate?, .invalidProviderResponse) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else {
+            return XCTFail("completion cannot overtake the disclosure fence")
+        }
+
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInvalid)
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(publicationCount, 0)
+        await fixture.provider.releaseTranscriptReadAuthorization()
+        let results = await fixture.provider.drainPendingTranscriptReadResults()
+        XCTAssertEqual(results, [.rejected(.closed)])
+        let cancelledAttemptCount = await fixture.provider.cancelledAttemptIDs.count
+        XCTAssertEqual(cancelledAttemptCount, 1)
     }
 
     func testStoppingOneLibraryDoesNotReplaceAnotherLibrarysActiveControl()
@@ -117,7 +769,7 @@ final class DefaultInvocationsTests: XCTestCase {
                 }
             )
         }
-        await provider.waitUntilLaunchStarts(in: first.scope)
+        await provider.waitUntilLaunchCount(1)
         let firstAuthority = await firstAuthorities.waitForAuthority()
 
         let secondTask = Task {
@@ -128,7 +780,7 @@ final class DefaultInvocationsTests: XCTestCase {
                 }
             )
         }
-        await provider.waitUntilLaunchStarts(in: secondScope)
+        await provider.waitUntilLaunchCount(2)
         let secondAuthority = await secondAuthorities.waitForAuthority()
         XCTAssertNotEqual(firstAuthority, secondAuthority)
         XCTAssertEqual(firstAuthority.library, first.scope)
@@ -270,6 +922,51 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(publicationCount, 0)
     }
 
+    func testBackoffStopRetriesUnconfirmedReapWithSameAuthority() async throws {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .complete(markdown: "must not launch"),
+            ],
+            providerCancellationOutcomes: [.unableToConfirm, .reaped]
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.sleeper.suspendNextSleep()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        await fixture.sleeper.waitUntilSleepStarts()
+        let authority = await authorities.waitForAuthority()
+        let request = StopCoachInvocationRequest(
+            library: fixture.scope,
+            chatID: fixture.request.chatID,
+            pendingUserTurnID: fixture.request.pendingUserTurnID
+        )
+
+        let firstStop = await fixture.invocations.stop(
+            request,
+            authority: authority
+        )
+        XCTAssertEqual(firstStop, .unableToReap)
+        guard case let .interrupted(aggregate) = await fixture.invocations.stop(
+            request,
+            authority: authority
+        ) else {
+            return XCTFail("backoff reap must remain retryable")
+        }
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInterrupted)
+        let invocationOutcome = await invocationTask.value
+        XCTAssertEqual(invocationOutcome, .stopped)
+        let launchCount = await fixture.provider.launchCount
+        XCTAssertEqual(launchCount, 1)
+    }
+
     func testStopDuringNonCooperativeBackoffReturnsBeforeSleeperFinishes()
         async throws
     {
@@ -373,6 +1070,57 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertNil(activeInvocation)
         XCTAssertEqual(launchCount, 1)
         XCTAssertEqual(publicationCount, 0)
+    }
+
+    func testAttemptTransitionStopRetriesUnconfirmedReapWithSameAuthority()
+        async throws
+    {
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [
+                .autoRetryableFailure,
+                .complete(markdown: "must never launch"),
+            ],
+            providerCancellationOutcomes: [.unableToConfirm, .reaped]
+        )
+        let authorities = InvocationStopAuthorityRecorder()
+        await fixture.persistence.suspendNextAttemptInstall()
+        let invocationTask = Task {
+            await fixture.invocations.tryInvoke(
+                fixture.request,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        await fixture.persistence.waitUntilNextAttemptInstallStarts()
+        let authority = await authorities.waitForAuthority()
+        let request = StopCoachInvocationRequest(
+            library: fixture.scope,
+            chatID: fixture.request.chatID,
+            pendingUserTurnID: fixture.request.pendingUserTurnID
+        )
+        let firstStop = Task {
+            await fixture.invocations.stop(request, authority: authority)
+        }
+        await fixture.provider.waitUntilCancellationStarts()
+        await fixture.persistence.resumeNextAttemptInstall()
+
+        let firstStopOutcome = await firstStop.value
+        XCTAssertEqual(firstStopOutcome, .unableToReap)
+        guard case let .interrupted(aggregate) = await fixture.invocations.stop(
+            request,
+            authority: authority
+        ) else {
+            return XCTFail("transition reap must remain retryable")
+        }
+        XCTAssertEqual(aggregate.pendingUserTurn?.failure, .coachResponseInterrupted)
+        let invocationOutcome = await invocationTask.value
+        XCTAssertEqual(invocationOutcome, .stopped)
+        let activeInvocation = await fixture.persistence.activeInvocation
+        let launchCount = await fixture.provider.launchCount
+        XCTAssertNil(activeInvocation)
+        XCTAssertEqual(launchCount, 1)
     }
 
     func testStopOwnsInterruptionWhenSuspendedAttemptInstallLaterFails()
@@ -656,28 +1404,32 @@ final class DefaultInvocationsTests: XCTestCase {
         }
 
         let requests = await fixture.provider.requests
-        XCTAssertEqual(requests.map(\.attempt.ordinal), [1, 2, 3, 4])
-        XCTAssertEqual(requests.map(\.attempt.kind), [
+        XCTAssertEqual(requests.map(\.attemptOrdinal), [1, 2, 3, 4])
+        XCTAssertEqual(requests.map(\.attemptKind), [
             .standard, .standard, .standard, .standard,
         ])
-        XCTAssertEqual(Set(requests.map(\.attempt.id)).count, 4)
+        XCTAssertEqual(Set(requests.map(\.attemptID)).count, 4)
+        XCTAssertEqual(Set(requests.map(\.providerIdempotencyValue)).count, 4)
+        let installedAttempts = await fixture.persistence.installedAttempts
+        XCTAssertEqual(Set(installedAttempts.compactMap(\.userMessageID)).count, 4)
+        XCTAssertEqual(Set(installedAttempts.compactMap(\.coachMessageID)).count, 4)
+        XCTAssertEqual(Set(installedAttempts.compactMap(\.freshDraftID)).count, 4)
         XCTAssertEqual(
-            Set(requests.compactMap {
-                $0.attempt.transportAuthority?.providerIdempotencyValue
-            }).count,
-            4
-        )
-        XCTAssertEqual(Set(requests.map(\.attempt.userMessageID)).count, 4)
-        XCTAssertEqual(Set(requests.map(\.attempt.coachMessageID)).count, 4)
-        XCTAssertEqual(Set(requests.map(\.attempt.freshDraftID)).count, 4)
-        XCTAssertEqual(
-            Set(requests.compactMap { $0.transcriptAccess.handles.first }).count,
+            Set(requests.compactMap { $0.transcriptAccess?.handles.first }).count,
             4
         )
         XCTAssertEqual(
-            requests.map { $0.exchange.request },
-            Array(repeating: requests[0].exchange.request, count: 4),
-            "automatic retry must keep the frozen semantic request bytes"
+            Set(requests.map { Data($0.exchange.request) }).count,
+            4,
+            "automatic retry must bind a fresh handle into every request"
+        )
+        let normalizedRequests = try requests.map(
+            maskingTranscriptDescriptorHandles(in:)
+        )
+        XCTAssertEqual(
+            normalizedRequests,
+            Array(repeating: normalizedRequests[0], count: 4),
+            "only the Attempt-local transcript handle may change"
         )
         let delays = await fixture.sleeper.delaysMilliseconds
         let installedOrdinals = await fixture.persistence.installedAttemptOrdinals
@@ -705,22 +1457,19 @@ final class DefaultInvocationsTests: XCTestCase {
         else { return XCTFail("the shorter repair must publish") }
 
         let requests = await fixture.provider.requests
-        XCTAssertEqual(requests.map(\.attempt.kind), [
+        XCTAssertEqual(requests.map(\.attemptKind), [
             .standard, .standard, .shorterRepair,
         ])
         XCTAssertEqual(requests.map(\.outputTokenCeiling), [4, 4, 4])
+        let baseInstruction = DefaultInvocations.pinnedInstruction(
+            outputTokenCeiling: 4
+        )
         XCTAssertEqual(
             requests.map(\.pinnedInstruction),
             [
-                "Return one complete structured response that fits within the " +
-                    "4-token output allowance.",
-                "Return one complete structured response that fits within the " +
-                    "4-token output allowance.",
-                "Return one complete structured response that fits within the " +
-                    "4-token output allowance. The previous Attempt exceeded " +
-                    "the response limit. Return a materially shorter complete " +
-                    "response. Preserve the direct answer, remove repetition and " +
-                    "optional detail, and never return partial JSON.",
+                baseInstruction,
+                baseInstruction,
+                baseInstruction + " " + DefaultInvocations.shorterRepairInstruction,
             ]
         )
         XCTAssertEqual(
@@ -775,7 +1524,7 @@ final class DefaultInvocationsTests: XCTestCase {
             ), count: 3)
         )
         let requests = await fixture.provider.requests
-        XCTAssertEqual(events.map(\.attemptID), requests.prefix(3).map(\.attempt.id))
+        XCTAssertEqual(events.map(\.attemptID), requests.prefix(3).map(\.attemptID))
         XCTAssertEqual(
             events.map(\.occurredAt),
             Array(repeating: fixture.instant, count: 3)
@@ -783,15 +1532,16 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(events.map(\.durationMilliseconds), [7, 11, 13])
         XCTAssertEqual(timing.callCount, 7)
         let exchange = try XCTUnwrap(requests.first?.exchange)
-        let exactContext = InvocationRetryDiagnosticContext(
-            requestUTF8Bytes: exchange.request.count,
-            completeModelInputUTF8Bytes: exchange.completeModelInput.count,
-            transcriptReadRequestUTF8Bytes: exchange.transcriptReadRequest?.count ?? 0,
-            transcriptReadResponseUTF8Bytes:
-                exchange.transcriptReadResponse?.count ?? 0,
-            completeInputTokens: quote.completeInputTokens,
-            inputCeilingTokens: quote.inputCeilingTokens,
-            memoryUTF8Bytes: quote.categoryCosts[.memory]?.utf8ByteCount ?? 0
+        let exactContext = try XCTUnwrap(events.first?.context)
+        XCTAssertEqual(exactContext.requestUTF8Bytes, exchange.request.count)
+        XCTAssertGreaterThan(exactContext.completeModelInputUTF8Bytes, 0)
+        XCTAssertGreaterThan(exactContext.transcriptReadRequestUTF8Bytes, 0)
+        XCTAssertGreaterThan(exactContext.transcriptReadResponseUTF8Bytes, 0)
+        XCTAssertEqual(exactContext.completeInputTokens, quote.completeInputTokens)
+        XCTAssertEqual(exactContext.inputCeilingTokens, quote.inputCeilingTokens)
+        XCTAssertEqual(
+            exactContext.memoryUTF8Bytes,
+            quote.categoryCosts[.memory]?.utf8ByteCount ?? 0
         )
         XCTAssertGreaterThan(exactContext.memoryUTF8Bytes, 0)
         XCTAssertEqual(
@@ -957,8 +1707,8 @@ final class DefaultInvocationsTests: XCTestCase {
         ) else { return XCTFail("the single shorter repair must publish") }
 
         let requests = await fixture.provider.requests
-        XCTAssertEqual(requests.map(\.attempt.ordinal), [1, 2])
-        XCTAssertEqual(requests.map(\.attempt.kind), [.standard, .shorterRepair])
+        XCTAssertEqual(requests.map(\.attemptOrdinal), [1, 2])
+        XCTAssertEqual(requests.map(\.attemptKind), [.standard, .shorterRepair])
         XCTAssertEqual(requests[0].exchange.request, requests[1].exchange.request)
         XCTAssertEqual(requests[0].control, .standard)
         XCTAssertEqual(
@@ -972,14 +1722,15 @@ final class DefaultInvocationsTests: XCTestCase {
         )
         let delays = await fixture.sleeper.recordedDelays()
         XCTAssertEqual(delays, [])
+        let attempts = await fixture.persistence.installedAttempts
         XCTAssertEqual(
             aggregate.chat.messageIDs,
             [
-                try XCTUnwrap(requests[1].attempt.userMessageID),
-                try XCTUnwrap(requests[1].attempt.coachMessageID),
+                try XCTUnwrap(attempts[1].userMessageID),
+                try XCTUnwrap(attempts[1].coachMessageID),
             ]
         )
-        XCTAssertEqual(aggregate.chat.draft.draftID, requests[1].attempt.freshDraftID)
+        XCTAssertEqual(aggregate.chat.draft.draftID, attempts[1].freshDraftID)
     }
 
     func testRepeatedOverflowIsInvalidUserRetryableWithoutPartialPublication() async throws {
@@ -1172,9 +1923,9 @@ final class DefaultInvocationsTests: XCTestCase {
         XCTAssertEqual(aggregate?.pendingUserTurn?.failure, .coachResponseInvalid)
         XCTAssertEqual(aggregate?.chat.messageIDs, [])
         let requests = await fixture.provider.requests
-        XCTAssertEqual(requests.map(\.attempt.ordinal), [1, 2, 3, 4])
+        XCTAssertEqual(requests.map(\.attemptOrdinal), [1, 2, 3, 4])
         XCTAssertEqual(
-            requests.map(\.attempt.kind),
+            requests.map(\.attemptKind),
             [.standard, .standard, .standard, .standard]
         )
         let delays = await fixture.sleeper.recordedDelays()
@@ -2237,23 +2988,21 @@ private actor TwoLibraryInvocationIdentities: InvocationIdentityGenerating {
 }
 
 private actor TwoLibrarySuspendingProvider: SyntheticCoachProviderPort {
-    private var attemptsByLibrary: [
-        LibraryID: CoachProviderAttemptID
-    ] = [:]
     private var continuations: [
         CoachProviderAttemptID: CheckedContinuation<Void, Never>
     ] = [:]
+    private var launchCount = 0
     private var finishedAttemptIDs: Set<CoachProviderAttemptID> = []
     private(set) var cancelledAttemptIDs: [CoachProviderAttemptID] = []
 
     func run(
         _ request: SyntheticCoachProviderRequest
     ) async -> CoachProviderAttemptOutcome {
-        await withCheckedContinuation { continuation in
-            attemptsByLibrary[request.invocation.libraryID] = request.attempt.id
-            continuations[request.attempt.id] = continuation
+        launchCount += 1
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            continuations[request.attemptID] = continuation
         }
-        finishedAttemptIDs.insert(request.attempt.id)
+        finishedAttemptIDs.insert(request.attemptID)
         return .complete(markdown: "A complete response for its own Library.")
     }
 
@@ -2265,15 +3014,8 @@ private actor TwoLibrarySuspendingProvider: SyntheticCoachProviderPort {
         return .reaped
     }
 
-    func waitUntilLaunchStarts(in library: LibraryScope) async {
-        while true {
-            if let attemptID = attemptsByLibrary[library.libraryID],
-               continuations[attemptID] != nil
-            {
-                return
-            }
-            await Task.yield()
-        }
+    func waitUntilLaunchCount(_ count: Int) async {
+        while launchCount < count { await Task.yield() }
     }
 
     func isRunSuspended(attemptID: CoachProviderAttemptID) -> Bool {
@@ -2321,16 +3063,40 @@ private final class InvocationFixture: @unchecked Sendable {
             .complete(markdown: "A concise **synthetic** answer."),
         ],
         includesOnDemandAttachment: Bool = false,
+        providerTranscriptReadPlan: ProviderTranscriptReadPlan = .none,
+        transcriptAvailability: AttemptTranscriptAvailabilitySource = .allAvailable,
+        providerCancellationOutcomes: [CoachProviderAttemptCancellationOutcome] = [
+            .reaped,
+        ],
+        tokenEstimator: CoachTokenEstimator = .utf8ByteUpperBound(),
         identityGenerator: (any InvocationIdentityGenerating)? = nil,
         invocationRetrySleeper: (any InvocationRetrySleeping)? = nil,
         retryTiming: (any InvocationRetryTiming)? = nil
     ) throws {
-        let empty = try ChatAggregate.emptyDevelopmentChat(
+        let attachments: ChatAttachments = if includesOnDemandAttachment {
+            try ChatAttachments(
+                validating: [
+                    ChatSessionAttachment(
+                        attachmentID: try ChatSessionAttachmentID("attachment-1"),
+                        sessionID: try SessionID(
+                            "ses-20260830T115900000Z-1ABC"
+                        ),
+                        transcriptRevisionID: try TranscriptRevisionID(
+                            "trv-20260830T115900000Z-2DEF"
+                        )
+                    ),
+                ]
+            )
+        } else {
+            .empty
+        }
+        let empty = try ChatAggregate.newChat(
             chatID: ChatID("cht-20260830T120000000Z-1ABC"),
             draftID: ChatDraftID("drf-20260830T120000000Z-2DEF"),
             memoryID: CoachMemoryID("mem-20260830T120000000Z-3GHJ"),
             instant: instant,
-            profileStatementGeneration: 7
+            profileStatementGeneration: 7,
+            attachments: attachments
         )
         let draft = try empty.chat.draft.edited(text: draftText, at: instant)
         unlocked = try ChatAggregate(
@@ -2360,14 +3126,17 @@ private final class InvocationFixture: @unchecked Sendable {
         admission = ScriptedInvocationAdmission(decision: admissionDecision)
         provider = RecordingSyntheticCoachProvider(
             outcomes: providerOutcomes,
-            persistence: persistence
+            persistence: persistence,
+            transcriptReadPlan: providerTranscriptReadPlan,
+            cancellationOutcomes: providerCancellationOutcomes
         )
         sleeper = RecordingInvocationRetrySleeper()
         diagnostics = RecordingInvocationRetryDiagnostics()
         contextSource = InvocationContextSource(
             contextWindow: contextWindow,
             isCurrent: contextIsCurrent,
-            includesOnDemandAttachment: includesOnDemandAttachment
+            includesOnDemandAttachment: includesOnDemandAttachment,
+            tokenEstimator: tokenEstimator
         )
         let defaultIdentities = FixedInvocationIdentities(
             invocationID: try CoachInvocationID(
@@ -2394,7 +3163,8 @@ private final class InvocationFixture: @unchecked Sendable {
             retryDiagnostics: diagnostics,
             retryTiming: retryTiming ?? ScriptedInvocationRetryTiming(
                 milliseconds: [0]
-            )
+            ),
+            transcriptAvailability: transcriptAvailability
         )
     }
 }
@@ -2506,6 +3276,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
     private(set) var lastPublication: PublishCoachInvocationMutation?
     private(set) var recoveredRequests: [PendingCoachInvocationRequest] = []
     private(set) var installedAttemptOrdinals: [UInt8] = []
+    private(set) var installedAttempts: [CoachProviderAttempt] = []
     private var shouldSuspendNextAttemptInstall = false
     private var nextAttemptInstallStarted = false
     private var nextAttemptInstallContinuation: CheckedContinuation<Void, Never>?
@@ -2514,8 +3285,20 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         aggregate = initial
     }
 
-    func isDurable(_ invocation: CoachInvocation) -> Bool {
-        activeInvocation == invocation
+    func aggregateSnapshot() -> ChatAggregate { aggregate }
+
+    func isAttemptDurable(
+        attemptID: CoachProviderAttemptID,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        providerIdempotencyValue: ProviderIdempotencyValue
+    ) -> Bool {
+        guard let attempt = activeInvocation?.attempt else { return false }
+        return attempt.id == attemptID &&
+            attempt.ordinal == ordinal &&
+            attempt.kind == kind &&
+            attempt.transportAuthority?.providerIdempotencyValue ==
+            providerIdempotencyValue
     }
 
     func openNewPendingInvocation(
@@ -2594,6 +3377,8 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         aggregate = unlocked
         reservedRequest = nil
         activeInvocation = nil
+        installedAttemptOrdinals = []
+        installedAttempts = []
     }
 
     func prepareNewPendingInvocation(
@@ -2679,6 +3464,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
             aggregate = mutation.processingAggregate
             activeInvocation = durable
             installedAttemptOrdinals = [durable.attempt.ordinal]
+            installedAttempts = [mutation.invocation.attempt]
             return .installed(durable)
         case .failed:
             return .failed
@@ -2695,6 +3481,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         aggregate = mutation.processingAggregate
         activeInvocation = mutation.invocation
         installedAttemptOrdinals = [mutation.invocation.attempt.ordinal]
+        installedAttempts = [mutation.invocation.attempt]
         return .installed(mutation.invocation)
     }
 
@@ -2719,6 +3506,7 @@ private actor MemoryInvocationPersistence: InvocationPersistencePort {
         }
         activeInvocation = mutation.replacement
         installedAttemptOrdinals.append(mutation.replacement.attempt.ordinal)
+        installedAttempts.append(mutation.replacement.attempt)
         return .installed(
             ScriptedActiveInvocationSession(
                 persistence: self,
@@ -3169,8 +3957,10 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
     private(set) var durableBeforeLaunch: [Bool] = []
     private(set) var cancelledAttemptIDs: [CoachProviderAttemptID] = []
     private(set) var cancellationGraceMilliseconds: [Int64] = []
+    private(set) var transcriptReadResults: [AttemptTranscriptAccessResult] = []
     private var outcomes: [CoachProviderAttemptOutcome]
     private let persistence: MemoryInvocationPersistence
+    private let transcriptReadPlan: ProviderTranscriptReadPlan
     private var shouldSuspend = false
     private var suspendedAttemptOrdinals: Set<UInt8> = []
     private var launchStarted = false
@@ -3178,13 +3968,20 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
     private var shouldSuspendCancellation = false
     private var cancellationStarted = false
     private var cancellationContinuation: CheckedContinuation<Void, Never>?
+    private var cancellationOutcomes: [CoachProviderAttemptCancellationOutcome]
+    private let transcriptReadAuthorization = TranscriptReadAuthorizationBarrier()
+    private var pendingTranscriptReadTasks: [Task<AttemptTranscriptAccessResult, Never>] = []
 
     init(
         outcomes: [CoachProviderAttemptOutcome],
-        persistence: MemoryInvocationPersistence
+        persistence: MemoryInvocationPersistence,
+        transcriptReadPlan: ProviderTranscriptReadPlan,
+        cancellationOutcomes: [CoachProviderAttemptCancellationOutcome] = [.reaped]
     ) {
         self.outcomes = outcomes
         self.persistence = persistence
+        self.transcriptReadPlan = transcriptReadPlan
+        self.cancellationOutcomes = cancellationOutcomes
     }
 
     func failNextLaunch() { outcomes.insert(.userRetryableFailure, at: 0) }
@@ -3218,26 +4015,124 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
         while !cancellationStarted { await Task.yield() }
     }
 
+    func waitUntilTranscriptReadCount(_ count: Int) async {
+        while transcriptReadResults.count < count { await Task.yield() }
+    }
+
+    func releaseTranscriptReadAuthorization() async {
+        await transcriptReadAuthorization.release()
+    }
+
+    func drainPendingTranscriptReadResults() async -> [AttemptTranscriptAccessResult] {
+        let tasks = pendingTranscriptReadTasks
+        pendingTranscriptReadTasks.removeAll(keepingCapacity: false)
+        var results: [AttemptTranscriptAccessResult] = []
+        for task in tasks {
+            results.append(await task.value)
+        }
+        transcriptReadResults.append(contentsOf: results)
+        return results
+    }
+
     func resumeCancellation() {
         cancellationContinuation?.resume()
         cancellationContinuation = nil
     }
 
     func recordedAttemptKinds() -> [CoachProviderAttemptKind] {
-        requests.map(\.attempt.kind)
+        requests.map(\.attemptKind)
     }
 
     func recordedAttemptOrdinals() -> [UInt8] {
-        requests.map(\.attempt.ordinal)
+        requests.map(\.attemptOrdinal)
     }
 
     func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome {
-        durableBeforeLaunch.append(await persistence.isDurable(request.invocation))
+        durableBeforeLaunch.append(
+            await persistence.isAttemptDurable(
+                attemptID: request.attemptID,
+                ordinal: request.attemptOrdinal,
+                kind: request.attemptKind,
+                providerIdempotencyValue: request.providerIdempotencyValue
+            )
+        )
         launchCount += 1
         requests.append(request)
         serializedRequests.append(Array(request.exchange.request))
         launchStarted = true
-        if shouldSuspend || suspendedAttemptOrdinals.remove(request.attempt.ordinal) != nil {
+        if let transcriptAccess = request.transcriptAccess {
+            if transcriptReadPlan == .completeWhileReadChecksAvailability {
+                pendingTranscriptReadTasks.append(
+                    Task {
+                        await transcriptAccess.read(
+                            transportRequestID:
+                                AttemptTranscriptTransportRequestID("read-1")!,
+                            handles: transcriptAccess.handles
+                        )
+                    }
+                )
+                while await transcriptAccess.brokerStatusForTesting() != .checking {
+                    await Task.yield()
+                }
+            }
+            if transcriptReadPlan == .completeBeforeReadAuthorization {
+                let authorization = transcriptReadAuthorization
+                pendingTranscriptReadTasks.append(
+                    Task {
+                        await transcriptAccess.readForTesting(
+                            transportRequestID:
+                                AttemptTranscriptTransportRequestID("read-1")!,
+                            handles: transcriptAccess.handles,
+                            beforeFinalAuthorization: {
+                                await authorization.arriveAndWait()
+                            }
+                        )
+                    }
+                )
+                await authorization.waitUntilArrived()
+            }
+            if transcriptReadPlan == .terminalBeforeCoordinatorReport {
+                transcriptReadResults.append(
+                    await transcriptAccess.stageReadBeforeTerminalReportForTesting(
+                        transportRequestID:
+                            AttemptTranscriptTransportRequestID("read-1")!,
+                        handles: transcriptAccess.handles
+                    )
+                )
+            }
+            let requestedBatches: [[PreparedCoachTranscriptHandle]] =
+                switch transcriptReadPlan {
+                case .none:
+                    []
+                case .all:
+                    [transcriptAccess.handles]
+                case .duplicateFirst:
+                    transcriptAccess.handles.first.map { [[$0, $0]] } ?? []
+                case .threeExactReads:
+                    Array(repeating: transcriptAccess.handles, count: 3)
+                case .secondSemanticExactRead:
+                    Array(repeating: transcriptAccess.handles, count: 2)
+                case .terminalBeforeCoordinatorReport:
+                    []
+                case .completeWhileReadChecksAvailability,
+                     .completeBeforeReadAuthorization:
+                    []
+                }
+            for (index, requestedHandles) in requestedBatches.enumerated() {
+                let requestOrdinal = transcriptReadPlan == .secondSemanticExactRead
+                    ? index + 1
+                    : 1
+                transcriptReadResults.append(
+                    await transcriptAccess.read(
+                        transportRequestID: AttemptTranscriptTransportRequestID(
+                            "read-\(requestOrdinal)"
+                        )!,
+                        handles: requestedHandles
+                    )
+                )
+            }
+        }
+        if shouldSuspend || suspendedAttemptOrdinals.remove(request.attemptOrdinal) != nil {
             shouldSuspend = false
             await withCheckedContinuation { launchContinuation = $0 }
         }
@@ -3260,7 +4155,43 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
             shouldSuspendCancellation = false
             await withCheckedContinuation { cancellationContinuation = $0 }
         }
-        return .reaped
+        return cancellationOutcomes.isEmpty
+            ? .reaped
+            : cancellationOutcomes.removeFirst()
+    }
+}
+
+private enum ProviderTranscriptReadPlan: Equatable, Sendable {
+    case none
+    case all
+    case duplicateFirst
+    case threeExactReads
+    case secondSemanticExactRead
+    case terminalBeforeCoordinatorReport
+    case completeWhileReadChecksAvailability
+    case completeBeforeReadAuthorization
+}
+
+private actor TranscriptReadAuthorizationBarrier {
+    private var arrived = false
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func arriveAndWait() async {
+        arrived = true
+        guard !released else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func waitUntilArrived() async {
+        while !arrived { await Task.yield() }
+    }
+
+    func release() {
+        released = true
+        let waiters = waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters { waiter.resume() }
     }
 }
 
@@ -3281,6 +4212,37 @@ private actor InvocationStopAuthorityRecorder {
         var seen: Set<CoachProviderAttemptID> = []
         return authorities.filter { seen.insert($0.attemptID).inserted }
     }
+}
+
+private func maskingTranscriptDescriptorHandles(
+    in request: SyntheticCoachProviderRequest
+) throws -> Data {
+    guard var object = try JSONSerialization.jsonObject(
+        with: request.exchange.request
+    ) as? [String: Any],
+        var attachments = object["sessionAttachments"] as? [[String: Any]]
+    else {
+        throw TranscriptRequestNormalizationError.invalidRequest
+    }
+    var replacedCount = 0
+    for index in attachments.indices
+    where attachments[index]["kind"] as? String == "onDemand" {
+        guard attachments[index]["sessionTranscriptHandle"] is String else {
+            throw TranscriptRequestNormalizationError.invalidRequest
+        }
+        attachments[index]["sessionTranscriptHandle"] =
+            "<attempt-transcript-handle>"
+        replacedCount += 1
+    }
+    guard replacedCount == request.exchange.transcriptHandles.count else {
+        throw TranscriptRequestNormalizationError.invalidRequest
+    }
+    object["sessionAttachments"] = attachments
+    return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+}
+
+private enum TranscriptRequestNormalizationError: Error {
+    case invalidRequest
 }
 
 private actor RecordingInvocationRetrySleeper: InvocationRetrySleeping {
@@ -3405,6 +4367,7 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
     private let contextWindow: Int
     private let current: Bool
     private let includesOnDemandAttachment: Bool
+    private let tokenEstimator: CoachTokenEstimator
     private(set) var pendingResolutionCount = 0
     private var currentCheckCount = 0
     nonisolated let profile = CoachProfileProvenance(
@@ -3415,11 +4378,13 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
     init(
         contextWindow: Int,
         isCurrent: Bool,
-        includesOnDemandAttachment: Bool = false
+        includesOnDemandAttachment: Bool = false,
+        tokenEstimator: CoachTokenEstimator = .utf8ByteUpperBound()
     ) {
         self.contextWindow = contextWindow
         current = isCurrent
         self.includesOnDemandAttachment = includesOnDemandAttachment
+        self.tokenEstimator = tokenEstimator
     }
 
     func resolveNewChat(
@@ -3464,7 +4429,19 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                                         "lines": .array([]),
                                         "audioEvents": .array([]),
                                     ]),
-                                ])
+                                ]),
+                                sourceAttachment: ChatSessionAttachment(
+                                    attachmentID: try ChatSessionAttachmentID(
+                                        "attachment-1"
+                                    ),
+                                    sessionID: try SessionID(
+                                        "ses-20260830T120000000Z-3DEF"
+                                    ),
+                                    transcriptRevisionID: try TranscriptRevisionID(
+                                        "trv-20260830T121000000Z-4FGH"
+                                    )
+                                ),
+                                revisionSHA256: String(repeating: "1", count: 64)
                             ),
                         ] : []
                     ),
@@ -3485,7 +4462,7 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                             attachmentProjectionPolicy:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
-                                    tokenEstimator: .utf8ByteUpperBound()
+                                    tokenEstimator: tokenEstimator
                                 )
                         )
                     ),
@@ -3534,6 +4511,90 @@ private actor SequencedInvocationClock: ChatClock {
     func now() async -> UTCInstant {
         precondition(!instants.isEmpty)
         return instants.removeFirst()
+    }
+}
+
+private actor SequencedTranscriptAvailability {
+    private var results: [AttemptTranscriptAvailability]
+    private(set) var queries: [AttemptTranscriptAvailabilityQuery] = []
+
+    init(results: [AttemptTranscriptAvailability]) {
+        self.results = results
+    }
+
+    func inspect(
+        _ query: AttemptTranscriptAvailabilityQuery
+    ) -> AttemptTranscriptAvailability {
+        queries.append(query)
+        return results.isEmpty ? .available : results.removeFirst()
+    }
+}
+
+private actor RetryInvocationIdentities: InvocationIdentityGenerating {
+    private var invocationIndex = 0
+    private var attemptIndex = 0
+
+    func generateInvocationID(at instant: UTCInstant) async -> CoachInvocationID {
+        invocationIndex += 1
+        return try! CoachInvocationID(
+            String(
+                format: "inv-20260830T12000%d000Z-%04d",
+                invocationIndex,
+                5_000 + invocationIndex
+            )
+        )
+    }
+
+    func generateAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationAttemptIdentity {
+        attemptIndex += 1
+        let suffix = 6_000 + attemptIndex
+        return InvocationAttemptIdentity(
+            attemptID: try! CoachProviderAttemptID(
+                String(
+                    format: "atm-20260830T12000%d000Z-%04d",
+                    attemptIndex,
+                    suffix
+                )
+            ),
+            idempotencyValue: try! ProviderIdempotencyValue(
+                "retry-invocation-\(attemptIndex)"
+            ),
+            userMessageID: try! ChatMessageID(
+                String(
+                    format: "msg-20260830T12000%d000Z-%04d",
+                    attemptIndex,
+                    7_000 + attemptIndex
+                )
+            ),
+            coachMessageID: try! ChatMessageID(
+                String(
+                    format: "msg-20260830T12000%d000Z-%04d",
+                    attemptIndex,
+                    8_000 + attemptIndex
+                )
+            ),
+            freshDraftID: try! ChatDraftID(
+                String(
+                    format: "drf-20260830T12000%d000Z-%04d",
+                    attemptIndex,
+                    9_000 + attemptIndex
+                )
+            ),
+            transcriptHandles: (0 ..< transcriptHandleCount).map { index in
+                try! PreparedCoachTranscriptHandle(
+                    String(
+                        format: "00000000-0000-0000-%04x-%012x",
+                        attemptIndex,
+                        index + 1
+                    )
+                )
+            }
+        )
     }
 }
 

@@ -55,7 +55,8 @@ struct CoachResponseStopInteractionPresentation: Equatable, Sendable {
               case let .open(aggregate) = chatState.selection,
               aggregate.chat.id == authority.chatID,
               aggregate.pendingUserTurn?.id == authority.pendingUserTurnID,
-              chatState.activity == .invokingCoach(authority.chatID)
+              chatState.activity == .invokingCoach(authority.chatID) ||
+                  chatState.activity == .stoppingCoach(authority.chatID)
         else {
             isEnabled = false
             return
@@ -151,25 +152,84 @@ enum ChatInvocationAdmissionPresentation {
 struct CoachResponseFailureCardPresentation: Equatable {
     let heading: String
     let body: String?
+    let sessionLinks: [CoachResponseFailureSessionLinkPresentation]
+    let additionalSessionCount: Int
+
+    init(
+        heading: String,
+        body: String?,
+        sessionLinks: [CoachResponseFailureSessionLinkPresentation] = [],
+        additionalSessionCount: Int = 0
+    ) {
+        self.heading = heading
+        self.body = body
+        self.sessionLinks = sessionLinks
+        self.additionalSessionCount = additionalSessionCount
+    }
+}
+
+struct CoachResponseFailureSessionLinkPresentation: Equatable {
+    let attachmentID: ChatSessionAttachmentID
+    let displayLabel: String
+    let sessionID: SessionID
+}
+
+struct CoachResponseFailureSessionLinkView: View {
+    let link: CoachResponseFailureSessionLinkPresentation
+    let onOpenSession: (SessionID) -> Void
+
+    var body: some View {
+        Button(link.displayLabel, action: openSession)
+            .accessibilityLabel("Open Session, \(link.displayLabel)")
+    }
+
+    func openSession() {
+        onOpenSession(link.sessionID)
+    }
 }
 
 enum CoachResponseFailurePresentation {
     static func card(
-        for failure: PendingUserTurnFailure?
+        for failure: PendingUserTurnFailure?,
+        attachments: ChatAttachments = .empty
     ) -> CoachResponseFailureCardPresentation {
         switch failure {
         case .coachProviderError:
-            CoachResponseFailureCardPresentation(
+            return CoachResponseFailureCardPresentation(
                 heading: "Coach provider error",
                 body: "The coach could not complete the request."
             )
         case .coachResponseInvalid:
-            CoachResponseFailureCardPresentation(
+            return CoachResponseFailureCardPresentation(
                 heading: "Coach response couldn't be used",
                 body: "The coach returned an incomplete or invalid response."
             )
+        case let .coachTranscriptReadFailed(summary):
+            let sessionsByAttachmentID = Dictionary(
+                uniqueKeysWithValues: attachments.values.map {
+                    ($0.attachmentID, $0.sessionID)
+                }
+            )
+            let links: [CoachResponseFailureSessionLinkPresentation] = summary.sessions
+                .prefix(CoachTranscriptReadFailureSummary.maximumLinkedSessionCount)
+                .compactMap { session in
+                    guard let sessionID = sessionsByAttachmentID[
+                        session.sessionAttachmentID
+                    ] else { return nil }
+                    return CoachResponseFailureSessionLinkPresentation(
+                        attachmentID: session.sessionAttachmentID,
+                        displayLabel: session.displayLabel,
+                        sessionID: sessionID
+                    )
+                }
+            return CoachResponseFailureCardPresentation(
+                heading: "Some Sessions couldn't be read",
+                body: "The Coach stopped before publishing anything. Open the affected Sessions, then Retry.",
+                sessionLinks: links,
+                additionalSessionCount: Int(summary.additionalSessionCount)
+            )
         case .coachResponseInterrupted, .none, .coachContextCannotFit:
-            CoachResponseFailureCardPresentation(
+            return CoachResponseFailureCardPresentation(
                 heading: "Coach response was interrupted",
                 body: nil
             )
@@ -263,7 +323,7 @@ enum PendingUserTurnPresentation: Equatable {
         case .processing:
             [.stopCoachResponse]
         case .stopping:
-            []
+            [.stopCoachResponse]
         case .contextCapacityFailure:
             [
                 .retryPendingUserTurn,
@@ -316,11 +376,17 @@ public struct ChatRootView: View {
     @ObservedObject private var dispatcher: ChatCommandDispatcher
     @State private var renameTitle = ""
     private let scope: LibraryScope
+    private let onOpenSession: (SessionID) -> Void
 
-    public init(dispatcher: ChatCommandDispatcher, scope: LibraryScope) {
+    public init(
+        dispatcher: ChatCommandDispatcher,
+        scope: LibraryScope,
+        onOpenSession: @escaping (SessionID) -> Void = { _ in }
+    ) {
         _model = StateObject(wrappedValue: ChatPresentationModel(dispatcher: dispatcher))
         _dispatcher = ObservedObject(wrappedValue: dispatcher)
         self.scope = scope
+        self.onOpenSession = onOpenSession
     }
 
     public var body: some View {
@@ -571,7 +637,13 @@ public struct ChatRootView: View {
                             )
                         }
                     case .stopping:
-                        EmptyView()
+                        HStack {
+                            Spacer()
+                            pendingRecoveryButtons(
+                                presentation.recoveryActions,
+                                pending: pending
+                            )
+                        }
                     case .contextCapacityFailure:
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Chat size exceeded. Please create a new one.")
@@ -590,7 +662,8 @@ public struct ChatRootView: View {
                     case .coachResponseFailure:
                         VStack(alignment: .leading, spacing: 8) {
                             let failureCard = CoachResponseFailurePresentation.card(
-                                for: pending.failure
+                                for: pending.failure,
+                                attachments: selectedChatAttachments
                             )
                             Text(failureCard.heading)
                                 .font(.callout.weight(.semibold))
@@ -599,6 +672,25 @@ public struct ChatRootView: View {
                                 Text(body)
                                     .font(.callout)
                                     .accessibilityLabel(body)
+                            }
+                            ForEach(
+                                failureCard.sessionLinks,
+                                id: \.attachmentID
+                            ) { link in
+                                CoachResponseFailureSessionLinkView(
+                                    link: link,
+                                    onOpenSession: onOpenSession
+                                )
+                            }
+                            if failureCard.additionalSessionCount > 0 {
+                                Text(
+                                    "+ \(failureCard.additionalSessionCount) more Sessions"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityLabel(
+                                    "\(failureCard.additionalSessionCount) additional affected Sessions"
+                                )
                             }
                             HStack {
                                 pendingRecoveryButtons(
@@ -621,6 +713,13 @@ public struct ChatRootView: View {
         case nil:
             EmptyView()
         }
+    }
+
+    private var selectedChatAttachments: ChatAttachments {
+        guard case let .open(aggregate) = model.snapshot.selection else {
+            return .empty
+        }
+        return aggregate.chat.attachments
     }
 
     @ViewBuilder

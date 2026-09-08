@@ -3,7 +3,53 @@ import AudoraDomain
 import Foundation
 import XCTest
 
+private let coachContextFixtureRevisionSHA256 = String(repeating: "1", count: 64)
+
 final class CoachContextPlannerTests: XCTestCase {
+    func testAttemptTranscriptBudgetCountsNonzeroHiddenExchangeExactlyOnce()
+        throws
+    {
+        let estimator = try CoachTokenEstimator(
+            identifier: "ascii-byte-exact-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { $0.count }
+        )
+        let framing = CoachProviderFraming(
+            initialRequestHiddenTokens: 2,
+            transcriptReadExchangeHiddenTokens: 5
+        )
+        let exactAuthority = AttemptTranscriptResponseBudgetAuthority(
+            inputCeilingTokens: 11,
+            pinnedInstructionFrame: Data("P".utf8),
+            framing: framing,
+            tokenEstimator: estimator
+        )
+        let overflowAuthority = AttemptTranscriptResponseBudgetAuthority(
+            inputCeilingTokens: 10,
+            pinnedInstructionFrame: Data("P".utf8),
+            framing: framing,
+            tokenEstimator: estimator
+        )
+        let response = Data("R".utf8)
+
+        let exact = try XCTUnwrap(
+            exactAuthority.budget(
+                reboundInitialRequest: Data("I".utf8),
+                transcriptReadRequest: Data("Q".utf8)
+            )
+        )
+        let overflow = try XCTUnwrap(
+            overflowAuthority.budget(
+                reboundInitialRequest: Data("I".utf8),
+                transcriptReadRequest: Data("Q".utf8)
+            )
+        )
+
+        XCTAssertTrue(try exact.admits(canonicalResponse: response))
+        XCTAssertFalse(try overflow.admits(canonicalResponse: response))
+    }
+
     func testCanonicalRequestSerializationIsAvailableAtTheApplicationSeam() {
         let value = CanonicalJSONValue.object([
             "z": .string("quotes \" and newlines\n"),
@@ -13,6 +59,23 @@ final class CoachContextPlannerTests: XCTestCase {
         XCTAssertEqual(
             String(decoding: CanonicalJSON.serialize(value), as: UTF8.self),
             #"{"a":2,"z":"quotes \" and newlines\n"}"#
+        )
+    }
+
+    func testPinnedInstructionContractIsExactAndTranscriptScoped() {
+        XCTAssertEqual(
+            CoachProviderPinnedInstruction.standard(outputTokenCeiling: 32),
+            "Return one complete structured response that fits within the " +
+                "32-token output allowance. Ground claims about attached " +
+                "Sessions only in complete transcripts supplied inline or " +
+                "returned by read_session_transcripts. When the request needs " +
+                "evidence from on-demand Session attachments, request every " +
+                "needed handle together in one read_session_transcripts call. " +
+                "Do not split, reorder, shrink, or retry that logical read. If " +
+                "a transcript read does not return complete transcripts, do " +
+                "not answer around missing evidence. If you detect that you " +
+                "conflated two Sessions, ask the user to send the message again " +
+                "instead of presenting the answer as grounded."
         )
     }
 
@@ -57,7 +120,15 @@ final class CoachContextPlannerTests: XCTestCase {
                             "audioEvents": .array([]),
                             "lines": .array([]),
                         ]),
-                    ])
+                    ]),
+                    sourceAttachment: ChatSessionAttachment(
+                        attachmentID: try ChatSessionAttachmentID("attachment-large"),
+                        sessionID: try SessionID("ses-20260830T120000000Z-3DEF"),
+                        transcriptRevisionID: try TranscriptRevisionID(
+                            "trv-20260830T121000000Z-4FGH"
+                        )
+                    ),
+                    revisionSHA256: coachContextFixtureRevisionSHA256
                 ),
             ]
         )
@@ -85,6 +156,34 @@ final class CoachContextPlannerTests: XCTestCase {
             )
         )
         XCTAssertNotNil(prepared.exchange.transcriptReadResponse)
+
+        let expectedInstruction = CoachProviderPinnedInstruction.standard(
+            outputTokenCeiling: configuration.descriptor.contextBudget
+                .responseReservedTokens
+        )
+        XCTAssertEqual(prepared.exchange.pinnedInstruction, expectedInstruction)
+        XCTAssertEqual(
+            prepared.exchange.modelInputFrames.first,
+            Data(expectedInstruction.utf8)
+        )
+        XCTAssertEqual(
+            quote.completeInputTokens,
+            prepared.exchange.modelInputFrames.reduce(0) { $0 + $1.count }
+        )
+        let budgetAuthority = try XCTUnwrap(
+            prepared.exchange.transcriptResponseBudgetAuthority
+        )
+        let responseBudget = try XCTUnwrap(
+            budgetAuthority.budget(
+                reboundInitialRequest: prepared.exchange.request,
+                transcriptReadRequest: transcriptReadRequest
+            )
+        )
+        XCTAssertEqual(
+            responseBudget.remainingInputTokens,
+            quote.inputCeilingTokens - prepared.exchange.modelInputFrames
+                .dropLast().reduce(0) { $0 + $1.count }
+        )
     }
 
     func testTranscriptHandleIsBoundedAndAuthoritativeAcrossBothPayloads() throws {
@@ -110,7 +209,15 @@ final class CoachContextPlannerTests: XCTestCase {
             sessionTranscriptHandle: authority,
             transcriptDisclosure: .object([
                 "sessionAttachmentId": .string("attachment-large"),
-            ])
+            ]),
+            sourceAttachment: ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID("attachment-large"),
+                sessionID: try SessionID("ses-20260830T120000000Z-3DEF"),
+                transcriptRevisionID: try TranscriptRevisionID(
+                    "trv-20260830T121000000Z-4FGH"
+                )
+            ),
+            revisionSHA256: coachContextFixtureRevisionSHA256
         )
 
         XCTAssertThrowsError(
@@ -189,7 +296,7 @@ final class CoachContextPlannerTests: XCTestCase {
             configuration: configuration
         )
 
-        XCTAssertEqual(quote.completeInputTokens, 1)
+        XCTAssertEqual(quote.completeInputTokens, 2)
         XCTAssertTrue(quote.fits)
         XCTAssertGreaterThan(
             quote.categoryCosts.values.reduce(0) { $0 + $1.estimatedTokenCount },
@@ -331,7 +438,8 @@ final class CoachContextPlannerTests: XCTestCase {
 
         let evidence = ChatAttachmentEvidence(
             displayLabel: "Many short words",
-            revision: revision
+            revision: revision,
+            revisionSHA256: coachContextFixtureRevisionSHA256
         )
         let projection = try policy.project(evidence: evidence)
         let candidate = try projection.makeCandidate()
@@ -371,7 +479,8 @@ final class CoachContextPlannerTests: XCTestCase {
     {
         let evidence = ChatAttachmentEvidence(
             displayLabel: "Pinned evidence",
-            revision: try manyShortWordRevision(wordCount: 1)
+            revision: try manyShortWordRevision(wordCount: 1),
+            revisionSHA256: coachContextFixtureRevisionSHA256
         )
         let projection = try CoachAttachmentProjectionPolicy(
             maximumInlineTranscriptTokens: 8_192,
@@ -416,7 +525,8 @@ final class CoachContextPlannerTests: XCTestCase {
             + revision.revisionID.rawValue
         let evidence = ChatAttachmentEvidence(
             displayLabel: localDisplayLabel,
-            revision: revision
+            revision: revision,
+            revisionSHA256: coachContextFixtureRevisionSHA256
         )
         let policy = try CoachAttachmentProjectionPolicy(
             maximumInlineTranscriptTokens: 8_192,
@@ -462,6 +572,111 @@ final class CoachContextPlannerTests: XCTestCase {
         XCTAssertFalse(providerJSON.contains(revision.revisionID.rawValue))
     }
 
+    func testInlineAndOnDemandProjectionExposeOnlyAllowlistedTranscriptFields()
+        throws
+    {
+        let revision = try manyShortWordRevision(wordCount: 1)
+        let evidence = ChatAttachmentEvidence(
+            displayLabel: "Privacy fixture",
+            revision: revision,
+            revisionSHA256: coachContextFixtureRevisionSHA256
+        )
+        let attachment = ChatSessionAttachment(
+            attachmentID: try ChatSessionAttachmentID("attachment-privacy"),
+            sessionID: revision.sessionID,
+            transcriptRevisionID: revision.revisionID
+        )
+        let handle = try PreparedCoachTranscriptHandle(
+            "00000000-0000-0000-0000-000000000001"
+        )
+        let expectedTranscript = CanonicalJSONValue.object([
+            "audioEvents": .array([]),
+            "lines": .array([
+                .object([
+                    "text": .string("w0"),
+                    "timeRange": .object([
+                        "endMs": .integer(1_000),
+                        "startMs": .integer(0),
+                    ]),
+                    "words": .array([
+                        .object([
+                            "text": .string("w0"),
+                            "wordId": .string("w000000"),
+                        ]),
+                    ]),
+                ]),
+            ]),
+        ])
+        let inlineProjection = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 10_000,
+            tokenEstimator: .utf8ByteUpperBound()
+        ).project(evidence: evidence)
+        let onDemandProjection = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 1,
+            tokenEstimator: .utf8ByteUpperBound()
+        ).project(evidence: evidence)
+
+        XCTAssertEqual(inlineProjection.canonicalTranscript, expectedTranscript)
+        XCTAssertEqual(onDemandProjection.canonicalTranscript, expectedTranscript)
+        XCTAssertEqual(
+            try inlineProjection.prepareAttachment(
+                attachment: attachment,
+                transcriptHandle: handle
+            ),
+            .inline(
+                requestValue: .object([
+                    "displayLabel": .string("Privacy fixture"),
+                    "kind": .string("inline"),
+                    "sessionAttachmentId": .string("attachment-privacy"),
+                    "transcript": expectedTranscript,
+                ])
+            )
+        )
+        XCTAssertEqual(
+            try onDemandProjection.prepareAttachment(
+                attachment: attachment,
+                transcriptHandle: handle
+            ),
+            .onDemand(
+                requestValue: .object([
+                    "displayLabel": .string("Privacy fixture"),
+                    "kind": .string("onDemand"),
+                    "sessionAttachmentId": .string("attachment-privacy"),
+                    "sessionTranscriptHandle": .string(handle.rawValue),
+                ]),
+                sessionTranscriptHandle: handle,
+                transcriptDisclosure: .object([
+                    "sessionAttachmentId": .string("attachment-privacy"),
+                    "transcript": expectedTranscript,
+                ]),
+                sourceAttachment: attachment,
+                revisionSHA256: coachContextFixtureRevisionSHA256
+            )
+        )
+
+        let providerJSON = String(
+            decoding: CanonicalJSON.serialize(expectedTranscript),
+            as: UTF8.self
+        )
+        for forbiddenValue in [
+            revision.sessionID.rawValue,
+            revision.revisionID.rawValue,
+            revision.jobID.rawValue,
+            "confidence",
+            "ordinal",
+            "order",
+            "audioSource",
+            "engine",
+            "fingerprint",
+            "license",
+            "textualEvent",
+            "rawAudio",
+            "path",
+        ] {
+            XCTAssertFalse(providerJSON.contains(forbiddenValue), forbiddenValue)
+        }
+    }
+
     func testAttachmentProjectionUsesInjectedExactCeilingAndProviderEstimator() throws {
         let revision = try manyShortWordRevision(wordCount: 2)
         let estimator = try CoachTokenEstimator(
@@ -489,7 +704,8 @@ final class CoachContextPlannerTests: XCTestCase {
             try atLimit.project(
                 evidence: ChatAttachmentEvidence(
                     displayLabel: "Exact limit",
-                    revision: revision
+                    revision: revision,
+                    revisionSHA256: coachContextFixtureRevisionSHA256
                 )
             ).delivery,
             .inline
@@ -498,7 +714,8 @@ final class CoachContextPlannerTests: XCTestCase {
             try overLimit.project(
                 evidence: ChatAttachmentEvidence(
                     displayLabel: "One over",
-                    revision: revision
+                    revision: revision,
+                    revisionSHA256: coachContextFixtureRevisionSHA256
                 )
             ).delivery,
             .onDemand
@@ -541,7 +758,8 @@ final class CoachContextPlannerTests: XCTestCase {
         )
         let evidence = ChatAttachmentEvidence(
             displayLabel: "Over canonical limit",
-            revision: try manyShortWordRevision(wordCount: 1)
+            revision: try manyShortWordRevision(wordCount: 1),
+            revisionSHA256: coachContextFixtureRevisionSHA256
         )
 
         XCTAssertThrowsError(try policy.project(evidence: evidence)) { error in
@@ -567,7 +785,8 @@ final class CoachContextPlannerTests: XCTestCase {
                 wordCount: 2,
                 sessionID: "ses-20260830T120000000Z-3DEF",
                 revisionID: "trv-20260830T121000000Z-4FGH"
-            )
+            ),
+            revisionSHA256: coachContextFixtureRevisionSHA256
         )
         let healthy = ChatAttachmentEvidence(
             displayLabel: "Healthy Session",
@@ -575,7 +794,8 @@ final class CoachContextPlannerTests: XCTestCase {
                 wordCount: 1,
                 sessionID: "ses-20260830T112000000Z-7STV",
                 revisionID: "trv-20260830T113000000Z-8WXY"
-            )
+            ),
+            revisionSHA256: coachContextFixtureRevisionSHA256
         )
         let oversizedAttachment = ChatSessionAttachment(
             attachmentID: try ChatSessionAttachmentID("attachment-oversized"),
@@ -650,7 +870,8 @@ final class CoachContextPlannerTests: XCTestCase {
     func testAttachmentCatalogFailsWhenQualifiedEstimatorMalfunctions() async throws {
         let evidence = ChatAttachmentEvidence(
             displayLabel: "Healthy Session",
-            revision: try manyShortWordRevision(wordCount: 1)
+            revision: try manyShortWordRevision(wordCount: 1),
+            revisionSHA256: coachContextFixtureRevisionSHA256
         )
         let estimator = try CoachTokenEstimator(
             identifier: "malfunctioning-fixture-v1",
@@ -687,7 +908,8 @@ final class CoachContextPlannerTests: XCTestCase {
                 wordCount: 1,
                 sessionID: "ses-20260830T120000000Z-3DEF",
                 revisionID: "trv-20260830T121000000Z-4FGH"
-            )
+            ),
+            revisionSHA256: coachContextFixtureRevisionSHA256
         )
         let second = ChatAttachmentEvidence(
             displayLabel: "Second Session",
@@ -695,7 +917,8 @@ final class CoachContextPlannerTests: XCTestCase {
                 wordCount: 1,
                 sessionID: "ses-20260830T122000000Z-5GHJ",
                 revisionID: "trv-20260830T123000000Z-6JKM"
-            )
+            ),
+            revisionSHA256: coachContextFixtureRevisionSHA256
         )
         let traversal = AttachmentTraversalObservation()
         let estimator = try CoachTokenEstimator(
@@ -752,7 +975,8 @@ final class CoachContextPlannerTests: XCTestCase {
                     wordCount: 1,
                     sessionID: "ses-20260830T12\(index)000000Z-3DE\(index)",
                     revisionID: "trv-20260830T12\(index)100000Z-4FG\(index)"
-                )
+                ),
+                revisionSHA256: coachContextFixtureRevisionSHA256
             )
         }
         let attachments = try ChatAttachments(

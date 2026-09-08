@@ -167,8 +167,9 @@ public struct CoachProviderAttempt: Equatable, Sendable {
         )
     }
 
-    /// Reconstitutes only the safe durable projection embedded by Invocation
-    /// schema v3. No provider transport authority can be recovered from disk.
+    /// Reconstitutes only the safe durable Attempt projection introduced by
+    /// Invocation schema v3 and retained by v4. No provider transport authority
+    /// can be recovered from disk.
     public init(
         durableID id: CoachProviderAttemptID,
         ordinal: UInt8,
@@ -335,6 +336,7 @@ public enum CoachInvocationError: Error, Equatable, Sendable {
     case profileProvenanceMismatch
     case attemptPublicationAuthorityRequired
     case invalidTerminalFailure
+    case transcriptReadFailureAttachmentMismatch
 }
 
 /// A generated live Attempt identity conflicts with authority already consumed
@@ -353,7 +355,8 @@ public enum CoachInvocationAttemptInstallError: Error, Equatable, Sendable {
 /// intent, admission, and frozen semantic context stay stable while the nested
 /// current Attempt is atomically replaced.
 public struct CoachInvocation: Equatable, Sendable {
-    public static let schemaVersion: UInt32 = 3
+    public static let attemptSequenceSchemaVersion: UInt32 = 3
+    public static let schemaVersion: UInt32 = 4
 
     public let persistedSchemaVersion: UInt32
     public let id: CoachInvocationID
@@ -436,22 +439,30 @@ public struct CoachInvocation: Equatable, Sendable {
               transportAuthorities.flatMap(\.transcriptHandles).count
         else { throw CoachInvocationError.attemptPublicationAuthorityRequired }
         switch (schemaVersion, preparedProfile, attempt.publicationAuthority) {
-        case (1, nil, nil), (2, .some, nil), (Self.schemaVersion, .some, .some):
+        case (1, nil, nil), (2, .some, nil),
+             (Self.attemptSequenceSchemaVersion, .some, .some),
+             (Self.schemaVersion, .some, .some):
             break
-        case (1, .some, _), (2, nil, _), (Self.schemaVersion, nil, _):
+        case (1, .some, _), (2, nil, _),
+             (Self.attemptSequenceSchemaVersion, nil, _),
+             (Self.schemaVersion, nil, _):
             throw CoachInvocationError.profileProvenanceMismatch
-        case (Self.schemaVersion, .some, nil):
+        case (Self.attemptSequenceSchemaVersion, .some, nil),
+             (Self.schemaVersion, .some, nil):
             throw CoachInvocationError.attemptPublicationAuthorityRequired
         default:
             throw CoachInvocationError.invalidSchemaVersion
         }
-        if schemaVersion == Self.schemaVersion,
+        if schemaVersion >= Self.attemptSequenceSchemaVersion,
            attempts.contains(where: { $0.publicationAuthority == nil })
         {
             throw CoachInvocationError.attemptPublicationAuthorityRequired
         }
-        guard terminalFailure != .coachContextCannotFit,
-              schemaVersion == Self.schemaVersion || terminalFailure == nil
+        guard schemaVersion >= Self.attemptSequenceSchemaVersion ||
+              terminalFailure == nil,
+              schemaVersion == Self.schemaVersion ||
+              (terminalFailure != .coachContextCannotFit &&
+                  terminalFailure?.transcriptReadFailureSummary == nil)
         else { throw CoachInvocationError.invalidTerminalFailure }
         persistedSchemaVersion = schemaVersion
         self.id = id
@@ -544,10 +555,12 @@ public struct CoachInvocation: Equatable, Sendable {
         )
     }
 
-    /// Safe schema-v3 disk representation. Transport authority intentionally
+    /// Safe attempt-sequence disk representation. Transport authority intentionally
     /// disappears; every other immutable binding remains exact.
     public func durableProjection() throws -> Self {
-        guard persistedSchemaVersion == Self.schemaVersion else { return self }
+        guard persistedSchemaVersion >= Self.attemptSequenceSchemaVersion else {
+            return self
+        }
         return try CoachInvocation(
             schemaVersion: persistedSchemaVersion,
             id: id,
@@ -581,7 +594,6 @@ public struct CoachInvocation: Equatable, Sendable {
         _ failure: PendingUserTurnFailure
     ) throws -> Self {
         guard persistedSchemaVersion == Self.schemaVersion,
-              failure != .coachContextCannotFit,
               terminalFailure == nil || terminalFailure == failure
         else { throw CoachInvocationError.invalidTerminalFailure }
         return try CoachInvocation(
@@ -622,6 +634,17 @@ public struct CoachInvocation: Equatable, Sendable {
         }
         guard pending.responsePositionID == responsePositionID else {
             throw CoachInvocationError.responsePositionMismatch
+        }
+        if let summary = terminalFailure?.transcriptReadFailureSummary {
+            let attachmentIDs = Set(aggregate.chat.attachments.values.map(\.attachmentID))
+            guard summary.sessions.allSatisfy({
+                attachmentIDs.contains($0.sessionAttachmentID)
+            }),
+                summary.sessions.count + Int(summary.additionalSessionCount) <=
+                attachmentIDs.count
+            else {
+                throw CoachInvocationError.transcriptReadFailureAttachmentMismatch
+            }
         }
     }
 

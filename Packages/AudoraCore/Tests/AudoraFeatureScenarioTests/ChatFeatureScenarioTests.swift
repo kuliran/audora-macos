@@ -27,6 +27,7 @@ final class ChatFeatureScenarioTests: XCTestCase {
             .cancelDuringAttachmentResolutionScenario,
             .suspendedLibrarySwitchChatScenario,
             .stopReapsAndRejectsLateCoachResultScenario,
+            .onDemandTranscriptMixedAvailabilityChatScenario,
         ]
 
         for resource in resources {
@@ -52,7 +53,14 @@ final class ChatFeatureScenarioTests: XCTestCase {
             let coachContextSource = ScenarioCoachContextSnapshotPort(
                 mode: dto.contextCapacityMode ?? "alwaysFits",
                 events: dto.dependencyTrace.filter { $0.port == "coachContext" },
-                recorder: recorder
+                recorder: recorder,
+                pendingAttachmentResolutions:
+                    dto.attemptTranscriptAvailability == nil
+                    ? []
+                    : dto.dependencyTrace.first(where: {
+                        $0.port == "attachmentSource" &&
+                            $0.effect == "resolveAttachments"
+                    })?.resolutions ?? []
             )
             let baseCoachContext = DefaultCoachContextFeature(
                 source: coachContextSource
@@ -67,7 +75,9 @@ final class ChatFeatureScenarioTests: XCTestCase {
                     },
                     recorder: recorder,
                     suspendFirstAttempt:
-                        dto.suspendedEffect == "firstProviderAttempt"
+                        dto.suspendedEffect == "firstProviderAttempt",
+                    attemptTranscriptAvailability:
+                        dto.attemptTranscriptAvailability ?? []
                 )
             let feature = DefaultChatFeature(
                 store: store,
@@ -362,6 +372,22 @@ final class ChatFeatureScenarioTests: XCTestCase {
                     dto.scenarioId
                 )
             }
+            if let expected = dto.expectedState.pendingTranscriptReadFailure {
+                XCTAssertEqual(
+                    transcriptReadFailure(
+                        selectedChat(state)?.pendingUserTurn?.failure
+                    ),
+                    expected,
+                    dto.scenarioId
+                )
+            }
+            if let expected = dto.expectedState.pendingRecoveryActions {
+                XCTAssertEqual(
+                    pendingRecoveryActions(state),
+                    expected,
+                    dto.scenarioId
+                )
+            }
             if let expected = dto.expectedState.activity {
                 XCTAssertEqual(activity(state), expected, dto.scenarioId)
             }
@@ -621,6 +647,33 @@ final class ChatFeatureScenarioTests: XCTestCase {
             )
         }
     }
+
+    private func transcriptReadFailure(
+        _ failure: PendingUserTurnFailure?
+    ) -> CoachTranscriptReadFailureSummaryDTO? {
+        guard let summary = failure?.transcriptReadFailureSummary else {
+            return nil
+        }
+        return CoachTranscriptReadFailureSummaryDTO(
+            sessions: summary.sessions.map {
+                CoachTranscriptReadFailureSessionDTO(
+                    sessionAttachmentId: $0.sessionAttachmentID.rawValue,
+                    displayLabel: $0.displayLabel
+                )
+            },
+            additionalSessionCount: Int(summary.additionalSessionCount)
+        )
+    }
+
+    private func pendingRecoveryActions(_ state: ChatFeatureState) -> [String]? {
+        guard case let .open(aggregate) = state.selection,
+              let pending = aggregate.pendingUserTurn,
+              pending.failure?.transcriptReadFailureSummary != nil,
+              state.isCoachResponseRetryableFailure(pending),
+              case .locked = state.composer
+        else { return nil }
+        return ["retryPendingUserTurn", "discardPendingUserTurn"]
+    }
 }
 
 private struct ChatFeatureScenarioDTO: Decodable {
@@ -637,6 +690,7 @@ private struct ChatFeatureScenarioDTO: Decodable {
     let providerAvailability: String?
     let contextCapacityMode: String?
     let suspendedEffect: String?
+    let attemptTranscriptAvailability: [ChatOpenedAttachmentStatusDTO]?
 }
 
 private struct ChatScenarioSnapshotDTO: Decodable {
@@ -991,6 +1045,8 @@ private struct ChatScenarioStateDTO: Decodable {
     let pendingUserTurnId: String?
     let responsePositionId: String?
     let pendingFailure: String?
+    let pendingTranscriptReadFailure: CoachTranscriptReadFailureSummaryDTO?
+    let pendingRecoveryActions: [String]?
     let activity: String?
     let stopAuthorityAvailable: Bool?
     let notice: String?
@@ -1007,6 +1063,16 @@ private struct ChatScenarioStateDTO: Decodable {
 private struct ChatOpenedAttachmentStatusDTO: Decodable, Equatable {
     let attachmentId: String
     let status: String
+}
+
+private struct CoachTranscriptReadFailureSummaryDTO: Decodable, Equatable {
+    let sessions: [CoachTranscriptReadFailureSessionDTO]
+    let additionalSessionCount: Int
+}
+
+private struct CoachTranscriptReadFailureSessionDTO: Decodable, Equatable {
+    let sessionAttachmentId: String
+    let displayLabel: String
 }
 
 private enum ScenarioFailure: Error { case command, script }
@@ -1311,7 +1377,8 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
         providerIsAvailable: Bool,
         providerEvents: [ChatDependencyEventDTO],
         recorder: ChatScenarioRecorder,
-        suspendFirstAttempt: Bool
+        suspendFirstAttempt: Bool,
+        attemptTranscriptAvailability: [ChatOpenedAttachmentStatusDTO]
     ) throws {
         let persistence = ScenarioInvocationPersistence(store: store)
         let admission = ScenarioInvocationAdmission()
@@ -1323,13 +1390,35 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
         )
         self.admission = admission
         self.provider = provider
+        var availabilityByAttachment:
+            [ChatSessionAttachmentID: AttemptTranscriptAvailability] = [:]
+        for availability in attemptTranscriptAvailability {
+            let attachmentID = try ChatSessionAttachmentID(
+                availability.attachmentId
+            )
+            guard availabilityByAttachment[attachmentID] == nil else {
+                throw ScenarioFailure.script
+            }
+            availabilityByAttachment[attachmentID] =
+                availability.status == "available" ? .available : .unavailable
+        }
+        let frozenAvailabilityByAttachment = availabilityByAttachment
+        let transcriptAvailability = AttemptTranscriptAvailabilitySource {
+            query in
+            guard !frozenAvailabilityByAttachment.isEmpty else {
+                return .available
+            }
+            return frozenAvailabilityByAttachment[query.sessionAttachmentID] ??
+                .unavailable
+        }
         coordinator = DefaultInvocations(
             persistence: persistence,
             admission: admission,
             provider: provider,
             coachContext: DefaultCoachContextFeature(source: source),
             clock: ScenarioInvocationClock(),
-            identities: try ScenarioInvocationIdentities()
+            identities: try ScenarioInvocationIdentities(),
+            transcriptAvailability: transcriptAvailability
         )
     }
 
@@ -1892,6 +1981,29 @@ private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
     func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome {
         callCount += 1
         guard isAvailable else { return .userRetryableFailure }
+        if let transcriptAccess = request.transcriptAccess {
+            let result = await transcriptAccess.read(
+                transportRequestID: AttemptTranscriptTransportRequestID(
+                    "scenario-read-1"
+                )!,
+                handles: transcriptAccess.handles
+            )
+            guard case let .delivered(delivery) = result,
+                  delivery.kind == .sessionUnavailable,
+                  delivery.terminatesAttempt,
+                  let object = try? JSONSerialization.jsonObject(
+                      with: delivery.responseBody
+                  ) as? [String: Any],
+                  Set(object.keys) == [
+                      "kind", "unavailableSessionTranscriptHandles",
+                  ],
+                  object["kind"] as? String == "sessionUnavailable",
+                  object["transcripts"] == nil
+            else {
+                XCTFail("on-demand scenario did not fail atomically")
+                return .userRetryableFailure
+            }
+        }
         guard suspendFirstAttempt, callCount == 1 else {
             return .complete(markdown: "A complete **synthetic** Coach response.")
         }
@@ -2010,7 +2122,21 @@ private struct ScenarioInvocationIdentities: InvocationIdentityGenerating {
         kind: CoachProviderAttemptKind,
         transcriptHandleCount: Int
     ) async -> InvocationAttemptIdentity {
-        identity.attemptIdentity
+        InvocationAttemptIdentity(
+            attemptID: identity.attemptID,
+            idempotencyValue: identity.idempotencyValue,
+            userMessageID: identity.userMessageID,
+            coachMessageID: identity.coachMessageID,
+            freshDraftID: identity.freshDraftID,
+            transcriptHandles: (0 ..< transcriptHandleCount).map { index in
+                try! PreparedCoachTranscriptHandle(
+                    String(
+                        format: "10000000-0000-4000-8000-%012d",
+                        index + 1
+                    )
+                )
+            }
+        )
     }
 }
 
@@ -2316,17 +2442,20 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
     private let mode: String
     private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder
+    private let pendingAttachmentResolutions: [ChatAttachmentResolutionDTO]
     private var pendingResolutionCount = 0
     private var cancelledNewChatQuoteStarted = false
 
     init(
         mode: String,
         events: [ChatDependencyEventDTO],
-        recorder: ChatScenarioRecorder
+        recorder: ChatScenarioRecorder,
+        pendingAttachmentResolutions: [ChatAttachmentResolutionDTO] = []
     ) {
         self.mode = mode
         self.events = events
         self.recorder = recorder
+        self.pendingAttachmentResolutions = pendingAttachmentResolutions
     }
 
     func resolveNewChat(
@@ -2616,7 +2745,8 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
                             "sessionSummaries": .array([]),
                         ]),
                         history: [],
-                        currentDraft: draft.text
+                        currentDraft: draft.text,
+                        attachments: try preparedPendingAttachments()
                     ),
                     configuration: try CoachContextConfiguration(
                         descriptor: CoachProviderDescriptor(
@@ -2652,6 +2782,54 @@ private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
             )
         } catch {
             return .sourceUnavailable
+        }
+    }
+
+    private func preparedPendingAttachments() throws
+        -> [PreparedCoachAttachment]
+    {
+        try pendingAttachmentResolutions.enumerated().map { index, resolution in
+            guard resolution.status == "available",
+                  let candidate = resolution.candidate,
+                  candidate.delivery == "onDemand"
+            else { throw ScenarioFailure.script }
+            let sourceAttachment = ChatSessionAttachment(
+                attachmentID: try ChatSessionAttachmentID(
+                    resolution.attachment.attachmentId
+                ),
+                sessionID: try SessionID(resolution.attachment.sessionId),
+                transcriptRevisionID: try TranscriptRevisionID(
+                    resolution.attachment.transcriptRevisionId
+                )
+            )
+            let handle = try PreparedCoachTranscriptHandle(
+                String(
+                    format: "00000000-0000-4000-8000-%012d",
+                    index + 1
+                )
+            )
+            return .onDemand(
+                requestValue: .object([
+                    "displayLabel": .string(candidate.displayLabel),
+                    "kind": .string("onDemand"),
+                    "sessionAttachmentId": .string(
+                        sourceAttachment.attachmentID.rawValue
+                    ),
+                    "sessionTranscriptHandle": .string(handle.rawValue),
+                ]),
+                sessionTranscriptHandle: handle,
+                transcriptDisclosure: .object([
+                    "sessionAttachmentId": .string(
+                        sourceAttachment.attachmentID.rawValue
+                    ),
+                    "transcript": .object([
+                        "audioEvents": .array([]),
+                        "lines": .array([]),
+                    ]),
+                ]),
+                sourceAttachment: sourceAttachment,
+                revisionSHA256: String(repeating: "a", count: 64)
+            )
         }
     }
 }

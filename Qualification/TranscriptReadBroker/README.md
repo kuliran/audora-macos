@@ -36,7 +36,7 @@ capability material, paths, or raw diagnostics.
 `TranscriptReadBroker` is one Swift actor with two lifecycle operations:
 
 ```swift
-read(capability:requestBody:)
+read(capability:transportRequestID:requestBody:)
 revoke(reason:)
 ```
 
@@ -47,8 +47,9 @@ revalidates every provider-visible timed range against the app-only canonical
 duration and its enclosing line, then returns one canonical complete response or
 no transcript content. Ranges are strictly half-open (`0 <= startMs < endMs <=
 durationMs`); a Word may remain explicitly untimed. A complete response may be
-replayed once for exact transport redelivery; any changed, reordered, split, or
-third request closes the grant.
+replayed once only when the bounded transport-call identity and exact request bytes
+both match; a new identity, changed bytes, reordered or split handles, or a third
+request closes the grant.
 
 The response fit check uses `CompleteToolResponseBudget` from the issue-#6 context
 estimation package. That seam frames and tokenizes the complete canonical tool
@@ -56,9 +57,9 @@ response as one model-visible message. The broker contains no token heuristic.
 
 `TranscriptReadMCPBoundary` admits only MCP initialize/ping/tool discovery and
 `tools/call` for `read_session_transcripts`. Its advertised input schema is checked
-against the committed `ReadSessionTranscriptsRequest.json`. Semantic duplicate
-rejection remains in the broker because the generated schema intentionally has no
-`uniqueItems` constraint.
+against the committed `ReadSessionTranscriptsRequest.json`, including the unique,
+128-handle bound. The broker repeats semantic duplicate and configured-limit
+rejection as the fail-closed runtime authority.
 
 `LoopbackTranscriptReadHTTPServer` binds only IPv4 `127.0.0.1` on an ephemeral
 port. It accepts one bounded HTTP/1.1 request per connection, uses close-on-exec

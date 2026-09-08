@@ -8,7 +8,9 @@
             "items": {
                 "$ref": "#/$defs/SessionTranscriptHandle"
             },
-            "minItems": 1
+            "minItems": 1,
+            "maxItems": 128,
+            "uniqueItems": true
         }
     },
     "required": [

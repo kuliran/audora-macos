@@ -10,6 +10,12 @@
         },
         {
             "$ref": "#/$defs/PendingUserTurnV3"
+        },
+        {
+            "$ref": "#/$defs/PendingUserTurnV4"
+        },
+        {
+            "$ref": "#/$defs/PendingUserTurnTranscriptReadFailureV4"
         }
     ],
     "$defs": {
@@ -101,7 +107,7 @@
                     "const": 3
                 },
                 "failure": {
-                    "$ref": "#/$defs/PendingUserTurnFailure"
+                    "$ref": "#/$defs/PendingUserTurnFailureV3"
                 }
             },
             "required": [
@@ -110,6 +116,80 @@
                 "draftVersion",
                 "responsePositionId",
                 "schemaVersion"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PendingUserTurnV4": {
+            "type": "object",
+            "properties": {
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                },
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "draftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 4
+                },
+                "failure": {
+                    "$ref": "#/$defs/PendingUserTurnFailureV3"
+                }
+            },
+            "required": [
+                "pendingUserTurnId",
+                "draftId",
+                "draftVersion",
+                "responsePositionId",
+                "schemaVersion"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PendingUserTurnTranscriptReadFailureV4": {
+            "type": "object",
+            "properties": {
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                },
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "draftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 4
+                },
+                "failure": {
+                    "type": "string",
+                    "const": "coachTranscriptReadFailed"
+                },
+                "transcriptReadFailure": {
+                    "$ref": "#/$defs/CoachTranscriptReadFailureSummary"
+                }
+            },
+            "required": [
+                "pendingUserTurnId",
+                "draftId",
+                "draftVersion",
+                "responsePositionId",
+                "schemaVersion",
+                "failure",
+                "transcriptReadFailure"
             ],
             "unevaluatedProperties": {
                 "not": {}
@@ -151,7 +231,7 @@
                 }
             ]
         },
-        "PendingUserTurnFailure": {
+        "PendingUserTurnFailureV3": {
             "anyOf": [
                 {
                     "type": "string",
@@ -170,6 +250,97 @@
                     "const": "coachResponseInvalid"
                 }
             ]
+        },
+        "CoachTranscriptReadFailureSummary": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/CompleteCoachTranscriptReadFailureSummary"
+                },
+                {
+                    "$ref": "#/$defs/TruncatedCoachTranscriptReadFailureSummary"
+                }
+            ]
+        },
+        "CompleteCoachTranscriptReadFailureSummary": {
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachTranscriptReadFailureSession"
+                    },
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "uniqueItems": true
+                },
+                "additionalSessionCount": {
+                    "type": "number",
+                    "const": 0
+                }
+            },
+            "required": [
+                "sessions",
+                "additionalSessionCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TruncatedCoachTranscriptReadFailureSummary": {
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachTranscriptReadFailureSession"
+                    },
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "uniqueItems": true
+                },
+                "additionalSessionCount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 125
+                }
+            },
+            "required": [
+                "sessions",
+                "additionalSessionCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CoachTranscriptReadFailureSession": {
+            "type": "object",
+            "properties": {
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                },
+                "displayLabel": {
+                    "$ref": "#/$defs/CoachTranscriptReadFailureDisplayLabel"
+                }
+            },
+            "required": [
+                "sessionAttachmentId",
+                "displayLabel"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatSessionAttachmentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[0-9A-Za-z_-]+$"
+        },
+        "CoachTranscriptReadFailureDisplayLabel": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
         }
     }
 }

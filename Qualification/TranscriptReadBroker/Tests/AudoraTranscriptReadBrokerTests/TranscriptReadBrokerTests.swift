@@ -6,6 +6,19 @@ import Foundation
 import XCTest
 
 final class TranscriptReadBrokerTests: XCTestCase {
+    func testDefaultHandleLimitAccepts128AndRejects129Attachments() async throws {
+        let grant = try makeGrant(attachmentCount: 128)
+        let handles = grant.providerAttachments.map(\.sessionTranscriptHandle)
+
+        guard case let .delivered(delivery) = await grant.broker.read(
+            capability: grant.capability,
+            requestBody: requestBody(handles: handles)
+        ) else { return XCTFail("the contract maximum must be readable") }
+        XCTAssertEqual(delivery.kind, .complete)
+        XCTAssertEqual(handles.count, 128)
+        XCTAssertThrowsError(try makeGrant(attachmentCount: 129))
+    }
+
     func testEachGrantIssuesFreshCanonicalHandlesAndCapability() async throws {
         let first = try makeGrant()
         let second = try makeGrant()
@@ -506,9 +519,6 @@ final class TranscriptReadBrokerTests: XCTestCase {
         let grant = try makeGrant(readCount: count)
         let handles = grant.providerAttachments.map(\.sessionTranscriptHandle)
         let firstBody = requestBody(handles: handles)
-        let whitespaceBody = Data(
-            "{ \"sessionTranscriptHandles\" : [\"\(handles[0])\", \"\(handles[1])\"] }".utf8
-        )
 
         let first = await grant.broker.read(
             capability: grant.capability,
@@ -516,7 +526,7 @@ final class TranscriptReadBrokerTests: XCTestCase {
         )
         let replay = await grant.broker.read(
             capability: grant.capability,
-            requestBody: whitespaceBody
+            requestBody: firstBody
         )
         guard case let .delivered(firstDelivery) = first,
               case let .delivered(replayDelivery) = replay
@@ -537,6 +547,61 @@ final class TranscriptReadBrokerTests: XCTestCase {
         )
         XCTAssertEqual(third, .rejected(.closed))
         XCTAssertEqual(count.value, 2)
+        let status = await grant.broker.status()
+        XCTAssertEqual(status, .revoked)
+    }
+
+    func testSameBodyWithNewTransportIdentityIsASecondSemanticRead() async throws {
+        let count = LockedCounter()
+        let grant = try makeGrant(readCount: count)
+        let body = requestBody(
+            handles: grant.providerAttachments.map(\.sessionTranscriptHandle)
+        )
+
+        let first = await grant.broker.read(
+            capability: grant.capability,
+            transportRequestID: TranscriptReadTransportRequestID("read-1")!,
+            requestBody: body
+        )
+        let second = await grant.broker.read(
+            capability: grant.capability,
+            transportRequestID: TranscriptReadTransportRequestID("read-2")!,
+            requestBody: body
+        )
+
+        guard case .delivered = first else {
+            return XCTFail("the first semantic read must complete")
+        }
+        XCTAssertEqual(second, .rejected(.closed))
+        XCTAssertEqual(count.value, 2)
+        let status = await grant.broker.status()
+        XCTAssertEqual(status, .revoked)
+    }
+
+    func testDifferentRequestBytesWithSameTransportIdentityFailClosed() async throws {
+        let grant = try makeGrant()
+        let handles = grant.providerAttachments.map(\.sessionTranscriptHandle)
+        let firstBody = requestBody(handles: handles)
+        let whitespaceBody = Data(
+            "{ \"sessionTranscriptHandles\" : [\"\(handles[0])\", \"\(handles[1])\"] }".utf8
+        )
+        let identity = TranscriptReadTransportRequestID("read-1")!
+
+        let first = await grant.broker.read(
+            capability: grant.capability,
+            transportRequestID: identity,
+            requestBody: firstBody
+        )
+        let changed = await grant.broker.read(
+            capability: grant.capability,
+            transportRequestID: identity,
+            requestBody: whitespaceBody
+        )
+
+        guard case .delivered = first else {
+            return XCTFail("the first semantic read must complete")
+        }
+        XCTAssertEqual(changed, .rejected(.closed))
         let status = await grant.broker.status()
         XCTAssertEqual(status, .revoked)
     }
@@ -701,7 +766,9 @@ final class TranscriptReadBrokerTests: XCTestCase {
             options: [.sortedKeys]
         )
         XCTAssertEqual(advertisedData, normalizedCommitted)
-        XCTAssertFalse(String(decoding: advertisedData, as: UTF8.self).contains("uniqueItems"))
+        let advertisedText = String(decoding: advertisedData, as: UTF8.self)
+        XCTAssertTrue(advertisedText.contains(#""uniqueItems":true"#))
+        XCTAssertTrue(advertisedText.contains(#""maxItems":128"#))
 
         let providerSurface = String(decoding: discovery.body, as: UTF8.self)
         for forbidden in [
@@ -758,7 +825,7 @@ final class TranscriptReadBrokerTests: XCTestCase {
         XCTAssertEqual(status, .revoked)
     }
 
-    func testMCPToolCallRoundTripsCommittedResponseAndIgnoresRPCIDForRedelivery() async throws {
+    func testMCPToolCallRoundTripsCommittedResponseForSameRPCIDRedelivery() async throws {
         let count = LockedCounter()
         let grant = try makeGrant(readCount: count)
         let authorization = try authorizationHeader(for: grant)
@@ -782,7 +849,7 @@ final class TranscriptReadBrokerTests: XCTestCase {
         let replay = await boundary.handle(
             mcpRequest(
                 authorization: authorization,
-                body: toolCallBody(id: "rpc-b", arguments: arguments)
+                body: toolCallBody(id: "rpc-a", arguments: arguments)
             )
         )
         XCTAssertEqual(first.statusCode, 200)
@@ -815,6 +882,79 @@ final class TranscriptReadBrokerTests: XCTestCase {
         XCTAssertFalse(
             providerSurface.contains(String(authorization.dropFirst("Bearer ".count)))
         )
+    }
+
+    func testMCPNewRPCIDForIdenticalArgumentsIsASecondSemanticCall() async throws {
+        let count = LockedCounter()
+        let grant = try makeGrant(readCount: count)
+        let authorization = try authorizationHeader(for: grant)
+        let boundary = grant.makeMCPBoundary(expectedAuthority: "127.0.0.1:43123")
+        _ = await boundary.handle(
+            mcpRequest(
+                authorization: authorization,
+                body: initializeBody(id: "initialize-1")
+            )
+        )
+        let arguments: [String: Any] = [
+            "sessionTranscriptHandles": [grant.providerAttachments[0].sessionTranscriptHandle],
+        ]
+
+        let first = await boundary.handle(
+            mcpRequest(
+                authorization: authorization,
+                body: toolCallBody(id: "rpc-a", arguments: arguments)
+            )
+        )
+        let secondSemanticCall = await boundary.handle(
+            mcpRequest(
+                authorization: authorization,
+                body: toolCallBody(id: "rpc-b", arguments: arguments)
+            )
+        )
+
+        XCTAssertEqual(first.statusCode, 200)
+        XCTAssertEqual(secondSemanticCall.statusCode, 400)
+        XCTAssertEqual(count.value, 1)
+        let isStopped = await boundary.isStopped()
+        let closedReason = await boundary.diagnosticClosedReason()
+        XCTAssertTrue(isStopped)
+        XCTAssertEqual(closedReason, .protocolState)
+    }
+
+    func testMCPRejectsHugeNumericRPCIDBeforeStorage() async throws {
+        for numericID in [1e100, 1e101] {
+            let count = LockedCounter()
+            let grant = try makeGrant(readCount: count)
+            let authorization = try authorizationHeader(for: grant)
+            let boundary = grant.makeMCPBoundary(
+                expectedAuthority: "127.0.0.1:43123"
+            )
+            _ = await boundary.handle(
+                mcpRequest(
+                    authorization: authorization,
+                    body: initializeBody(id: "initialize-1")
+                )
+            )
+            let response = await boundary.handle(
+                mcpRequest(
+                    authorization: authorization,
+                    body: toolCallBody(
+                        id: numericID,
+                        arguments: [
+                            "sessionTranscriptHandles": [
+                                grant.providerAttachments[0]
+                                    .sessionTranscriptHandle,
+                            ],
+                        ]
+                    )
+                )
+            )
+
+            XCTAssertEqual(response.statusCode, 400)
+            XCTAssertEqual(count.value, 0)
+            let closedReason = await boundary.diagnosticClosedReason()
+            XCTAssertEqual(closedReason, .messageShape)
+        }
     }
 
     func testMCPRejectsUnrelatedMethodsToolsAndFieldsBeforeStorage() async throws {
@@ -1399,6 +1539,33 @@ final class TranscriptReadBrokerTests: XCTestCase {
         )
     }
 
+    private func makeGrant(attachmentCount: Int) throws -> AttemptTranscriptGrant {
+        let transcript = fixtureTranscript(text: "Synthetic bounded transcript.")
+        let reader = FrozenTranscriptReader { _ in .available(transcript) }
+        let budget = try CompleteToolResponseBudget(
+            remainingInputTokens: 1_000_000,
+            responsePrefix: Data(),
+            responseSuffix: Data(),
+            hiddenTokens: 0,
+            tokenEstimator: .utf8ByteUpperBound()
+        )
+        let attachments = (0 ..< attachmentCount).map { index in
+            FrozenTranscriptAttachment(
+                sessionAttachmentID: "attachment-\(index)",
+                displayLabel: "Synthetic \(index)",
+                revision: FrozenTranscriptRevision(
+                    sessionID: "local-session-\(index)",
+                    revisionID: "revision-\(index)"
+                )
+            )
+        }
+        return try AttemptTranscriptGrantIssuer().issue(
+            attachments: attachments,
+            reader: reader,
+            completeResponseBudget: budget
+        )
+    }
+
     private func fixtureTranscript(text: String) -> SessionTranscriptProjection {
         SessionTranscriptProjection(
             durationMs: 1_000,
@@ -1464,7 +1631,7 @@ final class TranscriptReadBrokerTests: XCTestCase {
     }
 
     private func toolCallBody(
-        id: String,
+        id: Any,
         name: String = "read_session_transcripts",
         arguments: [String: Any]
     ) -> Data {
@@ -1486,7 +1653,7 @@ final class TranscriptReadBrokerTests: XCTestCase {
         )
     }
 
-    private func rpcBody(id: String, method: String, params: [String: Any]) -> Data {
+    private func rpcBody(id: Any, method: String, params: [String: Any]) -> Data {
         try! JSONSerialization.data(
             withJSONObject: [
                 "id": id,
@@ -1746,6 +1913,21 @@ final class TranscriptReadBrokerTests: XCTestCase {
             of: #"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"#,
             options: .regularExpression
         ) != nil
+    }
+}
+
+private extension TranscriptReadBroker {
+    func read(
+        capability: TranscriptReadCapability,
+        requestBody: Data
+    ) -> TranscriptReadResult {
+        read(
+            capability: capability,
+            transportRequestID: TranscriptReadTransportRequestID(
+                "direct-qualification-read"
+            )!,
+            requestBody: requestBody
+        )
     }
 }
 

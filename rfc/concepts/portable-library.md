@@ -37,7 +37,7 @@ Audora Library.audoralibrary/
 │       └── profile-write.json        # present only while unresolved
 ├── invocations/
 │   └── <invocation-id>/              # the one active Library Invocation
-│       └── invocation.json            # v3 includes bounded Attempt history
+│       └── invocation.json            # v4 includes bounded Attempt history
 ├── jobs/
 │   ├── .attempts.json                # per-Session sequence/current pointer
 │   └── job-20260822T160300000Z-1ABC/
@@ -128,13 +128,12 @@ Chat root cannot be migrated without changing its meaning, Audora freezes that
 Chat and instructs the user to create a new one; it does not invent replacement
 history.
 
-Pending User Turn v3 adds `coachProviderError` and `coachResponseInvalid`; v2 adds
-`coachResponseInterrupted`. The reader still accepts a strict v1 record only when
-`failure` is absent or `coachContextCannotFit`, and accepts a strict v2 record only
-with those values or `coachResponseInterrupted`. A legacy record that claims a
-newer version's failure value is corrupt. The next write of a valid v1 or v2
-Pending upgrades it to v3, while a version newer than v3 freezes only its own Chat
-as newer-schema data.
+Pending User Turn v4 adds `coachTranscriptReadFailed` with its required bounded
+Session-link summary. V3 adds `coachProviderError` and `coachResponseInvalid`; v2
+adds `coachResponseInterrupted`. The reader still accepts each strict legacy value
+set and rejects a legacy record that claims a newer version's failure. The next
+write of a valid v1, v2, or v3 Pending upgrades it to v4, while a version newer than
+v4 freezes only its own Chat as newer-schema data.
 
 ## Development Profile
 
@@ -446,15 +445,17 @@ Automatic retry stays under the Chat's single `processing` state and
 uses delays of 5, 10, then 15 seconds. A user-triggered Retry creates a new
 Invocation and therefore fresh Attempt and transcript-read values.
 
-`invocation.json` schema v3 contains the ordered one-to-four Attempt history
-inside the Invocation root. Nested Attempts carry no `schemaVersion`; they inherit
-v3 and persist only Attempt ID, ordinal/kind, and message/fresh-Draft publication
+`invocation.json` schema v4 contains the ordered one-to-four Attempt history and,
+for transcript-read failure only, the same bounded Session-link terminal summary as
+Pending. Nested Attempts carry no `schemaVersion`; they retain the layout introduced
+in v3 and persist only Attempt ID, ordinal/kind, and message/fresh-Draft publication
 authority. Provider idempotency values, transcript handles, and bearer access are
 process-live transport authority: they are independently generated, never written
 to the Library or proof, and never reconstructed after relaunch. Strict legacy
-Invocation v1/v2 records keep their historical flat Attempt ID/idempotency fields
-only for read compatibility and safe retirement; the next valid legacy rewrite is
-v3, and a root newer than v3 freezes without provider resumption.
+Invocation v1/v2 records keep their historical flat Attempt ID/idempotency fields;
+v3 keeps the first nested layout. All remain read-only recovery inputs, the next
+valid legacy rewrite is v4, and a root newer than v4 freezes without provider
+resumption.
 
 Retry admission first installs and directory-flushes the Invocation as its
 generation marker. While holding the Chat mutation lock, it then replaces the

@@ -57,7 +57,9 @@ namespace Audora.Contracts {
   union PendingUserTurn {
     legacyV1: PendingUserTurnV1,
     legacyV2: PendingUserTurnV2,
-    current: PendingUserTurnV3,
+    legacyV3: PendingUserTurnV3,
+    current: PendingUserTurnV4,
+    currentTranscriptReadFailure: PendingUserTurnTranscriptReadFailureV4,
   }
 
   model PendingUserTurnV1 {
@@ -75,7 +77,20 @@ namespace Audora.Contracts {
   model PendingUserTurnV3 {
     ...PendingUserTurnFields;
     schemaVersion: 3;
-    failure?: PendingUserTurnFailure;
+    failure?: PendingUserTurnFailureV3;
+  }
+
+  model PendingUserTurnV4 {
+    ...PendingUserTurnFields;
+    schemaVersion: 4;
+    failure?: PendingUserTurnFailureV3;
+  }
+
+  model PendingUserTurnTranscriptReadFailureV4 {
+    ...PendingUserTurnFields;
+    schemaVersion: 4;
+    failure: "coachTranscriptReadFailed";
+    transcriptReadFailure: CoachTranscriptReadFailureSummary;
   }
 
   model PendingUserTurnFields {
@@ -94,11 +109,49 @@ namespace Audora.Contracts {
     coachResponseInterrupted: "coachResponseInterrupted",
     coachProviderError: "coachProviderError",
     coachResponseInvalid: "coachResponseInvalid",
+    coachTranscriptReadFailed: "coachTranscriptReadFailed",
+  }
+
+  union PendingUserTurnFailureV3 {
+    coachContextCannotFit: "coachContextCannotFit",
+    coachResponseInterrupted: "coachResponseInterrupted",
+    coachProviderError: "coachProviderError",
+    coachResponseInvalid: "coachResponseInvalid",
   }
 
   union PendingUserTurnFailureV2 {
     coachContextCannotFit: "coachContextCannotFit",
     coachResponseInterrupted: "coachResponseInterrupted",
+  }
+
+  union CoachTranscriptReadFailureSummary {
+    completeSet: CompleteCoachTranscriptReadFailureSummary,
+    truncatedSet: TruncatedCoachTranscriptReadFailureSummary,
+  }
+
+  model CompleteCoachTranscriptReadFailureSummary {
+    @uniqueItems
+    @minItems(1)
+    @maxItems(3)
+    sessions: CoachTranscriptReadFailureSession[];
+
+    additionalSessionCount: 0;
+  }
+
+  model TruncatedCoachTranscriptReadFailureSummary {
+    @uniqueItems
+    @minItems(3)
+    @maxItems(3)
+    sessions: CoachTranscriptReadFailureSession[];
+
+    @minValue(1)
+    @maxValue(125)
+    additionalSessionCount: integer;
+  }
+
+  model CoachTranscriptReadFailureSession {
+    sessionAttachmentId: ChatSessionAttachmentId;
+    displayLabel: CoachTranscriptReadFailureDisplayLabel;
   }
 
   @pattern("^cht-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
@@ -123,6 +176,11 @@ namespace Audora.Contracts {
   @maxLength(64)
   @pattern("^[0-9A-Za-z_-]+$")
   scalar ChatSessionAttachmentId extends string;
+
+  @minLength(1)
+  @maxLength(256)
+  @pattern("^[^\\u0000-\\u001F\\u007F-\\u009F]*$")
+  scalar CoachTranscriptReadFailureDisplayLabel extends string;
 
   @minLength(1)
   @maxLength(256)
@@ -168,6 +226,11 @@ namespace Audora.Contracts {
     providerAvailability?: ChatScenarioProviderAvailability;
     contextCapacityMode?: ChatScenarioContextCapacityMode;
     suspendedEffect?: ChatScenarioSuspendedEffect;
+
+    /** Attempt-time revalidation after the Chat was opened successfully. */
+    @uniqueItems
+    @maxItems(128)
+    attemptTranscriptAvailability?: ChatOpenedAttachmentStatus[];
   }
 
   model ChatScenarioSnapshot {
@@ -265,6 +328,13 @@ namespace Audora.Contracts {
     pendingUserTurnId?: PendingUserTurnId;
     responsePositionId?: ChatResponsePositionId;
     pendingFailure?: PendingUserTurnFailure;
+    pendingTranscriptReadFailure?: CoachTranscriptReadFailureSummary;
+
+    @uniqueItems
+    @minItems(2)
+    @maxItems(2)
+    pendingRecoveryActions?: ChatScenarioPendingRecoveryAction[];
+
     activity?: ChatScenarioActivity;
     stopAuthorityAvailable?: boolean;
     notice?: ChatScenarioNotice;
@@ -285,6 +355,11 @@ namespace Audora.Contracts {
 
     @maxItems(128)
     openedAttachmentStatuses?: ChatOpenedAttachmentStatus[];
+  }
+
+  union ChatScenarioPendingRecoveryAction {
+    retryPendingUserTurn: "retryPendingUserTurn",
+    discardPendingUserTurn: "discardPendingUserTurn",
   }
 
   model BeginNewChatScenarioCommand {

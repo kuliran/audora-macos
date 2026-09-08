@@ -264,7 +264,7 @@ struct CoachContextQuoteInput: Equatable, Sendable {
                 switch attachment {
                 case .inline:
                     break
-                case let .onDemand(_, handle, transcriptDisclosure):
+                case let .onDemand(_, handle, transcriptDisclosure, _, _):
                     handles.append(.string(handle.rawValue))
                     disclosures.append(transcriptDisclosure)
                 }

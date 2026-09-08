@@ -2333,7 +2333,7 @@ final class ChatFeatureTests: XCTestCase {
         async let sending: Void = feature.send(
             .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
         )
-        _ = await gateway.waitUntilInvocationIsSuspended()
+        let authority = await gateway.waitUntilInvocationIsSuspended()
 
         let mayTerminate = await feature.flushForOrderlyTermination()
         await sending
@@ -2341,7 +2341,7 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertFalse(mayTerminate)
         let state = await feature.currentState
         XCTAssertEqual(state.activity, .stoppingCoach(aggregate.chat.id))
-        XCTAssertNil(state.coachInvocationStopAuthority)
+        XCTAssertEqual(state.coachInvocationStopAuthority, authority)
         XCTAssertEqual(
             Self.openAggregate(in: state)?.pendingUserTurn?.failure,
             nil,
@@ -2394,13 +2394,55 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertFalse(terminationAllowed)
         let finalState = await feature.currentState
         XCTAssertEqual(finalState.activity, .stoppingCoach(aggregate.chat.id))
-        XCTAssertNil(finalState.coachInvocationStopAuthority)
+        XCTAssertEqual(finalState.coachInvocationStopAuthority, authority)
         XCTAssertNil(
             Self.openAggregate(in: finalState)?.pendingUserTurn?.failure
         )
     }
 
-    func testUnreapedStopLatchSurvivesSupersedingChatContext() async throws {
+    func testUnreapedStopCanRetrySameAuthorityThenTerminationSucceeds()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Retry exact reaping before orderly termination."
+        )
+        let gateway = RetryableUnreapedInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        async let sending: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        let authority = await gateway.waitUntilInvocationIsSuspended()
+        let stopCommand = ChatCommand.stopCoachResponse(Self.context, authority)
+
+        await feature.send(stopCommand)
+        let unreapedState = await feature.currentState
+        XCTAssertEqual(unreapedState.coachInvocationStopAuthority, authority)
+        XCTAssertEqual(unreapedState.activity, .stoppingCoach(aggregate.chat.id))
+
+        await feature.send(stopCommand)
+        await sending
+
+        let reapedState = await feature.currentState
+        XCTAssertNil(reapedState.coachInvocationStopAuthority)
+        XCTAssertNil(reapedState.activity)
+        XCTAssertEqual(
+            Self.openAggregate(in: reapedState)?.pendingUserTurn?.failure,
+            .coachResponseInterrupted
+        )
+        let stopCount = await gateway.stopCount
+        XCTAssertEqual(stopCount, 2)
+        let mayTerminate = await feature.flushForOrderlyTermination()
+        XCTAssertTrue(mayTerminate)
+    }
+
+    func testOrderlyTerminationRetriesUnreapedStopAfterSupersedingChatContext()
+        async throws
+    {
         let aggregate = try Self.aggregate(
             draftText: "Keep the unreaped provider latched across Libraries."
         )
@@ -2442,13 +2484,166 @@ final class ChatFeatureTests: XCTestCase {
         await stopping
         let terminationAllowed = await feature.flushForOrderlyTermination()
 
-        XCTAssertFalse(
+        XCTAssertTrue(
             terminationAllowed,
-            "an unreaped provider outlives the superseded Chat presentation"
+            "termination must retry the detached exact authority"
         )
+        let stopCount = await gateway.stopCount
+        XCTAssertEqual(stopCount, 2)
         let finalState = await feature.currentState
         XCTAssertEqual(finalState.selection, .none)
         XCTAssertNil(finalState.coachInvocationStopAuthority)
+    }
+
+    func testAutomaticTranscriptFailureRetainsDetachedReapAuthorityAcrossLibraryReplacement()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Retain automatic transcript failure reaping."
+        )
+        let gateway = RetryableUnreapedInvocationGateway()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        async let sending: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        let authority = await gateway.waitUntilInvocationIsSuspended()
+
+        await feature.send(.start(Self.secondContext))
+        await gateway.finishInvocationAsProviderReapPending()
+        await sending
+
+        let replacementState = await feature.currentState
+        XCTAssertEqual(replacementState.selection, .none)
+        XCTAssertNil(replacementState.coachInvocationStopAuthority)
+
+        let firstTermination = await feature.flushForOrderlyTermination()
+        XCTAssertFalse(firstTermination)
+        let secondTermination = await feature.flushForOrderlyTermination()
+        XCTAssertTrue(secondTermination)
+
+        let stopAuthorities = await gateway.stopAuthorities
+        let stopRequests = await gateway.stopRequests
+        XCTAssertEqual(stopAuthorities, [authority, authority])
+        XCTAssertEqual(
+            stopRequests,
+            [
+                StopCoachInvocationRequest(
+                    library: authority.library,
+                    chatID: authority.chatID,
+                    pendingUserTurnID: authority.pendingUserTurnID
+                ),
+                StopCoachInvocationRequest(
+                    library: authority.library,
+                    chatID: authority.chatID,
+                    pendingUserTurnID: authority.pendingUserTurnID
+                ),
+            ]
+        )
+        let invocationCount = await gateway.invocationCount
+        XCTAssertEqual(invocationCount, 1)
+    }
+
+    func testRetryTranscriptFailureRetainsDetachedReapAuthorityAcrossLibraryReplacement()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Retain Retry transcript failure reaping."
+        )
+        let failedPending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120000000Z-6PQR"
+            ),
+            failure: .coachProviderError
+        )
+        let failedAggregate = try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            pendingUserTurn: failedPending
+        )
+        let gateway = RetryableUnreapedInvocationGateway(
+            retryAggregate: failedAggregate
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failedAggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, failedAggregate.chat.id))
+        async let retrying: Void = feature.send(
+            .retryPendingUserTurn(Self.context, failedPending.id)
+        )
+        let authority = await gateway.waitUntilInvocationIsSuspended()
+
+        await feature.send(.start(Self.secondContext))
+        await gateway.finishInvocationAsProviderReapPending()
+        await retrying
+
+        let firstTermination = await feature.flushForOrderlyTermination()
+        let secondTermination = await feature.flushForOrderlyTermination()
+        XCTAssertFalse(firstTermination)
+        XCTAssertTrue(secondTermination)
+        let stopAuthorities = await gateway.stopAuthorities
+        XCTAssertEqual(stopAuthorities, [authority, authority])
+        let invocationCount = await gateway.invocationCount
+        XCTAssertEqual(invocationCount, 1)
+    }
+
+    func testReplacementLibraryCannotStartCoachUntilDetachedAuthorityIsReaped()
+        async throws
+    {
+        let aggregate = try Self.aggregate(
+            draftText: "Fence the next Library behind exact provider reaping."
+        )
+        let gateway = RetryableUnreapedInvocationGateway(
+            suspendSecondReap: true
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            invocations: gateway
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+        async let firstSending: Void = feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+        let firstAuthority = await gateway.waitUntilInvocationIsSuspended()
+
+        await feature.send(
+            .stopCoachResponse(Self.context, firstAuthority)
+        )
+        await firstSending
+        await feature.send(.start(Self.secondContext))
+        await feature.send(.open(Self.secondContext, aggregate.chat.id))
+        async let successorSending: Void = feature.send(
+            .sendDraft(
+                Self.secondContext,
+                aggregate.chat.id,
+                aggregate.chat.draft
+            )
+        )
+
+        await gateway.waitUntilSecondReapStarts()
+        let launchesBeforeReap = await gateway.invocationCount
+        XCTAssertEqual(
+            launchesBeforeReap,
+            1,
+            "a replacement Library must not start a provider behind an unreaped process"
+        )
+
+        await gateway.resumeSecondReap()
+        _ = await gateway.waitUntilInvocationCount(2)
+        let launchesAfterReap = await gateway.invocationCount
+        XCTAssertEqual(launchesAfterReap, 2)
+        await gateway.finishInvocationAsStopped()
+        await successorSending
     }
 
     func testSendLeavesDraftEditableWhenAnotherInvocationOwnsTheLibrary() async throws {
@@ -2706,10 +2901,24 @@ final class ChatFeatureTests: XCTestCase {
     }
 
     func testTypedProviderFailuresRemainRetryableCoachResponseFailures() throws {
+        let transcriptFailure = PendingUserTurnFailure.coachTranscriptReadFailed(
+            try CoachTranscriptReadFailureSummary(
+                sessions: [
+                    CoachTranscriptReadFailureSession(
+                        sessionAttachmentID: try ChatSessionAttachmentID(
+                            "attachment-1"
+                        ),
+                        displayLabel: "Opening practice"
+                    ),
+                ],
+                additionalSessionCount: 0
+            )
+        )
         for failure in [
             PendingUserTurnFailure.coachProviderError,
             .coachResponseInvalid,
             .coachResponseInterrupted,
+            transcriptFailure,
         ] {
             let pending = PendingUserTurn(
                 id: try PendingUserTurnID("ptu-20260830T120000000Z-5KMN"),
@@ -3675,6 +3884,189 @@ private actor StoppableRetryInvocationGateway: Invocations {
     }
 }
 
+private actor RetryableUnreapedInvocationGateway: Invocations {
+    private let suspendSecondReap: Bool
+    private let retryAggregate: ChatAggregate?
+    private var authority: InvocationStopAuthority?
+    private var aggregate: ChatAggregate?
+    private var invocationContinuation:
+        CheckedContinuation<InvocationTryOutcome, Never>?
+    private var secondReapContinuation: CheckedContinuation<Void, Never>?
+    private(set) var invocationCount = 0
+    private(set) var stopCount = 0
+    private(set) var stopRequests: [StopCoachInvocationRequest] = []
+    private(set) var stopAuthorities: [InvocationStopAuthority] = []
+
+    init(
+        suspendSecondReap: Bool = false,
+        retryAggregate: ChatAggregate? = nil
+    ) {
+        self.suspendSecondReap = suspendSecondReap
+        self.retryAggregate = retryAggregate
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(prepared, observingStopAuthority: { _ in })
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        await tryInvoke(request, observingStopAuthority: { _ in })
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        guard let retryAggregate,
+              retryAggregate.chat.id == request.chatID,
+              retryAggregate.pendingUserTurn?.id == request.pendingUserTurnID
+        else { return .rejected(nil, .eligibilityChanged) }
+        invocationCount += 1
+        let authority = InvocationStopAuthority(
+            testingRequest: StopCoachInvocationRequest(
+                library: request.library,
+                chatID: request.chatID,
+                pendingUserTurnID: request.pendingUserTurnID
+            ),
+            invocationID: try! CoachInvocationID(
+                "inv-20260830T120000000Z-7QRS"
+            ),
+            attemptID: try! CoachProviderAttemptID(
+                "atm-20260830T120000000Z-8TVW"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000397"
+            )!
+        )
+        self.authority = authority
+        aggregate = retryAggregate
+        await observer(authority)
+        return await withCheckedContinuation { invocationContinuation = $0 }
+    }
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        invocationCount += 1
+        let authority = InvocationStopAuthority(
+            testingRequest: StopCoachInvocationRequest(
+                library: prepared.request.library,
+                chatID: prepared.request.chatID,
+                pendingUserTurnID: prepared.request.pendingUserTurnID
+            ),
+            invocationID: try! CoachInvocationID(
+                "inv-20260830T120000000Z-7QRS"
+            ),
+            attemptID: try! CoachProviderAttemptID(
+                "atm-20260830T120000000Z-8TVW"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000397"
+            )!
+        )
+        self.authority = authority
+        aggregate = prepared.aggregate
+        await observer(authority)
+        return await withCheckedContinuation { invocationContinuation = $0 }
+    }
+
+    func stop(
+        _ request: StopCoachInvocationRequest,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome {
+        guard self.authority == authority,
+              authority.library == request.library,
+              authority.chatID == request.chatID,
+              authority.pendingUserTurnID == request.pendingUserTurnID
+        else { return .staleAuthority }
+        stopCount += 1
+        stopRequests.append(request)
+        stopAuthorities.append(authority)
+        if stopCount == 1 {
+            invocationContinuation?.resume(returning: .stopped)
+            invocationContinuation = nil
+            return .unableToReap
+        }
+        if suspendSecondReap, stopCount == 2 {
+            await withCheckedContinuation { secondReapContinuation = $0 }
+        }
+        guard let aggregate, let pending = aggregate.pendingUserTurn else {
+            return .persistenceUnavailable(aggregate)
+        }
+        self.authority = nil
+        return .interrupted(
+            try! ChatAggregate(
+                chat: aggregate.chat,
+                memory: aggregate.memory,
+                pendingUserTurn: pending.replacingFailure(
+                    .coachResponseInterrupted
+                )
+            )
+        )
+    }
+
+    func waitUntilInvocationIsSuspended() async -> InvocationStopAuthority {
+        while authority == nil || invocationContinuation == nil {
+            await Task.yield()
+        }
+        return authority!
+    }
+
+    func waitUntilSecondReapStarts() async {
+        while stopCount < 2 || secondReapContinuation == nil {
+            await Task.yield()
+        }
+    }
+
+    func resumeSecondReap() {
+        secondReapContinuation?.resume()
+        secondReapContinuation = nil
+    }
+
+    func waitUntilInvocationCount(_ expected: Int) async -> InvocationStopAuthority {
+        while invocationCount < expected || authority == nil ||
+            invocationContinuation == nil
+        {
+            await Task.yield()
+        }
+        return authority!
+    }
+
+    func finishInvocationAsStopped() {
+        invocationContinuation?.resume(returning: .stopped)
+        invocationContinuation = nil
+    }
+
+    func finishInvocationAsProviderReapPending() {
+        guard let authority else { return }
+        invocationContinuation?.resume(
+            returning: .providerReapPending(authority)
+        )
+        invocationContinuation = nil
+    }
+}
+
 private actor UnreapableStoppableInvocationGateway: Invocations {
     private var authority: InvocationStopAuthority?
     private var invocationContinuation:
@@ -3744,7 +4136,6 @@ private actor UnreapableStoppableInvocationGateway: Invocations {
               authority.pendingUserTurnID == request.pendingUserTurnID
         else { return .staleAuthority }
         stopCount += 1
-        self.authority = nil
         invocationContinuation?.resume(returning: .stopped)
         invocationContinuation = nil
         return .unableToReap
@@ -3766,6 +4157,7 @@ private actor AdmissionRefreshDuringUnreapableStopGateway: Invocations {
         CheckedContinuation<InvocationTryOutcome, Never>?
     private var stopContinuation: CheckedContinuation<Void, Never>?
     private var stopStarted = false
+    private(set) var stopCount = 0
 
     func admissionAvailability(
         in library: LibraryScope
@@ -3835,9 +4227,13 @@ private actor AdmissionRefreshDuringUnreapableStopGateway: Invocations {
               authority.chatID == request.chatID,
               authority.pendingUserTurnID == request.pendingUserTurnID
         else { return .staleAuthority }
+        stopCount += 1
+        if stopCount > 1 {
+            self.authority = nil
+            return .noActiveInvocation
+        }
         stopStarted = true
         await withCheckedContinuation { stopContinuation = $0 }
-        self.authority = nil
         return .unableToReap
     }
 
@@ -5065,7 +5461,7 @@ private actor GrowingNewChatProfileSnapshotPort: CoachContextSnapshotPort {
             descriptor: CoachProviderDescriptor(
                 displayName: "Growing Profile fixture",
                 contextBudget: CoachContextBudget(
-                    contextWindowTokens: 512,
+                    contextWindowTokens: 2_000,
                     responseReservedTokens: 32,
                     safetyMarginTokens: 8
                 ),

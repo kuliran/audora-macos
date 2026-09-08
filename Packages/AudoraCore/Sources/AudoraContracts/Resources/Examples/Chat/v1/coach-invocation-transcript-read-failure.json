@@ -9,14 +9,6 @@
       "userMessageId": "msg-20260830T120002000Z-4GHJ",
       "coachMessageId": "msg-20260830T120002000Z-5KMN",
       "freshDraftId": "drf-20260830T120002000Z-6PQR"
-    },
-    {
-      "attemptId": "atm-20260830T120002000Z-7STV",
-      "ordinal": 2,
-      "kind": "shorterRepair",
-      "userMessageId": "msg-20260830T120003000Z-7STV",
-      "coachMessageId": "msg-20260830T120003000Z-8WXY",
-      "freshDraftId": "drf-20260830T120003000Z-9YZ0"
     }
   ],
   "libraryId": "lib-20260830T115900000Z-2ABC",
@@ -28,5 +20,15 @@
   "expectedManifestRevision": 1,
   "profileRevisionId": "prf-20260830T120100000Z-3DEF",
   "profileStatementGeneration": 1,
-  "admittedAt": "2026-08-30T12:00:02.000Z"
+  "admittedAt": "2026-08-30T12:00:02.000Z",
+  "terminalFailure": "coachTranscriptReadFailed",
+  "transcriptReadFailure": {
+    "sessions": [
+      {
+        "sessionAttachmentId": "attachment_1",
+        "displayLabel": "Opening practice"
+      }
+    ],
+    "additionalSessionCount": 0
+  }
 }

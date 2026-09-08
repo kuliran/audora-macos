@@ -525,7 +525,7 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testPendingUserTurnEncoderWritesV3ForInterruptedFailure() throws {
+    func testPendingUserTurnEncoderWritesV4ForInterruptedFailure() throws {
         let pending = PendingUserTurn(
             id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
             draftID: try ChatDraftID("drf-20260830T120000000Z-3DEF"),
@@ -542,8 +542,50 @@ final class PortableChatPersistenceTests: XCTestCase {
             ) as? [String: Any]
         )
 
-        XCTAssertEqual((object["schemaVersion"] as? NSNumber)?.uint32Value, 3)
+        XCTAssertEqual((object["schemaVersion"] as? NSNumber)?.uint32Value, 4)
         XCTAssertEqual(object["failure"] as? String, "coachResponseInterrupted")
+    }
+
+    func testPendingUserTurnEncoderWritesOnlyBoundedTranscriptFailureSummary() throws {
+        let summary = try CoachTranscriptReadFailureSummary(
+            sessions: [
+                CoachTranscriptReadFailureSession(
+                    sessionAttachmentID: ChatSessionAttachmentID("attachment_1"),
+                    displayLabel: "Practice Session"
+                ),
+            ],
+            additionalSessionCount: 0
+        )
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: try ChatDraftID("drf-20260830T120000000Z-3DEF"),
+            draftVersion: 1,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            ),
+            failure: .coachTranscriptReadFailed(summary)
+        )
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: PortableChatPersistence().encodePendingUserTurn(pending)
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(Set(object.keys), [
+            "schemaVersion", "pendingUserTurnId", "draftId", "draftVersion",
+            "responsePositionId", "failure", "transcriptReadFailure",
+        ])
+        XCTAssertEqual(object["failure"] as? String, "coachTranscriptReadFailed")
+        let encodedSummary = try XCTUnwrap(
+            object["transcriptReadFailure"] as? [String: Any]
+        )
+        XCTAssertEqual(Set(encodedSummary.keys), ["sessions", "additionalSessionCount"])
+        let session = try XCTUnwrap(
+            (encodedSummary["sessions"] as? [[String: Any]])?.first
+        )
+        XCTAssertEqual(Set(session.keys), ["sessionAttachmentId", "displayLabel"])
+        XCTAssertEqual(session["sessionAttachmentId"] as? String, "attachment_1")
+        XCTAssertEqual(session["displayLabel"] as? String, "Practice Session")
     }
 
     func testLegacyV1PendingFailuresAreStrictAndValidStateUpgradesOnWrite() throws {
@@ -594,7 +636,7 @@ final class PortableChatPersistenceTests: XCTestCase {
             )
             XCTAssertEqual(
                 (upgradedObject["schemaVersion"] as? NSNumber)?.uint32Value,
-                3
+                4
             )
             XCTAssertEqual(upgraded.pendingUserTurn, capacity)
 
@@ -613,6 +655,21 @@ final class PortableChatPersistenceTests: XCTestCase {
             XCTAssertEqual(
                 try persistence.load(original.chat.id, at: root, in: scope),
                 .readWrite(legacyV2Interrupted)
+            )
+
+            try rewritePending(
+                at: pendingURL,
+                schemaVersion: 3,
+                failure: .coachProviderError
+            )
+            let legacyV3ProviderFailure = try ChatAggregate(
+                chat: upgraded.chat,
+                memory: upgraded.memory,
+                pendingUserTurn: pending.replacingFailure(.coachProviderError)
+            )
+            XCTAssertEqual(
+                try persistence.load(original.chat.id, at: root, in: scope),
+                .readWrite(legacyV3ProviderFailure)
             )
 
             try rewritePending(
@@ -641,7 +698,7 @@ final class PortableChatPersistenceTests: XCTestCase {
 
             try rewritePending(
                 at: pendingURL,
-                schemaVersion: 4,
+                schemaVersion: 5,
                 failure: .coachResponseInterrupted
             )
             XCTAssertEqual(
@@ -2439,7 +2496,7 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testMalformedV3InvocationWithValidCommonIdentityFreezesOnlyItsChat() throws {
+    func testMalformedV4InvocationWithValidCommonIdentityFreezesOnlyItsChat() throws {
         try withCreatedLibrary { root, scope in
             let persistence = PortableChatPersistence()
             let fixture = try makeInvocationFixture(
@@ -2484,7 +2541,7 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testV3InvocationWithoutSelectedProfileOmitsRevisionInsteadOfEncodingNull() throws {
+    func testV4InvocationWithoutSelectedProfileOmitsRevisionInsteadOfEncodingNull() throws {
         try withCreatedLibrary { root, scope in
             let persistence = PortableChatPersistence()
             let fixture = try makeInvocationFixture(

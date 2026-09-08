@@ -8,6 +8,7 @@ public enum CoachAttachmentProjectionPolicyError: Error, Equatable, Sendable {
 
 enum CoachAttachmentProjectionError: Error, Equatable, Sendable {
     case canonicalTranscriptTooLarge
+    case invalidRevisionFingerprint
 }
 
 /// A provider-facing label derived at the same boundary that replaces local
@@ -135,6 +136,9 @@ public struct CoachAttachmentProjectionPolicy: Sendable {
     public func project(
         evidence: ChatAttachmentEvidence
     ) throws -> CoachAttachmentProjection {
+        guard AudioArtifactFingerprint.isSHA256(evidence.revisionSHA256) else {
+            throw CoachAttachmentProjectionError.invalidRevisionFingerprint
+        }
         let canonicalTranscript = Self.canonicalTranscript(evidence.revision)
         let canonicalBytes: Data
         do {
@@ -273,7 +277,9 @@ public struct CoachAttachmentProjection: Equatable, Sendable {
                 transcriptDisclosure: .object([
                     "sessionAttachmentId": .string(sessionAttachmentID.rawValue),
                     "transcript": canonicalTranscript,
-                ])
+                ]),
+                sourceAttachment: attachment,
+                revisionSHA256: evidence.revisionSHA256
             )
         }
     }

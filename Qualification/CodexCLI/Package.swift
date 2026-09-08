@@ -34,6 +34,7 @@ let package = Package(
             dependencies: [
                 "AudoraCodexCLIQualification",
                 .product(name: "AudoraApplication", package: "AudoraCore"),
+                .product(name: "AudoraDomain", package: "AudoraCore"),
             ]
         ),
     ]

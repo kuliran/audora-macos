@@ -147,6 +147,10 @@ public enum InvocationTryOutcome: Equatable, Sendable {
     /// The exact Stop capability won. The Stop caller owns terminal state
     /// publication; the original Invocation continuation must have no effect.
     case stopped
+    /// Transcript access terminated the Attempt and provider absence could not
+    /// yet be proven. The Application must retain this exact process-live
+    /// authority until a later Stop confirms reaping.
+    case providerReapPending(InvocationStopAuthority)
 }
 
 public enum InvocationAdmissionAvailability: Equatable, Sendable {
@@ -860,8 +864,198 @@ public extension InvocationAdmissionPort {
     }
 }
 
-struct ProviderAttemptTranscriptAccess: Equatable, Sendable {
+private actor ProviderAttemptCompletion {
+    enum Resolution: Sendable {
+        case provider(CoachProviderAttemptOutcome)
+        case transcript(AttemptTranscriptAccessTerminalStatus)
+        case stopped
+    }
+
+    private var resolution: Resolution?
+    private var waiters: [CheckedContinuation<Resolution, Never>] = []
+
+    func wait() async -> Resolution {
+        if let resolution { return resolution }
+        return await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func complete(_ resolution: Resolution) {
+        guard self.resolution == nil else { return }
+        self.resolution = resolution
+        let waiters = waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters { waiter.resume(returning: resolution) }
+    }
+}
+
+private final class ProviderAttemptTranscriptReadGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var open = true
+    private var unfinishedReadCount = 0
+    private var closurePreemptedRead = false
+
+    @discardableResult
+    func close() -> Bool {
+        lock.withLock {
+            open = false
+            if unfinishedReadCount > 0 {
+                closurePreemptedRead = true
+            }
+            return closurePreemptedRead
+        }
+    }
+
+    func beginRead() -> Bool {
+        lock.withLock {
+            guard open else { return false }
+            unfinishedReadCount += 1
+            return true
+        }
+    }
+
+    func authorize<Result>(_ result: Result) -> Result? {
+        lock.withLock {
+            precondition(unfinishedReadCount > 0)
+            unfinishedReadCount -= 1
+            return open ? result : nil
+        }
+    }
+}
+
+struct ProviderAttemptTranscriptAccess: Sendable {
     let handles: [PreparedCoachTranscriptHandle]
+
+    private let capability: AttemptTranscriptAccessCapability
+    private let broker: AttemptTranscriptAccessBroker
+    private let completion: ProviderAttemptCompletion
+    private let gate: ProviderAttemptTranscriptReadGate
+
+    fileprivate init(
+        grant: AttemptTranscriptAccessGrant,
+        completion: ProviderAttemptCompletion
+    ) {
+        handles = grant.exchange.transcriptHandles
+        capability = grant.capability
+        broker = grant.broker
+        self.completion = completion
+        gate = ProviderAttemptTranscriptReadGate()
+    }
+
+    /// Module-local construction used to exercise the final disclosure fence
+    /// without exposing the coordinator's completion actor.
+    init(grant: AttemptTranscriptAccessGrant) {
+        self.init(grant: grant, completion: ProviderAttemptCompletion())
+    }
+
+    /// The provider can request one typed nonempty subset. Capability material
+    /// never becomes model-visible or printable.
+    func read(
+        transportRequestID: AttemptTranscriptTransportRequestID,
+        handles: [PreparedCoachTranscriptHandle]
+    ) async -> AttemptTranscriptAccessResult {
+        await read(
+            transportRequestID: transportRequestID,
+            handles: handles,
+            beforeFinalAuthorization: {}
+        )
+    }
+
+    /// Module-local race seam used to suspend after the broker has prepared a
+    /// result but before the final provider-disclosure authorization fence.
+    func readForTesting(
+        transportRequestID: AttemptTranscriptTransportRequestID,
+        handles: [PreparedCoachTranscriptHandle],
+        beforeFinalAuthorization: @escaping @Sendable () async -> Void
+    ) async -> AttemptTranscriptAccessResult {
+        await read(
+            transportRequestID: transportRequestID,
+            handles: handles,
+            beforeFinalAuthorization: beforeFinalAuthorization
+        )
+    }
+
+    private func read(
+        transportRequestID: AttemptTranscriptTransportRequestID,
+        handles: [PreparedCoachTranscriptHandle],
+        beforeFinalAuthorization: @escaping @Sendable () async -> Void
+    ) async -> AttemptTranscriptAccessResult {
+        guard gate.beginRead() else { return .rejected(.closed) }
+        let result = await broker.read(
+            capability: capability,
+            transportRequestID: transportRequestID,
+            handles: handles
+        )
+        let terminalStatus: AttemptTranscriptAccessTerminalStatus?
+        switch result {
+        case .rejected:
+            // A third read, an altered replay, or another closed-broker access
+            // is terminal even when the broker's prior status was `completed`.
+            terminalStatus = .rejected
+        case .delivered:
+            switch await broker.status() {
+            case let .terminal(status):
+                terminalStatus = switch status {
+                case .sessionUnavailable, .contextCannotFit, .rejected:
+                    status
+                case .completed, .revoked:
+                    nil
+                }
+            case .open, .checking, .replayable:
+                terminalStatus = nil
+            }
+        }
+
+        await beforeFinalAuthorization()
+        // This is the last authorization point after every broker suspension.
+        // Stop/finalization can therefore prevent transcript bytes from escaping.
+        guard let authorized = gate.authorize(result) else {
+            return .rejected(.closed)
+        }
+        if let terminalStatus {
+            // The Invocation coordinator must win before a non-cooperative
+            // provider can continue after receiving a terminal tool response.
+            // Terminal responses contain no transcript bytes, so completing the
+            // coordinator before returning them does not reopen disclosure.
+            await completion.complete(.transcript(terminalStatus))
+        }
+        return authorized
+    }
+
+    /// Module-local race harness: stages a broker terminal before the normal
+    /// coordinator notification, so Stop's handoff fence can be verified.
+    func stageReadBeforeTerminalReportForTesting(
+        transportRequestID: AttemptTranscriptTransportRequestID,
+        handles: [PreparedCoachTranscriptHandle]
+    ) async -> AttemptTranscriptAccessResult {
+        guard gate.beginRead() else { return .rejected(.closed) }
+        let result = await broker.read(
+            capability: capability,
+            transportRequestID: transportRequestID,
+            handles: handles
+        )
+        return gate.authorize(result) ?? .rejected(.closed)
+    }
+
+    func closeReads() {
+        gate.close()
+    }
+
+    func brokerStatusForTesting() async -> AttemptTranscriptAccessBrokerStatus {
+        await broker.status()
+    }
+
+    fileprivate func finalize(
+        reason: AttemptTranscriptAccessRevocationReason
+    ) async -> AttemptTranscriptAccessBrokerStatus {
+        let preemptedRead = gate.close()
+        let brokerStatus = await broker.finalize(reason: reason)
+        return preemptedRead ? .checking : brokerStatus
+    }
+
+    fileprivate func revoke(reason: AttemptTranscriptAccessRevocationReason) async {
+        gate.close()
+        await broker.revoke(reason: reason)
+    }
 }
 
 enum CoachProviderAttemptControl: Equatable, Sendable {
@@ -883,10 +1077,12 @@ enum CoachProviderAttemptCancellationOutcome: Equatable, Sendable {
 }
 
 struct SyntheticCoachProviderRequest: Sendable {
-    let invocation: CoachInvocation
-    let attempt: CoachProviderAttempt
-    let exchange: CanonicalCoachExchange
-    let transcriptAccess: ProviderAttemptTranscriptAccess
+    let attemptID: CoachProviderAttemptID
+    let attemptOrdinal: UInt8
+    let attemptKind: CoachProviderAttemptKind
+    let providerIdempotencyValue: ProviderIdempotencyValue
+    let exchange: AttemptBoundCoachExchange
+    let transcriptAccess: ProviderAttemptTranscriptAccess?
     let outputTokenCeiling: Int
     let pinnedInstruction: String
     let control: CoachProviderAttemptControl
@@ -991,6 +1187,11 @@ public enum InvocationRetryDiagnosticReason: String, Equatable, Sendable {
     case retryScheduleUnavailable
     case retrySleepFailed
     case missingAttemptTransportAuthority
+    case unreapedProviderBlockedSuccessor
+    case attemptTranscriptAccessLaunchFailed
+    case transcriptSessionUnavailable
+    case transcriptContextCannotFit
+    case transcriptAccessProtocolFailure
     case nextAttemptIdentityCollisionExhausted
     case nextAttemptConstructionFailed
     case nextAttemptInstallationFailed
@@ -1008,6 +1209,7 @@ public enum InvocationRetryDiagnosticClassification: String, Equatable, Sendable
     case providerAutoRetryable
     case providerUserRetryable
     case invalidProviderResponse
+    case transcriptReadFailure
     case retryInfrastructureFailure
     case publicationConflict
     case persistenceUnavailable
@@ -1124,29 +1326,6 @@ public struct DiscardingInvocationRetryDiagnostics: InvocationRetryDiagnostics {
 }
 
 public actor DefaultInvocations: Invocations {
-    private actor ProviderAttemptCompletion {
-        enum Resolution: Sendable {
-            case provider(CoachProviderAttemptOutcome)
-            case stopped
-        }
-
-        private var resolution: Resolution?
-        private var waiters: [CheckedContinuation<Resolution, Never>] = []
-
-        func wait() async -> Resolution {
-            if let resolution { return resolution }
-            return await withCheckedContinuation { waiters.append($0) }
-        }
-
-        func complete(_ resolution: Resolution) {
-            guard self.resolution == nil else { return }
-            self.resolution = resolution
-            let waiters = waiters
-            self.waiters.removeAll(keepingCapacity: false)
-            for waiter in waiters { waiter.resume(returning: resolution) }
-        }
-    }
-
     private actor BackoffCompletion {
         enum Resolution: Sendable {
             case elapsed
@@ -1175,6 +1354,7 @@ public actor DefaultInvocations: Invocations {
         case provider(Task<Void, Never>, ProviderAttemptCompletion)
         case backoff(Task<Void, Never>, BackoffCompletion)
         case transition(Task<NextAttemptResolution, Never>)
+        case reapPending(InvocationTryOutcome?)
         case stopping
 
         func cancel() {
@@ -1182,7 +1362,7 @@ public actor DefaultInvocations: Invocations {
             case let .provider(task, _): task.cancel()
             case let .backoff(task, _): task.cancel()
             case let .transition(task): task.cancel()
-            case .stopping: break
+            case .reapPending, .stopping: break
             }
         }
     }
@@ -1194,8 +1374,10 @@ public actor DefaultInvocations: Invocations {
         let fallback: ChatAggregate
         let diagnosticContext: InvocationRetryDiagnosticContext
         let startedAtMilliseconds: UInt64
+        let transcriptAccess: ProviderAttemptTranscriptAccess?
         var work: ActiveInvocationWork
         var isRevoked: Bool
+        var retainedTranscriptTerminalStatus: AttemptTranscriptAccessTerminalStatus?
     }
 
     private struct PublicationRecoveryIntent: Sendable {
@@ -1237,8 +1419,21 @@ public actor DefaultInvocations: Invocations {
     """
 
     static func pinnedInstruction(outputTokenCeiling: Int) -> String {
-        "Return one complete structured response that fits within the " +
-            "\(outputTokenCeiling)-token output allowance."
+        CoachProviderPinnedInstruction.standard(
+            outputTokenCeiling: outputTokenCeiling
+        )
+    }
+
+    private static func pinnedInstruction(
+        base: String,
+        attemptKind: CoachProviderAttemptKind
+    ) -> String {
+        switch attemptKind {
+        case .standard:
+            base
+        case .shorterRepair:
+            base + " " + shorterRepairInstruction
+        }
     }
     private let persistence: any InvocationPersistencePort
     private let admission: any InvocationAdmissionPort
@@ -1249,6 +1444,7 @@ public actor DefaultInvocations: Invocations {
     private let retrySleeper: any InvocationRetrySleeping
     private let retryDiagnostics: any InvocationRetryDiagnostics
     private let retryTiming: any InvocationRetryTiming
+    private let transcriptAvailability: AttemptTranscriptAvailabilitySource
     private var inFlightRequests: Set<PendingCoachInvocationRequest> = []
     private var preparedSessions: [
         UUID: any InvocationPendingPersistenceSession
@@ -1257,6 +1453,10 @@ public actor DefaultInvocations: Invocations {
         PendingCoachInvocationRequest: OperationalRetrySnapshot
     ] = [:]
     private var activeInvocationControls: [UUID: ActiveInvocationControl] = [:]
+
+    private var hasUnreapedProviderAuthority: Bool {
+        activeInvocationControls.values.contains { $0.isRevoked }
+    }
 
     init(
         persistence: any InvocationPersistencePort,
@@ -1268,7 +1468,8 @@ public actor DefaultInvocations: Invocations {
         retrySleeper: any InvocationRetrySleeping = TaskInvocationRetrySleeper(),
         retryDiagnostics: any InvocationRetryDiagnostics =
             DiscardingInvocationRetryDiagnostics(),
-        retryTiming: any InvocationRetryTiming = ContinuousInvocationRetryTiming()
+        retryTiming: any InvocationRetryTiming = ContinuousInvocationRetryTiming(),
+        transcriptAvailability: AttemptTranscriptAvailabilitySource = .allAvailable
     ) {
         self.persistence = persistence
         self.admission = admission
@@ -1279,6 +1480,7 @@ public actor DefaultInvocations: Invocations {
         self.retrySleeper = retrySleeper
         self.retryDiagnostics = retryDiagnostics
         self.retryTiming = retryTiming
+        self.transcriptAvailability = transcriptAvailability
     }
 
     /// Production composition seam. Exact preparation and the synthetic provider
@@ -1293,7 +1495,8 @@ public actor DefaultInvocations: Invocations {
         retrySleeper: any InvocationRetrySleeping = TaskInvocationRetrySleeper(),
         retryDiagnostics: any InvocationRetryDiagnostics =
             DiscardingInvocationRetryDiagnostics(),
-        retryTiming: any InvocationRetryTiming = ContinuousInvocationRetryTiming()
+        retryTiming: any InvocationRetryTiming = ContinuousInvocationRetryTiming(),
+        transcriptAvailability: AttemptTranscriptAvailabilitySource
     ) {
         self.persistence = persistence
         self.admission = admission
@@ -1304,11 +1507,15 @@ public actor DefaultInvocations: Invocations {
         self.retrySleeper = retrySleeper
         self.retryDiagnostics = retryDiagnostics
         self.retryTiming = retryTiming
+        self.transcriptAvailability = transcriptAvailability
     }
 
     public func prepareNewInvocation(
         _ request: NewPendingCoachInvocationRequest
     ) async -> NewPendingCoachInvocationOutcome {
+        guard !hasUnreapedProviderAuthority else {
+            return .activeInvocation
+        }
         switch await persistence.openNewPendingInvocation(request) {
         case let .opened(session):
             let authority = session.authority
@@ -1357,7 +1564,9 @@ public actor DefaultInvocations: Invocations {
         }
         preparedSessions.removeValue(forKey: prepared.capabilityID)
         let request = prepared.request
-        guard inFlightRequests.insert(request).inserted else {
+        guard !hasUnreapedProviderAuthority,
+              inFlightRequests.insert(request).inserted
+        else {
             await session.abandon()
             return .rejected(nil, .activeInvocation)
         }
@@ -1376,7 +1585,9 @@ public actor DefaultInvocations: Invocations {
         _ request: PendingCoachInvocationRequest,
         observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
     ) async -> InvocationTryOutcome {
-        guard inFlightRequests.insert(request).inserted else {
+        guard !hasUnreapedProviderAuthority,
+              inFlightRequests.insert(request).inserted
+        else {
             return .rejected(nil, .activeInvocation)
         }
         defer { inFlightRequests.remove(request) }
@@ -1560,6 +1771,46 @@ public actor DefaultInvocations: Invocations {
             )
         }
 
+        do {
+            try AttemptTranscriptAccessGrantIssuer().preflight(
+                exchange: prepared.exchange,
+                freshHandles: identity.transcriptHandles,
+                pinnedInstruction: prepared.exchange.pinnedInstruction
+            )
+        } catch AttemptTranscriptAccessGrantIssueError.contextCannotFit {
+            let outcome: InvocationTryOutcome = switch await session.terminate(
+                .contextCapacityFailure
+            ) {
+            case let .committed(aggregate):
+                .contextCapacityFailure(aggregate, prepared.quote)
+            case let .stale(current):
+                .rejected(current, .eligibilityChanged)
+            case let .recovered(resolution):
+                interruptionAfterTerminalRecovery(
+                    resolution,
+                    request: request,
+                    fallback: finalAuthority.aggregate
+                )
+            }
+            if presentsUserRetry(outcome, request: request) {
+                await recordRetryDiagnostic(
+                    reason: .transcriptContextCannotFit,
+                    classification: .contextCapacity,
+                    disposition: .userRetryableFailure,
+                    invocation: nil,
+                    context: diagnosticContext(for: prepared),
+                    durationMilliseconds: 0
+                )
+            }
+            return outcome
+        } catch {
+            return await reject(
+                session,
+                fallback: finalAuthority,
+                reason: .persistenceUnavailable
+            )
+        }
+
         // Identity discovery may scan every durable namespace. Debit against a
         // fresh instant so the rolling window starts when admission is claimed,
         // not when that potentially slow preflight began.
@@ -1731,28 +1982,76 @@ public actor DefaultInvocations: Invocations {
                 .shorterRepair(instruction: Self.shorterRepairInstruction)
             }
             let outputTokenCeiling = prepared.quote.reservedResponseTokens
-            let attemptInstruction: String = switch control {
-            case .standard:
-                ""
-            case let .shorterRepair(instruction):
-                " \(instruction)"
-            }
             let pinnedInstruction = Self.pinnedInstruction(
-                outputTokenCeiling: outputTokenCeiling
-            ) + attemptInstruction
+                base: prepared.exchange.pinnedInstruction,
+                attemptKind: attempt.kind
+            )
+            let providerCompletion = ProviderAttemptCompletion()
+            let attemptExchange: AttemptBoundCoachExchange
+            let transcriptAccess: ProviderAttemptTranscriptAccess?
+            if prepared.exchange.preparedTranscriptHandles.isEmpty,
+               transportAuthority.transcriptHandles.isEmpty
+            {
+                attemptExchange = AttemptBoundCoachExchange(
+                    request: prepared.exchange.request,
+                    transcriptHandles: []
+                )
+                transcriptAccess = nil
+            } else {
+                do {
+                    let grant = try AttemptTranscriptAccessGrantIssuer().issue(
+                        exchange: prepared.exchange,
+                        freshHandles: transportAuthority.transcriptHandles,
+                        pinnedInstruction: pinnedInstruction,
+                        availabilityChecker: transcriptAvailability.checker(
+                            library: request.library,
+                            chatID: request.chatID
+                        )
+                    )
+                    attemptExchange = grant.exchange
+                    transcriptAccess = ProviderAttemptTranscriptAccess(
+                        grant: grant,
+                        completion: providerCompletion
+                    )
+                } catch {
+                    return await interruptAndAbortRecordingUserRetry(
+                        activeSession,
+                        fallback: processingAggregate,
+                        reason: .retryInfrastructureFailed,
+                        diagnosticReason: .attemptTranscriptAccessLaunchFailed,
+                        classification: .retryInfrastructureFailure,
+                        prepared: prepared,
+                        startedAt: attemptStartedAt
+                    )
+                }
+            }
+            guard !activeInvocationControls.values.contains(where: {
+                $0.runID != runID && $0.isRevoked
+            }) else {
+                transcriptAccess?.closeReads()
+                return await interruptAndAbortRecordingUserRetry(
+                    activeSession,
+                    fallback: processingAggregate,
+                    reason: .retryInfrastructureFailed,
+                    diagnosticReason: .unreapedProviderBlockedSuccessor,
+                    classification: .retryInfrastructureFailure,
+                    prepared: prepared,
+                    startedAt: attemptStartedAt
+                )
+            }
             let providerRequest = SyntheticCoachProviderRequest(
-                invocation: invocation,
-                attempt: attempt,
-                exchange: prepared.exchange,
-                transcriptAccess: ProviderAttemptTranscriptAccess(
-                    handles: transportAuthority.transcriptHandles
-                ),
+                attemptID: attempt.id,
+                attemptOrdinal: attempt.ordinal,
+                attemptKind: attempt.kind,
+                providerIdempotencyValue:
+                    transportAuthority.providerIdempotencyValue,
+                exchange: attemptExchange,
+                transcriptAccess: transcriptAccess,
                 outputTokenCeiling: outputTokenCeiling,
                 pinnedInstruction: pinnedInstruction,
                 control: control
             )
             let provider = self.provider
-            let providerCompletion = ProviderAttemptCompletion()
             let providerTask = Task {
                 let outcome = await provider.run(providerRequest)
                 await providerCompletion.complete(.provider(outcome))
@@ -1769,18 +2068,160 @@ public actor DefaultInvocations: Invocations {
                 fallback: processingAggregate,
                 diagnosticContext: diagnosticContext(for: prepared),
                 startedAtMilliseconds: attemptStartedAt,
+                transcriptAccess: transcriptAccess,
                 work: .provider(providerTask, providerCompletion),
-                isRevoked: false
+                isRevoked: false,
+                retainedTranscriptTerminalStatus: nil
             )
             await observer(stopAuthority)
             guard isCompletionAuthorized(runID: runID, authority: stopAuthority) else {
                 return stoppedInvocationOutcome(fallback: processingAggregate)
             }
             let completion = await providerCompletion.wait()
-            guard case let .provider(outcome) = completion,
-                  isCompletionAuthorized(runID: runID, authority: stopAuthority)
-            else {
+            guard isCompletionAuthorized(runID: runID, authority: stopAuthority) else {
                 return stoppedInvocationOutcome(fallback: processingAggregate)
+            }
+            let outcome: CoachProviderAttemptOutcome?
+            let transcriptStatus: AttemptTranscriptAccessBrokerStatus?
+            var providerWasReapedForTranscriptTerminal = false
+            switch completion {
+            case .stopped:
+                return stoppedInvocationOutcome(fallback: processingAggregate)
+            case let .provider(value):
+                outcome = value
+                if let transcriptAccess {
+                    let revocationReason: AttemptTranscriptAccessRevocationReason =
+                        switch value {
+                        case .complete: .attemptCompleted
+                        case .autoRetryableFailure, .userRetryableFailure:
+                            .providerFailed
+                        case .responseOverflow: .protocolFailure
+                        }
+                    let finalizedStatus = await transcriptAccess.finalize(
+                        reason: revocationReason
+                    )
+                    transcriptStatus = finalizedStatus == .checking
+                        ? .terminal(.rejected)
+                        : finalizedStatus
+                } else {
+                    transcriptStatus = nil
+                }
+            case let .transcript(status):
+                outcome = nil
+                transcriptStatus = .terminal(status)
+                recordTranscriptTerminalStatus(
+                    status,
+                    runID: runID,
+                    authority: stopAuthority
+                )
+                transcriptAccess?.closeReads()
+                providerTask.cancel()
+                let cancellation = await provider.cancelAndReap(
+                    attemptID: attempt.id,
+                    graceMilliseconds: Self.providerCancellationGraceMilliseconds
+                )
+                guard isCompletionAuthorized(
+                    runID: runID,
+                    authority: stopAuthority
+                ) else {
+                    return stoppedInvocationOutcome(fallback: processingAggregate)
+                }
+                guard cancellation == .reaped || cancellation == .alreadyAbsent else {
+                    retainUnreapedProviderControl(
+                        runID: runID,
+                        authority: stopAuthority,
+                        transcriptStatus: status
+                    )
+                    return .providerReapPending(stopAuthority)
+                }
+                providerWasReapedForTranscriptTerminal = true
+            }
+            guard isCompletionAuthorized(runID: runID, authority: stopAuthority) else {
+                return stoppedInvocationOutcome(fallback: processingAggregate)
+            }
+
+            if case let .terminal(status)? = transcriptStatus,
+               status != .completed
+            {
+                recordTranscriptTerminalStatus(
+                    status,
+                    runID: runID,
+                    authority: stopAuthority
+                )
+                if !providerWasReapedForTranscriptTerminal {
+                    providerTask.cancel()
+                    let cancellation = await provider.cancelAndReap(
+                        attemptID: attempt.id,
+                        graceMilliseconds: Self.providerCancellationGraceMilliseconds
+                    )
+                    guard isCompletionAuthorized(
+                        runID: runID,
+                        authority: stopAuthority
+                    ) else {
+                        return stoppedInvocationOutcome(fallback: processingAggregate)
+                    }
+                    guard cancellation == .reaped || cancellation == .alreadyAbsent
+                    else {
+                        retainUnreapedProviderControl(
+                            runID: runID,
+                            authority: stopAuthority,
+                            transcriptStatus: status
+                        )
+                        return .providerReapPending(stopAuthority)
+                    }
+                }
+
+                guard claimCompletion(runID: runID, authority: stopAuthority) else {
+                    return stoppedInvocationOutcome(fallback: processingAggregate)
+                }
+                switch status {
+                case let .sessionUnavailable(sessions):
+                    guard let terminalFailure = transcriptReadFailure(
+                        sessions: sessions
+                    ) else {
+                        return await interruptAndAbortRecordingUserRetry(
+                            activeSession,
+                            fallback: processingAggregate,
+                            reason: .invalidProviderResponse,
+                            diagnosticReason: .transcriptAccessProtocolFailure,
+                            classification: .invalidProviderResponse,
+                            prepared: prepared,
+                            startedAt: attemptStartedAt
+                        )
+                    }
+                    return await interruptAndAbortRecordingUserRetry(
+                        activeSession,
+                        fallback: processingAggregate,
+                        reason: .providerFailed,
+                        diagnosticReason: .transcriptSessionUnavailable,
+                        classification: .transcriptReadFailure,
+                        prepared: prepared,
+                        startedAt: attemptStartedAt,
+                        terminalFailure: terminalFailure
+                    )
+                case .contextCannotFit:
+                    return await abortTranscriptContextCannotFit(
+                        activeSession,
+                        fallback: processingAggregate,
+                        prepared: prepared,
+                        startedAt: attemptStartedAt
+                    )
+                case .rejected, .revoked:
+                    return await interruptAndAbortRecordingUserRetry(
+                        activeSession,
+                        fallback: processingAggregate,
+                        reason: .invalidProviderResponse,
+                        diagnosticReason: .transcriptAccessProtocolFailure,
+                        classification: .invalidProviderResponse,
+                        prepared: prepared,
+                        startedAt: attemptStartedAt
+                    )
+                case .completed:
+                    preconditionFailure("handled above")
+                }
+            }
+            guard let outcome else {
+                preconditionFailure("terminal transcript completion was not handled")
             }
             switch outcome {
             case let .complete(markdown):
@@ -2090,6 +2531,38 @@ public actor DefaultInvocations: Invocations {
                     authority: authority
                 )
             }
+            do {
+                try AttemptTranscriptAccessGrantIssuer().preflight(
+                    exchange: prepared.exchange,
+                    freshHandles: identity.transcriptHandles,
+                    pinnedInstruction: Self.pinnedInstruction(
+                        base: prepared.exchange.pinnedInstruction,
+                        attemptKind: kind
+                    )
+                )
+            } catch AttemptTranscriptAccessGrantIssueError.contextCannotFit {
+                guard claimCompletion(runID: runID, authority: authority) else {
+                    return .revoked(session)
+                }
+                return .terminal(
+                    await abortTranscriptContextCannotFit(
+                        session,
+                        fallback: fallback,
+                        prepared: prepared,
+                        startedAt: startedAt
+                    )
+                )
+            } catch {
+                return await finishFailedAttemptTransition(
+                    session,
+                    fallback: fallback,
+                    diagnosticReason: .attemptTranscriptAccessLaunchFailed,
+                    prepared: prepared,
+                    startedAt: startedAt,
+                    runID: runID,
+                    authority: authority
+                )
+            }
             guard isCompletionAuthorized(runID: runID, authority: authority) else {
                 return .revoked(session)
             }
@@ -2159,6 +2632,63 @@ public actor DefaultInvocations: Invocations {
                 startedAt: startedAt
             )
         )
+    }
+
+    private func transcriptReadFailure(
+        sessions: [AttemptTranscriptFailureSession]
+    ) -> PendingUserTurnFailure? {
+        guard !sessions.isEmpty,
+              sessions.count <= ChatAttachments.maximumCount,
+              let additionalCount = UInt8(
+                  exactly: max(
+                      0,
+                      sessions.count -
+                          CoachTranscriptReadFailureSummary.maximumLinkedSessionCount
+                  )
+              )
+        else { return nil }
+        do {
+            let linked = try sessions
+                .prefix(CoachTranscriptReadFailureSummary.maximumLinkedSessionCount)
+                .map {
+                    try CoachTranscriptReadFailureSession(
+                        sessionAttachmentID: $0.sessionAttachmentID,
+                        displayLabel: $0.displayLabel
+                    )
+                }
+            return .coachTranscriptReadFailed(
+                try CoachTranscriptReadFailureSummary(
+                    sessions: linked,
+                    additionalSessionCount: additionalCount
+                )
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private func abortTranscriptContextCannotFit(
+        _ session: any InvocationActivePersistenceSession,
+        fallback: ChatAggregate,
+        prepared: PreparedCoachLaunchContext,
+        startedAt: UInt64
+    ) async -> InvocationTryOutcome {
+        let outcome = await interruptAndAbortRecordingUserRetry(
+            session,
+            fallback: fallback,
+            reason: .retryInfrastructureFailed,
+            diagnosticReason: .transcriptContextCannotFit,
+            classification: .contextCapacity,
+            prepared: prepared,
+            startedAt: startedAt,
+            terminalFailure: .coachContextCannotFit
+        )
+        if case let .interrupted(current?, _) = outcome,
+           current.pendingUserTurn?.failure == .coachContextCannotFit
+        {
+            return .contextCapacityFailure(current, prepared.quote)
+        }
+        return outcome
     }
 
     private func recordRetryDiagnostic(
@@ -2270,7 +2800,7 @@ public actor DefaultInvocations: Invocations {
                 current?.pendingUserTurn?.failure != nil
         case let .operationallyInterrupted(_, retryRequest, _):
             return retryRequest == request
-        case .published, .stopped:
+        case .published, .stopped, .providerReapPending:
             return false
         }
     }
@@ -2297,7 +2827,15 @@ public actor DefaultInvocations: Invocations {
                 candidate.authority.matches(request)
             } ? .staleAuthority : .noActiveInvocation
         }
-        guard !control.isRevoked,
+        let retriesUnreapedProvider: Bool = if control.isRevoked {
+            switch control.work {
+            case .provider, .reapPending: true
+            case .backoff, .transition, .stopping: false
+            }
+        } else {
+            false
+        }
+        guard (!control.isRevoked || retriesUnreapedProvider),
               control.authority == authority,
               authority.matches(request)
         else { return .staleAuthority }
@@ -2308,12 +2846,35 @@ public actor DefaultInvocations: Invocations {
         let work = control.work
         control.work = .stopping
         activeInvocationControls[authority.capabilityID] = control
+        // Revoke transcript disclosure immediately after the Stop fence wins,
+        // before provider cancellation or process reap can suspend.
+        control.transcriptAccess?.closeReads()
+        if let transcriptAccess = control.transcriptAccess,
+           case let .terminal(status) = await transcriptAccess.finalize(
+               reason: .cancelled
+           ),
+           control.retainedTranscriptTerminalStatus == nil
+        {
+            // Only provider-visible transcript failures may replace an ordinary
+            // user interruption. In particular, a repeated Stop observes the
+            // broker's own `.revoked(.cancelled)` terminal and must not turn it
+            // into an invalid-response failure.
+            switch status {
+            case .sessionUnavailable, .contextCannotFit, .rejected:
+                // A terminal broker result may have won immediately before Stop,
+                // while its coordinator signal was still being handed off.
+                control.retainedTranscriptTerminalStatus = status
+                activeInvocationControls[authority.capabilityID] = control
+            case .completed, .revoked:
+                break
+            }
+        }
         switch work {
         case let .provider(_, completion):
             await completion.complete(.stopped)
         case let .backoff(_, completion):
             await completion.complete(.stopped)
-        case .transition, .stopping:
+        case .transition, .reapPending, .stopping:
             break
         }
         work.cancel()
@@ -2335,6 +2896,8 @@ public actor DefaultInvocations: Invocations {
                 )
             case let .terminal(outcome):
                 guard cancellation == .reaped || cancellation == .alreadyAbsent else {
+                    control.work = .reapPending(outcome)
+                    activeInvocationControls[authority.capabilityID] = control
                     return .unableToReap
                 }
                 return await completeStoppedInvocation(
@@ -2358,13 +2921,31 @@ public actor DefaultInvocations: Invocations {
 
         guard cancellation == .reaped || cancellation == .alreadyAbsent else {
             // The process may still exist. Keep the exact current persistence
-            // session and Library liveness lease behind the revoked fence.
+            // session and Library liveness lease behind a state-independent
+            // reap marker. Provider completion, backoff cancellation, or a
+            // next-Attempt transition may already have consumed the old work.
+            control.session = sessionToAbort
+            control.work = .reapPending(nil)
+            activeInvocationControls[authority.capabilityID] = control
             return .unableToReap
         }
 
-        let terminal = await sessionToAbort.abort(
-            failure: .coachResponseInterrupted
+        if case let .reapPending(terminalOutcome?) = work {
+            return await completeStoppedInvocation(
+                stopOutcome(
+                    from: terminalOutcome,
+                    request: request,
+                    fallback: control.fallback
+                ),
+                control: control,
+                authority: authority
+            )
+        }
+
+        let terminalFailure = retainedTerminalFailure(
+            for: control.retainedTranscriptTerminalStatus
         )
+        let terminal = await sessionToAbort.abort(failure: terminalFailure)
         let outcome: InvocationStopOutcome = switch terminal {
         case let .committed(aggregate):
             .interrupted(aggregate)
@@ -2372,14 +2953,14 @@ public actor DefaultInvocations: Invocations {
             if let current,
                current.chat.id == request.chatID,
                current.pendingUserTurn?.id == request.pendingUserTurnID,
-               current.pendingUserTurn?.failure == .coachResponseInterrupted
+               current.pendingUserTurn?.failure == terminalFailure
             {
                 .interrupted(current)
             } else {
                 .persistenceUnavailable(current ?? control.fallback)
             }
         case let .recovered(.eligible(pendingAuthority)):
-            pendingAuthority.pendingUserTurn.failure == .coachResponseInterrupted
+            pendingAuthority.pendingUserTurn.failure == terminalFailure
                 ? .interrupted(pendingAuthority.aggregate)
                 : .persistenceUnavailable(pendingAuthority.aggregate)
         case let .recovered(.ineligible(current)):
@@ -2411,9 +2992,12 @@ public actor DefaultInvocations: Invocations {
             false
         }
         if presentsExactRetry {
+            let diagnostic = retainedTerminalDiagnostic(
+                for: control.retainedTranscriptTerminalStatus
+            )
             await recordRetryDiagnostic(
-                reason: .coachResponseStopped,
-                classification: .interruption,
+                reason: diagnostic.reason,
+                classification: diagnostic.classification,
                 disposition: .userRetryableFailure,
                 invocation: control.session.invocation,
                 context: control.diagnosticContext,
@@ -2449,6 +3033,8 @@ public actor DefaultInvocations: Invocations {
             return .persistenceUnavailable(current)
         case let .published(current, _):
             return .persistenceUnavailable(current)
+        case .providerReapPending:
+            return .unableToReap
         case .operationallyInterrupted, .stopped:
             return .persistenceUnavailable(fallback)
         }
@@ -2504,6 +3090,73 @@ public actor DefaultInvocations: Invocations {
         activeInvocationControls[authority.capabilityID] = control
     }
 
+    private func retainUnreapedProviderControl(
+        runID: UUID,
+        authority: InvocationStopAuthority,
+        transcriptStatus: AttemptTranscriptAccessTerminalStatus
+    ) {
+        guard var control = activeInvocationControls[authority.capabilityID],
+              control.runID == runID,
+              control.authority == authority,
+              !control.isRevoked,
+              case .provider = control.work
+        else { return }
+        // No terminal persistence is allowed while process absence is
+        // uncertain. Keep the exact session and Library lease, but fence every
+        // stale continuation. The same Stop authority may retry exact reaping.
+        control.isRevoked = true
+        control.retainedTranscriptTerminalStatus = transcriptStatus
+        control.work = .reapPending(nil)
+        activeInvocationControls[authority.capabilityID] = control
+    }
+
+    private func recordTranscriptTerminalStatus(
+        _ status: AttemptTranscriptAccessTerminalStatus,
+        runID: UUID,
+        authority: InvocationStopAuthority
+    ) {
+        guard var control = activeInvocationControls[authority.capabilityID],
+              control.runID == runID,
+              control.authority == authority,
+              !control.isRevoked
+        else { return }
+        control.retainedTranscriptTerminalStatus = status
+        activeInvocationControls[authority.capabilityID] = control
+    }
+
+    private func retainedTerminalFailure(
+        for status: AttemptTranscriptAccessTerminalStatus?
+    ) -> PendingUserTurnFailure {
+        switch status {
+        case let .sessionUnavailable(sessions):
+            transcriptReadFailure(sessions: sessions) ?? .coachResponseInvalid
+        case .contextCannotFit:
+            .coachContextCannotFit
+        case .rejected:
+            .coachResponseInvalid
+        case .completed, .revoked, nil:
+            .coachResponseInterrupted
+        }
+    }
+
+    private func retainedTerminalDiagnostic(
+        for status: AttemptTranscriptAccessTerminalStatus?
+    ) -> (
+        reason: InvocationRetryDiagnosticReason,
+        classification: InvocationRetryDiagnosticClassification
+    ) {
+        switch status {
+        case .sessionUnavailable:
+            (.transcriptSessionUnavailable, .transcriptReadFailure)
+        case .contextCannotFit:
+            (.transcriptContextCannotFit, .contextCapacity)
+        case .rejected:
+            (.transcriptAccessProtocolFailure, .invalidProviderResponse)
+        case .completed, .revoked, nil:
+            (.coachResponseStopped, .interruption)
+        }
+    }
+
     private func claimCompletion(
         runID: UUID,
         authority: InvocationStopAuthority
@@ -2546,6 +3199,7 @@ public actor DefaultInvocations: Invocations {
         _ session: any InvocationActivePersistenceSession,
         fallback: ChatAggregate,
         reason: InvocationInterruptionReason,
+        terminalFailure overrideTerminalFailure: PendingUserTurnFailure? = nil,
         publication: PublicationRecoveryIntent? = nil
     ) async -> InvocationTryOutcome {
         let invocation = session.invocation
@@ -2558,12 +3212,17 @@ public actor DefaultInvocations: Invocations {
             if case let .published(outcome) = resolution { return outcome }
             publicationRecovery = resolution
         }
-        let terminalFailure: PendingUserTurnFailure = switch reason {
-        case .providerFailed: .coachProviderError
-        case .invalidProviderResponse: .coachResponseInvalid
-        case .retryInfrastructureFailed, .publicationConflict,
-             .persistenceUnavailable:
-            .coachResponseInterrupted
+        let terminalFailure: PendingUserTurnFailure
+        if let overrideTerminalFailure {
+            terminalFailure = overrideTerminalFailure
+        } else {
+            terminalFailure = switch reason {
+            case .providerFailed: .coachProviderError
+            case .invalidProviderResponse: .coachResponseInvalid
+            case .retryInfrastructureFailed, .publicationConflict,
+                 .persistenceUnavailable:
+                .coachResponseInterrupted
+            }
         }
         return switch await session.abort(failure: terminalFailure) {
         case let .committed(aggregate):
@@ -2602,7 +3261,8 @@ public actor DefaultInvocations: Invocations {
         diagnosticReason: InvocationRetryDiagnosticReason,
         classification: InvocationRetryDiagnosticClassification,
         prepared: PreparedCoachLaunchContext,
-        startedAt: UInt64
+        startedAt: UInt64,
+        terminalFailure: PendingUserTurnFailure? = nil
     ) async -> InvocationTryOutcome {
         let invocation = session.invocation
         let context = diagnosticContext(for: prepared)
@@ -2610,7 +3270,8 @@ public actor DefaultInvocations: Invocations {
         let outcome = await interruptAndAbort(
             session,
             fallback: fallback,
-            reason: reason
+            reason: reason,
+            terminalFailure: terminalFailure
         )
         guard presentsUserRetry(
             outcome,
@@ -2670,7 +3331,8 @@ public actor DefaultInvocations: Invocations {
                 current?.pendingUserTurn?.failure != nil
         case let .operationallyInterrupted(_, retryRequest, _):
             return retryRequest == request
-        case .published, .contextCapacityFailure, .rejected, .stopped:
+        case .published, .contextCapacityFailure, .rejected, .stopped,
+             .providerReapPending:
             return false
         }
     }

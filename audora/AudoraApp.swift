@@ -90,6 +90,9 @@ struct AudoraApp: App {
             persistence: chatPersistence,
             workspace: workspace
         )
+        let attachmentEvidenceSource = PortableChatSessionAttachmentSource(
+            workspace: workspace
+        )
         let invocations = DefaultInvocations(
             persistence: PortableInvocationStore(
                 persistence: chatPersistence,
@@ -98,7 +101,12 @@ struct AudoraApp: App {
             admission: MachineInvocationAdmissionFactory.live(),
             clock: SystemLibraryClock(),
             identities: RandomInvocationIdentityGenerator(),
-            retryDiagnostics: retryDiagnostics
+            retryDiagnostics: retryDiagnostics,
+            transcriptAvailability:
+                PortableAttemptTranscriptAvailabilitySource.make(
+                    workspace: workspace,
+                    persistence: chatPersistence
+                )
         )
         let chatFeature = DefaultChatFeature(
             store: chatStore,
@@ -113,8 +121,7 @@ struct AudoraApp: App {
             responsePositionIDGenerator: chatIdentityGenerator,
             admissionRefreshScheduler: SystemChatAdmissionRefreshScheduler(),
             invocations: invocations,
-            attachmentEvidenceSource:
-                PortableChatSessionAttachmentSource(workspace: workspace)
+            attachmentEvidenceSource: attachmentEvidenceSource
         )
         let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,

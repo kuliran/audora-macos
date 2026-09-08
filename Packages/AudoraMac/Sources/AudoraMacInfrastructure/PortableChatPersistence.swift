@@ -1285,6 +1285,62 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
+    /// Reads the immutable attachment authority for one active Attempt without
+    /// waiting behind a local writer. The caller owns bounded retry and treats
+    /// `nil` as transient lock contention.
+    func loadForAttemptTranscriptAvailability(
+        _ chatID: ChatID,
+        at libraryRoot: URL,
+        in scope: LibraryScope
+    ) throws -> LoadedPortableChat? {
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        guard try acquireSharedMutationLockNonblocking(on: stagingDescriptor)
+        else { return nil }
+        defer { releaseMutationLock(on: stagingDescriptor) }
+
+        let publicationProof = try publicationProofLookup(
+            expectedLibraryID: scope.libraryID,
+            under: rootDescriptor
+        )
+        if let snapshot = publicationProof.frozenSnapshots[chatID] {
+            return .frozen(snapshot)
+        }
+        let chatsDescriptor = try openDirectory(named: "chats", under: rootDescriptor)
+        defer { Darwin.close(chatsDescriptor) }
+        guard try entryExists(named: chatID.rawValue, under: chatsDescriptor) else {
+            throw PortableChatPersistenceError.chatMissing
+        }
+        let chatDescriptor = try openDirectory(
+            named: chatID.rawValue,
+            under: chatsDescriptor
+        )
+        defer { Darwin.close(chatDescriptor) }
+        guard try acquireSharedMutationLockNonblocking(on: chatDescriptor)
+        else { return nil }
+        defer { releaseMutationLock(on: chatDescriptor) }
+        do {
+            return try loadChat(
+                from: chatDescriptor,
+                expectedID: chatID,
+                reconcileTransients: false,
+                publicationProofAuthority: publicationProof.authority(for: chatID)
+            )
+        } catch let error as PortableChatPersistenceError {
+            guard let frozen = frozenChatSnapshot(for: error, chatID: chatID) else {
+                throw error
+            }
+            return .frozen(frozen)
+        } catch {
+            return .frozen(FrozenChatSnapshot(chatID: chatID, reason: .corrupt))
+        }
+    }
+
     func create(
         _ seed: NewChatSeed,
         at libraryRoot: URL
@@ -4804,7 +4860,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 draftId: pending.draftID.rawValue,
                 draftVersion: pending.draftVersion,
                 responsePositionId: pending.responsePositionID.rawValue,
-                failure: pending.failure?.rawValue
+                failure: pending.failure?.rawValue,
+                transcriptReadFailure: pending.failure?.transcriptReadFailureSummary
+                    .map(PortableCoachTranscriptReadFailureSummaryDTO.init)
             )
         )
     }
@@ -5139,6 +5197,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             }
             guard pendingVersion == 1 ||
                 pendingVersion == 2 ||
+                pendingVersion == 3 ||
                 pendingVersion == UInt64(PendingUserTurn.schemaVersion)
             else {
                 throw PortableChatPersistenceError.unsupportedOlderSchema
@@ -5495,6 +5554,15 @@ public struct PortableChatPersistence: @unchecked Sendable {
             throw PortableChatPersistenceError.invalidLayout
         }
         let terminalFailure = invocation.terminalFailure ?? .coachResponseInterrupted
+        if let summary = terminalFailure.transcriptReadFailureSummary {
+            let attachmentIDs = Set(chat.attachments.values.map(\.attachmentID))
+            guard summary.sessions.allSatisfy({
+                attachmentIDs.contains($0.sessionAttachmentID)
+            }),
+                summary.sessions.count + Int(summary.additionalSessionCount) <=
+                attachmentIDs.count
+            else { throw PortableChatPersistenceError.invalidLayout }
+        }
         let terminal = pending.replacingFailure(terminalFailure)
         if terminal != pending {
             let partialName = ".pending-user-turn.json.\(UUID().uuidString.lowercased()).partial"
@@ -5547,6 +5615,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
         guard let pending = current.pendingUserTurn else {
             throw PortableChatPersistenceError.invalidLayout
         }
+        guard (try? invocation.validateIntent(against: current)) != nil else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
         let terminalFailure = invocation.terminalFailure ?? failure
         if pending.failure != terminalFailure {
             let replacement = pending.replacingFailure(terminalFailure)
@@ -5583,8 +5654,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             try fault(.afterInvocationAbortPendingFailureInstall)
         }
         try beforeCommitting()
-        guard (try? invocation.validateIntent(against: current)) != nil,
-              try listEntryNames(under: invocationRoot, maximumCount: 4) ==
+        guard try listEntryNames(under: invocationRoot, maximumCount: 4) ==
               ["invocation.json"],
               !(try entryExists(named: "aborting-invocation.json", under: chatDescriptor)),
               renameat(
@@ -6965,22 +7035,46 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     private func decodePendingUserTurn(_ data: Data) throws -> PendingUserTurn {
         let dictionary = try jsonDictionary(data)
+        let dto: PendingUserTurnDTO = try decode(PendingUserTurnDTO.self, data)
         let requiredKeys: Set<String> = [
             "schemaVersion", "pendingUserTurnId", "draftId", "draftVersion",
             "responsePositionId",
         ]
         let actualKeys = Set(dictionary.keys)
-        guard actualKeys == requiredKeys || actualKeys == requiredKeys.union(["failure"])
-        else {
-            throw PortableChatPersistenceError.unknownKey
+        let allowedOptionalKeys: Set<String>
+        switch dto.schemaVersion {
+        case 1, 2, 3:
+            allowedOptionalKeys = ["failure"]
+        case PendingUserTurn.schemaVersion:
+            allowedOptionalKeys = ["failure", "transcriptReadFailure"]
+        default:
+            throw PortableChatPersistenceError.invalidSchemaVersion
         }
+        guard actualKeys.isSuperset(of: requiredKeys),
+              actualKeys.subtracting(requiredKeys).isSubset(of: allowedOptionalKeys)
+        else { throw PortableChatPersistenceError.unknownKey }
         if actualKeys.contains("failure"), dictionary["failure"] is NSNull {
             throw PortableChatPersistenceError.invalidJSON
         }
-        let dto: PendingUserTurnDTO = try decode(PendingUserTurnDTO.self, data)
+        if actualKeys.contains("transcriptReadFailure") {
+            guard dto.schemaVersion == PendingUserTurn.schemaVersion,
+                  let summary = dictionary["transcriptReadFailure"]
+                    as? [String: Any]
+            else { throw PortableChatPersistenceError.invalidJSON }
+            try requireExactKeys(summary, ["sessions", "additionalSessionCount"])
+            guard let sessions = summary["sessions"] as? [[String: Any]] else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            for session in sessions {
+                try requireExactKeys(session, ["sessionAttachmentId", "displayLabel"])
+            }
+        }
         let failure: PendingUserTurnFailure?
         switch dto.schemaVersion {
         case 1:
+            guard dto.transcriptReadFailure == nil else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
             switch dto.failure {
             case nil: failure = nil
             case PendingUserTurnFailure.coachContextCannotFit.rawValue:
@@ -6989,6 +7083,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 throw PortableChatPersistenceError.invalidJSON
             }
         case 2:
+            guard dto.transcriptReadFailure == nil else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
             switch dto.failure {
             case nil: failure = nil
             case PendingUserTurnFailure.coachContextCannotFit.rawValue:
@@ -6998,7 +7095,10 @@ public struct PortableChatPersistence: @unchecked Sendable {
             case .some:
                 throw PortableChatPersistenceError.invalidJSON
             }
-        case PendingUserTurn.schemaVersion:
+        case 3:
+            guard dto.transcriptReadFailure == nil else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
             if let rawFailure = dto.failure {
                 guard let parsed = PendingUserTurnFailure(rawValue: rawFailure) else {
                     throw PortableChatPersistenceError.invalidJSON
@@ -7007,8 +7107,27 @@ public struct PortableChatPersistence: @unchecked Sendable {
             } else {
                 failure = nil
             }
+        case PendingUserTurn.schemaVersion:
+            if dto.failure == "coachTranscriptReadFailed" {
+                guard let summary = try dto.transcriptReadFailure?.domainValue() else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                failure = .coachTranscriptReadFailed(summary)
+            } else {
+                guard dto.transcriptReadFailure == nil else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                if let rawFailure = dto.failure {
+                    guard let parsed = PendingUserTurnFailure(rawValue: rawFailure) else {
+                        throw PortableChatPersistenceError.invalidJSON
+                    }
+                    failure = parsed
+                } else {
+                    failure = nil
+                }
+            }
         default:
-            throw PortableChatPersistenceError.invalidSchemaVersion
+            preconditionFailure("schema version was validated above")
         }
         return PendingUserTurn(
             id: try PendingUserTurnID(dto.pendingUserTurnId),
@@ -7459,6 +7578,17 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
+    private func acquireSharedMutationLockNonblocking(
+        on descriptor: Int32
+    ) throws -> Bool {
+        try Task.checkCancellation()
+        guard audoraFlock(descriptor, LOCK_SH | LOCK_NB) != 0 else { return true }
+        if errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR {
+            return false
+        }
+        throw PortableChatPersistenceError.ioFailure
+    }
+
     private func releaseMutationLock(on descriptor: Int32) {
         _ = audoraFlock(descriptor, LOCK_UN)
     }
@@ -7823,6 +7953,7 @@ private struct PendingUserTurnDTO: Codable {
     let draftVersion: UInt64
     let responsePositionId: String
     let failure: String?
+    let transcriptReadFailure: PortableCoachTranscriptReadFailureSummaryDTO?
 }
 
 private struct ChatMessageDTO: Codable {

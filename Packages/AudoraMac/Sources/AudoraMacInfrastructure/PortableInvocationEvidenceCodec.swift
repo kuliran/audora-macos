@@ -142,17 +142,18 @@ struct PortableInvocationEvidenceCodec {
     }
 
     func encodeInvocation(_ invocation: CoachInvocation) throws -> Data {
-        try boundedDeterministicJSON(CoachInvocationDTO(
+        let usesAttemptSequence = invocation.persistedSchemaVersion >=
+            CoachInvocation.attemptSequenceSchemaVersion
+        return try boundedDeterministicJSON(CoachInvocationDTO(
             schemaVersion: invocation.persistedSchemaVersion,
             invocationId: invocation.id.rawValue,
-            attemptId: invocation.persistedSchemaVersion < CoachInvocation.schemaVersion
-                ? invocation.attemptID.rawValue
-                : nil,
-            providerIdempotencyValue: invocation.persistedSchemaVersion <
-                CoachInvocation.schemaVersion
-                ? invocation.providerIdempotencyValue?.rawValue
-                : nil,
-            attempts: invocation.persistedSchemaVersion == CoachInvocation.schemaVersion
+            attemptId: usesAttemptSequence
+                ? nil
+                : invocation.attemptID.rawValue,
+            providerIdempotencyValue: usesAttemptSequence
+                ? nil
+                : invocation.providerIdempotencyValue?.rawValue,
+            attempts: usesAttemptSequence
                 ? invocation.attempts.map(CoachProviderAttemptDTO.init)
                 : nil,
             libraryId: invocation.libraryID.rawValue,
@@ -165,7 +166,10 @@ struct PortableInvocationEvidenceCodec {
             profileRevisionId: invocation.preparedProfile?.revisionID?.rawValue,
             profileStatementGeneration: invocation.preparedProfile?.statementGeneration,
             admittedAt: invocation.admittedAt.rawValue,
-            terminalFailure: invocation.terminalFailure?.rawValue
+            terminalFailure: invocation.terminalFailure?.rawValue,
+            transcriptReadFailure: invocation.terminalFailure?
+                .transcriptReadFailureSummary
+                .map(PortableCoachTranscriptReadFailureSummaryDTO.init)
         ))
     }
 
@@ -271,7 +275,7 @@ struct PortableInvocationEvidenceCodec {
             {
                 throw PortableChatPersistenceError.invalidJSON
             }
-        } else {
+        } else if dto.schemaVersion == CoachInvocation.attemptSequenceSchemaVersion {
             let v3 = common.union(["attempts", "profileStatementGeneration"])
             let actualKeys = Set(dictionary.keys)
             let allowedOptional: Set<String> = [
@@ -300,6 +304,48 @@ struct PortableInvocationEvidenceCodec {
                     "userMessageId", "coachMessageId", "freshDraftId",
                 ])
             }
+        } else {
+            let v4 = common.union(["attempts", "profileStatementGeneration"])
+            let actualKeys = Set(dictionary.keys)
+            let allowedOptional: Set<String> = [
+                "profileRevisionId", "terminalFailure", "transcriptReadFailure",
+            ]
+            guard actualKeys.isSuperset(of: v4),
+                  actualKeys.subtracting(v4).isSubset(of: allowedOptional)
+            else { throw PortableChatPersistenceError.unknownKey }
+            for optionalKey in allowedOptional where actualKeys.contains(optionalKey) {
+                if dictionary[optionalKey] is NSNull {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+            }
+            guard let rawAttempts = dictionary["attempts"] as? [[String: Any]],
+                  !rawAttempts.isEmpty,
+                  rawAttempts.count <= Int(CoachProviderAttempt.maximumOrdinal)
+            else { throw PortableChatPersistenceError.invalidJSON }
+            for rawAttempt in rawAttempts {
+                try json.requireExactKeys(rawAttempt, [
+                    "attemptId", "ordinal", "kind",
+                    "userMessageId", "coachMessageId", "freshDraftId",
+                ])
+            }
+            if actualKeys.contains("transcriptReadFailure") {
+                guard let summary = dictionary["transcriptReadFailure"]
+                    as? [String: Any]
+                else { throw PortableChatPersistenceError.invalidJSON }
+                try json.requireExactKeys(
+                    summary,
+                    ["sessions", "additionalSessionCount"]
+                )
+                guard let sessions = summary["sessions"] as? [[String: Any]] else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                for session in sessions {
+                    try json.requireExactKeys(
+                        session,
+                        ["sessionAttachmentId", "displayLabel"]
+                    )
+                }
+            }
         }
         return try mapPersistedDomainValidation {
             let pending = PendingUserTurn(
@@ -324,7 +370,7 @@ struct PortableInvocationEvidenceCodec {
                 )
             }
             let attempts: [CoachProviderAttempt]
-            if dto.schemaVersion == CoachInvocation.schemaVersion {
+            if dto.schemaVersion >= CoachInvocation.attemptSequenceSchemaVersion {
                 guard dto.attemptId == nil,
                       dto.providerIdempotencyValue == nil,
                       let attemptDTOs = dto.attempts
@@ -342,6 +388,23 @@ struct PortableInvocationEvidenceCodec {
                     )
                 )]
             }
+            let terminalFailure: PendingUserTurnFailure?
+            if dto.terminalFailure == "coachTranscriptReadFailed" {
+                guard dto.schemaVersion == CoachInvocation.schemaVersion,
+                      let summary = try dto.transcriptReadFailure?.domainValue()
+                else { throw PortableChatPersistenceError.invalidJSON }
+                terminalFailure = .coachTranscriptReadFailed(summary)
+            } else {
+                guard dto.transcriptReadFailure == nil else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                terminalFailure = try dto.terminalFailure.map { rawValue in
+                    guard let failure = PendingUserTurnFailure(rawValue: rawValue) else {
+                        throw PortableChatPersistenceError.invalidJSON
+                    }
+                    return failure
+                }
+            }
             return try CoachInvocation(
                 schemaVersion: dto.schemaVersion,
                 id: try CoachInvocationID(dto.invocationId),
@@ -352,12 +415,7 @@ struct PortableInvocationEvidenceCodec {
                 preparedProfile: preparedProfile,
                 expectedManifestRevision: dto.expectedManifestRevision,
                 admittedAt: UTCInstant(dto.admittedAt),
-                terminalFailure: try dto.terminalFailure.map { rawValue in
-                    guard let failure = PendingUserTurnFailure(rawValue: rawValue) else {
-                        throw PortableChatPersistenceError.invalidJSON
-                    }
-                    return failure
-                }
+                terminalFailure: terminalFailure
             )
         }
     }
@@ -479,7 +537,7 @@ struct PortableInvocationEvidenceCodec {
             // authority. Its proof remains bound by the exact Chat, Pending,
             // message hashes/order, fresh Draft, and Profile checks below.
             hasVersionSpecificAuthority = invocation.preparedProfile != nil
-        case CoachInvocation.schemaVersion:
+        case CoachInvocation.attemptSequenceSchemaVersion ... CoachInvocation.schemaVersion:
             hasVersionSpecificAuthority = invocation.preparedProfile != nil &&
                 invocation.attempt.userMessageID == proof.userMessageID &&
                 invocation.attempt.coachMessageID == proof.coachMessageID &&
@@ -551,7 +609,8 @@ struct PortableInvocationEvidenceCodec {
                   pending.draftID == invocation.draftID,
                   pending.draftVersion == invocation.draftVersion,
                   pending.responsePositionID == invocation.responsePositionID,
-                  invocation.persistedSchemaVersion < CoachInvocation.schemaVersion ||
+                  invocation.persistedSchemaVersion <
+                  CoachInvocation.attemptSequenceSchemaVersion ||
                   pending.failure == nil
             else { return false }
         } else if evidence.pendingUserTurn != nil {
@@ -1213,6 +1272,7 @@ private struct CoachInvocationDTO: Codable {
     let profileStatementGeneration: UInt64?
     let admittedAt: String
     let terminalFailure: String?
+    let transcriptReadFailure: PortableCoachTranscriptReadFailureSummaryDTO?
 }
 
 private struct CoachInvocationCommonIdentityDTO: Decodable {

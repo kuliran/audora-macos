@@ -39,6 +39,167 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    func testTranscriptFailureCardResolvesOnlyCurrentChatAttachments() throws {
+        let firstAttachmentID = try ChatSessionAttachmentID("attachment-1")
+        let secondAttachmentID = try ChatSessionAttachmentID("attachment-2")
+        let otherAttachmentID = try ChatSessionAttachmentID("attachment-other")
+        let firstSessionID = try SessionID("ses-20260830T120000000Z-1ABC")
+        let attachments = try ChatAttachments(
+            validating: [
+                ChatSessionAttachment(
+                    attachmentID: firstAttachmentID,
+                    sessionID: firstSessionID,
+                    transcriptRevisionID: try TranscriptRevisionID(
+                        "trv-20260830T120000000Z-2DEF"
+                    )
+                ),
+                ChatSessionAttachment(
+                    attachmentID: otherAttachmentID,
+                    sessionID: try SessionID(
+                        "ses-20260830T120000000Z-3GHJ"
+                    ),
+                    transcriptRevisionID: try TranscriptRevisionID(
+                        "trv-20260830T120000000Z-4JKM"
+                    )
+                ),
+            ]
+        )
+        let failure = PendingUserTurnFailure.coachTranscriptReadFailed(
+            try CoachTranscriptReadFailureSummary(
+                sessions: [
+                    CoachTranscriptReadFailureSession(
+                        sessionAttachmentID: firstAttachmentID,
+                        displayLabel: "Opening practice"
+                    ),
+                    CoachTranscriptReadFailureSession(
+                        sessionAttachmentID: secondAttachmentID,
+                        displayLabel: "Weekly review"
+                    ),
+                ],
+                additionalSessionCount: 0
+            )
+        )
+
+        XCTAssertEqual(
+            CoachResponseFailurePresentation.card(
+                for: failure,
+                attachments: attachments
+            ),
+            CoachResponseFailureCardPresentation(
+                heading: "Some Sessions couldn't be read",
+                body: "The Coach stopped before publishing anything. Open the affected Sessions, then Retry.",
+                sessionLinks: [
+                    CoachResponseFailureSessionLinkPresentation(
+                        attachmentID: firstAttachmentID,
+                        displayLabel: "Opening practice",
+                        sessionID: firstSessionID
+                    ),
+                ],
+                additionalSessionCount: 0
+            )
+        )
+    }
+
+    func testTranscriptFailureSessionLinkRoutesToProcessingAndReview() throws {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T120000000Z-1ABC")
+        )
+        let attachmentID = try ChatSessionAttachmentID("attachment-1")
+        let sessionID = try SessionID("ses-20260830T120000000Z-2DEF")
+        let attachments = try ChatAttachments(
+            validating: [
+                ChatSessionAttachment(
+                    attachmentID: attachmentID,
+                    sessionID: sessionID,
+                    transcriptRevisionID: try TranscriptRevisionID(
+                        "trv-20260830T120000000Z-3GHJ"
+                    )
+                ),
+            ]
+        )
+        let summary = try CoachTranscriptReadFailureSummary(
+            sessions: [
+                CoachTranscriptReadFailureSession(
+                    sessionAttachmentID: attachmentID,
+                    displayLabel: "Opening practice"
+                ),
+            ],
+            additionalSessionCount: 0
+        )
+        let link = try XCTUnwrap(
+            CoachResponseFailurePresentation.card(
+                for: .coachTranscriptReadFailed(summary),
+                attachments: attachments
+            ).sessionLinks.first
+        )
+        var processingSelections: [SessionProcessingSelection] = []
+        var reviewSelections: [ReviewSelection] = []
+        let routing = LibrarySessionLinkRouting(
+            scope: scope,
+            selectProcessing: { processingSelections.append($0) },
+            selectReview: { reviewSelections.append($0) }
+        )
+        let renderedLink = CoachResponseFailureSessionLinkView(
+            link: link,
+            onOpenSession: routing.openSession
+        )
+
+        renderedLink.openSession()
+
+        XCTAssertEqual(
+            processingSelections,
+            [SessionProcessingSelection(scope: scope, sessionID: sessionID)]
+        )
+        XCTAssertEqual(
+            reviewSelections,
+            [ReviewSelection(scope: scope, sessionID: sessionID)]
+        )
+    }
+
+    func testTranscriptFailureCardBoundsLinksAndSummarizesAdditionalSessions()
+        throws
+    {
+        let attachmentIDs = try (1 ... 3).map {
+            try ChatSessionAttachmentID("attachment-\($0)")
+        }
+        let sessionIDs = try (1 ... 3).map {
+            try SessionID("ses-20260830T120000000Z-\($0)ABC")
+        }
+        let attachments = try ChatAttachments(
+            validating: try zip(attachmentIDs, sessionIDs).enumerated().map {
+                index, pair in
+                ChatSessionAttachment(
+                    attachmentID: pair.0,
+                    sessionID: pair.1,
+                    transcriptRevisionID: try TranscriptRevisionID(
+                        "trv-20260830T120000000Z-\(index + 1)DEF"
+                    )
+                )
+            }
+        )
+        let summary = try CoachTranscriptReadFailureSummary(
+            sessions: try attachmentIDs.enumerated().map { index, attachmentID in
+                try CoachTranscriptReadFailureSession(
+                    sessionAttachmentID: attachmentID,
+                    displayLabel: "Session \(index + 1)"
+                )
+            },
+            additionalSessionCount: 2
+        )
+
+        let card = CoachResponseFailurePresentation.card(
+            for: .coachTranscriptReadFailed(summary),
+            attachments: attachments
+        )
+
+        XCTAssertEqual(card.sessionLinks.count, 3)
+        XCTAssertEqual(card.sessionLinks.map(\.displayLabel), [
+            "Session 1", "Session 2", "Session 3",
+        ])
+        XCTAssertEqual(card.sessionLinks.map(\.sessionID), sessionIDs)
+        XCTAssertEqual(card.additionalSessionCount, 2)
+    }
+
     func testRetryableCoachFailureActionsUseCauseNeutralAccessibilityLabels() {
         for failure in [
             PendingUserTurnFailure.coachProviderError,
@@ -159,7 +320,7 @@ final class ChatPresentationModelTests: XCTestCase {
         )
         XCTAssertEqual(stoppingPresentation, .stopping)
         XCTAssertFalse(stoppingPresentation.showsAdmissionUnavailableReason)
-        XCTAssertEqual(stoppingPresentation.recoveryActions, [])
+        XCTAssertEqual(stoppingPresentation.recoveryActions, [.stopCoachResponse])
 
         let duringApplicationBoundary = CoachResponseStopInteractionPresentation(
             admissionState: ApplicationCommandAdmissionState(
@@ -179,7 +340,7 @@ final class ChatPresentationModelTests: XCTestCase {
                 chatState: state
             ).isEnabled
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             CoachResponseStopInteractionPresentation(
                 admissionState: .idle,
                 chatState: ChatFeatureState(

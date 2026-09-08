@@ -9,6 +9,9 @@ namespace Audora.Contracts {
   model CoachRequest {
     profile: ProfileContext;
     conversation: ConversationContext;
+
+    @uniqueItems
+    @maxItems(128)
     sessionAttachments: SessionAttachment[];
   }
 
@@ -217,7 +220,9 @@ namespace Audora.Contracts {
   @jsonSchema
   @id("ReadSessionTranscriptsRequest.json")
   model ReadSessionTranscriptsRequest {
+    @uniqueItems
     @minItems(1)
+    @maxItems(128)
     sessionTranscriptHandles: SessionTranscriptHandle[];
   }
 
@@ -234,14 +239,18 @@ namespace Audora.Contracts {
   model ReadSessionTranscriptsResponseComplete {
     kind: "complete";
 
+    @uniqueItems
     @minItems(1)
+    @maxItems(128)
     transcripts: SessionTranscriptDisclosure[];
   }
 
   model ReadSessionTranscriptsResponseSessionUnavailable {
     kind: "sessionUnavailable";
 
+    @uniqueItems
     @minItems(1)
+    @maxItems(128)
     unavailableSessionTranscriptHandles: SessionTranscriptHandle[];
   }
 
