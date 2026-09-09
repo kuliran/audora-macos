@@ -1,0 +1,405 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/ProfileChangeProposal.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "proposalId": {
+            "$ref": "#/$defs/ProfileChangeProposalId"
+        },
+        "chatId": {
+            "$ref": "#/$defs/ChatId"
+        },
+        "responsePositionId": {
+            "$ref": "#/$defs/ChatResponsePositionId"
+        },
+        "baseProfile": {
+            "$ref": "#/$defs/ProfileProposalBase"
+        },
+        "changes": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/ProfileProposalChange"
+            },
+            "minItems": 1
+        },
+        "evidenceAppends": {
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/ProfileProposalEvidenceAppend"
+            },
+            "minItems": 1,
+            "description": "Standalone appends retained only when semantic changes make the proposal reviewed."
+        },
+        "createdAt": {
+            "$ref": "#/$defs/UTCInstant"
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "proposalId",
+        "chatId",
+        "responsePositionId",
+        "baseProfile",
+        "changes",
+        "createdAt"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "One validated semantic-or-mixed Profile proposal awaiting Speaker review.",
+    "$defs": {
+        "ProfileChangeProposalId": {
+            "type": "string",
+            "pattern": "^prp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ChatId": {
+            "type": "string",
+            "pattern": "^cht-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ChatResponsePositionId": {
+            "type": "string",
+            "pattern": "^rsp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ProfileProposalBase": {
+            "type": "object",
+            "properties": {
+                "revisionId": {
+                    "$ref": "#/$defs/ProfileRevisionId"
+                },
+                "statementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                }
+            },
+            "required": [
+                "statementGeneration"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ProfileProposalChange": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/ProfileProposalAdd"
+                },
+                {
+                    "$ref": "#/$defs/ProfileProposalReplace"
+                },
+                {
+                    "$ref": "#/$defs/ProfileProposalRetire"
+                }
+            ]
+        },
+        "ProfileProposalEvidenceAppend": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "$ref": "#/$defs/ProfileProposalTarget"
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/PersistedEvidenceReference"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "target",
+                "evidence"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "UTCInstant": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        },
+        "ProfileRevisionId": {
+            "type": "string",
+            "pattern": "^prf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "ProfileProposalAdd": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "add"
+                },
+                "statement": {
+                    "$ref": "#/$defs/ProfileProposedStatement"
+                }
+            },
+            "required": [
+                "kind",
+                "statement"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ProfileProposalReplace": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "replace"
+                },
+                "target": {
+                    "$ref": "#/$defs/ProfileProposalTarget"
+                },
+                "replacement": {
+                    "$ref": "#/$defs/ProfileProposedStatement"
+                }
+            },
+            "required": [
+                "kind",
+                "target",
+                "replacement"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ProfileProposalRetire": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "retire"
+                },
+                "target": {
+                    "$ref": "#/$defs/ProfileProposalTarget"
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/PersistedEvidenceReference"
+                    },
+                    "description": "Ordered evidence basis retained for Reconsider; it may be empty."
+                }
+            },
+            "required": [
+                "kind",
+                "target",
+                "evidence"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ProfileProposalTarget": {
+            "type": "object",
+            "properties": {
+                "statementId": {
+                    "$ref": "#/$defs/ProfileStatementId"
+                },
+                "statementKind": {
+                    "$ref": "#/$defs/ProfileStatementKind"
+                },
+                "wording": {
+                    "$ref": "#/$defs/NonEmptyText"
+                }
+            },
+            "required": [
+                "statementId",
+                "statementKind",
+                "wording"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedEvidenceReference": {
+            "type": "object",
+            "properties": {
+                "sessionId": {
+                    "$ref": "#/$defs/SessionId"
+                },
+                "transcriptRevisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId"
+                },
+                "target": {
+                    "$ref": "#/$defs/PersistedEvidenceReferenceTarget"
+                },
+                "display": {
+                    "$ref": "#/$defs/PersistedEvidenceReferenceDisplay"
+                }
+            },
+            "required": [
+                "sessionId",
+                "transcriptRevisionId",
+                "target",
+                "display"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ProfileProposedStatement": {
+            "type": "object",
+            "properties": {
+                "statementId": {
+                    "$ref": "#/$defs/ProfileStatementId",
+                    "description": "Allocated by Application, never by the coach."
+                },
+                "statementKind": {
+                    "$ref": "#/$defs/ProfileStatementKind"
+                },
+                "wording": {
+                    "$ref": "#/$defs/NonEmptyText"
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/PersistedEvidenceReference"
+                    }
+                }
+            },
+            "required": [
+                "statementId",
+                "statementKind",
+                "wording",
+                "evidence"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ProfileStatementId": {
+            "type": "string",
+            "pattern": "^stm-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ProfileStatementKind": {
+            "type": "string",
+            "enum": [
+                "goal",
+                "coachingPreference",
+                "selfAssessment",
+                "speakingObservation",
+                "growthDirection"
+            ]
+        },
+        "NonEmptyText": {
+            "type": "string",
+            "minLength": 1
+        },
+        "SessionId": {
+            "type": "string",
+            "pattern": "^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "TranscriptRevisionId": {
+            "type": "string",
+            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "PersistedEvidenceReferenceTarget": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/PersistedEvidenceWordRange"
+                },
+                {
+                    "$ref": "#/$defs/PersistedEvidenceAudioEvent"
+                }
+            ]
+        },
+        "PersistedEvidenceReferenceDisplay": {
+            "type": "object",
+            "properties": {
+                "sessionLabel": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                },
+                "trustedText": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16384
+                },
+                "startMs": {
+                    "$ref": "#/$defs/PersistedEvidenceStartMilliseconds"
+                },
+                "endMs": {
+                    "$ref": "#/$defs/PersistedEvidenceEndMilliseconds"
+                }
+            },
+            "required": [
+                "sessionLabel",
+                "trustedText",
+                "startMs",
+                "endMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedEvidenceWordRange": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "wordRange"
+                },
+                "startWordId": {
+                    "$ref": "#/$defs/TranscriptWordId"
+                },
+                "endWordId": {
+                    "$ref": "#/$defs/TranscriptWordId"
+                }
+            },
+            "required": [
+                "kind",
+                "startWordId",
+                "endWordId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedEvidenceAudioEvent": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "audioEvent"
+                },
+                "audioEventId": {
+                    "$ref": "#/$defs/TranscriptAudioEventId"
+                }
+            },
+            "required": [
+                "kind",
+                "audioEventId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedEvidenceStartMilliseconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2700000
+        },
+        "PersistedEvidenceEndMilliseconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2700000
+        },
+        "TranscriptWordId": {
+            "type": "string",
+            "pattern": "^w[0-9]{6}$"
+        },
+        "TranscriptAudioEventId": {
+            "type": "string",
+            "pattern": "^a[0-9]{6}$"
+        }
+    }
+}

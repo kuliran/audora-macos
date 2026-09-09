@@ -3500,6 +3500,233 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(state.notice, .staleRename)
     }
 
+    func testOpenProfileProposalBlocksDraftEditingAndCoachSend() async throws {
+        let aggregate = try Self.aggregateWithProfileProposal(
+            draftText: "Do not send while this decision is unresolved."
+        )
+        let store = RecordingChatStore(catalog: [.available(aggregate)])
+        let invocations = RecordingInterruptedInvocationGateway()
+        let feature = makeFeature(store: store, invocations: invocations)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        let opened = await feature.currentState
+        XCTAssertFalse(ChatInteractionPolicy.allowsComposerEditing(in: opened))
+        XCTAssertFalse(ChatInteractionPolicy.allowsCoachInvocation(in: opened))
+
+        await feature.send(
+            .editDraft(
+                Self.context,
+                aggregate.chat.id,
+                aggregate.chat.draft.draftID,
+                text: "This edit must be ignored."
+            )
+        )
+        await feature.send(
+            .sendDraft(Self.context, aggregate.chat.id, aggregate.chat.draft)
+        )
+
+        let terminal = await feature.currentState
+        let savedDraftCount = await store.savedDrafts.count
+        let preparationCount = await invocations.preparations.count
+        let invocationCount = await invocations.requests.count
+        XCTAssertEqual(Self.openAggregate(in: terminal), aggregate)
+        XCTAssertEqual(terminal.composer, .editable(aggregate.chat.draft, isDirty: false))
+        XCTAssertEqual(savedDraftCount, 0)
+        XCTAssertEqual(preparationCount, 0)
+        XCTAssertEqual(invocationCount, 0)
+    }
+
+    func testAcceptProfileProposalDispatchesOnceAndInstallsResolvedAggregate()
+        async throws
+    {
+        let aggregate = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(aggregate.profileProposal)
+        let resolved = try Self.resolvingProfileProposal(in: aggregate)
+        let coordinator = RecordingProfileProposalCoordinator(
+            acceptOutcomes: [.committed(resolved)]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        await feature.send(.acceptProfileProposal(Self.context, proposal.id))
+
+        let mutations = await coordinator.acceptMutations
+        XCTAssertEqual(mutations.count, 1)
+        XCTAssertEqual(mutations.first?.library, Self.scope)
+        XCTAssertEqual(mutations.first?.base, aggregate)
+        XCTAssertEqual(mutations.first?.proposalID, proposal.id)
+        XCTAssertEqual(
+            mutations.first?.acceptedAt,
+            try UTCInstant("2026-08-30T12:00:00.000Z")
+        )
+        XCTAssertEqual(
+            mutations.first?.intendedRevisionID,
+            try ProfileRevisionID("prf-20260830T120300000Z-7QRS")
+        )
+        XCTAssertEqual(
+            mutations.first?.writeIntentID,
+            try ProfileWriteIntentID("pwi-20260830T120300000Z-7QRS")
+        )
+        let discardMutationCount = await coordinator.discardMutations.count
+        XCTAssertEqual(discardMutationCount, 0)
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), resolved)
+        XCTAssertNil(Self.openAggregate(in: state)?.profileProposal)
+        XCTAssertNil(state.activity)
+        XCTAssertNil(state.notice)
+        XCTAssertTrue(ChatInteractionPolicy.allowsComposerEditing(in: state))
+    }
+
+    func testDiscardProfileProposalDispatchesOnceAndInstallsResolvedAggregate()
+        async throws
+    {
+        let aggregate = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(aggregate.profileProposal)
+        let resolved = try Self.resolvingProfileProposal(in: aggregate)
+        let coordinator = RecordingProfileProposalCoordinator(
+            discardOutcomes: [.committed(resolved)]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        await feature.send(.discardProfileProposal(Self.context, proposal.id))
+
+        let mutations = await coordinator.discardMutations
+        XCTAssertEqual(mutations.count, 1)
+        XCTAssertEqual(mutations.first?.library, Self.scope)
+        XCTAssertEqual(mutations.first?.base, aggregate)
+        XCTAssertEqual(mutations.first?.proposalID, proposal.id)
+        let acceptMutationCount = await coordinator.acceptMutations.count
+        XCTAssertEqual(acceptMutationCount, 0)
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), resolved)
+        XCTAssertNil(Self.openAggregate(in: state)?.profileProposal)
+        XCTAssertNil(state.activity)
+        XCTAssertNil(state.notice)
+        XCTAssertTrue(ChatInteractionPolicy.allowsComposerEditing(in: state))
+    }
+
+    func testFirstProfileProposalResolutionSerializesOppositeStaleCommand()
+        async throws
+    {
+        let aggregate = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(aggregate.profileProposal)
+        let resolved = try Self.resolvingProfileProposal(in: aggregate)
+        let coordinator = RecordingProfileProposalCoordinator(
+            acceptOutcomes: [.committed(resolved)],
+            suspendFirstAccept: true
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        async let accept: Void = feature.send(
+            .acceptProfileProposal(Self.context, proposal.id)
+        )
+        await coordinator.waitUntilFirstAcceptIsSuspended()
+
+        await feature.send(.discardProfileProposal(Self.context, proposal.id))
+        let suspendedAcceptCount = await coordinator.acceptMutations.count
+        let suspendedDiscardCount = await coordinator.discardMutations.count
+        let suspendedState = await feature.currentState
+        XCTAssertEqual(suspendedAcceptCount, 1)
+        XCTAssertEqual(suspendedDiscardCount, 0)
+        XCTAssertEqual(
+            suspendedState.activity,
+            .acceptingProfileProposal(aggregate.chat.id)
+        )
+
+        await coordinator.resumeFirstAccept()
+        await accept
+
+        let terminalAcceptCount = await coordinator.acceptMutations.count
+        let terminalDiscardCount = await coordinator.discardMutations.count
+        XCTAssertEqual(terminalAcceptCount, 1)
+        XCTAssertEqual(
+            terminalDiscardCount,
+            0,
+            "the queued opposite action is stale after the first resolution commits"
+        )
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), resolved)
+        XCTAssertNil(state.activity)
+        XCTAssertNil(state.notice)
+    }
+
+    func testFailedProfileProposalOutcomesKeepProposalAndClearActivity()
+        async throws
+    {
+        let acceptAggregate = try Self.aggregateWithProfileProposal()
+        let acceptProposal = try XCTUnwrap(acceptAggregate.profileProposal)
+        let acceptCoordinator = RecordingProfileProposalCoordinator(
+            acceptOutcomes: [.failed]
+        )
+        let acceptFeature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(acceptAggregate)]),
+            profileProposals: acceptCoordinator
+        )
+        await acceptFeature.send(.start(Self.context))
+        await acceptFeature.send(.open(Self.context, acceptAggregate.chat.id))
+
+        await acceptFeature.send(
+            .acceptProfileProposal(Self.context, acceptProposal.id)
+        )
+
+        let acceptState = await acceptFeature.currentState
+        XCTAssertEqual(Self.openAggregate(in: acceptState), acceptAggregate)
+        XCTAssertEqual(
+            Self.openAggregate(in: acceptState)?.profileProposal,
+            acceptProposal
+        )
+        XCTAssertNil(acceptState.activity)
+        XCTAssertEqual(acceptState.notice, .profileProposalAcceptFailed)
+        XCTAssertFalse(ChatInteractionPolicy.allowsComposerEditing(in: acceptState))
+
+        let discardAggregate = try Self.aggregateWithProfileProposal(
+            chat: "cht-20260830T121000000Z-8TVW",
+            draft: "drf-20260830T121000000Z-9XYZ",
+            memory: "mem-20260830T121000000Z-ABCD"
+        )
+        let discardProposal = try XCTUnwrap(discardAggregate.profileProposal)
+        let discardCoordinator = RecordingProfileProposalCoordinator(
+            discardOutcomes: [.failed]
+        )
+        let discardFeature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(discardAggregate)]),
+            profileProposals: discardCoordinator
+        )
+        await discardFeature.send(.start(Self.context))
+        await discardFeature.send(.open(Self.context, discardAggregate.chat.id))
+
+        await discardFeature.send(
+            .discardProfileProposal(Self.context, discardProposal.id)
+        )
+
+        let discardState = await discardFeature.currentState
+        XCTAssertEqual(Self.openAggregate(in: discardState), discardAggregate)
+        XCTAssertEqual(
+            Self.openAggregate(in: discardState)?.profileProposal,
+            discardProposal
+        )
+        XCTAssertNil(discardState.activity)
+        XCTAssertEqual(discardState.notice, .profileProposalDiscardFailed)
+        XCTAssertFalse(ChatInteractionPolicy.allowsComposerEditing(in: discardState))
+    }
+
     private func makeFeature(
         store: any ChatStorePort,
         profileReader: any ProfileStatementGenerationReading = FixedProfileReader(),
@@ -3512,6 +3739,8 @@ final class ChatFeatureTests: XCTestCase {
         admissionRefreshScheduler: any ChatAdmissionRefreshScheduling =
             ImmediateAdmissionRefreshScheduler(),
         invocations: any Invocations = RecordingInterruptedInvocationGateway(),
+        profileProposals: any ProfileProposalCoordinating =
+            UnavailableProfileProposalCoordinator(),
         coachContext: any ChatCoachContextCoordinating = ChatFeatureBoundCoachContextFixture(
             attachmentSource: EmptyChatAttachmentSource(),
             base: DefaultCoachContextFeature(
@@ -3533,7 +3762,8 @@ final class ChatFeatureTests: XCTestCase {
             autosaveScheduler: autosaveScheduler,
             admissionRefreshScheduler: admissionRefreshScheduler,
             coachContext: coachContext,
-            invocations: invocations
+            invocations: invocations,
+            profileProposals: profileProposals
         )
     }
 
@@ -3601,6 +3831,90 @@ final class ChatFeatureTests: XCTestCase {
         )
     }
 
+    private static func aggregateWithProfileProposal(
+        chat: String = "cht-20260830T120000000Z-2ABC",
+        draft: String = "drf-20260830T120000000Z-3DEF",
+        memory: String = "mem-20260830T120000000Z-4GHJ",
+        draftText: String = "Continue coaching me after this decision."
+    ) throws -> ChatAggregate {
+        let base = try aggregate(
+            chat: chat,
+            draft: draft,
+            memory: memory,
+            draftText: draftText
+        )
+        let instant = try UTCInstant("2026-08-30T12:03:00.000Z")
+        let responsePositionID = try ChatResponsePositionID(
+            "rsp-20260830T120300000Z-6PQR"
+        )
+        let profile = CoachProfileProvenance(
+            revisionID: nil,
+            statementGeneration: 7
+        )
+        let messages = [
+            try ChatMessage(
+                id: ChatMessageID("msg-20260830T120300000Z-5KMN"),
+                responsePositionID: responsePositionID,
+                content: .user(text: "Remember my speaking goal."),
+                createdAt: instant
+            ),
+            try ChatMessage(
+                id: ChatMessageID("msg-20260830T120300000Z-7QRS"),
+                responsePositionID: responsePositionID,
+                content: .coach(markdown: "I have a Profile suggestion for you."),
+                coachProfile: profile,
+                createdAt: instant
+            ),
+        ]
+        let chatWithMessages = try Chat(
+            id: base.chat.id,
+            manifestRevision: base.chat.manifestRevision,
+            title: base.chat.title,
+            createdAt: base.chat.createdAt,
+            updatedAt: instant,
+            creation: base.chat.creation,
+            profileStatementGenerationAtCreation:
+                base.chat.profileStatementGenerationAtCreation,
+            attachments: base.chat.attachments,
+            draft: base.chat.draft,
+            messageIDs: messages.map(\.id),
+            currentMemoryID: base.chat.currentMemoryID
+        )
+        let proposed = try ProfileProposedStatement(
+            statementID: ProfileStatementID(
+                "stm-20260830T120300000Z-8TVW"
+            ),
+            statementKind: .goal,
+            wording: "Speak with a clear structure in technical discussions.",
+            evidence: []
+        )
+        let proposal = try ProfileChangeProposal(
+            id: ProfileChangeProposalID("prp-20260830T120300000Z-7QRS"),
+            chatID: base.chat.id,
+            responsePositionID: responsePositionID,
+            baseProfile: profile,
+            changes: [.add(statement: proposed)],
+            createdAt: instant
+        )
+        return try ChatAggregate(
+            chat: chatWithMessages,
+            memory: base.memory,
+            messages: messages,
+            profileProposal: proposal
+        )
+    }
+
+    private static func resolvingProfileProposal(
+        in aggregate: ChatAggregate
+    ) throws -> ChatAggregate {
+        try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            messages: aggregate.messages,
+            pendingUserTurn: aggregate.pendingUserTurn
+        )
+    }
+
     private static func attachment() throws -> ChatSessionAttachment {
         ChatSessionAttachment(
             attachmentID: try ChatSessionAttachmentID("attachment-000001"),
@@ -3642,6 +3956,54 @@ final class ChatFeatureTests: XCTestCase {
             throw TestError.unexpectedState
         }
         return draft
+    }
+}
+
+private actor RecordingProfileProposalCoordinator: ProfileProposalCoordinating {
+    private var acceptOutcomes: [ProfileProposalMutationOutcome]
+    private var discardOutcomes: [ProfileProposalMutationOutcome]
+    private var suspendFirstAccept: Bool
+    private var firstAcceptContinuation: CheckedContinuation<Void, Never>?
+    private(set) var acceptMutations: [AcceptProfileProposalMutation] = []
+    private(set) var discardMutations: [DiscardProfileProposalMutation] = []
+
+    init(
+        acceptOutcomes: [ProfileProposalMutationOutcome] = [],
+        discardOutcomes: [ProfileProposalMutationOutcome] = [],
+        suspendFirstAccept: Bool = false
+    ) {
+        self.acceptOutcomes = acceptOutcomes
+        self.discardOutcomes = discardOutcomes
+        self.suspendFirstAccept = suspendFirstAccept
+    }
+
+    func accept(
+        _ mutation: AcceptProfileProposalMutation
+    ) async -> ProfileProposalMutationOutcome {
+        acceptMutations.append(mutation)
+        if suspendFirstAccept {
+            suspendFirstAccept = false
+            await withCheckedContinuation { firstAcceptContinuation = $0 }
+        }
+        guard !acceptOutcomes.isEmpty else { return .failed }
+        return acceptOutcomes.removeFirst()
+    }
+
+    func discard(
+        _ mutation: DiscardProfileProposalMutation
+    ) async -> ProfileProposalMutationOutcome {
+        discardMutations.append(mutation)
+        guard !discardOutcomes.isEmpty else { return .failed }
+        return discardOutcomes.removeFirst()
+    }
+
+    func waitUntilFirstAcceptIsSuspended() async {
+        while firstAcceptContinuation == nil { await Task.yield() }
+    }
+
+    func resumeFirstAccept() {
+        firstAcceptContinuation?.resume()
+        firstAcceptContinuation = nil
     }
 }
 

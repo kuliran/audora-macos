@@ -308,7 +308,7 @@ final class PortableLibraryPersistenceTests: XCTestCase {
             let supportedReplacement = try persistence.encodePreferences(.defaults)
 
             XCTAssertThrowsError(
-                try persistence.atomicallyReplaceRoot(
+                try persistence.atomicallyReplaceRootForTesting(
                     supportedReplacement,
                     relativePath: LibraryRelativePath("preferences.json"),
                     under: root
@@ -325,7 +325,7 @@ final class PortableLibraryPersistenceTests: XCTestCase {
             let persistence = PortableLibraryPersistence()
             let manifest = try persistence.encodeManifest(authority.manifest)
             XCTAssertThrowsError(
-                try persistence.atomicallyReplaceRoot(
+                try persistence.atomicallyReplaceRootForTesting(
                     manifest,
                     relativePath: LibraryRelativePath("library.json"),
                     under: root
@@ -390,7 +390,7 @@ final class PortableLibraryPersistenceTests: XCTestCase {
                     }
                     if afterInstall {
                         XCTAssertEqual(
-                            try persistence.atomicallyReplaceRoot(
+                            try persistence.atomicallyReplaceRootForTesting(
                                 newData,
                                 relativePath: relative,
                                 under: root
@@ -399,7 +399,7 @@ final class PortableLibraryPersistenceTests: XCTestCase {
                         )
                     } else {
                         XCTAssertThrowsError(
-                            try persistence.atomicallyReplaceRoot(
+                            try persistence.atomicallyReplaceRootForTesting(
                                 newData,
                                 relativePath: relative,
                                 under: root

@@ -109,6 +109,7 @@ public actor DefaultChatFeature: ChatFeature {
     private let admissionRefreshScheduler: any ChatAdmissionRefreshScheduling
     private let coachContext: any ChatCoachContextCoordinating
     private let invocations: any Invocations
+    private let profileProposals: any ProfileProposalCoordinating
     private let newChatCreation: NewChatCreationModule
 
     private var activeContext: ChatCommandContext?
@@ -146,7 +147,9 @@ public actor DefaultChatFeature: ChatFeature {
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
         admissionRefreshScheduler: any ChatAdmissionRefreshScheduling,
-        invocations: any Invocations
+        invocations: any Invocations,
+        profileProposals: any ProfileProposalCoordinating =
+            UnavailableProfileProposalCoordinator()
     ) {
         self.store = store
         self.profileReader = profileReader
@@ -161,6 +164,7 @@ public actor DefaultChatFeature: ChatFeature {
         let coachContext = DefaultCoachContextFeature()
         self.coachContext = coachContext
         self.invocations = invocations
+        self.profileProposals = profileProposals
         newChatCreation = NewChatCreationModule(
             store: store,
             profileReader: profileReader,
@@ -185,7 +189,9 @@ public actor DefaultChatFeature: ChatFeature {
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
         admissionRefreshScheduler: any ChatAdmissionRefreshScheduling,
         invocations: any Invocations,
-        attachmentEvidenceSource: any ChatSessionAttachmentEvidenceSource
+        attachmentEvidenceSource: any ChatSessionAttachmentEvidenceSource,
+        profileProposals: any ProfileProposalCoordinating =
+            UnavailableProfileProposalCoordinator()
     ) {
         self.store = store
         self.profileReader = profileReader
@@ -198,6 +204,7 @@ public actor DefaultChatFeature: ChatFeature {
         self.autosaveScheduler = autosaveScheduler
         self.admissionRefreshScheduler = admissionRefreshScheduler
         self.invocations = invocations
+        self.profileProposals = profileProposals
         let coachContext = DefaultCoachContextFeature(
             attachmentEvidenceSource: attachmentEvidenceSource
         )
@@ -225,7 +232,9 @@ public actor DefaultChatFeature: ChatFeature {
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
         admissionRefreshScheduler: (any ChatAdmissionRefreshScheduling)? = nil,
         coachContext: any ChatCoachContextCoordinating,
-        invocations: (any Invocations)? = nil
+        invocations: (any Invocations)? = nil,
+        profileProposals: any ProfileProposalCoordinating =
+            UnavailableProfileProposalCoordinator()
     ) {
         self.store = store
         self.profileReader = profileReader
@@ -240,6 +249,7 @@ public actor DefaultChatFeature: ChatFeature {
             ?? UnavailableChatAdmissionRefreshScheduler()
         self.coachContext = coachContext
         self.invocations = invocations ?? UnavailableChatInvocations()
+        self.profileProposals = profileProposals
         newChatCreation = NewChatCreationModule(
             store: store,
             profileReader: profileReader,
@@ -312,6 +322,7 @@ public actor DefaultChatFeature: ChatFeature {
                   case let .editable(draft, _) = state.composer,
                   aggregate.chat.id == chatID,
                   aggregate.pendingUserTurn == nil,
+                  aggregate.profileProposal == nil,
                   aggregate.chat.draft.draftID == draftID,
                   draft.draftID == draftID
             else {
@@ -330,6 +341,7 @@ public actor DefaultChatFeature: ChatFeature {
                   case let .editable(draft, _) = state.composer,
                   aggregate.chat.id == chatID,
                   aggregate.pendingUserTurn == nil,
+                  aggregate.profileProposal == nil,
                   aggregate.chat.draft.draftID == expectedDraft.draftID,
                   draft == expectedDraft
             else {
@@ -373,6 +385,7 @@ public actor DefaultChatFeature: ChatFeature {
                       case let .open(aggregate) = state.selection,
                       aggregate.chat.id == chatID,
                       aggregate.pendingUserTurn == nil,
+                      aggregate.profileProposal == nil,
                       case let .editable(draft, _) = state.composer,
                       draft.draftID == draftID
                 else {
@@ -384,6 +397,7 @@ public actor DefaultChatFeature: ChatFeature {
                       case let .open(aggregate) = state.selection,
                       aggregate.chat.id == chatID,
                       aggregate.pendingUserTurn == nil,
+                      aggregate.profileProposal == nil,
                       case let .editable(draft, _) = state.composer,
                       draft == expectedDraft
                 else {
@@ -439,6 +453,10 @@ public actor DefaultChatFeature: ChatFeature {
             createNewChatFromCapacityFailure(pendingUserTurnID, context: context)
         case let .discardPendingUserTurn(context, pendingUserTurnID):
             await discardPendingUserTurn(pendingUserTurnID, context: context)
+        case let .acceptProfileProposal(context, proposalID):
+            await acceptProfileProposal(proposalID, context: context)
+        case let .discardProfileProposal(context, proposalID):
+            await discardProfileProposal(proposalID, context: context)
         case .start, .setFilter, .setNewChatAttachmentFilter,
              .editDraft, .sendDraft:
             break
@@ -1614,7 +1632,8 @@ public actor DefaultChatFeature: ChatFeature {
         guard activeContext == context,
               case let .open(aggregate) = state.selection,
               case let .editable(draft, _) = state.composer,
-              aggregate.pendingUserTurn == nil
+              aggregate.pendingUserTurn == nil,
+              aggregate.profileProposal == nil
         else {
             return
         }
@@ -1676,6 +1695,7 @@ public actor DefaultChatFeature: ChatFeature {
               case let .editable(draft, _) = state.composer,
               draft == expectedDraft,
               aggregate.pendingUserTurn == nil,
+              aggregate.profileProposal == nil,
               draft.text.unicodeScalars.contains(where: { !$0.properties.isWhitespace })
         else {
             state = replacing(activity: nil, notice: .invalidDraft)
@@ -2185,6 +2205,86 @@ public actor DefaultChatFeature: ChatFeature {
         )
     }
 
+    private func acceptProfileProposal(
+        _ proposalID: ProfileChangeProposalID,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context), state.activity == nil,
+              case let .open(aggregate) = state.selection,
+              aggregate.pendingUserTurn == nil,
+              aggregate.profileProposal?.id == proposalID
+        else { return }
+        state = replacing(
+            activity: .acceptingProfileProposal(aggregate.chat.id),
+            notice: nil
+        )
+        publish()
+        let acceptedAt = await clock.now()
+        guard isActive(context),
+              let mutation = try? AcceptProfileProposalMutation(
+                  library: context.libraryScope,
+                  base: aggregate,
+                  proposalID: proposalID,
+                  acceptedAt: acceptedAt
+              )
+        else { return }
+        applyProfileProposalOutcome(
+            await profileProposals.accept(mutation),
+            context: context,
+            failureNotice: .profileProposalAcceptFailed
+        )
+    }
+
+    private func discardProfileProposal(
+        _ proposalID: ProfileChangeProposalID,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context), state.activity == nil,
+              case let .open(aggregate) = state.selection,
+              aggregate.pendingUserTurn == nil,
+              aggregate.profileProposal?.id == proposalID,
+              let mutation = try? DiscardProfileProposalMutation(
+                  library: context.libraryScope,
+                  base: aggregate,
+                  proposalID: proposalID
+              )
+        else { return }
+        state = replacing(
+            activity: .discardingProfileProposal(aggregate.chat.id),
+            notice: nil
+        )
+        publish()
+        applyProfileProposalOutcome(
+            await profileProposals.discard(mutation),
+            context: context,
+            failureNotice: .profileProposalDiscardFailed
+        )
+    }
+
+    private func applyProfileProposalOutcome(
+        _ outcome: ProfileProposalMutationOutcome,
+        context: ChatCommandContext,
+        failureNotice: ChatNotice
+    ) {
+        guard isActive(context) else { return }
+        switch outcome {
+        case let .committed(current):
+            install(current, selection: .open(current), notice: nil)
+        case let .stale(current):
+            install(
+                current,
+                selection: .open(current),
+                notice: .profileProposalStale
+            )
+        case .readOnlyLibrary:
+            state = replacing(activity: nil, notice: .readOnlyLibrary)
+            publish()
+        case .failed:
+            state = replacing(activity: nil, notice: failureNotice)
+            publish()
+        }
+    }
+
     private func retryPendingUserTurn(
         _ pendingUserTurnID: PendingUserTurnID,
         context: ChatCommandContext
@@ -2210,7 +2310,8 @@ public actor DefaultChatFeature: ChatFeature {
             chat: aggregate.chat,
             memory: aggregate.memory,
             messages: aggregate.messages,
-            pendingUserTurn: processingPending
+            pendingUserTurn: processingPending,
+            profileProposal: aggregate.profileProposal
         ) else {
             state = replacing(activity: nil, notice: .pendingUserTurnFailed)
             publish()
@@ -2946,7 +3047,8 @@ private extension ChatCommand {
         case .start, .rename, .setFilter, .open, .editDraft,
              .refreshContextQuote, .sendDraft, .retryPendingUserTurn,
              .stopCoachResponse, .createNewChatFromCapacityFailure,
-             .discardPendingUserTurn:
+             .discardPendingUserTurn, .acceptProfileProposal,
+             .discardProfileProposal:
             false
         }
     }
@@ -2966,7 +3068,9 @@ private extension ChatCommand {
              let .stopCoachResponse(context, _),
              let .retryPendingUserTurn(context, _),
              let .createNewChatFromCapacityFailure(context, _),
-             let .discardPendingUserTurn(context, _):
+             let .discardPendingUserTurn(context, _),
+             let .acceptProfileProposal(context, _),
+             let .discardProfileProposal(context, _):
             context
         }
     }

@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "revisionId": "prf-20260909T120000000Z-2ABC",
+  "parentRevisionId": "prf-20260901T090000000Z-3DEF",
+  "generation": 12,
+  "statementGeneration": 8,
+  "createdAt": "2026-09-09T12:00:00.000Z",
+  "statements": [
+    {
+      "statementId": "stm-20260901T100000000Z-2ABC",
+      "statementKind": "speakingObservation",
+      "wording": "Transitions between technical points are often rushed.",
+      "supportingSessionCount": 2,
+      "evidence": [
+        {
+          "sessionId": "ses-20260820T101500000Z-4GHJ",
+          "transcriptRevisionId": "trv-20260820T104000000Z-5KMN",
+          "target": {
+            "kind": "wordRange",
+            "startWordId": "w000183",
+            "endWordId": "w000199"
+          },
+          "display": {
+            "sessionLabel": "Architecture reflection",
+            "trustedText": "The first point is ownership and the second point is isolation.",
+            "startMs": 258000,
+            "endMs": 264500
+          }
+        },
+        {
+          "sessionId": "ses-20260822T153045123Z-6PQR",
+          "transcriptRevisionId": "trv-20260822T155000000Z-7RST",
+          "target": {
+            "kind": "audioEvent",
+            "audioEventId": "a000004"
+          },
+          "display": {
+            "sessionLabel": "Product reflection",
+            "trustedText": "Brief silence before the next product point.",
+            "startMs": 423000,
+            "endMs": 424200
+          }
+        }
+      ]
+    },
+    {
+      "statementId": "stm-20260902T110000000Z-3DEF",
+      "statementKind": "selfAssessment",
+      "wording": "I sometimes over-explain implementation details.",
+      "supportingSessionCount": 0,
+      "evidence": []
+    },
+    {
+      "statementId": "stm-20260903T120000000Z-4GHJ",
+      "statementKind": "growthDirection",
+      "wording": "Pause briefly before introducing the next point.",
+      "supportingSessionCount": 1,
+      "evidence": [
+        {
+          "sessionId": "ses-20260820T101500000Z-4GHJ",
+          "transcriptRevisionId": "trv-20260820T104000000Z-5KMN",
+          "target": {
+            "kind": "wordRange",
+            "startWordId": "w000210",
+            "endWordId": "w000219"
+          },
+          "display": {
+            "sessionLabel": "Architecture reflection",
+            "trustedText": "Now the next point is how the boundary stays small.",
+            "startMs": 271000,
+            "endMs": 275000
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -570,6 +570,8 @@ final class ChatFeatureScenarioTests: XCTestCase {
         case .stoppingCoach: "stoppingCoach"
         case .retryingPendingUserTurn: "retryingPendingUserTurn"
         case .discardingPendingUserTurn: "discardingPendingUserTurn"
+        case .acceptingProfileProposal: "acceptingProfileProposal"
+        case .discardingProfileProposal: "discardingProfileProposal"
         case .none: nil
         }
     }

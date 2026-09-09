@@ -680,9 +680,8 @@ extension PortableLibraryWorkspace: ReviewAnnotationVisibilityPort {
         else { return .unavailable }
         let writeOutcome: PortableMutableRootWriteOutcome
         do {
-            writeOutcome = try persistence.atomicallyReplaceRoot(
+            writeOutcome = try persistence.atomicallyReplacePreferences(
                 encoded,
-                relativePath: try LibraryRelativePath("preferences.json"),
                 under: activeScope.root,
                 expectedRootIdentity: activeScope.rootIdentity,
                 reconcileAbandonedImports: false

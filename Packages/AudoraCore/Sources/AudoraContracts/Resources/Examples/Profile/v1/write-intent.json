@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "intentId": "pwi-20260909T120200000Z-2ABC",
+  "proposalId": "prp-20260909T120100000Z-5KMN",
+  "chatId": "cht-20260909T115500000Z-6PQR",
+  "expectedHead": {
+    "generation": 12,
+    "statementGeneration": 8,
+    "revisionId": "prf-20260909T120000000Z-2ABC",
+    "revisionSha256": "e8572882e50a9117627a1b380089353d78f052a12249568d09ab83300b35175d"
+  },
+  "intendedRevisionId": "prf-20260909T120200000Z-3DEF",
+  "createdAt": "2026-09-09T12:02:00.000Z"
+}

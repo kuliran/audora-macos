@@ -6,6 +6,8 @@ portable Library document roots in
 [`portable-library.tsp`](portable-library.tsp), and the Library lifecycle
 scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp), and
 the portable Chat roots and scenarios in [`chat.tsp`](chat.tsp).
+Immutable Profile snapshots, reviewed semantic-or-mixed Proposals, and accepted
+Proposal write intents live in [`profile.tsp`](profile.tsp).
 [`session-audio.tsp`](session-audio.tsp) is the single source of truth for
 shared Session identity and the imported/microphone audio and Session manifest
 variants. Imported-audio normalization and feature behavior live in
@@ -53,7 +55,10 @@ the current terminal reasons and legacy compatibility.
 - [`LibraryManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json)
 - [`LibraryPreferences.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json)
 - [`PendingUserTurn.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/PendingUserTurn.json)
+- [`ProfileChangeProposal.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileChangeProposal.json)
 - [`ProfileHead.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json)
+- [`ProfileRevision.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileRevision.json)
+- [`ProfileWriteIntent.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileWriteIntent.json)
 - [`ReadSessionTranscriptsRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json)
 - [`ReadSessionTranscriptsResponse.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json)
 - [`RecordingFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingFeatureScenario.json)
@@ -83,7 +88,10 @@ the current terminal reasons and legacy compatibility.
 | `LibraryManifest` | Portable Library storage | No |
 | `LibraryPreferences` | Portable Library storage | No |
 | `PendingUserTurn` | Portable Library operational storage | No |
+| `ProfileChangeProposal` | Chat-owned reviewed Profile proposal storage | No |
 | `ProfileHead` | Portable Library storage | No |
+| `ProfileRevision` | Immutable Development Profile snapshot storage | No |
+| `ProfileWriteIntent` | Profile commit-recovery storage | No |
 | `ReadSessionTranscriptsRequest` | Coach tool call -> Application | Yes |
 | `ReadSessionTranscriptsResponse` | Application -> coach tool result | Yes |
 | `RecordingFeatureScenario` | Portable cross-implementation behavior | No |
@@ -113,6 +121,39 @@ relaunch restoration, and newer-root read-only behavior. The
 [`library-launch-no-selection.v1.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Scenarios/library-launch-no-selection.v1.json)
 fixture describes launch without a saved Library locator. Portable implementations
 consume all scenarios through their package resources.
+
+## Profile storage contracts
+
+`ProfileRevision` is the complete immutable accepted Statement snapshot. Each
+Statement stores its app-owned `stm-` identity, kind, wording, total distinct
+supporting-Session count, and ordered `PersistedEvidenceReference` values. The
+same sealed Evidence Reference shape used by persisted coach message blocks binds
+an exact Session and Transcript Revision, typed target, and trusted display
+snapshot. Runtime validation additionally checks that `supportingSessionCount`
+equals the number of distinct evidence Session IDs. A revision contains no Chat,
+Proposal, provider, origin, or accepted-change provenance.
+
+`ProfileChangeProposal` is the owning Chat's one reviewed semantic-or-mixed
+record. It binds the exact Chat and response position, optional base Profile
+Revision, and required semantic generation. Its `changes` array is nonempty and
+closed over Add, Replace, and Retire. Application has already allocated every
+proposed Statement ID; Replace and Retire retain the target's complete ID, kind,
+and wording summary. Evidence remains in accepted provider order. Standalone
+Evidence Appends may accompany those semantic changes, but a wholly evidence-only
+publication is deliberately not a Proposal contract in this slice.
+
+`ProfileWriteIntent` binds one accepted Proposal and its Chat to one intended
+Revision ID and creation time. Its sealed expected-head union records both
+generations and requires either neither current Revision field or the exact
+Revision ID/SHA-256 pair. This slice defines the durable reconciliation record,
+not Profile-recovery scenario contracts.
+
+The checked-in [`revision.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/Profile/v1/revision.json),
+[`proposal.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/Profile/v1/proposal.json),
+and [`write-intent.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/Profile/v1/write-intent.json)
+exercise an immutable snapshot, all three semantic change variants plus a mixed
+Evidence Append, and a selected expected-head authority whose digest binds the
+example Revision bytes.
 
 ## Session audio roots
 
@@ -380,8 +421,8 @@ The compiler and JSON Schema emitter are pinned in `package.json`. The resolved
 dependency graph is committed in `pnpm-lock.yaml`. `generated-json-files.txt`
 enumerates the canonical package-resource schemas and makes the check fail when
 generated roots change unexpectedly or their committed bytes drift. The same
-check runs every checked-in audio-import, Recording, Transcript Revision, and
-Chat scenario or golden through the generated Draft 2020-12 schemas.
+check runs every checked-in Profile, audio-import, Recording, Transcript Revision,
+and Chat scenario or golden through the generated Draft 2020-12 schemas.
 It also checks exact imported cross-root hashes, rejects mixed manifest families,
 and keeps runtime-only Recording and Transcript Revision rejection fixtures
 schema-valid for the production Swift validators.

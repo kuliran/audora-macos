@@ -227,7 +227,7 @@ struct ValidatedCoachResponseMemory: Equatable, Sendable {
     }
 }
 
-enum ValidatedCoachProfileEdit: Equatable, Sendable {
+private enum ParsedCoachProfileEdit: Equatable, Sendable {
     case add(statementKind: CoachResponseProfileStatementKind, wording: String)
     case replace(targetStatementID: CoachResponseProfileStatementID, wording: String)
     case retire(targetStatementID: CoachResponseProfileStatementID)
@@ -240,14 +240,30 @@ enum ValidatedCoachProfileEdit: Equatable, Sendable {
     }
 }
 
-struct ValidatedCoachProfileEditProposal: Equatable, Sendable {
-    let edit: ValidatedCoachProfileEdit
+private struct ParsedCoachProfileEditProposal: Equatable, Sendable {
+    let edit: ParsedCoachProfileEdit
     let evidence: [CoachResponseEvidencePointer]
 }
 
-struct ValidatedCoachProfileEvidenceAppend: Equatable, Sendable {
+private struct ParsedCoachProfileEvidenceAppend: Equatable, Sendable {
     let targetStatementID: CoachResponseProfileStatementID
     let evidence: [CoachResponseEvidencePointer]
+}
+
+enum ValidatedCoachProfileEdit: Equatable, Sendable {
+    case add(statementKind: ProfileStatementKind, wording: String)
+    case replace(target: ProfileProposalTarget, wording: String)
+    case retire(target: ProfileProposalTarget)
+}
+
+struct ValidatedCoachProfileEditProposal: Equatable, Sendable {
+    let edit: ValidatedCoachProfileEdit
+    let evidence: [EvidenceReference]
+}
+
+struct ValidatedCoachProfileEvidenceAppend: Equatable, Sendable {
+    let target: ProfileProposalTarget
+    let evidence: [EvidenceReference]
 }
 
 /// The indivisible result of schema and semantic validation. Callers cannot
@@ -267,13 +283,9 @@ struct ValidatedCoachResponse: Equatable, Sendable {
         messageBlocks.map(\.messageBlock)
     }
 
-    /// #30 adds Profile-effect publication. Until then, fail closed rather than
-    /// silently dropping a validated Profile component while publishing prose,
-    /// evidence observations, and an optional Memory replacement.
     var isSupportedByCurrentPublicationSlice: Bool {
-        proposedProfileEdits.isEmpty &&
-            appendedProfileEvidence.isEmpty &&
-            !messageBlocks.isEmpty
+        !messageBlocks.isEmpty &&
+            (appendedProfileEvidence.isEmpty || !proposedProfileEdits.isEmpty)
     }
 }
 
@@ -411,6 +423,8 @@ struct CoachResponseValidationContext: Equatable, Sendable {
     let transcripts:
         [ChatSessionAttachmentID: CoachResponseTranscriptEvidenceIndex]
     let activeProfileStatementIDs: Set<CoachResponseProfileStatementID>
+    let activeProfileStatements:
+        [CoachResponseProfileStatementID: ProfileProposalTarget]
     let authority: CoachResponseValidationAuthority
 
     init(
@@ -418,17 +432,19 @@ struct CoachResponseValidationContext: Equatable, Sendable {
         transcripts: [
             ChatSessionAttachmentID: CoachResponseTranscriptEvidenceIndex
         ],
-        activeProfileStatementIDs: Set<String>,
+        activeProfileStatements: [String: ProfileProposalTarget],
         authority: CoachResponseValidationAuthority
     ) throws {
-        let parsedProfileStatementIDs = activeProfileStatementIDs.compactMap(
-            CoachResponseProfileStatementID.init
-        )
-        guard parsedProfileStatementIDs.count == activeProfileStatementIDs.count
-        else { throw CoachResponseValidationError.invalidPreparedContext }
+        var indexed: [CoachResponseProfileStatementID: ProfileProposalTarget] = [:]
+        for (rawProviderID, target) in activeProfileStatements {
+            guard let providerID = CoachResponseProfileStatementID(rawProviderID),
+                  indexed.updateValue(target, forKey: providerID) == nil
+            else { throw CoachResponseValidationError.invalidPreparedContext }
+        }
         self.triggerPosition = triggerPosition
         self.transcripts = transcripts
-        self.activeProfileStatementIDs = Set(parsedProfileStatementIDs)
+        activeProfileStatementIDs = Set(indexed.keys)
+        self.activeProfileStatements = indexed
         self.authority = authority
     }
 
@@ -456,11 +472,23 @@ struct CoachResponseValidationContext: Equatable, Sendable {
         }
 
         var profileIDs: Set<CoachResponseProfileStatementID> = []
+        var indexedProfile:
+            [CoachResponseProfileStatementID: ProfileProposalTarget] = [:]
         for statement in statements {
             guard case let .object(fields) = statement,
                   case let .string(rawStatementID)? = fields["statementId"],
                   let statementID = CoachResponseProfileStatementID(rawStatementID),
-                  profileIDs.insert(statementID).inserted
+                  let durableStatementID = try? ProfileStatementID(rawStatementID),
+                  case let .string(rawKind)? = fields["statementKind"],
+                  let kind = ProfileStatementKind(rawValue: rawKind),
+                  case let .string(wording)? = fields["wording"],
+                  let target = try? ProfileProposalTarget(
+                      statementID: durableStatementID,
+                      statementKind: kind,
+                      wording: wording
+                  ),
+                  profileIDs.insert(statementID).inserted,
+                  indexedProfile.updateValue(target, forKey: statementID) == nil
             else { throw CoachResponseValidationError.invalidPreparedContext }
         }
 
@@ -512,6 +540,7 @@ struct CoachResponseValidationContext: Equatable, Sendable {
         else { throw CoachResponseValidationError.invalidPreparedContext }
         transcripts = transcriptIndexes
         activeProfileStatementIDs = profileIDs
+        activeProfileStatements = indexedProfile
         self.authority = authority
     }
 
@@ -673,27 +702,38 @@ struct CoachResponseValidator: Sendable {
         if let memory = decoded.newMemory {
             try validate(memory: memory, in: context)
         }
-        for proposal in decoded.proposedProfileEdits {
-            _ = try resolve(
-                evidence: proposal.evidence,
-                purpose: .profileSupport,
-                in: context
-            )
-        }
-        for append in decoded.appendedProfileEvidence {
-            _ = try resolve(
-                evidence: append.evidence,
-                purpose: .profileSupport,
-                in: context
-            )
-        }
         try validateProfileEffects(decoded, in: context)
+        let resolvedProfileEdits = try decoded.proposedProfileEdits.map {
+            proposal in
+            ValidatedCoachProfileEditProposal(
+                edit: try validated(edit: proposal.edit, in: context),
+                evidence: try resolve(
+                    evidence: proposal.evidence,
+                    purpose: .profileSupport,
+                    in: context
+                )
+            )
+        }
+        let resolvedEvidenceAppends = try decoded.appendedProfileEvidence.map {
+            append in
+            guard let target = context.activeProfileStatements[
+                append.targetStatementID
+            ] else { throw CoachResponseValidationError.danglingProfileTarget }
+            return ValidatedCoachProfileEvidenceAppend(
+                target: target,
+                evidence: try resolve(
+                    evidence: append.evidence,
+                    purpose: .profileSupport,
+                    in: context
+                )
+            )
+        }
 
         return ValidatedCoachResponse(
             messageBlocks: resolvedMessageBlocks,
             newMemory: decoded.newMemory,
-            proposedProfileEdits: decoded.proposedProfileEdits,
-            appendedProfileEvidence: decoded.appendedProfileEvidence
+            proposedProfileEdits: resolvedProfileEdits,
+            appendedProfileEvidence: resolvedEvidenceAppends
         )
     }
 
@@ -937,6 +977,26 @@ struct CoachResponseValidator: Sendable {
 
     private enum EvidencePurpose { case messageObservation, profileSupport }
 
+    private func validated(
+        edit: ParsedCoachProfileEdit,
+        in context: CoachResponseValidationContext
+    ) throws -> ValidatedCoachProfileEdit {
+        switch edit {
+        case let .add(statementKind, wording):
+            guard let kind = ProfileStatementKind(rawValue: statementKind.rawValue)
+            else { throw CoachResponseValidationError.invalidPreparedContext }
+            return .add(statementKind: kind, wording: wording)
+        case let .replace(targetStatementID, wording):
+            guard let target = context.activeProfileStatements[targetStatementID]
+            else { throw CoachResponseValidationError.danglingProfileTarget }
+            return .replace(target: target, wording: wording)
+        case let .retire(targetStatementID):
+            guard let target = context.activeProfileStatements[targetStatementID]
+            else { throw CoachResponseValidationError.danglingProfileTarget }
+            return .retire(target: target)
+        }
+    }
+
     private func resolve(
         evidence: [CoachResponseEvidencePointer],
         purpose: EvidencePurpose,
@@ -1007,17 +1067,44 @@ struct CoachResponseValidator: Sendable {
         in context: CoachResponseValidationContext
     ) throws {
         var semanticTargets: [
-            CoachResponseProfileStatementID: ValidatedCoachProfileEdit
+            CoachResponseProfileStatementID: ParsedCoachProfileEdit
         ] = [:]
+        var evidenceSessionsBySemanticEdit: [(
+            edit: ParsedCoachProfileEdit,
+            sessionIDs: Set<SessionID>
+        )] = []
         for proposal in response.proposedProfileEdits {
-            guard let target = proposal.edit.targetStatementID else { continue }
-            guard context.activeProfileStatementIDs.contains(target) else {
-                throw CoachResponseValidationError.danglingProfileTarget
+            if let target = proposal.edit.targetStatementID {
+                guard context.activeProfileStatementIDs.contains(target) else {
+                    throw CoachResponseValidationError.danglingProfileTarget
+                }
+                if let existing = semanticTargets[target], existing != proposal.edit {
+                    throw CoachResponseValidationError.conflictingProfileEffects
+                }
+                semanticTargets[target] = proposal.edit
             }
-            if let existing = semanticTargets[target], existing != proposal.edit {
-                throw CoachResponseValidationError.conflictingProfileEffects
+            let sessionIDs = Set(
+                proposal.evidence.compactMap {
+                    context.transcripts[$0.sessionAttachmentID]?.sessionID
+                }
+            )
+            if let index = evidenceSessionsBySemanticEdit.firstIndex(where: {
+                $0.edit == proposal.edit
+            }) {
+                evidenceSessionsBySemanticEdit[index].sessionIDs.formUnion(
+                    sessionIDs
+                )
+            } else {
+                evidenceSessionsBySemanticEdit.append((proposal.edit, sessionIDs))
             }
-            semanticTargets[target] = proposal.edit
+        }
+        for grouped in evidenceSessionsBySemanticEdit {
+            if grouped.sessionIDs.count < (try minimumEvidenceSessionCount(
+                for: grouped.edit,
+                in: context
+            )) {
+                throw CoachResponseValidationError.invalidEvidencePointer
+            }
         }
         for append in response.appendedProfileEvidence {
             guard context.activeProfileStatementIDs.contains(
@@ -1028,13 +1115,32 @@ struct CoachResponseValidator: Sendable {
             }
         }
     }
+
+    private func minimumEvidenceSessionCount(
+        for edit: ParsedCoachProfileEdit,
+        in context: CoachResponseValidationContext
+    ) throws -> Int {
+        switch edit {
+        case let .add(providerKind, _):
+            guard let kind = ProfileStatementKind(rawValue: providerKind.rawValue)
+            else { throw CoachResponseValidationError.invalidPreparedContext }
+            return kind == .speakingObservation || kind == .growthDirection ? 2 : 0
+        case let .replace(targetStatementID, _):
+            guard let target = context.activeProfileStatements[targetStatementID]
+            else { throw CoachResponseValidationError.invalidPreparedContext }
+            return target.statementKind == .speakingObservation ||
+                target.statementKind == .growthDirection ? 1 : 0
+        case .retire:
+            return 0
+        }
+    }
 }
 
 private struct ParsedCoachResponse {
     let messageBlocks: [ParsedCoachResponseBlock]
     let newMemory: ValidatedCoachResponseMemory?
-    let proposedProfileEdits: [ValidatedCoachProfileEditProposal]
-    let appendedProfileEvidence: [ValidatedCoachProfileEvidenceAppend]
+    let proposedProfileEdits: [ParsedCoachProfileEditProposal]
+    let appendedProfileEvidence: [ParsedCoachProfileEvidenceAppend]
 }
 
 private enum ParsedCoachResponseBlock {
@@ -1136,20 +1242,20 @@ private struct CoachResponseSchemaDecoder {
 
     private func profileEditProposal(
         _ value: Any
-    ) throws -> ValidatedCoachProfileEditProposal {
+    ) throws -> ParsedCoachProfileEditProposal {
         let fields = try object(
             value,
             allowed: ["edit", "evidence"],
             required: ["edit"]
         )
         let evidence = try optionalArray(fields, key: "evidence")?.map(pointer) ?? []
-        return ValidatedCoachProfileEditProposal(
+        return ParsedCoachProfileEditProposal(
             edit: try profileEdit(fields["edit"] as Any),
             evidence: evidence
         )
     }
 
-    private func profileEdit(_ value: Any) throws -> ValidatedCoachProfileEdit {
+    private func profileEdit(_ value: Any) throws -> ParsedCoachProfileEdit {
         let discriminator = try discriminatedObject(value)
         switch discriminator.kind {
         case "add":
@@ -1194,13 +1300,13 @@ private struct CoachResponseSchemaDecoder {
 
     private func profileEvidenceAppend(
         _ value: Any
-    ) throws -> ValidatedCoachProfileEvidenceAppend {
+    ) throws -> ParsedCoachProfileEvidenceAppend {
         let fields = try object(
             value,
             allowed: ["targetStatementId", "evidence"],
             required: ["targetStatementId", "evidence"]
         )
-        return ValidatedCoachProfileEvidenceAppend(
+        return ParsedCoachProfileEvidenceAppend(
             targetStatementID: try profileStatementID(fields["targetStatementId"]),
             evidence: try nonemptyArray(fields["evidence"]).map(pointer)
         )

@@ -18,7 +18,10 @@ public enum ContractResource: CaseIterable, Sendable {
     case libraryFeatureScenarioSchema
     case libraryManifestSchema
     case libraryPreferencesSchema
+    case profileChangeProposalSchema
     case profileHeadSchema
+    case profileRevisionSchema
+    case profileWriteIntentSchema
     case readSessionTranscriptsRequestSchema
     case readSessionTranscriptsResponseSchema
     case recordingFeatureScenarioSchema
@@ -122,6 +125,10 @@ public enum ContractResource: CaseIterable, Sendable {
     case rejectedInvalidLibraryInstant
     case rejectedNegativeProfileGeneration
     case newerPreferencesExample
+
+    case profileRevisionExample
+    case profileChangeProposalExample
+    case profileWriteIntentExample
 
     case emptyDevelopmentChatExample
     case emptyDevelopmentChatMemoryExample
@@ -230,8 +237,14 @@ public enum ContractResource: CaseIterable, Sendable {
             "LibraryManifest.json"
         case .libraryPreferencesSchema:
             "LibraryPreferences.json"
+        case .profileChangeProposalSchema:
+            "ProfileChangeProposal.json"
         case .profileHeadSchema:
             "ProfileHead.json"
+        case .profileRevisionSchema:
+            "ProfileRevision.json"
+        case .profileWriteIntentSchema:
+            "ProfileWriteIntent.json"
         case .readSessionTranscriptsRequestSchema:
             "ReadSessionTranscriptsRequest.json"
         case .readSessionTranscriptsResponseSchema:
@@ -432,6 +445,12 @@ public enum ContractResource: CaseIterable, Sendable {
             "profile-head-negative-generation.json"
         case .newerPreferencesExample:
             "preferences-newer-schema.json"
+        case .profileRevisionExample:
+            "revision.json"
+        case .profileChangeProposalExample:
+            "proposal.json"
+        case .profileWriteIntentExample:
+            "write-intent.json"
         case .emptyDevelopmentChatExample:
             "chat.json"
         case .emptyDevelopmentChatMemoryExample:
@@ -573,7 +592,9 @@ public enum ContractResource: CaseIterable, Sendable {
              .coachRequestSchema, .coachResponseSchema,
              .chatFeatureScenarioSchema, .invocationAdmissionLedgerSchema,
              .libraryFeatureScenarioSchema,
-             .libraryManifestSchema, .libraryPreferencesSchema, .profileHeadSchema,
+             .libraryManifestSchema, .libraryPreferencesSchema,
+             .profileChangeProposalSchema, .profileHeadSchema,
+             .profileRevisionSchema, .profileWriteIntentSchema,
              .readSessionTranscriptsRequestSchema, .readSessionTranscriptsResponseSchema,
              .recordingFeatureScenarioSchema, .recordingStagingIdentityManifestSchema,
              .recordingStagingManifestSchema, .sessionManifestSchema,
@@ -652,6 +673,9 @@ public enum ContractResource: CaseIterable, Sendable {
              .rejectedUnknownPreferenceKey, .rejectedInvalidLibraryInstant,
              .rejectedNegativeProfileGeneration, .newerPreferencesExample:
             "Examples/PortableLibrary/v1/rejected"
+        case .profileRevisionExample, .profileChangeProposalExample,
+             .profileWriteIntentExample:
+            "Examples/Profile/v1"
         case .emptyDevelopmentChatExample, .emptyDevelopmentChatMemoryExample,
              .developmentChatUserMessageExample, .developmentChatCoachMessageExample,
              .developmentChatCoachInvocationExample,

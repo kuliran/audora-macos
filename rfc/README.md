@@ -170,19 +170,22 @@ ordered Markdown and Evidence Observation blocks in the published coach message.
 It resolves every provider pointer locally through the exact immutable Session and
 Transcript Revision pinned by its Chat attachment, stores typed Word-range or Audio
 Event anchors with a trusted app-derived display snapshot, and rejects the whole
-response when an attachment or target does not resolve there. Profile response
-effects remain outside this executable slice. Every complete provider response
-remains opaque until Application validates its closed schema, collector and token
-limits, passive Markdown, response-position authority, Memory bounds, evidence
-pointers, active Profile targets, and effect conflicts as one indivisible batch.
+response when an attachment or target does not resolve there. Semantic or mixed
+Profile effects now publish exactly one Chat-owned Proposal alongside the turn;
+pure evidence-only Profile publication remains outside this executable slice. Every
+complete provider response remains opaque until Application validates its closed
+schema, collector and token limits, passive Markdown, response-position authority,
+Memory bounds, evidence pointers, active Profile targets, and effect conflicts as
+one indivisible batch.
 Ordinary answers require at least one message block; the future Reconsider trigger may
 return none. The current publisher accepts the ordered supported message blocks
-with an optional bounded Memory replacement. Omission or canonical equality retains
-the existing snapshot identity; a changed value is staged and selected by the same
-Chat-manifest compare-and-swap as the message pair, after which pointer-led recovery
-removes the superseded snapshot. It still fails closed on Profile components
-assigned to later persistence slices. Invalid or unsupported batches publish no
-message or state effect, receive no automatic repair Attempt, and retain only
+with an optional bounded Memory replacement and, for semantic or mixed Profile
+effects, one reviewable Proposal. Omission or canonical equality retains the existing
+snapshot identity; a changed value is staged and selected by the same Chat-manifest
+compare-and-swap as the message pair, after which pointer-led recovery removes the
+superseded snapshot. Unsupported pure evidence-only Profile batches still fail
+closed. Invalid or unsupported batches publish no message or state effect, receive
+no automatic repair Attempt, and retain only
 closed metadata diagnostics behind the bounded Pending-turn **Retry** and
 **Discard** card.
 If the machine-local ledger rename succeeds but its parent-directory flush cannot

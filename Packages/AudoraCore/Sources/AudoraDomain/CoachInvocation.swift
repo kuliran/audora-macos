@@ -720,6 +720,7 @@ public extension ChatAggregate {
         coachMessage: ChatMessage,
         freshDraft: ChatDraft,
         replacementMemory: CoachMemory? = nil,
+        profileProposal: ProfileChangeProposal? = nil,
         at instant: UTCInstant
     ) throws -> ChatAggregate {
         try invocation.validate(against: self)
@@ -763,6 +764,15 @@ public extension ChatAggregate {
         else {
             throw InvocationPublicationError.freshDraftRequired
         }
+        guard self.profileProposal == nil,
+              profileProposal?.chatID == chat.id || profileProposal == nil,
+              profileProposal?.responsePositionID == invocation.responsePositionID ||
+                profileProposal == nil,
+              profileProposal?.baseProfile == invocation.preparedProfile ||
+                profileProposal == nil
+        else {
+            throw InvocationPublicationError.responsePositionMismatch
+        }
         if let replacementMemory {
             guard replacementMemory.chatID == chat.id else {
                 throw InvocationPublicationError.replacementMemoryOwnerMismatch
@@ -801,7 +811,8 @@ public extension ChatAggregate {
         return try ChatAggregate(
             chat: replacement,
             memory: replacementMemory ?? memory,
-            messages: replacementMessages
+            messages: replacementMessages,
+            profileProposal: profileProposal
         )
     }
 }

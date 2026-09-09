@@ -22,27 +22,31 @@
         {
           "sessionId": "ses-20260820T101500000Z-P4R7",
           "transcriptRevisionId": "trv-20260820T104000000Z-V2FK",
-          "anchor": {
+          "target": {
             "kind": "wordRange",
-            "startWordId": "word-183",
-            "endWordId": "word-199"
+            "startWordId": "w000183",
+            "endWordId": "w000199"
           },
-          "displaySnapshot": {
+          "display": {
             "sessionLabel": "Architecture reflection",
-            "timestampMs": 258000
+            "trustedText": "The first point is ownership and the second point is isolation.",
+            "startMs": 258000,
+            "endMs": 264500
           }
         },
         {
           "sessionId": "ses-20260822T153045123Z-P4R7",
           "transcriptRevisionId": "trv-20260822T155000000Z-W8CN",
-          "anchor": {
+          "target": {
             "kind": "wordRange",
-            "startWordId": "word-420",
-            "endWordId": "word-438"
+            "startWordId": "w000420",
+            "endWordId": "w000438"
           },
-          "displaySnapshot": {
+          "display": {
             "sessionLabel": "Product reflection",
-            "timestampMs": 423000
+            "trustedText": "That covers the product choice before the next point begins.",
+            "startMs": 423000,
+            "endMs": 429000
           }
         }
       ]

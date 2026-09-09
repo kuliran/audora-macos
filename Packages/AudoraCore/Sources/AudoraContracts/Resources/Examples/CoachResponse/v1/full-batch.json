@@ -42,6 +42,14 @@
             "kind": "audioEvent",
             "audioEventId": "event-3"
           }
+        },
+        {
+          "sessionAttachmentId": "demo-practice",
+          "target": {
+            "kind": "wordRange",
+            "startWordId": "word-31",
+            "endWordId": "word-34"
+          }
         }
       ]
     }

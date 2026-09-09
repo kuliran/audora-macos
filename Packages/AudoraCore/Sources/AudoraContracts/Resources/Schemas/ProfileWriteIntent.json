@@ -1,0 +1,126 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/ProfileWriteIntent.json",
+    "type": "object",
+    "properties": {
+        "schemaVersion": {
+            "type": "number",
+            "const": 1
+        },
+        "intentId": {
+            "$ref": "#/$defs/ProfileWriteIntentId"
+        },
+        "proposalId": {
+            "$ref": "#/$defs/ProfileChangeProposalId"
+        },
+        "chatId": {
+            "$ref": "#/$defs/ChatId"
+        },
+        "expectedHead": {
+            "$ref": "#/$defs/ProfileWriteExpectedHead"
+        },
+        "intendedRevisionId": {
+            "$ref": "#/$defs/ProfileRevisionId"
+        },
+        "createdAt": {
+            "$ref": "#/$defs/UTCInstant"
+        }
+    },
+    "required": [
+        "schemaVersion",
+        "intentId",
+        "proposalId",
+        "chatId",
+        "expectedHead",
+        "intendedRevisionId",
+        "createdAt"
+    ],
+    "unevaluatedProperties": {
+        "not": {}
+    },
+    "description": "Immutable authority required to reconcile one accepted Proposal exactly once.",
+    "$defs": {
+        "ProfileWriteIntentId": {
+            "type": "string",
+            "pattern": "^pwi-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ProfileChangeProposalId": {
+            "type": "string",
+            "pattern": "^prp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ChatId": {
+            "type": "string",
+            "pattern": "^cht-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ProfileWriteExpectedHead": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/ProfileWriteExpectedNullHead"
+                },
+                {
+                    "$ref": "#/$defs/ProfileWriteExpectedSelectedHead"
+                }
+            ]
+        },
+        "ProfileRevisionId": {
+            "type": "string",
+            "pattern": "^prf-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "UTCInstant": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        },
+        "ProfileWriteExpectedNullHead": {
+            "type": "object",
+            "properties": {
+                "generation": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "statementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                }
+            },
+            "required": [
+                "generation",
+                "statementGeneration"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ProfileWriteExpectedSelectedHead": {
+            "type": "object",
+            "properties": {
+                "generation": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "statementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "revisionId": {
+                    "$ref": "#/$defs/ProfileRevisionId"
+                },
+                "revisionSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                }
+            },
+            "required": [
+                "generation",
+                "statementGeneration",
+                "revisionId",
+                "revisionSha256"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
+        },
+        "Sha256Hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+        }
+    }
+}

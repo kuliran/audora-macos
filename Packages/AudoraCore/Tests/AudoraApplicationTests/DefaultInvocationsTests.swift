@@ -2099,33 +2099,17 @@ final class DefaultInvocationsTests: XCTestCase {
                 """
                 {
                   "messageBlocks":[{"kind":"markdown","markdown":"Do not publish alone."}],
-                  "proposeProfileEdits":[{
-                    "edit":{
-                      "kind":"add",
-                      "statementKind":"growthDirection",
-                      "wording":"Pause before each new point."
-                    }
-                  }]
-                }
-                """,
-                false,
-                []
-            ),
-            (
-                """
-                {
-                  "messageBlocks":[{"kind":"markdown","markdown":"Do not publish alone."}],
                   "appendProfileEvidence":[{
-                    "targetStatementId":"profile-1",
+                    "targetStatementId":"stm-20260830T110000000Z-1ABC",
                     "evidence":[{
                       "sessionAttachmentId":"attachment-1",
-                      "target":{"kind":"audioEvent","audioEventId":"audio-1"}
+                      "target":{"kind":"audioEvent","audioEventId":"a000000"}
                     }]
                   }]
                 }
                 """,
                 true,
-                ["profile-1"]
+                ["stm-20260830T110000000Z-1ABC"]
             ),
         ]
 
@@ -2172,6 +2156,209 @@ final class DefaultInvocationsTests: XCTestCase {
         }
     }
 
+    func testSemanticAndMixedProfileEffectsPublishAsOneChatOwnedProposal()
+        async throws
+    {
+        let first = "stm-20260830T110000000Z-1ABC"
+        let second = "stm-20260830T110100000Z-2DEF"
+        let third = "stm-20260830T110200000Z-3GHJ"
+        let response = """
+        {
+          "messageBlocks":[{"kind":"markdown","markdown":"Review this Profile suggestion."}],
+          "proposeProfileEdits":[
+            {
+              "edit":{
+                "kind":"add",
+                "statementKind":"goal",
+                "wording":"Pause before each new point."
+              },
+              "evidence":[{
+                "sessionAttachmentId":"attachment-1",
+                "target":{
+                  "kind":"wordRange",
+                  "startWordId":"w000000",
+                  "endWordId":"w000000"
+                }
+              }]
+            },
+            {
+              "edit":{
+                "kind":"replace",
+                "targetStatementId":"\(first)",
+                "wording":"Explain one idea at a time."
+              }
+            },
+            {
+              "edit":{
+                "kind":"retire",
+                "targetStatementId":"\(second)"
+              }
+            }
+          ],
+          "appendProfileEvidence":[{
+            "targetStatementId":"\(third)",
+            "evidence":[{
+              "sessionAttachmentId":"attachment-1",
+              "target":{"kind":"audioEvent","audioEventId":"a000000"}
+            }]
+          }]
+        }
+        """
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            responseReservedTokens: 2_048,
+            providerOutcomes: [
+                .complete(
+                    CoachProviderCompleteResponse(body: Data(response.utf8))
+                ),
+            ],
+            includesOnDemandAttachment: true,
+            activeProfileStatementIDs: [first, second, third]
+        )
+
+        guard case let .published(published, _) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("semantic Profile effects must publish for review") }
+
+        let proposal = try XCTUnwrap(published.profileProposal)
+        XCTAssertEqual(proposal.chatID, published.chat.id)
+        XCTAssertEqual(proposal.responsePositionID, fixture.pending.responsePositionID)
+        XCTAssertEqual(proposal.baseProfile, fixture.contextSource.profile)
+        XCTAssertEqual(proposal.changes.count, 3)
+        XCTAssertEqual(proposal.evidenceAppends.count, 1)
+        XCTAssertTrue(proposal.id.rawValue.hasPrefix("prp-"))
+        let proposedIDs = proposal.changes.compactMap { change -> ProfileStatementID? in
+            switch change {
+            case let .add(statement): statement.statementID
+            case let .replace(_, replacement): replacement.statementID
+            case .retire: nil
+            }
+        }
+        XCTAssertEqual(Set(proposedIDs).count, 2)
+        XCTAssertTrue(proposedIDs.allSatisfy { $0.rawValue.hasPrefix("stm-") })
+        XCTAssertEqual(
+            proposal.changes.flatMap(\.evidence).first?.sessionID,
+            fixture.initial.chat.attachments.values[0].sessionID
+        )
+        XCTAssertNil(published.pendingUserTurn)
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(publicationCount, 1)
+    }
+
+    func testDuplicateExactReplacementNormalizesBeforeStatementIdentityAllocation()
+        async throws
+    {
+        let target = "stm-20260830T110000000Z-1ABC"
+        let response = """
+        {
+          "messageBlocks":[{"kind":"markdown","markdown":"Review this refinement."}],
+          "proposeProfileEdits":[
+            {
+              "edit":{
+                "kind":"replace",
+                "targetStatementId":"\(target)",
+                "wording":"Explain one idea at a time."
+              },
+              "evidence":[{
+                "sessionAttachmentId":"attachment-1",
+                "target":{
+                  "kind":"wordRange",
+                  "startWordId":"w000000",
+                  "endWordId":"w000000"
+                }
+              }]
+            },
+            {
+              "edit":{
+                "kind":"replace",
+                "targetStatementId":"\(target)",
+                "wording":"Explain one idea at a time."
+              },
+              "evidence":[{
+                "sessionAttachmentId":"attachment-1",
+                "target":{"kind":"audioEvent","audioEventId":"a000000"}
+              }]
+            }
+          ]
+        }
+        """
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            responseReservedTokens: 2_048,
+            providerOutcomes: [
+                .complete(CoachProviderCompleteResponse(body: Data(response.utf8))),
+            ],
+            includesOnDemandAttachment: true,
+            activeProfileStatementIDs: [target]
+        )
+
+        guard case let .published(published, _) =
+            await fixture.invocations.tryInvoke(fixture.request),
+              let proposal = published.profileProposal,
+              proposal.changes.count == 1,
+              case let .replace(_, replacement) = proposal.changes[0]
+        else { return XCTFail("duplicate replacement must normalize") }
+
+        XCTAssertEqual(replacement.evidence.count, 2)
+        XCTAssertEqual(Set(replacement.evidence.map(\.sessionID)).count, 1)
+    }
+
+    func testDuplicateExactAdditionNormalizesBeforeStatementIdentityAllocation()
+        async throws
+    {
+        let response = """
+        {
+          "messageBlocks":[{"kind":"markdown","markdown":"Review this goal."}],
+          "proposeProfileEdits":[
+            {
+              "edit":{
+                "kind":"add",
+                "statementKind":"goal",
+                "wording":"Pause before each new point."
+              },
+              "evidence":[{
+                "sessionAttachmentId":"attachment-1",
+                "target":{
+                  "kind":"wordRange",
+                  "startWordId":"w000000",
+                  "endWordId":"w000000"
+                }
+              }]
+            },
+            {
+              "edit":{
+                "kind":"add",
+                "statementKind":"goal",
+                "wording":"Pause before each new point."
+              },
+              "evidence":[{
+                "sessionAttachmentId":"attachment-1",
+                "target":{"kind":"audioEvent","audioEventId":"a000000"}
+              }]
+            }
+          ]
+        }
+        """
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            responseReservedTokens: 2_048,
+            providerOutcomes: [
+                .complete(CoachProviderCompleteResponse(body: Data(response.utf8))),
+            ],
+            includesOnDemandAttachment: true
+        )
+
+        guard case let .published(published, _) =
+            await fixture.invocations.tryInvoke(fixture.request),
+              let proposal = published.profileProposal,
+              proposal.changes.count == 1,
+              case let .add(statement) = proposal.changes[0]
+        else { return XCTFail("duplicate addition must normalize") }
+
+        XCTAssertEqual(statement.evidence.count, 2)
+        XCTAssertEqual(Set(statement.evidence.map(\.sessionID)).count, 1)
+    }
+
     func testEvidenceObservationPublishesResolvedStructuredCoachBlocks() async throws {
         let response = CoachProviderCompleteResponse(
             body: Data(
@@ -2184,7 +2371,7 @@ final class DefaultInvocationsTests: XCTestCase {
                       "markdown":"This pause clearly separated your points.",
                       "evidence":[{
                         "sessionAttachmentId":"attachment-1",
-                        "target":{"kind":"wordRange","startWordId":"word-1","endWordId":"word-1"}
+                        "target":{"kind":"wordRange","startWordId":"w000000","endWordId":"w000000"}
                       }]
                     }
                   ]
@@ -3320,6 +3507,7 @@ private final class InvocationFixture: @unchecked Sendable {
 
     init(
         contextWindow: Int,
+        responseReservedTokens: Int = 512,
         admissionDecision: InvocationAdmissionClaimOutcome = .admitted,
         draftText: String = "Keep this exact user Draft",
         contextIsCurrent: Bool = true,
@@ -3401,6 +3589,7 @@ private final class InvocationFixture: @unchecked Sendable {
         diagnostics = RecordingInvocationRetryDiagnostics()
         contextSource = InvocationContextSource(
             contextWindow: contextWindow,
+            responseReservedTokens: responseReservedTokens,
             isCurrent: contextIsCurrent,
             includesOnDemandAttachment: includesOnDemandAttachment,
             tokenEstimator: tokenEstimator,
@@ -4644,6 +4833,7 @@ private final class ScriptedInvocationRetryTiming:
 
 private actor InvocationContextSource: CoachContextSnapshotPort {
     private let contextWindow: Int
+    private let responseReservedTokens: Int
     private let current: Bool
     private let includesOnDemandAttachment: Bool
     private let tokenEstimator: CoachTokenEstimator
@@ -4657,12 +4847,14 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
 
     init(
         contextWindow: Int,
+        responseReservedTokens: Int = 512,
         isCurrent: Bool,
         includesOnDemandAttachment: Bool = false,
         tokenEstimator: CoachTokenEstimator = .utf8ByteUpperBound(),
         activeProfileStatementIDs: [String] = []
     ) {
         self.contextWindow = contextWindow
+        self.responseReservedTokens = responseReservedTokens
         current = isCurrent
         self.includesOnDemandAttachment = includesOnDemandAttachment
         self.tokenEstimator = tokenEstimator
@@ -4728,7 +4920,7 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                                                 ]),
                                                 "words": .array([
                                                     .object([
-                                                        "wordId": .string("word-1"),
+                                                        "wordId": .string("w000000"),
                                                         "text": .string("Pause"),
                                                         "timeRange": .object([
                                                             "startMs": .integer(0),
@@ -4740,7 +4932,7 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                                         ]),
                                         "audioEvents": .array([
                                             .object([
-                                                "audioEventId": .string("audio-1"),
+                                                "audioEventId": .string("a000000"),
                                                 "category": .string("silentPause"),
                                                 "timeRange": .object([
                                                     "startMs": .integer(1_000),
@@ -4771,7 +4963,7 @@ private actor InvocationContextSource: CoachContextSnapshotPort {
                             contextBudget: CoachContextBudget(
                                 contextWindowTokens: contextWindow,
                                 responseReservedTokens: min(
-                                    512,
+                                    responseReservedTokens,
                                     max(1, contextWindow - 2)
                                 ),
                                 safetyMarginTokens: 1

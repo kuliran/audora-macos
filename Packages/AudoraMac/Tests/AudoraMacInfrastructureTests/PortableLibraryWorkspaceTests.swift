@@ -572,7 +572,7 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 selection: .null,
                 updatedAt: try UTCInstant("2026-08-30T12:10:00.000Z")
             )
-            try persistence.atomicallyReplaceRoot(
+            try persistence.atomicallyReplaceRootForTesting(
                 persistence.encodeProfileHead(changedHead),
                 relativePath: LibraryRelativePath("profile/head.json"),
                 under: root

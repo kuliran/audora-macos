@@ -94,11 +94,137 @@ enum ChatNoticePresentation {
         case .attachmentCatalogFailed: "Sessions could not be loaded for Chat creation."
         case .qualifiedCoachConfigurationUnavailable:
             "No qualified Coach configuration is available. Install an Audora update with a qualified configuration before creating a Chat."
+        case .profileProposalAcceptFailed:
+            "The Profile changes could not be accepted. Review the proposal and try again."
+        case .profileProposalDiscardFailed:
+            "The Profile proposal could not be discarded. Review it and try again."
+        case .profileProposalStale:
+            "The Profile changed elsewhere, so this proposal can no longer be accepted. Discard it and continue chatting with the coach."
         }
     }
 
     static func accessibilityLabel(for notice: ChatNotice) -> String {
         "Chat notice: \(recoveryText(for: notice))"
+    }
+}
+
+enum ProfileProposalChangeOperation: Equatable {
+    case add
+    case replace
+    case retire
+}
+
+struct ProfileProposalChangePresentation: Equatable {
+    let operation: ProfileProposalChangeOperation
+    let statementKindLabel: String
+    let currentWording: String?
+    let proposedWording: String?
+    let evidence: [EvidenceReference]
+
+    var heading: String {
+        switch operation {
+        case .add: "Add \(statementKindLabel)"
+        case .replace: "Replace \(statementKindLabel)"
+        case .retire: "Retire \(statementKindLabel)"
+        }
+    }
+}
+
+struct ProfileEvidenceAppendPresentation: Equatable {
+    let statementKindLabel: String
+    let targetWording: String
+    let evidence: [EvidenceReference]
+
+    var heading: String { "Add evidence to \(statementKindLabel)" }
+}
+
+struct ProfileProposalCardPresentation: Equatable {
+    static let acceptActionTitle = "Accept"
+    static let discardActionTitle = "Discard"
+    static let actionTitles = [acceptActionTitle, discardActionTitle]
+    static let explanatoryCopy =
+        "Want to change this suggestion? Discard it, continue chatting with the coach, then ask the coach to remember the result."
+
+    let proposalID: ProfileChangeProposalID
+    let changes: [ProfileProposalChangePresentation]
+    let evidenceAppends: [ProfileEvidenceAppendPresentation]
+
+    init(_ proposal: ProfileChangeProposal) {
+        proposalID = proposal.id
+        changes = proposal.changes.map { change in
+            switch change {
+            case let .add(statement):
+                ProfileProposalChangePresentation(
+                    operation: .add,
+                    statementKindLabel: Self.statementKindLabel(
+                        statement.statementKind
+                    ),
+                    currentWording: nil,
+                    proposedWording: statement.wording,
+                    evidence: statement.evidence
+                )
+            case let .replace(target, replacement):
+                ProfileProposalChangePresentation(
+                    operation: .replace,
+                    statementKindLabel: Self.statementKindLabel(
+                        target.statementKind
+                    ),
+                    currentWording: target.wording,
+                    proposedWording: replacement.wording,
+                    evidence: replacement.evidence
+                )
+            case let .retire(target, evidence):
+                ProfileProposalChangePresentation(
+                    operation: .retire,
+                    statementKindLabel: Self.statementKindLabel(
+                        target.statementKind
+                    ),
+                    currentWording: target.wording,
+                    proposedWording: nil,
+                    evidence: evidence
+                )
+            }
+        }
+        evidenceAppends = proposal.evidenceAppends.map { append in
+            ProfileEvidenceAppendPresentation(
+                statementKindLabel: Self.statementKindLabel(
+                    append.target.statementKind
+                ),
+                targetWording: append.target.wording,
+                evidence: append.evidence
+            )
+        }
+    }
+
+    private static func statementKindLabel(
+        _ kind: ProfileStatementKind
+    ) -> String {
+        switch kind {
+        case .goal: "Goal"
+        case .coachingPreference: "Coaching preference"
+        case .selfAssessment: "Self-assessment"
+        case .speakingObservation: "Speaking observation"
+        case .growthDirection: "Growth direction"
+        }
+    }
+}
+
+enum ChatActivityPresentation {
+    static func progressLabel(
+        for activity: ChatFeatureState.Activity?
+    ) -> String? {
+        switch activity {
+        case .creating: "Creating Chat…"
+        case .renaming: "Renaming Chat…"
+        case .lockingDraft: "Preparing Draft…"
+        case .invokingCoach: "Coach is responding…"
+        case .stoppingCoach: "Stopping Coach response…"
+        case .retryingPendingUserTurn: "Rechecking Chat capacity…"
+        case .discardingPendingUserTurn: "Unlocking Draft…"
+        case .acceptingProfileProposal: "Accepting Profile changes…"
+        case .discardingProfileProposal: "Discarding Profile changes…"
+        case nil: nil
+        }
     }
 }
 
@@ -669,6 +795,9 @@ public struct ChatRootView: View {
                         .frame(maxHeight: 300)
                     }
                 }
+                if let proposal = aggregate.profileProposal {
+                    profileProposalView(proposal)
+                }
                 composerView
                 Spacer()
             }
@@ -724,9 +853,9 @@ public struct ChatRootView: View {
     ) -> CoachEvidenceLinkAvailability {
         switch model.snapshot.openedAttachments {
         case .notRequested, .resolving:
-            .unavailable("Checking the exact Transcript Revision…")
+            return .unavailable("Checking the exact Transcript Revision…")
         case .failed:
-            .unavailable("The exact Transcript Revision could not be verified.")
+            return .unavailable("The exact Transcript Revision could not be verified.")
         case let .resolved(resolutions):
             guard let resolved = resolutions.first(where: {
                 $0.attachment.sessionID == reference.sessionID &&
@@ -741,6 +870,136 @@ public struct ChatRootView: View {
             case let .unavailable(reason):
                 return .unavailable(
                     "The supporting Session is \(Self.attachmentUnavailableText(reason))."
+                )
+            }
+        }
+    }
+
+    private func profileProposalView(
+        _ proposal: ProfileChangeProposal
+    ) -> some View {
+        let presentation = ProfileProposalCardPresentation(proposal)
+        return GroupBox("Profile Change Proposal") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("The coach suggests these Profile changes:")
+                    .font(.callout)
+
+                ForEach(
+                    Array(presentation.changes.enumerated()),
+                    id: \.offset
+                ) { _, change in
+                    profileProposalChangeView(change)
+                }
+
+                ForEach(
+                    Array(presentation.evidenceAppends.enumerated()),
+                    id: \.offset
+                ) { _, append in
+                    profileEvidenceAppendView(append)
+                }
+
+                Text(ProfileProposalCardPresentation.explanatoryCopy)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Spacer()
+                    Button(ProfileProposalCardPresentation.discardActionTitle) {
+                        model.discardProfileProposal(presentation.proposalID)
+                    }
+                    .accessibilityLabel("Discard Profile Change Proposal")
+                    .disabled(!allowsNavigationAndMutation)
+
+                    Button(ProfileProposalCardPresentation.acceptActionTitle) {
+                        model.acceptProfileProposal(presentation.proposalID)
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityLabel("Accept Profile Change Proposal")
+                    .disabled(!allowsNavigationAndMutation)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func profileProposalChangeView(
+        _ change: ProfileProposalChangePresentation
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(change.heading)
+                .font(.callout.weight(.semibold))
+            if let currentWording = change.currentWording {
+                proposalWording(label: "Current", wording: currentWording)
+            }
+            if let proposedWording = change.proposedWording {
+                proposalWording(label: "Proposed", wording: proposedWording)
+            }
+            proposalEvidenceLinks(change.evidence)
+        }
+        .padding(10)
+        .background(
+            .quaternary.opacity(0.35),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func profileEvidenceAppendView(
+        _ append: ProfileEvidenceAppendPresentation
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(append.heading)
+                .font(.callout.weight(.semibold))
+            proposalWording(label: "Current", wording: append.targetWording)
+            proposalEvidenceLinks(append.evidence)
+        }
+        .padding(10)
+        .background(
+            .quaternary.opacity(0.35),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func proposalWording(label: String, wording: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(wording)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private func proposalEvidenceLinks(
+        _ evidence: [EvidenceReference]
+    ) -> some View {
+        if evidence.isEmpty {
+            Text("No supporting evidence")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            Text("Evidence")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ForEach(Array(evidence.enumerated()), id: \.offset) { _, reference in
+                CoachEvidenceLinkView(
+                    reference: reference,
+                    availability: evidenceAvailability(reference),
+                    onOpen: onOpenEvidence,
+                    onUnavailable: model.announceEvidenceUnavailable
                 )
             }
         }
@@ -772,7 +1031,12 @@ public struct ChatRootView: View {
                             .stroke(.separator)
                     }
                     .accessibilityLabel("Chat Draft")
-                    .disabled(!allowsNavigationAndMutation)
+                    .disabled(
+                        !allowsNavigationAndMutation ||
+                            !ChatInteractionPolicy.allowsComposerEditing(
+                                in: model.snapshot
+                            )
+                    )
 
                     HStack {
                         Text(isDirty ? "Unsaved changes" : "Saved")
@@ -789,6 +1053,9 @@ public struct ChatRootView: View {
                             .coachInvocationControl(
                                 disabled:
                                 !allowsNavigationAndMutation ||
+                                    !ChatInteractionPolicy.allowsComposerEditing(
+                                        in: model.snapshot
+                                    ) ||
                                     !ChatInteractionPolicy.allowsCoachInvocation(
                                         in: model.snapshot
                                     ) ||
@@ -927,23 +1194,10 @@ public struct ChatRootView: View {
 
     @ViewBuilder
     private var activityView: some View {
-        switch model.snapshot.activity {
-        case .creating:
-            ProgressView("Creating Chat…")
-        case .renaming:
-            ProgressView("Renaming Chat…")
-        case .lockingDraft:
-            ProgressView("Preparing Draft…")
-        case .invokingCoach:
-            ProgressView("Coach is responding…")
-        case .stoppingCoach:
-            ProgressView("Stopping Coach response…")
-        case .retryingPendingUserTurn:
-            ProgressView("Rechecking Chat capacity…")
-        case .discardingPendingUserTurn:
-            ProgressView("Unlocking Draft…")
-        case nil:
-            EmptyView()
+        if let label = ChatActivityPresentation.progressLabel(
+            for: model.snapshot.activity
+        ) {
+            ProgressView(label)
         }
     }
 

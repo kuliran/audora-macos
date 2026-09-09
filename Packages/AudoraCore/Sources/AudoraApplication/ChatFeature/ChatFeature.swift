@@ -37,6 +37,8 @@ public enum ChatCommand: Equatable, Sendable {
     case retryPendingUserTurn(ChatCommandContext, PendingUserTurnID)
     case createNewChatFromCapacityFailure(ChatCommandContext, PendingUserTurnID)
     case discardPendingUserTurn(ChatCommandContext, PendingUserTurnID)
+    case acceptProfileProposal(ChatCommandContext, ProfileChangeProposalID)
+    case discardProfileProposal(ChatCommandContext, ProfileChangeProposalID)
 }
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)

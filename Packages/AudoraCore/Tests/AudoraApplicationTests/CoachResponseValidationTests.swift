@@ -91,6 +91,10 @@ final class CoachResponseValidationTests: XCTestCase {
                     {
                       "sessionAttachmentId":"attachment-1",
                       "target":{"kind":"audioEvent","audioEventId":"a1"}
+                    },
+                    {
+                      "sessionAttachmentId":"attachment-2",
+                      "target":{"kind":"audioEvent","audioEventId":"a2"}
                     }
                   ]
                 },
@@ -147,7 +151,7 @@ final class CoachResponseValidationTests: XCTestCase {
         XCTAssertEqual(validated.newMemory?.sessionSummaries.count, 1)
         XCTAssertEqual(validated.proposedProfileEdits.count, 2)
         XCTAssertEqual(validated.appendedProfileEvidence.count, 1)
-        XCTAssertFalse(validated.isSupportedByCurrentPublicationSlice)
+        XCTAssertTrue(validated.isSupportedByCurrentPublicationSlice)
     }
 
     func testOrdinaryAnswerRequiresBlocksButReconsiderMayBeEmpty() throws {
@@ -500,6 +504,182 @@ final class CoachResponseValidationTests: XCTestCase {
         }
     }
 
+    func testProfileStatementEvidenceAdmissionRulesAreEnforced() throws {
+        let sameSessionAcrossRevisions = context(
+            secondAttachmentUsesFirstSession: true
+        )
+        XCTAssertEqual(
+            Set(sameSessionAcrossRevisions.transcripts.values.map(\.sessionID)).count,
+            1
+        )
+        XCTAssertEqual(
+            Set(
+                sameSessionAcrossRevisions.transcripts.values.map(
+                    \.transcriptRevisionID
+                )
+            ).count,
+            2
+        )
+        for statementKind in ["speakingObservation", "growthDirection"] {
+            assertRejected(
+                """
+                {
+                  "messageBlocks":[{"kind":"markdown","markdown":"Valid."}],
+                  "proposeProfileEdits":[{
+                    "edit":{
+                      "kind":"add",
+                      "statementKind":"\(statementKind)",
+                      "wording":"Transcript-grounded statement."
+                    }
+                  }]
+                }
+                """,
+                as: .invalidEvidencePointer
+            )
+            assertRejected(
+                """
+                {
+                  "messageBlocks":[{"kind":"markdown","markdown":"Valid."}],
+                  "proposeProfileEdits":[{
+                    "edit":{
+                      "kind":"add",
+                      "statementKind":"\(statementKind)",
+                      "wording":"Recurring transcript-grounded statement."
+                    },
+                    "evidence":[
+                      {
+                        "sessionAttachmentId":"attachment-1",
+                        "target":{"kind":"wordRange","startWordId":"w1","endWordId":"w1"}
+                      },
+                      {
+                        "sessionAttachmentId":"attachment-2",
+                        "target":{"kind":"wordRange","startWordId":"x1","endWordId":"x1"}
+                      }
+                    ]
+                  }]
+                }
+                """,
+                as: .invalidEvidencePointer,
+                in: sameSessionAcrossRevisions
+            )
+        }
+
+        for statementKind in ["goal", "coachingPreference", "selfAssessment"] {
+            XCTAssertNoThrow(
+                try CoachResponseValidator().validate(
+                    response(
+                        """
+                        {
+                          "messageBlocks":[{
+                            "kind":"markdown",
+                            "markdown":"Valid."
+                          }],
+                          "proposeProfileEdits":[{
+                            "edit":{
+                              "kind":"add",
+                              "statementKind":"\(statementKind)",
+                              "wording":"Conversation-grounded statement."
+                            }
+                          }]
+                        }
+                        """
+                    ),
+                    in: context()
+                )
+            )
+        }
+
+        for statementKind in ["speakingObservation", "growthDirection"] {
+            XCTAssertNoThrow(
+                try CoachResponseValidator().validate(
+                    response(
+                        """
+                        {
+                          "messageBlocks":[{
+                            "kind":"markdown",
+                            "markdown":"Valid."
+                          }],
+                          "proposeProfileEdits":[{
+                            "edit":{
+                              "kind":"add",
+                              "statementKind":"\(statementKind)",
+                              "wording":"Supported by two distinct Sessions."
+                            },
+                            "evidence":[
+                              {
+                                "sessionAttachmentId":"attachment-1",
+                                "target":{"kind":"audioEvent","audioEventId":"a1"}
+                              },
+                              {
+                                "sessionAttachmentId":"attachment-2",
+                                "target":{"kind":"audioEvent","audioEventId":"a2"}
+                              }
+                            ]
+                          }]
+                        }
+                        """
+                    ),
+                    in: context()
+                )
+            )
+        }
+    }
+
+    func testExactDuplicateRecurringEditCombinesEvidenceForAdmission() throws {
+        let validated = try CoachResponseValidator().validate(
+            response(
+                """
+                {
+                  "messageBlocks":[{"kind":"markdown","markdown":"Valid."}],
+                  "proposeProfileEdits":[
+                    {
+                      "edit":{
+                        "kind":"add",
+                        "statementKind":"speakingObservation",
+                        "wording":"I rush transitions between ideas."
+                      },
+                      "evidence":[{
+                        "sessionAttachmentId":"attachment-1",
+                        "target":{
+                          "kind":"wordRange",
+                          "startWordId":"w1",
+                          "endWordId":"w1"
+                        }
+                      }]
+                    },
+                    {
+                      "edit":{
+                        "kind":"add",
+                        "statementKind":"speakingObservation",
+                        "wording":"I rush transitions between ideas."
+                      },
+                      "evidence":[{
+                        "sessionAttachmentId":"attachment-2",
+                        "target":{
+                          "kind":"wordRange",
+                          "startWordId":"x1",
+                          "endWordId":"x1"
+                        }
+                      }]
+                    }
+                  ]
+                }
+                """
+            ),
+            in: context()
+        )
+
+        XCTAssertEqual(validated.proposedProfileEdits.count, 2)
+        XCTAssertEqual(
+            Set(
+                validated.proposedProfileEdits
+                    .flatMap(\.evidence)
+                    .map(\.sessionID)
+            ).count,
+            2
+        )
+    }
+
     func testExactDuplicateProfileEditIsNotAConflict() throws {
         let body = """
         {
@@ -552,7 +732,11 @@ final class CoachResponseValidationTests: XCTestCase {
                   "statementKind":"speakingObservation",
                   "wording":"Unsupported observation."
                 },
-                "evidence":[\(pointer)]
+                "evidence":[
+                  \(pointer),
+                  {"sessionAttachmentId":"attachment-2",
+                   "target":{"kind":"audioEvent","audioEventId":"a2"}}
+                ]
               }]
             }
             """,
@@ -573,17 +757,21 @@ final class CoachResponseValidationTests: XCTestCase {
             in: context()
         )
         XCTAssertEqual(validated.messageBlocks.count, 2)
-        XCTAssertFalse(validated.isSupportedByCurrentPublicationSlice)
+        XCTAssertTrue(validated.isSupportedByCurrentPublicationSlice)
     }
 
     private func assertRejected(
         _ body: String,
         as expected: CoachResponseValidationError,
+        in validationContext: CoachResponseValidationContext? = nil,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
         XCTAssertThrowsError(
-            try CoachResponseValidator().validate(response(body), in: context()),
+            try CoachResponseValidator().validate(
+                response(body),
+                in: validationContext ?? context()
+            ),
             file: file,
             line: line
         ) {
@@ -606,24 +794,50 @@ final class CoachResponseValidationTests: XCTestCase {
         responseTokens: Int = 1_000_000,
         collectorBytes: Int = 1_000_000,
         memoryTokens: Int = 1_000_000,
-        framing: CoachProviderFraming = CoachProviderFraming()
+        framing: CoachProviderFraming = CoachProviderFraming(),
+        secondAttachmentUsesFirstSession: Bool = false
     ) -> CoachResponseValidationContext {
         let first = try! ChatSessionAttachmentID("attachment-1")
         let second = try! ChatSessionAttachmentID("attachment-2")
+        let firstSessionID = try! SessionID(
+            "ses-20260830T110000000Z-1KMN"
+        )
         return try! CoachResponseValidationContext(
             triggerPosition: trigger,
             transcripts: [
                 first: try! CoachResponseTranscriptEvidenceIndex(
                     wordIDs: ["w1", "w2", "w3"],
                     audioEventIDs: ["a1", "gap-1"],
-                    audioEventIDsIneligibleForProfileSupport: ["gap-1"]
+                    audioEventIDsIneligibleForProfileSupport: ["gap-1"],
+                    sessionID: firstSessionID
                 ),
                 second: try! CoachResponseTranscriptEvidenceIndex(
                     wordIDs: ["x1", "x2"],
-                    audioEventIDs: ["a2"]
+                    audioEventIDs: ["a2"],
+                    sessionID: secondAttachmentUsesFirstSession
+                        ? firstSessionID
+                        : SessionID("ses-20260831T110000000Z-2RST"),
+                    transcriptRevisionID: TranscriptRevisionID(
+                        "trv-20260831T111000000Z-2VWX"
+                    )
                 ),
             ],
-            activeProfileStatementIDs: ["profile-1", "profile-2"],
+            activeProfileStatements: [
+                "profile-1": try! ProfileProposalTarget(
+                    statementID: ProfileStatementID(
+                        "stm-20260830T110000000Z-1ABC"
+                    ),
+                    statementKind: .goal,
+                    wording: "First active goal"
+                ),
+                "profile-2": try! ProfileProposalTarget(
+                    statementID: ProfileStatementID(
+                        "stm-20260830T110000000Z-2DEF"
+                    ),
+                    statementKind: .goal,
+                    wording: "Second active goal"
+                ),
+            ],
             authority: CoachResponseValidationAuthority(
                 responseReservedTokens: responseTokens,
                 responseCollectorByteCeiling: collectorBytes,
@@ -648,10 +862,22 @@ final class CoachResponseValidationTests: XCTestCase {
                 ),
                 demo: try! CoachResponseTranscriptEvidenceIndex(
                     wordIDs: (31 ... 34).map { "word-\($0)" },
-                    audioEventIDs: []
+                    audioEventIDs: [],
+                    sessionID: SessionID("ses-20260831T110000000Z-2RST"),
+                    transcriptRevisionID: TranscriptRevisionID(
+                        "trv-20260831T111000000Z-2VWX"
+                    )
                 ),
             ],
-            activeProfileStatementIDs: ["statement-7"],
+            activeProfileStatements: [
+                "statement-7": try! ProfileProposalTarget(
+                    statementID: ProfileStatementID(
+                        "stm-20260830T110000000Z-7RST"
+                    ),
+                    statementKind: .goal,
+                    wording: "Contract fixture goal"
+                ),
+            ],
             authority: CoachResponseValidationAuthority(
                 responseReservedTokens: 1_000_000,
                 responseCollectorByteCeiling: 1_000_000,

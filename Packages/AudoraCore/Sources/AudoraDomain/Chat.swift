@@ -618,12 +618,14 @@ public struct ChatAggregate: Equatable, Sendable {
     public let memory: CoachMemory
     public let messages: [ChatMessage]
     public let pendingUserTurn: PendingUserTurn?
+    public let profileProposal: ProfileChangeProposal?
 
     public init(
         chat: Chat,
         memory: CoachMemory,
         messages: [ChatMessage] = [],
-        pendingUserTurn: PendingUserTurn? = nil
+        pendingUserTurn: PendingUserTurn? = nil,
+        profileProposal: ProfileChangeProposal? = nil
     ) throws {
         guard chat.currentMemoryID == memory.memoryID else {
             throw ChatAggregateError.memoryPointerMismatch
@@ -635,11 +637,15 @@ public struct ChatAggregate: Equatable, Sendable {
             guard messages.map(\.id) == chat.messageIDs,
                   messages.count.isMultiple(of: 2)
             else { throw ChatAggregateError.messageHistoryMismatch }
+            var responsePositions: Set<ChatResponsePositionID> = []
             for index in stride(from: 0, to: messages.count, by: 2) {
                 guard case .user = messages[index].content,
                       case .coach = messages[index + 1].content,
                       messages[index].responsePositionID ==
                         messages[index + 1].responsePositionID,
+                      responsePositions.insert(
+                          messages[index].responsePositionID
+                      ).inserted,
                       messages[index].persistedSchemaVersion ==
                         messages[index + 1].persistedSchemaVersion
                 else { throw ChatAggregateError.messageHistoryMismatch }
@@ -670,7 +676,10 @@ public struct ChatAggregate: Equatable, Sendable {
         }
         if let pendingUserTurn {
             guard pendingUserTurn.draftID == chat.draft.draftID,
-                  pendingUserTurn.draftVersion == chat.draft.version
+                  pendingUserTurn.draftVersion == chat.draft.version,
+                  messages.isEmpty || !messages.contains(where: {
+                      $0.responsePositionID == pendingUserTurn.responsePositionID
+                  })
             else {
                 throw ChatAggregateError.pendingDraftMismatch
             }
@@ -686,10 +695,44 @@ public struct ChatAggregate: Equatable, Sendable {
                 }
             }
         }
+        if let profileProposal {
+            guard pendingUserTurn == nil,
+                  profileProposal.chatID == chat.id
+            else { throw ChatAggregateError.messageHistoryMismatch }
+            if !messages.isEmpty {
+                let sourceMessages = messages.filter { message in
+                    message.responsePositionID ==
+                        profileProposal.responsePositionID && {
+                            if case .coach = message.content { return true }
+                            return false
+                        }()
+                }
+                guard sourceMessages.count == 1,
+                      sourceMessages[0].coachProfile == profileProposal.baseProfile
+                else { throw ChatAggregateError.messageHistoryMismatch }
+            }
+            let attachmentPairs = Set(chat.attachments.values.map {
+                EvidenceAttachmentPair(
+                    sessionID: $0.sessionID,
+                    transcriptRevisionID: $0.transcriptRevisionID
+                )
+            })
+            let proposalEvidence = profileProposal.changes.flatMap(\.evidence) +
+                profileProposal.evidenceAppends.flatMap(\.evidence)
+            guard proposalEvidence.allSatisfy({ reference in
+                attachmentPairs.contains(
+                    EvidenceAttachmentPair(
+                        sessionID: reference.sessionID,
+                        transcriptRevisionID: reference.transcriptRevisionID
+                    )
+                )
+            }) else { throw ChatAggregateError.messageHistoryMismatch }
+        }
         self.chat = chat
         self.memory = memory
         self.messages = messages
         self.pendingUserTurn = pendingUserTurn
+        self.profileProposal = profileProposal
     }
 
     public static func emptyDevelopmentChat(

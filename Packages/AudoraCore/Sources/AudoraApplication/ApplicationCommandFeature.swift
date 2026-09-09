@@ -372,7 +372,8 @@ private final class DeferredApplicationCommandCompletion {
 private extension ChatCommand {
     var beginsApplicationChatBoundary: Bool {
         switch self {
-        case .confirmNewChat, .open, .sendDraft, .retryPendingUserTurn:
+        case .confirmNewChat, .open, .sendDraft, .retryPendingUserTurn,
+             .acceptProfileProposal, .discardProfileProposal:
             true
         case .start, .beginNewChat, .setNewChatAttachmentFilter,
              .toggleNewChatAttachment, .cancelNewChat,

@@ -84,7 +84,8 @@ public struct PreparedPendingCoachInvocation: Equatable, Sendable {
             chat: newRequest.observedAggregate.chat,
             memory: newRequest.observedAggregate.memory,
             messages: newRequest.observedAggregate.messages,
-            pendingUserTurn: newRequest.pendingUserTurn
+            pendingUserTurn: newRequest.pendingUserTurn,
+            profileProposal: newRequest.observedAggregate.profileProposal
         )
         let request = PendingCoachInvocationRequest(
             library: newRequest.library,
@@ -497,7 +498,8 @@ public struct InstallCoachInvocationMutation: Equatable, Sendable {
             chat: authority.aggregate.chat,
             memory: authority.aggregate.memory,
             messages: authority.aggregate.messages,
-            pendingUserTurn: authority.pendingUserTurn.replacingFailure(nil)
+            pendingUserTurn: authority.pendingUserTurn.replacingFailure(nil),
+            profileProposal: authority.aggregate.profileProposal
         )
         invocation = try CoachInvocation(
             id: invocationID,
@@ -602,6 +604,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
     public let coachMessage: ChatMessage
     public let freshDraft: ChatDraft
     public let replacementMemory: CoachMemory?
+    public let profileProposal: ProfileChangeProposal?
     public let replacement: ChatAggregate
 
     /// Internal construction seam for persistence tests over app-owned
@@ -628,6 +631,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         invocation: CoachInvocation,
         coachBlocks: [CoachMessageBlock],
         replacementMemory: CoachMemory? = nil,
+        profileProposal: ProfileChangeProposal? = nil,
         completedAt: UTCInstant
     ) throws {
         self.base = base
@@ -655,12 +659,14 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
             updatedAt: completedAt
         )
         self.replacementMemory = replacementMemory
+        self.profileProposal = profileProposal
         replacement = try base.publishingTurn(
             invocation: invocation,
             userMessage: userMessage,
             coachMessage: coachMessage,
             freshDraft: freshDraft,
             replacementMemory: replacementMemory,
+            profileProposal: profileProposal,
             at: completedAt
         )
     }
@@ -681,13 +687,157 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         else {
             throw PublishCoachInvocationMutationError.unsupportedResponseComponent
         }
+        let proposal = try Self.materializeProfileProposal(
+            from: validatedResponse,
+            base: base,
+            invocation: invocation,
+            completedAt: completedAt
+        )
         try self.init(
             base: base,
             invocation: invocation,
             coachBlocks: validatedResponse.publicationBlocks,
             replacementMemory: replacementMemory,
+            profileProposal: proposal,
             completedAt: completedAt
         )
+    }
+
+    private static func materializeProfileProposal(
+        from response: ValidatedCoachResponse,
+        base: ChatAggregate,
+        invocation: CoachInvocation,
+        completedAt: UTCInstant
+    ) throws -> ProfileChangeProposal? {
+        guard !response.proposedProfileEdits.isEmpty else { return nil }
+        guard let sourceMessageID = invocation.attempt.publicationAuthority?
+            .coachMessageID,
+              let baseProfile = invocation.preparedProfile,
+              let proposalID = try? ProfileChangeProposalID(
+                  derivedProfileID(prefix: "prp-", source: sourceMessageID.rawValue)
+              )
+        else { throw PublishCoachInvocationMutationError.unsupportedResponseComponent }
+
+        var nextStatementOrdinal = 0
+        func allocateStatementID() throws -> ProfileStatementID {
+            defer { nextStatementOrdinal += 1 }
+            return try ProfileStatementID(
+                derivedProfileID(
+                    prefix: "stm-",
+                    source: sourceMessageID.rawValue,
+                    ordinal: nextStatementOrdinal
+                )
+            )
+        }
+        var changes: [ProfileProposalChange] = []
+        var semanticTargetIndexes: [ProfileStatementID: Int] = [:]
+        for proposal in response.proposedProfileEdits {
+            switch proposal.edit {
+            case let .add(kind, wording):
+                if let index = changes.firstIndex(where: { change in
+                    guard case let .add(existing) = change else { return false }
+                    return existing.statementKind == kind &&
+                        existing.wording == wording
+                }), case let .add(existing) = changes[index] {
+                    changes[index] = .add(
+                        statement: try ProfileProposedStatement(
+                            statementID: existing.statementID,
+                            statementKind: existing.statementKind,
+                            wording: existing.wording,
+                            evidence: existing.evidence + proposal.evidence
+                        )
+                    )
+                    continue
+                }
+                changes.append(.add(
+                    statement: try ProfileProposedStatement(
+                        statementID: allocateStatementID(),
+                        statementKind: kind,
+                        wording: wording,
+                        evidence: proposal.evidence
+                    )
+                ))
+            case let .replace(target, wording):
+                if let index = semanticTargetIndexes[target.statementID],
+                   case let .replace(existingTarget, existing) = changes[index],
+                   existingTarget == target,
+                   existing.wording == wording
+                {
+                    changes[index] = .replace(
+                        target: target,
+                        replacement: try ProfileProposedStatement(
+                            statementID: existing.statementID,
+                            statementKind: existing.statementKind,
+                            wording: existing.wording,
+                            evidence: existing.evidence + proposal.evidence
+                        )
+                    )
+                    continue
+                }
+                semanticTargetIndexes[target.statementID] = changes.count
+                changes.append(.replace(
+                    target: target,
+                    replacement: try ProfileProposedStatement(
+                        statementID: allocateStatementID(),
+                        statementKind: target.statementKind,
+                        wording: wording,
+                        evidence: proposal.evidence
+                    )
+                ))
+            case let .retire(target):
+                if let index = semanticTargetIndexes[target.statementID],
+                   case let .retire(existingTarget, existingEvidence) =
+                    changes[index], existingTarget == target
+                {
+                    changes[index] = .retire(
+                        target: target,
+                        evidence: existingEvidence + proposal.evidence
+                    )
+                    continue
+                }
+                semanticTargetIndexes[target.statementID] = changes.count
+                changes.append(.retire(
+                    target: target,
+                    evidence: proposal.evidence
+                ))
+            }
+        }
+        let appends = try response.appendedProfileEvidence.map {
+            try ProfileEvidenceAppend(target: $0.target, evidence: $0.evidence)
+        }
+        return try ProfileChangeProposal(
+            id: proposalID,
+            chatID: base.chat.id,
+            responsePositionID: invocation.responsePositionID,
+            baseProfile: baseProfile,
+            changes: changes,
+            evidenceAppends: appends,
+            createdAt: completedAt
+        )
+    }
+
+    private static func derivedProfileID(
+        prefix: String,
+        source: String,
+        ordinal: Int = 0
+    ) -> String {
+        let sourceTail = String(source.dropFirst(4))
+        guard ordinal > 0 else { return prefix + sourceTail }
+        let alphabet = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+        var tail = Array(sourceTail)
+        var carry = ordinal
+        for index in stride(from: tail.count - 1, through: tail.count - 4, by: -1) {
+            guard let digit = alphabet.firstIndex(of: tail[index]) else {
+                return prefix + sourceTail
+            }
+            let value = digit + carry
+            tail[index] = alphabet[value % alphabet.count]
+            carry = value / alphabet.count
+        }
+        // Wrap the fixed-width suffix just like the portable ID allocator. The
+        // response envelope cannot contain 32^4 semantic edits, so every
+        // ordinal in one validated batch remains distinct even at `ZZZZ`.
+        return prefix + String(tail)
     }
 
     private static func matchesValidatedMemory(

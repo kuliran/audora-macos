@@ -754,6 +754,202 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    func testProfileProposalCardProjectsEveryChangeAndOnlyAcceptDiscard() throws {
+        let chatID = try ChatID("cht-20260909T120000000Z-1ABC")
+        let proposal = try profileProposal(for: chatID)
+
+        let card = ProfileProposalCardPresentation(proposal)
+
+        XCTAssertEqual(card.proposalID, proposal.id)
+        XCTAssertEqual(
+            card.changes,
+            [
+                ProfileProposalChangePresentation(
+                    operation: .add,
+                    statementKindLabel: "Goal",
+                    currentWording: nil,
+                    proposedWording: "Pause after each main idea.",
+                    evidence: [try evidenceReference(index: 1)]
+                ),
+                ProfileProposalChangePresentation(
+                    operation: .replace,
+                    statementKindLabel: "Speaking observation",
+                    currentWording: "I rush transitions between ideas.",
+                    proposedWording: "I can make transitions easier to follow.",
+                    evidence: [try evidenceReference(index: 2)]
+                ),
+                ProfileProposalChangePresentation(
+                    operation: .retire,
+                    statementKindLabel: "Coaching preference",
+                    currentWording: "Give me a long written debrief.",
+                    proposedWording: nil,
+                    evidence: [try evidenceReference(index: 3)]
+                ),
+            ]
+        )
+        XCTAssertEqual(
+            card.evidenceAppends,
+            [
+                ProfileEvidenceAppendPresentation(
+                    statementKindLabel: "Self-assessment",
+                    targetWording: "I speak clearly when I slow down.",
+                    evidence: [try evidenceReference(index: 4)]
+                ),
+            ]
+        )
+        XCTAssertEqual(
+            card.changes.map(\.heading),
+            [
+                "Add Goal",
+                "Replace Speaking observation",
+                "Retire Coaching preference",
+            ]
+        )
+        XCTAssertEqual(
+            card.evidenceAppends.map(\.heading),
+            ["Add evidence to Self-assessment"]
+        )
+        XCTAssertEqual(
+            ProfileProposalCardPresentation.explanatoryCopy,
+            "Want to change this suggestion? Discard it, continue chatting with the coach, then ask the coach to remember the result."
+        )
+        XCTAssertEqual(
+            ProfileProposalCardPresentation.actionTitles,
+            ["Accept", "Discard"]
+        )
+        XCTAssertFalse(
+            ProfileProposalCardPresentation.actionTitles.contains("Discuss")
+        )
+    }
+
+    func testProfileProposalActionsCaptureCurrentContextAndExactProposalID()
+        async throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260909T115900000Z-1ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260909T120000000Z-2DEF",
+            draftID: "drf-20260909T120000000Z-3GHJ",
+            memoryID: "mem-20260909T120000000Z-4KMN",
+            title: "Profile review",
+            attachments: try profileProposalAttachments()
+        )
+        let proposal = try profileProposal(for: base.chat.id)
+        let proposed = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            profileProposal: proposal
+        )
+        let row = ChatRowSnapshot(aggregate: proposed)
+        let state = ChatFeatureState(
+            catalog: .ready(
+                ChatCatalogSnapshot(allRows: [row], visibleRows: [row])
+            ),
+            selection: .open(proposed),
+            composer: .editable(proposed.chat.draft, isDirty: false),
+            admissionAvailability: .available
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let model = makeChatPresentationModel(feature: feature)
+        await model.start(in: scope)
+        let startCommands = await feature.commands
+        let context = try XCTUnwrap(
+            startContexts(in: startCommands).first
+        )
+
+        model.acceptProfileProposal(proposal.id)
+        await waitForCommandCount(2, in: feature)
+        model.discardProfileProposal(proposal.id)
+        await waitForCommandCount(3, in: feature)
+
+        let commands = await feature.commands
+        XCTAssertEqual(
+            commands,
+            [
+                .start(context),
+                .acceptProfileProposal(context, proposal.id),
+                .discardProfileProposal(context, proposal.id),
+            ]
+        )
+    }
+
+    func testUnresolvedProfileProposalBlocksDraftEditsAndSendProjection()
+        async throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260909T125900000Z-1ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260909T130000000Z-2DEF",
+            draftID: "drf-20260909T130000000Z-3GHJ",
+            memoryID: "mem-20260909T130000000Z-4KMN",
+            title: "Blocked Draft",
+            attachments: try profileProposalAttachments()
+        )
+        let proposal = try profileProposal(for: base.chat.id)
+        let proposed = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            profileProposal: proposal
+        )
+        let row = ChatRowSnapshot(aggregate: proposed)
+        let state = ChatFeatureState(
+            catalog: .ready(
+                ChatCatalogSnapshot(allRows: [row], visibleRows: [row])
+            ),
+            selection: .open(proposed),
+            composer: .editable(proposed.chat.draft, isDirty: false),
+            admissionAvailability: .available
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let model = makeChatPresentationModel(feature: feature)
+        await model.start(in: scope)
+
+        XCTAssertFalse(ChatInteractionPolicy.allowsComposerEditing(in: state))
+        model.updateDraft("This edit must remain local to the disabled control.")
+        model.sendDraft()
+        await Task.yield()
+
+        let commands = await feature.commands
+        let context = try XCTUnwrap(startContexts(in: commands).first)
+        XCTAssertEqual(commands, [.start(context)])
+    }
+
+    func testProfileProposalActivityAndNoticesHaveActionableCopy() throws {
+        let chatID = try ChatID("cht-20260909T140000000Z-1ABC")
+        XCTAssertEqual(
+            ChatActivityPresentation.progressLabel(
+                for: .acceptingProfileProposal(chatID)
+            ),
+            "Accepting Profile changes…"
+        )
+        XCTAssertEqual(
+            ChatActivityPresentation.progressLabel(
+                for: .discardingProfileProposal(chatID)
+            ),
+            "Discarding Profile changes…"
+        )
+        XCTAssertEqual(
+            ChatNoticePresentation.recoveryText(
+                for: .profileProposalAcceptFailed
+            ),
+            "The Profile changes could not be accepted. Review the proposal and try again."
+        )
+        XCTAssertEqual(
+            ChatNoticePresentation.recoveryText(
+                for: .profileProposalDiscardFailed
+            ),
+            "The Profile proposal could not be discarded. Review it and try again."
+        )
+        XCTAssertEqual(
+            ChatNoticePresentation.recoveryText(for: .profileProposalStale),
+            "The Profile changed elsewhere, so this proposal can no longer be accepted. Discard it and continue chatting with the coach."
+        )
+    }
+
     func testRenameEditorTaskIdentityChangesBetweenRevisionZeroChats() throws {
         let first = ChatRenameEditorTaskID(
             chatID: try ChatID("cht-20260830T120000000Z-2ABC"),
@@ -783,6 +979,9 @@ final class ChatPresentationModelTests: XCTestCase {
             .messageMustBeShortened,
             .attachmentCatalogFailed,
             .qualifiedCoachConfigurationUnavailable,
+            .profileProposalAcceptFailed,
+            .profileProposalDiscardFailed,
+            .profileProposalStale,
         ]
 
         for notice in notices {
@@ -1181,12 +1380,129 @@ final class ChatPresentationModelTests: XCTestCase {
         }
     }
 
+    private func profileProposal(
+        for chatID: ChatID
+    ) throws -> ProfileChangeProposal {
+        let replaceTarget = try ProfileProposalTarget(
+            statementID: ProfileStatementID(
+                "stm-20260909T110000000Z-1ABC"
+            ),
+            statementKind: .speakingObservation,
+            wording: "I rush transitions between ideas."
+        )
+        let retireTarget = try ProfileProposalTarget(
+            statementID: ProfileStatementID(
+                "stm-20260909T110000000Z-2DEF"
+            ),
+            statementKind: .coachingPreference,
+            wording: "Give me a long written debrief."
+        )
+        let appendTarget = try ProfileProposalTarget(
+            statementID: ProfileStatementID(
+                "stm-20260909T110000000Z-3GHJ"
+            ),
+            statementKind: .selfAssessment,
+            wording: "I speak clearly when I slow down."
+        )
+        return try ProfileChangeProposal(
+            id: ProfileChangeProposalID("prp-20260909T120000000Z-4KMN"),
+            chatID: chatID,
+            responsePositionID: ChatResponsePositionID(
+                "rsp-20260909T120000000Z-5PQR"
+            ),
+            baseProfile: CoachProfileProvenance(
+                revisionID: ProfileRevisionID(
+                    "prf-20260909T105900000Z-6RST"
+                ),
+                statementGeneration: 7
+            ),
+            changes: [
+                .add(
+                    statement: try ProfileProposedStatement(
+                        statementID: ProfileStatementID(
+                            "stm-20260909T120000000Z-7VWX"
+                        ),
+                        statementKind: .goal,
+                        wording: "Pause after each main idea.",
+                        evidence: [try evidenceReference(index: 1)]
+                    )
+                ),
+                .replace(
+                    target: replaceTarget,
+                    replacement: try ProfileProposedStatement(
+                        statementID: ProfileStatementID(
+                            "stm-20260909T120000000Z-8XYZ"
+                        ),
+                        statementKind: .speakingObservation,
+                        wording: "I can make transitions easier to follow.",
+                        evidence: [try evidenceReference(index: 2)]
+                    )
+                ),
+                .retire(
+                    target: retireTarget,
+                    evidence: [try evidenceReference(index: 3)]
+                ),
+            ],
+            evidenceAppends: [
+                try ProfileEvidenceAppend(
+                    target: appendTarget,
+                    evidence: [try evidenceReference(index: 4)]
+                ),
+            ],
+            createdAt: UTCInstant("2026-09-09T12:00:00.000Z")
+        )
+    }
+
+    private func evidenceReference(index: Int) throws -> EvidenceReference {
+        try EvidenceReference(
+            sessionID: SessionID(
+                "ses-20260909T100000000Z-\(index)ABC"
+            ),
+            transcriptRevisionID: TranscriptRevisionID(
+                "trv-20260909T100000000Z-\(index)DEF"
+            ),
+            target: .wordRange(
+                startWordID: TranscriptWordID(
+                    String(format: "w%06d", index * 2 - 1)
+                ),
+                endWordID: TranscriptWordID(
+                    String(format: "w%06d", index * 2)
+                )
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Session \(index)",
+                trustedText: "Trusted evidence \(index)",
+                startMilliseconds: UInt64(index * 1_000),
+                endMilliseconds: UInt64(index * 1_000 + 500)
+            )
+        )
+    }
+
+    private func profileProposalAttachments() throws -> ChatAttachments {
+        try ChatAttachments(
+            validating: (1 ... 4).map { index in
+                ChatSessionAttachment(
+                    attachmentID: try ChatSessionAttachmentID(
+                        "proposal-evidence-\(index)"
+                    ),
+                    sessionID: try SessionID(
+                        "ses-20260909T100000000Z-\(index)ABC"
+                    ),
+                    transcriptRevisionID: try TranscriptRevisionID(
+                        "trv-20260909T100000000Z-\(index)DEF"
+                    )
+                )
+            }
+        )
+    }
+
     private func aggregate(
         in scope: LibraryScope,
         chatID: String,
         draftID: String,
         memoryID: String,
-        title: String
+        title: String,
+        attachments: ChatAttachments = .empty
     ) throws -> ChatAggregate {
         let instant = try UTCInstant("2026-08-30T12:00:00.000Z")
         let seed = try NewChatSeed(
@@ -1195,7 +1511,8 @@ final class ChatPresentationModelTests: XCTestCase {
             draftID: ChatDraftID(draftID),
             memoryID: CoachMemoryID(memoryID),
             instant: instant,
-            profileStatementGeneration: 7
+            profileStatementGeneration: 7,
+            attachments: attachments
         )
         return try RenameChatMutation(
             library: scope,
@@ -1304,7 +1621,8 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
              .refreshContextQuote, .sendDraft,
              .stopCoachResponse,
              .retryPendingUserTurn, .createNewChatFromCapacityFailure,
-             .discardPendingUserTurn:
+             .discardPendingUserTurn, .acceptProfileProposal,
+             .discardProfileProposal:
             break
         }
     }

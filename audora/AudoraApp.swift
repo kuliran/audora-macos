@@ -122,7 +122,11 @@ struct AudoraApp: App {
             responsePositionIDGenerator: chatIdentityGenerator,
             admissionRefreshScheduler: SystemChatAdmissionRefreshScheduler(),
             invocations: invocations,
-            attachmentEvidenceSource: attachmentEvidenceSource
+            attachmentEvidenceSource: attachmentEvidenceSource,
+            profileProposals: PortableProfileProposalCoordinator(
+                persistence: chatPersistence,
+                workspace: workspace
+            )
         )
         let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,

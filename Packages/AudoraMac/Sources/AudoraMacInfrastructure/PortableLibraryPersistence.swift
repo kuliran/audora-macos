@@ -273,12 +273,46 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
     }
 
     @discardableResult
-    public func atomicallyReplaceRoot(
+    public func atomicallyReplacePreferences(
+        _ data: Data,
+        under root: URL,
+        expectedRootIdentity: LibraryRootIdentity? = nil,
+        reconcileAbandonedImports: Bool = true
+    ) throws -> PortableMutableRootWriteOutcome {
+        try atomicallyReplaceRoot(
+            data,
+            relativePath: LibraryRelativePath("preferences.json"),
+            under: root,
+            expectedRootIdentity: expectedRootIdentity,
+            reconcileAbandonedImports: reconcileAbandonedImports
+        )
+    }
+
+    /// Unconditional Profile-head replacement exists only for corruption and
+    /// race fixtures. Production Profile writes must use its commit coordinator.
+    @discardableResult
+    func atomicallyReplaceRootForTesting(
         _ data: Data,
         relativePath: LibraryRelativePath,
         under root: URL,
         expectedRootIdentity: LibraryRootIdentity? = nil,
         reconcileAbandonedImports: Bool = true
+    ) throws -> PortableMutableRootWriteOutcome {
+        try atomicallyReplaceRoot(
+            data,
+            relativePath: relativePath,
+            under: root,
+            expectedRootIdentity: expectedRootIdentity,
+            reconcileAbandonedImports: reconcileAbandonedImports
+        )
+    }
+
+    private func atomicallyReplaceRoot(
+        _ data: Data,
+        relativePath: LibraryRelativePath,
+        under root: URL,
+        expectedRootIdentity: LibraryRootIdentity?,
+        reconcileAbandonedImports: Bool
     ) throws -> PortableMutableRootWriteOutcome {
         let relative = relativePath.description
         guard relative == "preferences.json" || relative == "profile/head.json" else {
@@ -659,7 +693,7 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         return preferences
     }
 
-    private func decodeProfileHead(_ data: Data) throws -> ProfileHead {
+    func decodeProfileHead(_ data: Data) throws -> ProfileHead {
         let dictionary = try jsonDictionary(data)
         let common = Set(["schemaVersion", "generation", "statementGeneration", "updatedAt"])
         let idPresent = dictionary.keys.contains("currentRevisionId")

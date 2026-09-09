@@ -15,7 +15,10 @@ Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryFeatureScen
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/PendingUserTurn.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileChangeProposal.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileRevision.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileWriteIntent.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsResponse.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/RecordingFeatureScenario.json

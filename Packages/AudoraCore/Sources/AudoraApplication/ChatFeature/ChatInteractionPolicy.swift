@@ -6,6 +6,15 @@ public enum ChatInteractionPolicy {
     }
 
     public static func allowsCoachInvocation(in state: ChatFeatureState) -> Bool {
-        state.admissionAvailability == .available
+        guard state.admissionAvailability == .available else { return false }
+        if case let .open(aggregate) = state.selection {
+            return aggregate.profileProposal == nil
+        }
+        return true
+    }
+
+    public static func allowsComposerEditing(in state: ChatFeatureState) -> Bool {
+        guard case let .open(aggregate) = state.selection else { return false }
+        return aggregate.pendingUserTurn == nil && aggregate.profileProposal == nil
     }
 }

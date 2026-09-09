@@ -4671,7 +4671,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                     with: Data(contentsOf: proofURL)
                 ) as? [String: Any]
             )
-            proof["schemaVersion"] = 2
+            proof["schemaVersion"] = InvocationPublicationProof.schemaVersion + 1
             try JSONSerialization.data(
                 withJSONObject: proof,
                 options: [.sortedKeys]
@@ -4738,7 +4738,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                     with: Data(contentsOf: proofURL)
                 ) as? [String: Any]
             )
-            proof["schemaVersion"] = 2
+            proof["schemaVersion"] = InvocationPublicationProof.schemaVersion + 1
             try JSONSerialization.data(
                 withJSONObject: proof,
                 options: [.sortedKeys]
@@ -4867,7 +4867,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                     with: Data(contentsOf: proofURL)
                 ) as? [String: Any]
             )
-            proof["schemaVersion"] = 2
+            proof["schemaVersion"] = InvocationPublicationProof.schemaVersion + 1
             let corruptProof = try JSONSerialization.data(
                 withJSONObject: proof,
                 options: [.sortedKeys]

@@ -79,6 +79,9 @@ public enum ChatNotice: String, Equatable, Sendable {
     case coachResponseInterrupted
     case attachmentCatalogFailed
     case qualifiedCoachConfigurationUnavailable
+    case profileProposalAcceptFailed
+    case profileProposalDiscardFailed
+    case profileProposalStale
 }
 
 public enum CoachContextAdvisoryState: Equatable, Sendable {
@@ -123,6 +126,8 @@ public struct ChatFeatureState: Equatable, Sendable {
         case stoppingCoach(ChatID)
         case retryingPendingUserTurn(ChatID)
         case discardingPendingUserTurn(ChatID)
+        case acceptingProfileProposal(ChatID)
+        case discardingProfileProposal(ChatID)
     }
 
     public let catalog: Catalog

@@ -50,6 +50,10 @@ const sessionProcessingExamplesDirectory = path.join(
   resourcesDirectory,
   "Examples/SessionProcessing/v1",
 );
+const profileExamplesDirectory = path.join(
+  resourcesDirectory,
+  "Examples/Profile/v1",
+);
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 
@@ -140,6 +144,114 @@ const sessionProcessingAttemptIndex = await validator(
 );
 const sessionProcessingScenario = await validator(
   "SessionProcessingFeatureScenario.json",
+);
+const profileRevision = await validator("ProfileRevision.json");
+const profileChangeProposal = await validator("ProfileChangeProposal.json");
+const profileWriteIntent = await validator("ProfileWriteIntent.json");
+
+await assertInventory(
+  profileExamplesDirectory,
+  ["proposal.json", "revision.json", "write-intent.json"],
+  "Profile fixture",
+);
+const profileRevisionFixture = await loadFixture(
+  path.join(profileExamplesDirectory, "revision.json"),
+);
+const profileProposalFixture = await loadJSON(
+  path.join(profileExamplesDirectory, "proposal.json"),
+);
+const profileWriteIntentFixture = await loadJSON(
+  path.join(profileExamplesDirectory, "write-intent.json"),
+);
+assertValidation(
+  profileRevision,
+  profileRevisionFixture.value,
+  true,
+  "profile/revision.json",
+);
+assertValidation(
+  profileChangeProposal,
+  profileProposalFixture,
+  true,
+  "profile/proposal.json",
+);
+assertValidation(
+  profileWriteIntent,
+  profileWriteIntentFixture,
+  true,
+  "profile/write-intent.json",
+);
+if (
+  profileWriteIntentFixture.expectedHead.revisionSha256 !==
+  sha256Hex(profileRevisionFixture.bytes)
+) {
+  throw new Error("profile/write-intent.json: expected revision digest drifted");
+}
+
+const revisionWithProvenance = structuredClone(profileRevisionFixture.value);
+revisionWithProvenance.origin = "chat";
+assertValidation(
+  profileRevision,
+  revisionWithProvenance,
+  false,
+  "profile/revision-with-provenance",
+);
+const emptyProfileChanges = structuredClone(profileProposalFixture);
+emptyProfileChanges.changes = [];
+assertValidation(
+  profileChangeProposal,
+  emptyProfileChanges,
+  false,
+  "profile/proposal-empty-changes",
+);
+const pureEvidenceProposal = structuredClone(profileProposalFixture);
+delete pureEvidenceProposal.changes;
+assertValidation(
+  profileChangeProposal,
+  pureEvidenceProposal,
+  false,
+  "profile/proposal-pure-evidence",
+);
+const incompleteProposalTarget = structuredClone(profileProposalFixture);
+delete incompleteProposalTarget.changes[1].target.wording;
+assertValidation(
+  profileChangeProposal,
+  incompleteProposalTarget,
+  false,
+  "profile/proposal-incomplete-target",
+);
+const nullBaseProposal = structuredClone(profileProposalFixture);
+delete nullBaseProposal.baseProfile.revisionId;
+assertValidation(
+  profileChangeProposal,
+  nullBaseProposal,
+  true,
+  "profile/proposal-null-base",
+);
+const emptyMixedAppends = structuredClone(profileProposalFixture);
+emptyMixedAppends.evidenceAppends = [];
+assertValidation(
+  profileChangeProposal,
+  emptyMixedAppends,
+  false,
+  "profile/proposal-empty-evidence-appends",
+);
+const halfSelectedExpectedHead = structuredClone(profileWriteIntentFixture);
+delete halfSelectedExpectedHead.expectedHead.revisionSha256;
+assertValidation(
+  profileWriteIntent,
+  halfSelectedExpectedHead,
+  false,
+  "profile/write-intent-half-selected-head",
+);
+const nullExpectedHead = structuredClone(profileWriteIntentFixture);
+delete nullExpectedHead.expectedHead.revisionId;
+delete nullExpectedHead.expectedHead.revisionSha256;
+assertValidation(
+  profileWriteIntent,
+  nullExpectedHead,
+  true,
+  "profile/write-intent-null-head",
 );
 
 const importedAudio = await loadFixture(

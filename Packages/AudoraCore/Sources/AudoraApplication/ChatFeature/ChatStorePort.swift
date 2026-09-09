@@ -135,7 +135,8 @@ public struct RenameChatMutation: Equatable, Sendable {
             chat: base.chat.renamed(to: title, at: updatedAt),
             memory: base.memory,
             messages: base.messages,
-            pendingUserTurn: base.pendingUserTurn
+            pendingUserTurn: base.pendingUserTurn,
+            profileProposal: base.profileProposal
         )
     }
 

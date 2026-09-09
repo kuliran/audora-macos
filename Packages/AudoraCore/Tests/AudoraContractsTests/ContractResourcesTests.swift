@@ -113,6 +113,153 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertTrue(serialized.contains("unevaluatedProperties"))
     }
 
+    func testProfilePersistenceContractsSealSemanticProposalAndExpectedAuthority() throws {
+        let revisionSchema = try jsonObject(.profileRevisionSchema)
+        let revisionDefinitions = try XCTUnwrap(
+            revisionSchema["$defs"] as? [String: Any]
+        )
+        XCTAssertNotNil(revisionSchema["unevaluatedProperties"])
+        let statement = try schemaProperties(
+            "PersistedProfileStatement",
+            in: revisionDefinitions
+        )
+        XCTAssertEqual(
+            Set(statement.keys),
+            [
+                "statementId", "statementKind", "wording",
+                "supportingSessionCount", "evidence",
+            ]
+        )
+        XCTAssertEqual(
+            (revisionDefinitions["ProfileStatementId"] as? [String: Any])?["pattern"]
+                as? String,
+            #"^stm-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"#
+        )
+
+        let chatMessageSchema = try jsonObject(.chatMessageSchema)
+        let chatMessageDefinitions = try XCTUnwrap(
+            chatMessageSchema["$defs"] as? [String: Any]
+        )
+        for definitionName in [
+            "PersistedEvidenceReference", "PersistedEvidenceReferenceTarget",
+            "PersistedEvidenceWordRange", "PersistedEvidenceAudioEvent",
+            "PersistedEvidenceReferenceDisplay",
+        ] {
+            let revisionDefinition = try XCTUnwrap(
+                revisionDefinitions[definitionName]
+            )
+            let messageDefinition = try XCTUnwrap(
+                chatMessageDefinitions[definitionName]
+            )
+            XCTAssertEqual(
+                try JSONSerialization.data(
+                    withJSONObject: revisionDefinition,
+                    options: [.sortedKeys]
+                ),
+                try JSONSerialization.data(
+                    withJSONObject: messageDefinition,
+                    options: [.sortedKeys]
+                ),
+                definitionName
+            )
+        }
+
+        let proposalSchema = try jsonObject(.profileChangeProposalSchema)
+        let proposalDefinitions = try XCTUnwrap(
+            proposalSchema["$defs"] as? [String: Any]
+        )
+        let proposalProperties = try XCTUnwrap(
+            proposalSchema["properties"] as? [String: Any]
+        )
+        XCTAssertNotNil(proposalSchema["unevaluatedProperties"])
+        XCTAssertEqual(
+            (proposalProperties["changes"] as? [String: Any])?["minItems"] as? Int,
+            1
+        )
+        XCTAssertEqual(
+            try unionReferences("ProfileProposalChange", in: proposalDefinitions),
+            ["ProfileProposalAdd", "ProfileProposalReplace", "ProfileProposalRetire"]
+        )
+        let target = try schemaProperties(
+            "ProfileProposalTarget",
+            in: proposalDefinitions
+        )
+        XCTAssertEqual(Set(target.keys), ["statementId", "statementKind", "wording"])
+        let proposed = try schemaProperties(
+            "ProfileProposedStatement",
+            in: proposalDefinitions
+        )
+        XCTAssertEqual(
+            Set(proposed.keys),
+            ["statementId", "statementKind", "wording", "evidence"]
+        )
+        XCTAssertEqual(
+            (proposalDefinitions["ProfileChangeProposalId"] as? [String: Any])?["pattern"]
+                as? String,
+            #"^prp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"#
+        )
+
+        let proposal = try jsonObject(.profileChangeProposalExample)
+        XCTAssertEqual(proposal["chatId"] as? String, "cht-20260909T115500000Z-6PQR")
+        XCTAssertEqual(
+            proposal["responsePositionId"] as? String,
+            "rsp-20260909T120030000Z-7RST"
+        )
+        let changes = try XCTUnwrap(proposal["changes"] as? [[String: Any]])
+        XCTAssertEqual(changes.compactMap { $0["kind"] as? String }, [
+            "add", "replace", "retire",
+        ])
+        let replacementTarget = try XCTUnwrap(changes[1]["target"] as? [String: Any])
+        XCTAssertEqual(Set(replacementTarget.keys), [
+            "statementId", "statementKind", "wording",
+        ])
+        let evidenceAppends = try XCTUnwrap(
+            proposal["evidenceAppends"] as? [[String: Any]]
+        )
+        XCTAssertEqual(evidenceAppends.count, 1)
+
+        let intentSchema = try jsonObject(.profileWriteIntentSchema)
+        let intentDefinitions = try XCTUnwrap(
+            intentSchema["$defs"] as? [String: Any]
+        )
+        XCTAssertNotNil(intentSchema["unevaluatedProperties"])
+        XCTAssertEqual(
+            try unionReferences("ProfileWriteExpectedHead", in: intentDefinitions),
+            ["ProfileWriteExpectedNullHead", "ProfileWriteExpectedSelectedHead"]
+        )
+        let nullHead = try schemaProperties(
+            "ProfileWriteExpectedNullHead",
+            in: intentDefinitions
+        )
+        let selectedHead = try schemaProperties(
+            "ProfileWriteExpectedSelectedHead",
+            in: intentDefinitions
+        )
+        XCTAssertEqual(Set(nullHead.keys), ["generation", "statementGeneration"])
+        XCTAssertEqual(Set(selectedHead.keys), [
+            "generation", "statementGeneration", "revisionId", "revisionSha256",
+        ])
+        XCTAssertEqual(
+            (intentDefinitions["ProfileWriteIntentId"] as? [String: Any])?["pattern"]
+                as? String,
+            #"^pwi-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"#
+        )
+
+        let revision = try jsonObject(.profileRevisionExample)
+        let intent = try jsonObject(.profileWriteIntentExample)
+        let expectedHead = try XCTUnwrap(intent["expectedHead"] as? [String: Any])
+        XCTAssertEqual(expectedHead["revisionId"] as? String, revision["revisionId"] as? String)
+        XCTAssertEqual(
+            expectedHead["statementGeneration"] as? Int,
+            revision["statementGeneration"] as? Int
+        )
+        XCTAssertEqual(
+            intent["proposalId"] as? String,
+            proposal["proposalId"] as? String
+        )
+        XCTAssertEqual(intent["chatId"] as? String, proposal["chatId"] as? String)
+    }
+
     func testAudioAndSessionSchemasExposeOnlyTheFourClosedVariants() throws {
         let audioRoot = try jsonObject(.audioManifestSchema)
         let audioDefinitions = try XCTUnwrap(audioRoot["$defs"] as? [String: Any])

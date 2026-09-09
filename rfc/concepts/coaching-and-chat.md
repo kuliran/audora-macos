@@ -508,9 +508,10 @@ or retried semantic reads. A non-complete read must not be answered around, and 
 detected Session conflation asks the user to send the message again. The adapter and
 broker independently enforce the atomic batch and sole exact transport redelivery.
 The complete response validator rejects invalid Memory, evidence, and Profile
-components before any message may publish. Valid Memory replacement and locally
-resolved message Evidence Observations are part of the turn transaction, while
-Profile publication remains outside this slice.
+components before any message may publish. Valid Memory replacement, locally
+resolved message Evidence Observations, and one Chat-owned Proposal for semantic or
+mixed Profile effects are part of the turn transaction. Pure evidence-only Profile
+publication remains outside this slice.
 
 A non-complete read does not permit an incomplete coach answer. Audora terminates
 the Attempt and creates a user-retryable application failure. For unavailable

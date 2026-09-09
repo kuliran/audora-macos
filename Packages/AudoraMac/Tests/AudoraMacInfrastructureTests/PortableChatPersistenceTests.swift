@@ -203,7 +203,7 @@ final class PortableChatPersistenceTests: XCTestCase {
                     selection: .null,
                     updatedAt: try UTCInstant("2026-08-30T12:01:00.000Z")
                 )
-                try library.atomicallyReplaceRoot(
+                try library.atomicallyReplaceRootForTesting(
                     library.encodeProfileHead(changedHead),
                     relativePath: try LibraryRelativePath("profile/head.json"),
                     under: root
@@ -1894,6 +1894,15 @@ final class PortableChatPersistenceTests: XCTestCase {
                 under: root,
                 chatID: fixture.locked.chat.id
             )
+            let durableAlteredAggregate = try ChatAggregate(
+                chat: fixture.publication.replacement.chat,
+                memory: fixture.publication.replacement.memory,
+                messages: [
+                    fixture.publication.userMessage,
+                    alteredCoachMessage,
+                ],
+                profileProposal: fixture.publication.replacement.profileProposal
+            )
 
             XCTAssertEqual(
                 try persistence.publishInvocation(
@@ -1901,7 +1910,7 @@ final class PortableChatPersistenceTests: XCTestCase {
                     at: root,
                     in: scope
                 ),
-                .stale(fixture.publication.replacement)
+                .stale(durableAlteredAggregate)
             )
         }
     }
@@ -2071,43 +2080,36 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testStructuredEvidenceMessageUsesV3AndReopensExactly() throws {
-        try withCreatedLibrary { root, scope in
+    func testStructuredEvidenceMessageUsesV3AndReopensExactly() async throws {
+        try await withCreatedLibraryAsync { root, scope in
             let persistence = PortableChatPersistence()
+            let attachment = try await installRecordedChatAttachmentFixture(
+                at: root,
+                in: scope,
+                attachmentID: "practice-session",
+                sessionID: "ses-20260830T115900000Z-1ABC",
+                revisionID: "trv-20260830T115900000Z-2DEF"
+            )
             let fixture = try makeInvocationFixture(
                 persistence: persistence,
                 root: root,
                 scope: scope,
                 attachments: try ChatAttachments(
-                    validating: [
-                        ChatSessionAttachment(
-                            attachmentID: try ChatSessionAttachmentID(
-                                "practice-session"
-                            ),
-                            sessionID: try SessionID(
-                                "ses-20260830T115900000Z-1ABC"
-                            ),
-                            transcriptRevisionID: try TranscriptRevisionID(
-                                "trv-20260830T115900000Z-2DEF"
-                            )
-                        ),
-                    ]
+                    validating: [attachment]
                 )
             )
             let reference = try EvidenceReference(
-                sessionID: SessionID("ses-20260830T115900000Z-1ABC"),
-                transcriptRevisionID: TranscriptRevisionID(
-                    "trv-20260830T115900000Z-2DEF"
-                ),
+                sessionID: attachment.sessionID,
+                transcriptRevisionID: attachment.transcriptRevisionID,
                 target: .wordRange(
-                    startWordID: TranscriptWordID("w000001"),
-                    endWordID: TranscriptWordID("w000003")
+                    startWordID: TranscriptWordID("w000000"),
+                    endWordID: TranscriptWordID("w000000")
                 ),
                 display: EvidenceReferenceDisplay(
                     sessionLabel: "Practice Session",
-                    trustedText: "Pause before the transition",
-                    startMilliseconds: 1_000,
-                    endMilliseconds: 2_250
+                    trustedText: "Hi.",
+                    startMilliseconds: 0,
+                    endMilliseconds: 1
                 )
             )
             let publication = try PublishCoachInvocationMutation(

@@ -2,6 +2,7 @@ import "./coach-provider.tsp";
 import "./coach-context-capacity.tsp";
 import "./chat.tsp";
 import "./coach-invocation.tsp";
+import "./profile.tsp";
 import "./portable-library.tsp";
 import "./library-feature-scenario.tsp";
 import "./session-audio.tsp";

@@ -199,6 +199,7 @@ public final class ChatPresentationModel: ObservableObject {
 
     public func updateDraft(_ text: String) {
         guard let context = commandContext,
+              ChatInteractionPolicy.allowsComposerEditing(in: snapshot),
               case let .open(aggregate) = snapshot.selection,
               case let .editable(draft, _) = snapshot.composer,
               aggregate.chat.draft.draftID == draft.draftID
@@ -210,6 +211,7 @@ public final class ChatPresentationModel: ObservableObject {
 
     public func sendDraft() {
         guard let context = commandContext,
+              ChatInteractionPolicy.allowsComposerEditing(in: snapshot),
               case let .open(aggregate) = snapshot.selection,
               case let .editable(draft, _) = snapshot.composer,
               aggregate.chat.draft.draftID == draft.draftID
@@ -253,6 +255,24 @@ public final class ChatPresentationModel: ObservableObject {
     ) {
         guard let context = commandContext else { return }
         send(.createNewChatFromCapacityFailure(context, pendingUserTurnID))
+    }
+
+    public func acceptProfileProposal(_ proposalID: ProfileChangeProposalID) {
+        guard let context = commandContext,
+              ChatInteractionPolicy.allowsNavigationAndMutation(in: snapshot),
+              case let .open(aggregate) = snapshot.selection,
+              aggregate.profileProposal?.id == proposalID
+        else { return }
+        send(.acceptProfileProposal(context, proposalID))
+    }
+
+    public func discardProfileProposal(_ proposalID: ProfileChangeProposalID) {
+        guard let context = commandContext,
+              ChatInteractionPolicy.allowsNavigationAndMutation(in: snapshot),
+              case let .open(aggregate) = snapshot.selection,
+              aggregate.profileProposal?.id == proposalID
+        else { return }
+        send(.discardProfileProposal(context, proposalID))
     }
 
     public func announceEvidenceUnavailable(_ explanation: String) {

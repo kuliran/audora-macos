@@ -104,10 +104,6 @@ public struct ProfileContext: Equatable, Sendable {
     }
 }
 
-public struct ProfileStatement: Equatable, Sendable {
-    public init() {}
-}
-
 public enum ProfileProjection {
     public static func context(from head: ProfileHead) -> ProfileContext? {
         switch head.selection {
