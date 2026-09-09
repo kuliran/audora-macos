@@ -373,7 +373,9 @@ private extension ChatCommand {
     var beginsApplicationChatBoundary: Bool {
         switch self {
         case .confirmNewChat, .open, .sendDraft, .retryPendingUserTurn,
-             .acceptProfileProposal, .discardProfileProposal:
+             .acceptProfileProposal, .discardProfileProposal,
+             .retryProfileEvidencePublication,
+             .discardProfileEvidencePublication:
             true
         case .start, .beginNewChat, .setNewChatAttachmentFilter,
              .toggleNewChatAttachment, .cancelNewChat,

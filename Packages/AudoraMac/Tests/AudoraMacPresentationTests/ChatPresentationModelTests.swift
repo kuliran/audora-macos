@@ -950,6 +950,221 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    func testProfileEvidencePublicationFailureCardDescribesEveryExactAppend()
+        throws
+    {
+        let chatID = try ChatID("cht-20260909T150000000Z-1ABC")
+        let publication = try profileEvidencePublication(for: chatID)
+        let firstReference = try evidenceReference(index: 1)
+        let firstAttachment = ChatSessionAttachment(
+            attachmentID: try ChatSessionAttachmentID("publication-evidence-1"),
+            sessionID: firstReference.sessionID,
+            transcriptRevisionID: firstReference.transcriptRevisionID
+        )
+        let resolved = try ResolvedChatAttachment(
+            attachment: firstAttachment,
+            resolution: .available(
+                try ChatAttachmentCandidate(
+                    sessionID: firstReference.sessionID,
+                    transcriptRevisionID: firstReference.transcriptRevisionID,
+                    displayLabel: "Planning reflection",
+                    durationMilliseconds: 30_000,
+                    approximateTranscriptTokens: 120,
+                    delivery: .inline
+                )
+            )
+        )
+
+        let card = try XCTUnwrap(
+            ProfileEvidencePublicationFailurePresentation.card(
+                for: publication,
+                openedAttachments: .resolved([resolved])
+            )
+        )
+
+        XCTAssertEqual(card.responsePositionID, publication.responsePositionID)
+        XCTAssertEqual(card.heading, "Profile evidence couldn't be saved")
+        XCTAssertEqual(
+            card.updates,
+            [
+                "Add evidence from “Planning reflection” to “Pause briefly between points.”",
+                "Add evidence from “Session 2” to “Keep conclusions concise.”",
+            ]
+        )
+        XCTAssertEqual(card.actionTitles, ["Retry", "Discard"])
+        XCTAssertEqual(
+            card.accessibilityLabel,
+            "Profile evidence couldn't be saved. " +
+                "Add evidence from “Planning reflection” to " +
+                "“Pause briefly between points.” " +
+                "Add evidence from “Session 2” to " +
+                "“Keep conclusions concise.”"
+        )
+    }
+
+    func testAbsentEvidencePublicationProducesNoFailureCard() throws {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260909T155900000Z-1ABC")
+        )
+        let aggregate = try aggregate(
+            in: scope,
+            chatID: "cht-20260909T160000000Z-2DEF",
+            draftID: "drf-20260909T160000000Z-3GHJ",
+            memoryID: "mem-20260909T160000000Z-4KMN",
+            title: "Silent publication"
+        )
+
+        XCTAssertNil(
+            ProfileEvidencePublicationFailurePresentation.card(
+                for: aggregate.profileEvidencePublication,
+                openedAttachments: .notRequested
+            )
+        )
+    }
+
+    func testAutomaticProfileEvidencePublicationStaysSilentWhileItSucceeds()
+        throws
+    {
+        let chatID = try ChatID("cht-20260909T162000000Z-1ABC")
+        let publication = try profileEvidencePublication(for: chatID)
+
+        XCTAssertNil(
+            ProfileEvidencePublicationFailurePresentation.card(
+                for: publication,
+                openedAttachments: .notRequested,
+                activity: .publishingProfileEvidence(chatID)
+            )
+        )
+        XCTAssertNotNil(
+            ProfileEvidencePublicationFailurePresentation.card(
+                for: publication,
+                openedAttachments: .notRequested,
+                activity: .retryingProfileEvidencePublication(chatID)
+            )
+        )
+    }
+
+    func testProfileEvidencePublicationFailureActionsCaptureExactResponsePosition()
+        async throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260909T165900000Z-1ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260909T170000000Z-2DEF",
+            draftID: "drf-20260909T170000000Z-3GHJ",
+            memoryID: "mem-20260909T170000000Z-4KMN",
+            title: "Publication recovery",
+            attachments: try profileProposalAttachments()
+        )
+        let publication = try profileEvidencePublication(for: base.chat.id)
+        let failed = try aggregate(
+            byStaging: publication,
+            on: base
+        )
+        let row = ChatRowSnapshot(aggregate: failed)
+        let state = ChatFeatureState(
+            catalog: .ready(
+                ChatCatalogSnapshot(allRows: [row], visibleRows: [row])
+            ),
+            selection: .open(failed),
+            composer: .editable(failed.chat.draft, isDirty: false),
+            admissionAvailability: .cooldown(
+                reopensAt: try UTCInstant("2026-09-09T17:01:00.000Z")
+            )
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let model = makeChatPresentationModel(feature: feature)
+        await model.start(in: scope)
+        let startCommands = await feature.commands
+        let context = try XCTUnwrap(startContexts(in: startCommands).first)
+
+        model.retryProfileEvidencePublication(publication.responsePositionID)
+        await waitForCommandCount(2, in: feature)
+        model.discardProfileEvidencePublication(publication.responsePositionID)
+        await waitForCommandCount(3, in: feature)
+
+        let commands = await feature.commands
+        XCTAssertEqual(
+            commands,
+            [
+                .start(context),
+                .retryProfileEvidencePublication(
+                    context,
+                    publication.responsePositionID
+                ),
+                .discardProfileEvidencePublication(
+                    context,
+                    publication.responsePositionID
+                ),
+            ]
+        )
+    }
+
+    func testProfileEvidencePublicationFailureBlocksDraftEditsAndSendProjection()
+        async throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260909T175900000Z-1ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260909T180000000Z-2DEF",
+            draftID: "drf-20260909T180000000Z-3GHJ",
+            memoryID: "mem-20260909T180000000Z-4KMN",
+            title: "Blocked by publication",
+            attachments: try profileProposalAttachments()
+        )
+        let publication = try profileEvidencePublication(for: base.chat.id)
+        let failed = try aggregate(
+            byStaging: publication,
+            on: base
+        )
+        let row = ChatRowSnapshot(aggregate: failed)
+        let state = ChatFeatureState(
+            catalog: .ready(
+                ChatCatalogSnapshot(allRows: [row], visibleRows: [row])
+            ),
+            selection: .open(failed),
+            composer: .editable(failed.chat.draft, isDirty: false),
+            admissionAvailability: .available
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let model = makeChatPresentationModel(feature: feature)
+        await model.start(in: scope)
+
+        XCTAssertFalse(ChatInteractionPolicy.allowsComposerEditing(in: state))
+        model.updateDraft("This must stay in the disabled control.")
+        model.sendDraft()
+        await Task.yield()
+
+        let commands = await feature.commands
+        let context = try XCTUnwrap(startContexts(in: commands).first)
+        XCTAssertEqual(commands, [.start(context)])
+    }
+
+    func testProfileEvidencePublicationActivitiesHaveActionableCopy() throws {
+        let chatID = try ChatID("cht-20260909T190000000Z-1ABC")
+        XCTAssertNil(
+            ChatActivityPresentation.progressLabel(
+                for: .publishingProfileEvidence(chatID)
+            )
+        )
+        XCTAssertEqual(
+            ChatActivityPresentation.progressLabel(
+                for: .retryingProfileEvidencePublication(chatID)
+            ),
+            "Retrying Profile evidence…"
+        )
+        XCTAssertEqual(
+            ChatActivityPresentation.progressLabel(
+                for: .discardingProfileEvidencePublication(chatID)
+            ),
+            "Discarding Profile evidence…"
+        )
+    }
+
     func testRenameEditorTaskIdentityChangesBetweenRevisionZeroChats() throws {
         let first = ChatRenameEditorTaskID(
             chatID: try ChatID("cht-20260830T120000000Z-2ABC"),
@@ -1453,6 +1668,84 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    private func profileEvidencePublication(
+        for chatID: ChatID
+    ) throws -> ProfileEvidencePublication {
+        try ProfileEvidencePublication(
+            chatID: chatID,
+            responsePositionID: ChatResponsePositionID(
+                "rsp-20260909T150000000Z-5PQR"
+            ),
+            evidenceAppends: [
+                try ProfileEvidenceAppend(
+                    target: ProfileProposalTarget(
+                        statementID: ProfileStatementID(
+                            "stm-20260909T145900000Z-6RST"
+                        ),
+                        statementKind: .speakingObservation,
+                        wording: "Pause briefly between points."
+                    ),
+                    evidence: [try evidenceReference(index: 1)]
+                ),
+                try ProfileEvidenceAppend(
+                    target: ProfileProposalTarget(
+                        statementID: ProfileStatementID(
+                            "stm-20260909T145900000Z-7VWX"
+                        ),
+                        statementKind: .growthDirection,
+                        wording: "Keep conclusions concise."
+                    ),
+                    evidence: [try evidenceReference(index: 2)]
+                ),
+            ],
+            createdAt: UTCInstant("2026-09-09T15:00:00.000Z")
+        )
+    }
+
+    private func aggregate(
+        byStaging publication: ProfileEvidencePublication,
+        on base: ChatAggregate
+    ) throws -> ChatAggregate {
+        let userMessage = try ChatMessage(
+            id: ChatMessageID("msg-20260909T150000000Z-8XYZ"),
+            responsePositionID: publication.responsePositionID,
+            content: .user(text: "Please reflect on this Session."),
+            createdAt: publication.createdAt
+        )
+        let coachMessage = try ChatMessage(
+            id: ChatMessageID("msg-20260909T150000000Z-9ABC"),
+            responsePositionID: publication.responsePositionID,
+            content: .coach(markdown: "Pause between ideas and stay concise."),
+            coachProfile: CoachProfileProvenance(
+                revisionID: ProfileRevisionID(
+                    "prf-20260909T145900000Z-1DEF"
+                ),
+                statementGeneration: 7
+            ),
+            createdAt: publication.createdAt
+        )
+        let publishedChat = try Chat(
+            id: base.chat.id,
+            manifestRevision: base.chat.manifestRevision + 1,
+            title: base.chat.title,
+            createdAt: base.chat.createdAt,
+            updatedAt: publication.createdAt,
+            creation: base.chat.creation,
+            profileStatementGenerationAtCreation:
+                base.chat.profileStatementGenerationAtCreation,
+            attachments: base.chat.attachments,
+            draft: base.chat.draft,
+            messageIDs: [userMessage.id, coachMessage.id],
+            currentMemoryID: base.chat.currentMemoryID
+        )
+        return try ChatAggregate(
+            chat: publishedChat,
+            memory: base.memory,
+            messages: [userMessage, coachMessage],
+            profileEvidencePublication: publication
+        )
+    }
+
     private func evidenceReference(index: Int) throws -> EvidenceReference {
         try EvidenceReference(
             sessionID: SessionID(
@@ -1622,7 +1915,8 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
              .stopCoachResponse,
              .retryPendingUserTurn, .createNewChatFromCapacityFailure,
              .discardPendingUserTurn, .acceptProfileProposal,
-             .discardProfileProposal:
+             .discardProfileProposal, .retryProfileEvidencePublication,
+             .discardProfileEvidencePublication:
             break
         }
     }

@@ -96,6 +96,270 @@ final class ProfileProposalDomainTests: XCTestCase {
         )
     }
 
+    func testPureEvidencePublicationUnionsFirstSessionOccurrenceWithoutChangingStatements() throws {
+        let existing = try evidence(
+            session: "ses-20260901T100000000Z-1ABC",
+            revision: "trv-20260901T100100000Z-2DEF",
+            word: "w000001"
+        )
+        let firstNewSessionOccurrence = try evidence(
+            session: "ses-20260902T100000000Z-3GHJ",
+            revision: "trv-20260902T100100000Z-4KMN",
+            word: "w000002"
+        )
+        let laterNewSessionOccurrence = try evidence(
+            session: "ses-20260902T100000000Z-3GHJ",
+            revision: "trv-20260902T100100000Z-4KMN",
+            word: "w000003"
+        )
+        let target = try statement(
+            id: "stm-20260901T110000000Z-5PQR",
+            kind: .speakingObservation,
+            wording: "I rush transitions between ideas.",
+            evidence: [existing]
+        )
+        let unaffected = try statement(
+            id: "stm-20260901T110100000Z-6RST",
+            wording: "Pause before moving to the next idea."
+        )
+        let base = try ProfileRevision(
+            revisionID: ProfileRevisionID("prf-20260903T090000000Z-7VWX"),
+            parentRevisionID: nil,
+            generation: 7,
+            statementGeneration: 4,
+            createdAt: UTCInstant("2026-09-03T09:00:00.000Z"),
+            statements: [target, unaffected]
+        )
+        let publication = try ProfileEvidencePublication(
+            chatID: ChatID("cht-20260903T100000000Z-8XYZ"),
+            responsePositionID: ChatResponsePositionID(
+                "rsp-20260903T100000000Z-9ABC"
+            ),
+            evidenceAppends: [
+                ProfileEvidenceAppend(
+                    target: ProfileProposalTarget(statement: target),
+                    evidence: [
+                        existing,
+                        firstNewSessionOccurrence,
+                        laterNewSessionOccurrence,
+                    ]
+                ),
+            ],
+            createdAt: UTCInstant("2026-09-03T10:00:00.000Z")
+        )
+
+        let result = try base.applying(
+            publication,
+            intendedRevisionID: ProfileRevisionID(
+                "prf-20260903T100100000Z-1DEF"
+            ),
+            createdAt: UTCInstant("2026-09-03T10:01:00.000Z")
+        )
+        guard case let .changed(revision) = result else {
+            return XCTFail("Expected an evidence-only revision")
+        }
+
+        XCTAssertEqual(revision.generation, 8)
+        XCTAssertEqual(revision.statementGeneration, 4)
+        XCTAssertEqual(revision.parentRevisionID, base.revisionID)
+        XCTAssertEqual(revision.statements.map(\.statementID), [
+            target.statementID,
+            unaffected.statementID,
+        ])
+        XCTAssertEqual(
+            revision.statement(id: target.statementID)?.evidence,
+            [existing, firstNewSessionOccurrence]
+        )
+        XCTAssertEqual(
+            revision.statement(id: target.statementID)?.supportingSessionCount,
+            2
+        )
+        XCTAssertEqual(revision.statement(id: unaffected.statementID), unaffected)
+    }
+
+    func testPureEvidencePublicationNormalizesByStatementAndSessionInProviderOrder() throws {
+        let firstTarget = try statement(
+            id: "stm-20260904T090000000Z-1ABC",
+            wording: "Pause before moving to the next idea."
+        )
+        let secondTarget = try statement(
+            id: "stm-20260904T090100000Z-2DEF",
+            wording: "Land one idea before starting another."
+        )
+        let sessionAFirst = try evidence(
+            session: "ses-20260904T080000000Z-3GHJ",
+            revision: "trv-20260904T080100000Z-4KMN",
+            word: "w000001"
+        )
+        let sessionASecond = try evidence(
+            session: "ses-20260904T080000000Z-3GHJ",
+            revision: "trv-20260904T080100000Z-4KMN",
+            word: "w000002"
+        )
+        let sessionB = try evidence(
+            session: "ses-20260904T081000000Z-5PQR",
+            revision: "trv-20260904T081100000Z-6RST",
+            word: "w000003"
+        )
+        let chatID = try ChatID("cht-20260904T100000000Z-7VWX")
+        let responsePositionID = try ChatResponsePositionID(
+            "rsp-20260904T100000000Z-8XYZ"
+        )
+        let createdAt = try UTCInstant("2026-09-04T10:00:00.000Z")
+
+        let publication = try ProfileEvidencePublication(
+            chatID: chatID,
+            responsePositionID: responsePositionID,
+            evidenceAppends: [
+                ProfileEvidenceAppend(
+                    target: ProfileProposalTarget(statement: firstTarget),
+                    evidence: [sessionAFirst]
+                ),
+                ProfileEvidenceAppend(
+                    target: ProfileProposalTarget(statement: secondTarget),
+                    evidence: [sessionASecond]
+                ),
+                ProfileEvidenceAppend(
+                    target: ProfileProposalTarget(statement: firstTarget),
+                    evidence: [sessionASecond, sessionB]
+                ),
+            ],
+            createdAt: createdAt
+        )
+
+        XCTAssertEqual(ProfileEvidencePublication.schemaVersion, 1)
+        XCTAssertEqual(publication.chatID, chatID)
+        XCTAssertEqual(publication.responsePositionID, responsePositionID)
+        XCTAssertEqual(publication.createdAt, createdAt)
+        XCTAssertEqual(
+            publication.evidenceAppends.map(\.targetStatementID),
+            [firstTarget.statementID, secondTarget.statementID]
+        )
+        XCTAssertEqual(
+            publication.evidenceAppends.map(\.evidence),
+            [[sessionAFirst, sessionB], [sessionASecond]]
+        )
+    }
+
+    func testPureEvidencePublicationReturnsNoOpForExistingSessionSupport() throws {
+        let existing = try evidence(
+            session: "ses-20260905T080000000Z-1ABC",
+            revision: "trv-20260905T080100000Z-2DEF",
+            word: "w000001"
+        )
+        let duplicateSession = try evidence(
+            session: "ses-20260905T080000000Z-1ABC",
+            revision: "trv-20260905T080100000Z-2DEF",
+            word: "w000002"
+        )
+        let target = try statement(
+            id: "stm-20260905T090000000Z-3GHJ",
+            wording: "Pause before moving to the next idea.",
+            evidence: [existing]
+        )
+        let base = try ProfileRevision(
+            revisionID: ProfileRevisionID("prf-20260905T090100000Z-4KMN"),
+            parentRevisionID: nil,
+            generation: 9,
+            statementGeneration: 6,
+            createdAt: UTCInstant("2026-09-05T09:01:00.000Z"),
+            statements: [target]
+        )
+        let publication = try profileEvidencePublication(
+            target: target,
+            evidence: [duplicateSession]
+        )
+
+        XCTAssertEqual(
+            try base.applying(
+                publication,
+                intendedRevisionID: base.revisionID,
+                createdAt: UTCInstant("2026-09-05T10:01:00.000Z")
+            ),
+            .noOp
+        )
+    }
+
+    func testPureEvidencePublicationReportsRetiredOrChangedTargetAsStale() throws {
+        let active = try statement(
+            id: "stm-20260906T090000000Z-1ABC",
+            kind: .growthDirection,
+            wording: "Pause before moving to the next idea."
+        )
+        let evidence = try evidence(
+            session: "ses-20260906T080000000Z-2DEF",
+            revision: "trv-20260906T080100000Z-3GHJ",
+            word: "w000001"
+        )
+        let base = try ProfileRevision(
+            revisionID: ProfileRevisionID("prf-20260906T090100000Z-4KMN"),
+            parentRevisionID: nil,
+            generation: 10,
+            statementGeneration: 7,
+            createdAt: UTCInstant("2026-09-06T09:01:00.000Z"),
+            statements: [active]
+        )
+        let retired = try statement(
+            id: "stm-20260906T090200000Z-5PQR",
+            wording: "Land one idea before starting another."
+        )
+        let changedSnapshot = try ProfileProposalTarget(
+            statementID: active.statementID,
+            statementKind: active.statementKind,
+            wording: "Pause after moving to the next idea."
+        )
+        let retiredPublication = try profileEvidencePublication(
+            target: retired,
+            evidence: [evidence]
+        )
+        let changedPublication = try ProfileEvidencePublication(
+            chatID: retiredPublication.chatID,
+            responsePositionID: retiredPublication.responsePositionID,
+            evidenceAppends: [
+                ProfileEvidenceAppend(
+                    target: changedSnapshot,
+                    evidence: [evidence]
+                ),
+            ],
+            createdAt: retiredPublication.createdAt
+        )
+
+        for publication in [retiredPublication, changedPublication] {
+            XCTAssertThrowsError(
+                try base.applying(
+                    publication,
+                    intendedRevisionID: ProfileRevisionID(
+                        "prf-20260906T100000000Z-6RST"
+                    ),
+                    createdAt: UTCInstant("2026-09-06T10:00:00.000Z")
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? ProfileEvidencePublicationApplicationError,
+                    .staleTarget
+                )
+            }
+        }
+    }
+
+    func testPureEvidencePublicationRequiresOneConsistentTargetedAppend() throws {
+        XCTAssertThrowsError(
+            try ProfileEvidencePublication(
+                chatID: ChatID("cht-20260907T100000000Z-1ABC"),
+                responsePositionID: ChatResponsePositionID(
+                    "rsp-20260907T100000000Z-2DEF"
+                ),
+                evidenceAppends: [],
+                createdAt: UTCInstant("2026-09-07T10:00:00.000Z")
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProfileEvidencePublicationError,
+                .emptyEvidenceAppends
+            )
+        }
+    }
+
     func testProfileProposalBindsItsOwnerAndRejectsConflictingTargets() throws {
         let targetStatement = try statement(
             id: "stm-20260901T110000000Z-3GHJ",
@@ -461,6 +725,25 @@ final class ProfileProposalDomainTests: XCTestCase {
             wording: wording,
             supportingSessionCount: UInt32(Set(evidence.map(\.sessionID)).count),
             evidence: evidence
+        )
+    }
+
+    private func profileEvidencePublication(
+        target: ProfileStatement,
+        evidence: [EvidenceReference]
+    ) throws -> ProfileEvidencePublication {
+        try ProfileEvidencePublication(
+            chatID: ChatID("cht-20260905T100000000Z-7VWX"),
+            responsePositionID: ChatResponsePositionID(
+                "rsp-20260905T100000000Z-8XYZ"
+            ),
+            evidenceAppends: [
+                ProfileEvidenceAppend(
+                    target: ProfileProposalTarget(statement: target),
+                    evidence: evidence
+                ),
+            ],
+            createdAt: UTCInstant("2026-09-05T10:00:00.000Z")
         )
     }
 }

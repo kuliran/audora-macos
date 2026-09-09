@@ -321,6 +321,7 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
     case afterUserMessageInstall
     case afterCoachMessageInstall
     case afterProfileProposalInstall
+    case afterProfileEvidencePublicationInstall
     case beforeProfileWriteIntentPartialWrite
     case afterProfileWriteIntentPartialWrite
     case afterProfileWriteIntentFileFlush
@@ -336,6 +337,7 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
     case afterProfileHeadInstall
     case afterProfileHeadDirectoryFlush
     case afterProfileProposalRemoval
+    case afterProfileEvidencePublicationRemoval
     case afterProfileWriteIntentRemoval
     case afterPublicationManifestFileFlush
     case afterPublicationManifestInstall
@@ -431,6 +433,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
     private struct InvocationPublicationArtifacts {
         let proof: InvocationPublicationProof
         let proposalData: Data?
+        let profileEvidencePublicationData: Data?
     }
 
     private struct RetryDiagnosticDependencies: Sendable {
@@ -1776,7 +1779,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             chat: current.chat.replacingDraft(with: mutation.replacement),
             memory: current.memory,
             messages: current.messages,
-            profileProposal: current.profileProposal
+            profileProposal: current.profileProposal,
+            profileEvidencePublication: current.profileEvidencePublication
         )
 
         try fault(.beforeDraftPartialWrite)
@@ -1917,7 +1921,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             memory: current.memory,
             messages: current.messages,
             pendingUserTurn: mutation.pendingUserTurn,
-            profileProposal: current.profileProposal
+            profileProposal: current.profileProposal,
+            profileEvidencePublication: current.profileEvidencePublication
         )
 
         try fault(.beforePendingPartialWrite)
@@ -2197,7 +2202,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             memory: current.memory,
             messages: current.messages,
             pendingUserTurn: mutation.replacement,
-            profileProposal: current.profileProposal
+            profileProposal: current.profileProposal,
+            profileEvidencePublication: current.profileEvidencePublication
         )
 
         if let livenessAuthority {
@@ -2391,7 +2397,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             chat: current.chat,
             memory: current.memory,
             messages: current.messages,
-            profileProposal: current.profileProposal
+            profileProposal: current.profileProposal,
+            profileEvidencePublication: current.profileEvidencePublication
         )
         try fault(.beforePendingRemoval)
         if let livenessAuthority {
@@ -4367,6 +4374,13 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 under: chatDescriptor
             )
         }
+        if let publicationData = artifacts.profileEvidencePublicationData {
+            try revalidateLiveness()
+            try installProfileEvidencePublication(
+                publicationData,
+                under: chatDescriptor
+            )
+        }
 
         let partialName = ".chat.json.\(UUID().uuidString.lowercased()).partial"
         var partialExists = false
@@ -4613,6 +4627,17 @@ public struct PortableChatPersistence: @unchecked Sendable {
         } else {
             nil
         }
+        let profileEvidencePublicationData: Data? = if try entryExists(
+            named: "profile-publication.json",
+            under: chatDescriptor
+        ) {
+            try boundedData(
+                named: "profile-publication.json",
+                under: chatDescriptor
+            )
+        } else {
+            nil
+        }
         return invocationEvidenceCodec.isExactPublishedInvocation(
             proof,
             invocation: invocation,
@@ -4630,7 +4655,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 userMessage: user,
                 coachMessageData: coachData,
                 coachMessage: coach,
-                proposalData: proposalData
+                proposalData: proposalData,
+                profileEvidencePublicationData: profileEvidencePublicationData
             )
         )
     }
@@ -5318,6 +5344,409 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
+    func publishProfileEvidence(
+        _ mutation: PublishProfileEvidenceMutation,
+        at libraryRoot: URL
+    ) throws -> PortableChatMutationResult {
+        guard let publication = mutation.base.profileEvidencePublication,
+              mutation.base.chat.id == publication.chatID,
+              mutation.responsePositionID == publication.responsePositionID
+        else { throw PortableChatPersistenceError.invalidLayout }
+        return try withProfileProposalMutationAuthority(
+            at: libraryRoot,
+            in: mutation.library,
+            chatID: mutation.base.chat.id
+        ) { authority in
+            let revalidate = {
+                try self.revalidateProfileProposalMutationAuthority(
+                    authority,
+                    at: libraryRoot,
+                    in: mutation.library
+                )
+            }
+            guard case let .readWrite(current) = try loadChat(
+                from: authority.chatDescriptor,
+                expectedID: mutation.base.chat.id,
+                reconcileTransients: true,
+                beforeDestructiveMutation: revalidate
+            ) else { throw PortableChatPersistenceError.invalidLayout }
+            let resolved = try aggregateResolvingProfileEvidencePublication(
+                mutation.base
+            )
+            guard current == mutation.base || current == resolved else {
+                return .stale(current)
+            }
+            guard !(try hasForeignProfileWriteIntent(
+                excluding: authority.chatName,
+                under: authority.chatsDescriptor
+            )) else { throw PortableChatPersistenceError.profileWriteInProgress }
+            try revalidate()
+            let headData = try boundedData(
+                named: "head.json",
+                under: authority.profileDescriptor
+            )
+            let head = try PortableLibraryPersistence().decodeProfileHead(headData)
+            if try headSelectsProfileEvidenceRevision(
+                head,
+                mutation: mutation,
+                publication: publication,
+                under: authority.profileDescriptor
+            ) {
+                try makeProfileEvidenceHeadDurable(
+                    head,
+                    mutation: mutation,
+                    publication: publication,
+                    under: authority.profileDescriptor,
+                    beforeMutation: revalidate
+                )
+                return .committed(
+                    try finishProfileEvidencePublication(
+                        expected: resolved,
+                        chatDescriptor: authority.chatDescriptor,
+                        beforeMutation: revalidate
+                    )
+                )
+            }
+            guard current == mutation.base,
+                  current.profileEvidencePublication == publication,
+                  let selectedRevision = try loadSelectedProfileRevision(
+                      head,
+                      under: authority.profileDescriptor
+                  )
+            else { return .stale(current) }
+
+            let application: ProfileEvidencePublicationApplicationResult
+            do {
+                application = try selectedRevision.applying(
+                    publication,
+                    intendedRevisionID: mutation.intendedRevisionID,
+                    createdAt: publication.createdAt
+                )
+            } catch ProfileEvidencePublicationApplicationError.staleTarget {
+                return .stale(current)
+            } catch ProfileEvidencePublicationApplicationError
+                .intendedRevisionIDCollision
+            {
+                return .stale(current)
+            } catch {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            switch application {
+            case .noOp:
+                _ = try removeProvedUnselectedProfileEvidenceRevisionIfPresent(
+                    intendedRevisionID: mutation.intendedRevisionID,
+                    publication: publication,
+                    currentHeadData: headData,
+                    currentHead: head,
+                    profileDescriptor: authority.profileDescriptor,
+                    revisionsDescriptor: authority.revisionsDescriptor,
+                    publicationsDescriptor: authority.publicationsDescriptor,
+                    beforeMutation: revalidate
+                )
+                return .committed(
+                    try finishProfileEvidencePublication(
+                        expected: resolved,
+                        chatDescriptor: authority.chatDescriptor,
+                        beforeMutation: revalidate
+                    )
+                )
+            case let .changed(revision):
+                let revisionData = try encodeProfileRevision(revision)
+                let digest = Self.sha256(revisionData)
+                try prepareProfileEvidenceRevisionSlot(
+                    for: revision,
+                    publication: publication,
+                    currentHeadData: headData,
+                    currentHead: head,
+                    profileDescriptor: authority.profileDescriptor,
+                    revisionsDescriptor: authority.revisionsDescriptor,
+                    publicationsDescriptor: authority.publicationsDescriptor,
+                    beforeMutation: revalidate
+                )
+                try installProfileRevision(
+                    revision,
+                    data: revisionData,
+                    digest: digest,
+                    revisionsDescriptor: authority.revisionsDescriptor,
+                    publicationsDescriptor: authority.publicationsDescriptor,
+                    beforeMutation: revalidate
+                )
+                try fault(.afterProfileRevisionInstall)
+                let replacementHead = ProfileHead(
+                    generation: revision.generation,
+                    statementGeneration: revision.statementGeneration,
+                    selection: .revision(
+                        try ProfileRevisionPointer(
+                            revisionID: revision.revisionID,
+                            sha256: digest
+                        )
+                    ),
+                    updatedAt: publication.createdAt
+                )
+                let proveInstalledRevision = {
+                    try revalidate()
+                    try self.requireExactInstalledProfileRevision(
+                        revision,
+                        data: revisionData,
+                        digest: digest,
+                        under: authority.revisionsDescriptor
+                    )
+                }
+                guard try compareAndSwapProfileHead(
+                    expectedData: headData,
+                    expected: head,
+                    replacement: replacementHead,
+                    under: authority.profileDescriptor,
+                    beforeInstalling: proveInstalledRevision
+                ) else { return .stale(current) }
+                try makeProfileEvidenceHeadDurable(
+                    replacementHead,
+                    mutation: mutation,
+                    publication: publication,
+                    under: authority.profileDescriptor,
+                    beforeMutation: revalidate
+                )
+                return .committed(
+                    try finishProfileEvidencePublication(
+                        expected: resolved,
+                        chatDescriptor: authority.chatDescriptor,
+                        beforeMutation: revalidate
+                    )
+                )
+            }
+        }
+    }
+
+    func discardProfileEvidencePublication(
+        _ mutation: DiscardProfileEvidencePublicationMutation,
+        at libraryRoot: URL
+    ) throws -> PortableChatMutationResult {
+        guard let publication = mutation.base.profileEvidencePublication,
+              mutation.base.chat.id == publication.chatID,
+              mutation.responsePositionID == publication.responsePositionID
+        else { throw PortableChatPersistenceError.invalidLayout }
+        return try withProfileProposalMutationAuthority(
+            at: libraryRoot,
+            in: mutation.library,
+            chatID: mutation.base.chat.id
+        ) { authority in
+            let revalidate = {
+                try self.revalidateProfileProposalMutationAuthority(
+                    authority,
+                    at: libraryRoot,
+                    in: mutation.library
+                )
+            }
+            guard case let .readWrite(current) = try loadChat(
+                from: authority.chatDescriptor,
+                expectedID: mutation.base.chat.id,
+                reconcileTransients: true,
+                beforeDestructiveMutation: revalidate
+            ) else { throw PortableChatPersistenceError.invalidLayout }
+            let resolved = try aggregateResolvingProfileEvidencePublication(
+                mutation.base
+            )
+            guard current == mutation.base || current == resolved else {
+                return .stale(current)
+            }
+            let publish = try PublishProfileEvidenceMutation(
+                library: mutation.library,
+                base: mutation.base,
+                responsePositionID: mutation.responsePositionID
+            )
+            let headData = try boundedData(
+                named: "head.json",
+                under: authority.profileDescriptor
+            )
+            let head = try PortableLibraryPersistence().decodeProfileHead(headData)
+            if try headSelectsProfileEvidenceRevision(
+                head,
+                mutation: publish,
+                publication: publication,
+                under: authority.profileDescriptor
+            ) {
+                try makeProfileEvidenceHeadDurable(
+                    head,
+                    mutation: publish,
+                    publication: publication,
+                    under: authority.profileDescriptor,
+                    beforeMutation: revalidate
+                )
+                let published = try finishProfileEvidencePublication(
+                    expected: resolved,
+                    chatDescriptor: authority.chatDescriptor,
+                    beforeMutation: revalidate
+                )
+                return .stale(published)
+            }
+            guard current == mutation.base,
+                  current.profileEvidencePublication == publication
+            else { return .stale(current) }
+            _ = try removeProvedUnselectedProfileEvidenceRevisionIfPresent(
+                intendedRevisionID: publish.intendedRevisionID,
+                publication: publication,
+                currentHeadData: headData,
+                currentHead: head,
+                profileDescriptor: authority.profileDescriptor,
+                revisionsDescriptor: authority.revisionsDescriptor,
+                publicationsDescriptor: authority.publicationsDescriptor,
+                beforeMutation: revalidate
+            )
+            return .committed(
+                try finishProfileEvidencePublication(
+                    expected: resolved,
+                    chatDescriptor: authority.chatDescriptor,
+                    beforeMutation: revalidate
+                )
+            )
+        }
+    }
+
+    func reconcileCommittedProfileEvidencePublication(
+        _ mutation: PublishProfileEvidenceMutation,
+        at libraryRoot: URL
+    ) throws -> ChatAggregate? {
+        do {
+            return try withProfileProposalMutationAuthority(
+                at: libraryRoot,
+                in: mutation.library,
+                chatID: mutation.base.chat.id
+            ) { authority in
+                guard let publication = mutation.base.profileEvidencePublication
+                else { return nil }
+                let revalidate = {
+                    try self.revalidateProfileProposalMutationAuthority(
+                        authority,
+                        at: libraryRoot,
+                        in: mutation.library
+                    )
+                }
+                guard case let .readWrite(current) = try loadChat(
+                    from: authority.chatDescriptor,
+                    expectedID: mutation.base.chat.id,
+                    reconcileTransients: true,
+                    beforeDestructiveMutation: revalidate
+                ) else { return nil }
+                let resolved = try aggregateResolvingProfileEvidencePublication(
+                    mutation.base
+                )
+                guard current == mutation.base || current == resolved,
+                      !(try hasForeignProfileWriteIntent(
+                          excluding: authority.chatName,
+                          under: authority.chatsDescriptor
+                      ))
+                else { return nil }
+                let head = try PortableLibraryPersistence().decodeProfileHead(
+                    boundedData(
+                        named: "head.json",
+                        under: authority.profileDescriptor
+                    )
+                )
+                if try headSelectsProfileEvidenceRevision(
+                    head,
+                    mutation: mutation,
+                    publication: publication,
+                    under: authority.profileDescriptor
+                ) {
+                    try makeProfileEvidenceHeadDurable(
+                        head,
+                        mutation: mutation,
+                        publication: publication,
+                        under: authority.profileDescriptor,
+                        beforeMutation: revalidate
+                    )
+                    return try finishProfileEvidencePublication(
+                        expected: resolved,
+                        chatDescriptor: authority.chatDescriptor,
+                        beforeMutation: revalidate
+                    )
+                }
+                guard current == resolved,
+                      !(try entryExists(
+                          named: "profile-publication.json",
+                          under: authority.chatDescriptor
+                      )),
+                      let selected = try loadSelectedProfileRevision(
+                          head,
+                          under: authority.profileDescriptor
+                      ),
+                      case .noOp = try selected.applying(
+                          publication,
+                          intendedRevisionID: mutation.intendedRevisionID,
+                          createdAt: publication.createdAt
+                )
+                else { return nil }
+                return try proveProfileEvidencePublicationRemovalDurable(
+                    expected: resolved,
+                    chatDescriptor: authority.chatDescriptor,
+                    beforeMutation: revalidate
+                )
+            }
+        } catch PortableChatPersistenceError.chatMissing {
+            return nil
+        } catch ProfileEvidencePublicationApplicationError.staleTarget {
+            return nil
+        }
+    }
+
+    func reconcileCommittedProfileEvidenceDiscard(
+        _ mutation: DiscardProfileEvidencePublicationMutation,
+        at libraryRoot: URL
+    ) throws -> ChatAggregate? {
+        do {
+            return try withProfileProposalMutationAuthority(
+                at: libraryRoot,
+                in: mutation.library,
+                chatID: mutation.base.chat.id
+            ) { authority in
+                guard let publication = mutation.base.profileEvidencePublication
+                else { return nil }
+                let revalidate = {
+                    try self.revalidateProfileProposalMutationAuthority(
+                        authority,
+                        at: libraryRoot,
+                        in: mutation.library
+                    )
+                }
+                guard !(try entryExists(
+                    named: "profile-publication.json",
+                    under: authority.chatDescriptor
+                )), case let .readWrite(current) = try loadChat(
+                    from: authority.chatDescriptor,
+                    expectedID: mutation.base.chat.id,
+                    reconcileTransients: true,
+                    beforeDestructiveMutation: revalidate
+                ), current == (try aggregateResolvingProfileEvidencePublication(
+                    mutation.base
+                )) else { return nil }
+                let publish = try PublishProfileEvidenceMutation(
+                    library: mutation.library,
+                    base: mutation.base,
+                    responsePositionID: mutation.responsePositionID
+                )
+                let head = try PortableLibraryPersistence().decodeProfileHead(
+                    boundedData(
+                        named: "head.json",
+                        under: authority.profileDescriptor
+                    )
+                )
+                guard !(try headSelectsProfileEvidenceRevision(
+                    head,
+                    mutation: publish,
+                    publication: publication,
+                    under: authority.profileDescriptor
+                )) else { return nil }
+                return try proveProfileEvidencePublicationRemovalDurable(
+                    expected: current,
+                    chatDescriptor: authority.chatDescriptor,
+                    beforeMutation: revalidate
+                )
+            }
+        } catch PortableChatPersistenceError.chatMissing {
+            return nil
+        }
+    }
+
     private func finishProfileProposalAcceptance(
         mutation: AcceptProfileProposalMutation,
         proposal: ProfileChangeProposal,
@@ -5494,6 +5923,49 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return reopened
     }
 
+    private func finishProfileEvidencePublication(
+        expected: ChatAggregate,
+        chatDescriptor: Int32,
+        beforeMutation: () throws -> Void
+    ) throws -> ChatAggregate {
+        try beforeMutation()
+        try removeRegularFileIfPresent(
+            named: "profile-publication.json",
+            under: chatDescriptor
+        )
+        try fault(.afterProfileEvidencePublicationRemoval)
+        return try proveProfileEvidencePublicationRemovalDurable(
+            expected: expected,
+            chatDescriptor: chatDescriptor,
+            beforeMutation: beforeMutation
+        )
+    }
+
+    private func proveProfileEvidencePublicationRemovalDurable(
+        expected: ChatAggregate,
+        chatDescriptor: Int32,
+        beforeMutation: () throws -> Void
+    ) throws -> ChatAggregate {
+        try beforeMutation()
+        try flushDescriptor(chatDescriptor)
+        try beforeMutation()
+        guard !(try entryExists(
+            named: "profile-publication.json",
+            under: chatDescriptor
+        )) else { throw PortableChatPersistenceError.invalidLayout }
+        try beforeMutation()
+        guard case let .readWrite(reopened) = try loadChat(
+            from: chatDescriptor,
+            expectedID: expected.chat.id,
+            reconcileTransients: true,
+            beforeDestructiveMutation: beforeMutation
+        ), reopened == expected else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        try beforeMutation()
+        return reopened
+    }
+
     private func aggregateResolvingProfileProposal(
         _ aggregate: ChatAggregate
     ) throws -> ChatAggregate {
@@ -5502,7 +5974,21 @@ public struct PortableChatPersistence: @unchecked Sendable {
             memory: aggregate.memory,
             messages: aggregate.messages,
             pendingUserTurn: aggregate.pendingUserTurn,
-            profileProposal: nil
+            profileProposal: nil,
+            profileEvidencePublication: aggregate.profileEvidencePublication
+        )
+    }
+
+    private func aggregateResolvingProfileEvidencePublication(
+        _ aggregate: ChatAggregate
+    ) throws -> ChatAggregate {
+        try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            messages: aggregate.messages,
+            pendingUserTurn: aggregate.pendingUserTurn,
+            profileProposal: aggregate.profileProposal,
+            profileEvidencePublication: nil
         )
     }
 
@@ -5876,6 +6362,169 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
     }
 
+    /// A lost head CAS can leave this operation's deterministic revision ID
+    /// installed against an older parent. Before rebasing the same operation,
+    /// remove only that proved, unselected, and unreferenced orphan.
+    private func prepareProfileEvidenceRevisionSlot(
+        for revision: ProfileRevision,
+        publication: ProfileEvidencePublication,
+        currentHeadData: Data,
+        currentHead: ProfileHead,
+        profileDescriptor: Int32,
+        revisionsDescriptor: Int32,
+        publicationsDescriptor: Int32,
+        beforeMutation: () throws -> Void
+    ) throws {
+        let name = revision.revisionID.rawValue
+        guard try entryExists(named: name, under: revisionsDescriptor) else {
+            return
+        }
+        let installed = try loadProfileRevision(
+            id: revision.revisionID,
+            under: profileDescriptor
+        )
+        guard installed != revision else { return }
+        guard try removeProvedUnselectedProfileEvidenceRevisionIfPresent(
+            intendedRevisionID: revision.revisionID,
+            publication: publication,
+            currentHeadData: currentHeadData,
+            currentHead: currentHead,
+            profileDescriptor: profileDescriptor,
+            revisionsDescriptor: revisionsDescriptor,
+            publicationsDescriptor: publicationsDescriptor,
+            beforeMutation: beforeMutation
+        ) else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+    }
+
+    @discardableResult
+    private func removeProvedUnselectedProfileEvidenceRevisionIfPresent(
+        intendedRevisionID: ProfileRevisionID,
+        publication: ProfileEvidencePublication,
+        currentHeadData: Data,
+        currentHead: ProfileHead,
+        profileDescriptor: Int32,
+        revisionsDescriptor: Int32,
+        publicationsDescriptor: Int32,
+        beforeMutation: () throws -> Void
+    ) throws -> Bool {
+        let name = intendedRevisionID.rawValue
+        guard try entryExists(named: name, under: revisionsDescriptor) else {
+            return false
+        }
+        let installed = try loadProfileRevision(
+            id: intendedRevisionID,
+            under: profileDescriptor
+        )
+        guard currentHead.authority.currentRevisionID != intendedRevisionID,
+              installed.createdAt == publication.createdAt,
+              let installedParentID = installed.parentRevisionID
+        else { return false }
+        let installedParent = try loadProfileRevision(
+            id: installedParentID,
+            under: profileDescriptor
+        )
+        let application: ProfileEvidencePublicationApplicationResult
+        do {
+            application = try installedParent.applying(
+                publication,
+                intendedRevisionID: intendedRevisionID,
+                createdAt: publication.createdAt
+            )
+        } catch {
+            return false
+        }
+        guard case let .changed(provedInstalled) = application,
+              provedInstalled == installed
+        else { return false }
+
+        let revisionNames = try listEntryNames(
+            under: revisionsDescriptor,
+            maximumCount: 65_536
+        ).filter { $0 != ".DS_Store" && $0 != name }
+        for childName in revisionNames {
+            let childID: ProfileRevisionID
+            do {
+                childID = try ProfileRevisionID(childName)
+            } catch {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            let child = try loadProfileRevision(
+                id: childID,
+                under: profileDescriptor
+            )
+            if child.parentRevisionID == intendedRevisionID {
+                return false
+            }
+        }
+
+        let revisionIdentity = try directoryIdentity(
+            named: name,
+            under: revisionsDescriptor
+        )
+        let revisionDescriptor = try openDirectory(
+            named: name,
+            under: revisionsDescriptor
+        )
+        defer { Darwin.close(revisionDescriptor) }
+        try beforeMutation()
+        let provedHeadData = try boundedData(
+            named: "head.json",
+            under: profileDescriptor
+        )
+        guard provedHeadData == currentHeadData,
+              try PortableLibraryPersistence().decodeProfileHead(
+                  provedHeadData
+              ) == currentHead,
+              currentHead.authority.currentRevisionID != intendedRevisionID,
+              try directoryIdentity(of: revisionDescriptor) == revisionIdentity,
+              try directoryIdentity(named: name, under: revisionsDescriptor) ==
+                revisionIdentity
+        else { throw PortableChatPersistenceError.invalidLayout }
+
+        let tombstoneName =
+            ".profile-\(name)-\(UUID().uuidString.lowercased()).partial"
+        try noReplaceRename(
+            from: name,
+            under: revisionsDescriptor,
+            to: tombstoneName,
+            under: publicationsDescriptor
+        )
+        try fault(.afterProfileRevisionAbortRename)
+        guard try directoryIdentity(
+            named: tombstoneName,
+            under: publicationsDescriptor
+        ) == revisionIdentity else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        try flushDescriptor(revisionsDescriptor)
+        try flushDescriptor(publicationsDescriptor)
+        try beforeMutation()
+        var cleanupBudget = CandidateCleanupBudget()
+        guard let cleanupPlan = try stagedProfileRevisionCleanupPlan(
+            named: tombstoneName,
+            under: publicationsDescriptor,
+            budget: &cleanupBudget
+        ), cleanupPlan.directoryIdentity == revisionIdentity else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        try removeStagedProfileRevision(
+            cleanupPlan,
+            under: publicationsDescriptor,
+            emitsFaults: true
+        )
+        try flushDescriptor(publicationsDescriptor)
+        try beforeMutation()
+        guard !(try entryExists(named: name, under: revisionsDescriptor)),
+              try boundedData(
+                  named: "head.json",
+                  under: profileDescriptor
+              ) == currentHeadData
+        else { throw PortableChatPersistenceError.invalidLayout }
+        return true
+    }
+
     private func removeUncommittedProfileRevisionIfPresent(
         intent: ProfileWriteIntent,
         proposal: ProfileChangeProposal,
@@ -6171,6 +6820,64 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return installed == expected
     }
 
+    private func headSelectsProfileEvidenceRevision(
+        _ head: ProfileHead,
+        mutation: PublishProfileEvidenceMutation,
+        publication: ProfileEvidencePublication,
+        under profileDescriptor: Int32
+    ) throws -> Bool {
+        guard head.authority.currentRevisionID == mutation.intendedRevisionID,
+              let installed = try loadProfileRevision(
+                  selectedBy: head.selection,
+                  under: profileDescriptor
+              ),
+              installed.generation == head.generation,
+              installed.statementGeneration == head.statementGeneration,
+              installed.createdAt == publication.createdAt,
+              let parentRevisionID = installed.parentRevisionID
+        else { return false }
+        let parent = try loadProfileRevision(
+            id: parentRevisionID,
+            under: profileDescriptor
+        )
+        let expected = try parent.applying(
+            publication,
+            intendedRevisionID: mutation.intendedRevisionID,
+            createdAt: publication.createdAt
+        )
+        guard case let .changed(revision) = expected else { return false }
+        return installed == revision
+    }
+
+    private func makeProfileEvidenceHeadDurable(
+        _ head: ProfileHead,
+        mutation: PublishProfileEvidenceMutation,
+        publication: ProfileEvidencePublication,
+        under profileDescriptor: Int32,
+        beforeMutation: () throws -> Void
+    ) throws {
+        try beforeMutation()
+        guard try headSelectsProfileEvidenceRevision(
+            head,
+            mutation: mutation,
+            publication: publication,
+            under: profileDescriptor
+        ) else { throw PortableChatPersistenceError.invalidLayout }
+        try flushDescriptor(profileDescriptor)
+        try beforeMutation()
+        let durableHead = try PortableLibraryPersistence().decodeProfileHead(
+            boundedData(named: "head.json", under: profileDescriptor)
+        )
+        guard durableHead == head,
+              try headSelectsProfileEvidenceRevision(
+                  durableHead,
+                  mutation: mutation,
+                  publication: publication,
+                  under: profileDescriptor
+              )
+        else { throw PortableChatPersistenceError.invalidLayout }
+    }
+
     private func loadProfileRevision(
         id: ProfileRevisionID,
         under profileDescriptor: Int32
@@ -6343,6 +7050,26 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return data
     }
 
+    func encodeProfileEvidencePublication(
+        _ publication: ProfileEvidencePublication
+    ) throws -> Data {
+        let data = try deterministicJSON(
+            ProfileEvidencePublicationDTO(
+                schemaVersion: ProfileEvidencePublication.schemaVersion,
+                chatId: publication.chatID.rawValue,
+                responsePositionId: publication.responsePositionID.rawValue,
+                evidenceAppends: publication.evidenceAppends.map(
+                    ProfileEvidenceAppendDTO.init
+                ),
+                createdAt: publication.createdAt.rawValue
+            )
+        )
+        guard data.count <= Self.maximumRootBytes else {
+            throw PortableChatPersistenceError.rootTooLarge
+        }
+        return data
+    }
+
     @_spi(InvocationInfrastructure)
     public func encodeInvocation(_ invocation: CoachInvocation) throws -> Data {
         try invocationEvidenceCodec.encodeInvocation(invocation)
@@ -6358,6 +7085,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let proposalData = try mutation.profileProposal.map(
             encodeProfileProposal
         )
+        let profileEvidencePublicationData = try mutation
+            .profileEvidencePublication.map(encodeProfileEvidencePublication)
         let proof = try invocationEvidenceCodec.makePublicationProof(
             for: mutation,
             evidence: PortableInvocationPublicationSourceEvidence(
@@ -6368,12 +7097,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 userMessage: try encodeMessage(mutation.userMessage),
                 coachMessage: try encodeMessage(mutation.coachMessage),
                 freshDraft: try encodeDraft(mutation.freshDraft),
-                proposal: proposalData
+                proposal: proposalData,
+                profileEvidencePublication: profileEvidencePublicationData
             )
         )
         return InvocationPublicationArtifacts(
             proof: proof,
-            proposalData: proposalData
+            proposalData: proposalData,
+            profileEvidencePublicationData: profileEvidencePublicationData
         )
     }
 
@@ -6852,6 +7583,31 @@ public struct PortableChatPersistence: @unchecked Sendable {
         } else {
             nil
         }
+        let persistedProfileEvidencePublicationData: Data? = if try entryExists(
+            named: "profile-publication.json",
+            under: chatDescriptor
+        ) {
+            try boundedData(
+                named: "profile-publication.json",
+                under: chatDescriptor
+            )
+        } else {
+            nil
+        }
+        guard persistedProposalData == nil ||
+                persistedProfileEvidencePublicationData == nil
+        else { throw PortableChatPersistenceError.invalidLayout }
+        if let data = persistedProfileEvidencePublicationData {
+            let version = try schemaVersion(in: data)
+            if version > UInt64(ProfileEvidencePublication.schemaVersion) {
+                return .frozen(
+                    FrozenChatSnapshot(chatID: expectedID, reason: .newerSchema)
+                )
+            }
+            guard version == UInt64(ProfileEvidencePublication.schemaVersion) else {
+                throw PortableChatPersistenceError.unsupportedOlderSchema
+            }
+        }
         if reconcileTransients {
             try reconcileAbortingInvocation(
                 chat: chat,
@@ -6984,6 +7740,39 @@ public struct PortableChatPersistence: @unchecked Sendable {
             profileProposal = nil
         }
 
+        let profileEvidencePublication: ProfileEvidencePublication?
+        var removesUncommittedProfileEvidencePublication = false
+        if let publicationData = persistedProfileEvidencePublicationData {
+            let publication = try mapPersistedDomainValidation {
+                try decodeProfileEvidencePublication(publicationData)
+            }
+            guard publication.chatID == chat.id else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            let sourceMessages = orderedMessages.filter { message in
+                guard message.responsePositionID == publication.responsePositionID,
+                      case .coach = message.content
+                else { return false }
+                return true
+            }
+            if sourceMessages.count == 1 {
+                profileEvidencePublication = publication
+            } else if sourceMessages.isEmpty,
+                      let publicationProofAuthority,
+                      invocationEvidenceCodec.proof(
+                          publicationProofAuthority.proof,
+                          bindsProfileEvidencePublicationData: publicationData
+                      )
+            {
+                profileEvidencePublication = nil
+                removesUncommittedProfileEvidencePublication = reconcileTransients
+            } else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+        } else {
+            profileEvidencePublication = nil
+        }
+
         let pendingUserTurn: PendingUserTurn?
         var removesStalePending = false
         if let decodedPendingUserTurn,
@@ -7021,7 +7810,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 memory: memory,
                 messages: orderedMessages,
                 pendingUserTurn: pendingUserTurn,
-                profileProposal: profileProposal
+                profileProposal: profileProposal,
+                profileEvidencePublication: profileEvidencePublication
             )
         }
         if removesStalePending {
@@ -7046,6 +7836,13 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 try beforeDestructiveMutation()
                 try removeRegularFileIfPresent(
                     named: "proposal.json",
+                    under: chatDescriptor
+                )
+            }
+            if removesUncommittedProfileEvidencePublication {
+                try beforeDestructiveMutation()
+                try removeRegularFileIfPresent(
+                    named: "profile-publication.json",
                     under: chatDescriptor
                 )
             }
@@ -7182,7 +7979,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             under: chatDescriptor,
             maximumCount: Self.maximumChatRootEntries
         )
-        where (Self.isRenamePartialName(name) || Self.isPendingPartialName(name)) &&
+        where (Self.isRenamePartialName(name) || Self.isPendingPartialName(name) ||
+            Self.isProfilePublicationPartialName(name)) &&
             isRegularFile(named: name, under: chatDescriptor)
         {
             try beforeRemoving()
@@ -7426,7 +8224,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 memory: current.memory,
                 messages: current.messages,
                 pendingUserTurn: pending.replacingFailure(terminalFailure),
-                profileProposal: current.profileProposal
+                profileProposal: current.profileProposal,
+                profileEvidencePublication: current.profileEvidencePublication
             ))
         else { throw PortableChatPersistenceError.invalidLayout }
         return reopened
@@ -8346,6 +9145,45 @@ public struct PortableChatPersistence: @unchecked Sendable {
         try fault(.afterProfileProposalInstall)
     }
 
+    private func installProfileEvidencePublication(
+        _ data: Data,
+        under chatDescriptor: Int32
+    ) throws {
+        let finalName = "profile-publication.json"
+        if try entryExists(named: finalName, under: chatDescriptor) {
+            guard try boundedData(named: finalName, under: chatDescriptor) == data
+            else { throw PortableChatPersistenceError.invalidLayout }
+            return
+        }
+        let partialName =
+            ".profile-publication.json.\(UUID().uuidString.lowercased()).partial"
+        var partialExists = false
+        defer {
+            if partialExists {
+                _ = partialName.withCString {
+                    Darwin.unlinkat(chatDescriptor, $0, 0)
+                }
+            }
+        }
+        try writeExclusive(data, named: partialName, under: chatDescriptor)
+        partialExists = true
+        let partialDescriptor = try openRegularFile(
+            named: partialName,
+            under: chatDescriptor
+        )
+        defer { Darwin.close(partialDescriptor) }
+        try flushDescriptor(partialDescriptor)
+        try noReplaceRename(
+            from: partialName,
+            under: chatDescriptor,
+            to: finalName,
+            under: chatDescriptor
+        )
+        partialExists = false
+        try flushDescriptor(chatDescriptor)
+        try fault(.afterProfileEvidencePublicationInstall)
+    }
+
     private func installMemory(
         _ memory: CoachMemory,
         under memoryDescriptor: Int32
@@ -8457,6 +9295,20 @@ public struct PortableChatPersistence: @unchecked Sendable {
         guard name.hasPrefix(prefix), name.hasSuffix(suffix) else { return false }
         let uuid = String(name.dropFirst(prefix.count).dropLast(suffix.count))
         return UUID(uuidString: uuid) != nil
+    }
+
+    private static func isProfilePublicationPartialName(_ name: String) -> Bool {
+        let prefixes = [
+            ".proposal.json.",
+            ".profile-publication.json.",
+            ".profile-write.json.",
+        ]
+        let suffix = ".partial"
+        guard let prefix = prefixes.first(where: { name.hasPrefix($0) }),
+              name.hasSuffix(suffix)
+        else { return false }
+        let uuid = String(name.dropFirst(prefix.count).dropLast(suffix.count))
+        return UUID(uuidString: uuid)?.uuidString.lowercased() == uuid
     }
 
     private static func isInvocationPartialName(_ name: String) -> Bool {
@@ -9299,6 +10151,42 @@ public struct PortableChatPersistence: @unchecked Sendable {
             data
         )
         guard dto.schemaVersion == ProfileChangeProposal.schemaVersion else {
+            throw PortableChatPersistenceError.invalidSchemaVersion
+        }
+        do {
+            return try dto.domainValue()
+        } catch {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+    }
+
+    private func decodeProfileEvidencePublication(
+        _ data: Data
+    ) throws -> ProfileEvidencePublication {
+        let dictionary = try jsonDictionary(data)
+        try requireExactKeys(
+            dictionary,
+            [
+                "schemaVersion", "chatId", "responsePositionId",
+                "evidenceAppends", "createdAt",
+            ]
+        )
+        guard let appends = dictionary["evidenceAppends"] as? [[String: Any]],
+              !appends.isEmpty
+        else { throw PortableChatPersistenceError.invalidJSON }
+        for append in appends {
+            try requireExactKeys(append, ["target", "evidence"])
+            try validateProfileProposalTargetJSON(append["target"])
+            try validateEvidenceReferenceArrayJSON(
+                append["evidence"],
+                allowsEmpty: false
+            )
+        }
+        let dto: ProfileEvidencePublicationDTO = try decode(
+            ProfileEvidencePublicationDTO.self,
+            data
+        )
+        guard dto.schemaVersion == ProfileEvidencePublication.schemaVersion else {
             throw PortableChatPersistenceError.invalidSchemaVersion
         }
         do {
@@ -10225,9 +11113,91 @@ public actor PortableProfileProposalCoordinator: ProfileProposalCoordinating {
         }
     }
 
+    public func publishEvidence(
+        _ mutation: PublishProfileEvidenceMutation
+    ) async -> ProfileEvidencePublicationMutationOutcome {
+        let result:
+            ActiveLibraryOperationResult<ProfileEvidencePublicationMutationOutcome> =
+            await workspace.performActiveReadWriteOperation(
+                in: mutation.library
+            ) { root in
+                do {
+                    return Self.mapEvidence(
+                        try persistence.publishProfileEvidence(
+                            mutation,
+                            at: root
+                        )
+                    )
+                } catch PortableChatPersistenceError.readOnlyLibrary {
+                    return .readOnlyLibrary
+                } catch {
+                    if let committed = try? persistence
+                        .reconcileCommittedProfileEvidencePublication(
+                            mutation,
+                            at: root
+                        )
+                    {
+                        return .committed(committed)
+                    }
+                    return .failed
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly: .readOnlyLibrary
+        case .unavailable: .failed
+        }
+    }
+
+    public func discardEvidence(
+        _ mutation: DiscardProfileEvidencePublicationMutation
+    ) async -> ProfileEvidencePublicationMutationOutcome {
+        let result:
+            ActiveLibraryOperationResult<ProfileEvidencePublicationMutationOutcome> =
+            await workspace.performActiveReadWriteOperation(
+                in: mutation.library
+            ) { root in
+                do {
+                    return Self.mapEvidence(
+                        try persistence.discardProfileEvidencePublication(
+                            mutation,
+                            at: root
+                        )
+                    )
+                } catch PortableChatPersistenceError.readOnlyLibrary {
+                    return .readOnlyLibrary
+                } catch {
+                    if let committed = try? persistence
+                        .reconcileCommittedProfileEvidenceDiscard(
+                            mutation,
+                            at: root
+                        )
+                    {
+                        return .committed(committed)
+                    }
+                    return .failed
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly: .readOnlyLibrary
+        case .unavailable: .failed
+        }
+    }
+
     private nonisolated static func map(
         _ result: PortableChatMutationResult
     ) -> ProfileProposalMutationOutcome {
+        switch result {
+        case let .committed(aggregate): .committed(aggregate)
+        case let .stale(aggregate): .stale(aggregate)
+        case .frozen: .failed
+        }
+    }
+
+    private nonisolated static func mapEvidence(
+        _ result: PortableChatMutationResult
+    ) -> ProfileEvidencePublicationMutationOutcome {
         switch result {
         case let .committed(aggregate): .committed(aggregate)
         case let .stale(aggregate): .stale(aggregate)
@@ -10585,6 +11555,23 @@ private struct ProfileChangeProposalDTO: Codable {
             baseProfile: baseProfile.domainValue,
             changes: try changes.map { try $0.domainValue },
             evidenceAppends: try (evidenceAppends ?? []).map { try $0.domainValue },
+            createdAt: UTCInstant(createdAt)
+        )
+    }
+}
+
+private struct ProfileEvidencePublicationDTO: Codable {
+    let schemaVersion: UInt32
+    let chatId: String
+    let responsePositionId: String
+    let evidenceAppends: [ProfileEvidenceAppendDTO]
+    let createdAt: String
+
+    func domainValue() throws -> ProfileEvidencePublication {
+        try ProfileEvidencePublication(
+            chatID: ChatID(chatId),
+            responsePositionID: ChatResponsePositionID(responsePositionId),
+            evidenceAppends: evidenceAppends.map { try $0.domainValue },
             createdAt: UTCInstant(createdAt)
         )
     }

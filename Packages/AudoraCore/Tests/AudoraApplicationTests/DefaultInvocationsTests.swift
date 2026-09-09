@@ -2089,71 +2089,72 @@ final class DefaultInvocationsTests: XCTestCase {
         }
     }
 
-    func testValidatedButUnsupportedEffectsFailClosedWithoutPartialMessagePublication()
+    func testPureEvidenceResponseAtomicallyPublishesTurnMemoryAndStagedOperation()
         async throws
     {
-        let validUnsupportedResponses: [
-            (body: String, includesTranscript: Bool, activeProfileIDs: [String])
-        ] = [
-            (
-                """
-                {
-                  "messageBlocks":[{"kind":"markdown","markdown":"Do not publish alone."}],
-                  "appendProfileEvidence":[{
-                    "targetStatementId":"stm-20260830T110000000Z-1ABC",
-                    "evidence":[{
-                      "sessionAttachmentId":"attachment-1",
-                      "target":{"kind":"audioEvent","audioEventId":"a000000"}
-                    }]
-                  }]
-                }
-                """,
-                true,
-                ["stm-20260830T110000000Z-1ABC"]
-            ),
-        ]
-
-        for (index, response) in validUnsupportedResponses.enumerated() {
-            let fixture = try InvocationFixture(
-                contextWindow: 100_000,
-                providerOutcomes: [
-                    .complete(
-                        CoachProviderCompleteResponse(
-                            body: Data(response.body.utf8)
-                        )
-                    ),
-                ],
-                includesOnDemandAttachment: response.includesTranscript,
-                activeProfileStatementIDs: response.activeProfileIDs
-            )
-
-            let outcome = await fixture.invocations.tryInvoke(fixture.request)
-            guard case let .interrupted(aggregate, .invalidProviderResponse) =
-                outcome
-            else {
-                XCTFail(
-                    "unsupported response \(index) must fail closed"
-                )
-                continue
-            }
-            XCTAssertEqual(aggregate?.chat.messageIDs, [])
-            XCTAssertEqual(aggregate?.chat.draft, fixture.initial.chat.draft)
-            XCTAssertEqual(aggregate?.memory, fixture.initial.memory)
-            XCTAssertEqual(
-                aggregate?.pendingUserTurn?.failure,
-                .coachResponseInvalid
-            )
-            let publicationCount = await fixture.persistence.publicationCount
-            let ordinals = await fixture.provider.recordedAttemptOrdinals()
-            let delays = await fixture.sleeper.recordedDelays()
-            XCTAssertEqual(publicationCount, 0)
-            XCTAssertEqual(ordinals, [1])
-            XCTAssertEqual(delays, [])
-            XCTAssertEqual(
-                fixture.diagnostics.recordedEvents().first?.reason,
-                .responsePublicationUnsupported
-            )
+        let statementID = "stm-20260830T110000000Z-1ABC"
+        let response = """
+        {
+          "messageBlocks":[{"kind":"markdown","markdown":"Keep this evidence with the Profile."}],
+          "newMemory":{
+            "generalNotes":"Practice deliberate transitions.",
+            "sessionSummaries":[]
+          },
+          "appendProfileEvidence":[{
+            "targetStatementId":"\(statementID)",
+            "evidence":[{
+              "sessionAttachmentId":"attachment-1",
+              "target":{"kind":"audioEvent","audioEventId":"a000000"}
+            }]
+          }]
         }
+        """
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            responseReservedTokens: 2_048,
+            providerOutcomes: [
+                .complete(CoachProviderCompleteResponse(body: Data(response.utf8))),
+            ],
+            includesOnDemandAttachment: true,
+            activeProfileStatementIDs: [statementID]
+        )
+
+        guard case let .published(published, _) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else {
+            return XCTFail("pure Profile evidence must stage with the published turn")
+        }
+
+        XCTAssertEqual(
+            published.chat.messageIDs,
+            [fixture.userMessageID, fixture.coachMessageID]
+        )
+        XCTAssertEqual(published.memory.memoryID, fixture.replacementMemoryID)
+        XCTAssertEqual(
+            published.memory.generalNotes,
+            "Practice deliberate transitions."
+        )
+        XCTAssertNil(published.pendingUserTurn)
+        XCTAssertNil(published.profileProposal)
+        let publication = try XCTUnwrap(published.profileEvidencePublication)
+        XCTAssertEqual(publication.chatID, published.chat.id)
+        XCTAssertEqual(
+            publication.responsePositionID,
+            fixture.pending.responsePositionID
+        )
+        XCTAssertEqual(publication.createdAt, fixture.instant)
+        XCTAssertEqual(publication.evidenceAppends.count, 1)
+        XCTAssertEqual(
+            publication.evidenceAppends[0].target.statementID,
+            try ProfileStatementID(statementID)
+        )
+        XCTAssertEqual(
+            publication.evidenceAppends[0].target.wording,
+            "Speak with clarity."
+        )
+        XCTAssertEqual(publication.evidenceAppends[0].evidence.count, 1)
+        let publicationCount = await fixture.persistence.publicationCount
+        XCTAssertEqual(publicationCount, 1)
     }
 
     func testSemanticAndMixedProfileEffectsPublishAsOneChatOwnedProposal()
@@ -2221,6 +2222,7 @@ final class DefaultInvocationsTests: XCTestCase {
         else { return XCTFail("semantic Profile effects must publish for review") }
 
         let proposal = try XCTUnwrap(published.profileProposal)
+        XCTAssertNil(published.profileEvidencePublication)
         XCTAssertEqual(proposal.chatID, published.chat.id)
         XCTAssertEqual(proposal.responsePositionID, fixture.pending.responsePositionID)
         XCTAssertEqual(proposal.baseProfile, fixture.contextSource.profile)

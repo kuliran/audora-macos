@@ -237,6 +237,136 @@ public struct ProfileEvidenceAppend: Equatable, Sendable {
     }
 }
 
+public enum ProfileEvidencePublicationError: Error, Equatable, Sendable {
+    case emptyEvidenceAppends
+    case inconsistentTarget
+}
+
+/// One Chat-owned pure-evidence effect that survives response validation and is
+/// durable independently of the Profile transaction that applies it.
+public struct ProfileEvidencePublication: Equatable, Sendable {
+    public static let schemaVersion: UInt32 = 1
+
+    public let chatID: ChatID
+    public let responsePositionID: ChatResponsePositionID
+    public let evidenceAppends: [ProfileEvidenceAppend]
+    public let createdAt: UTCInstant
+
+    public init(
+        chatID: ChatID,
+        responsePositionID: ChatResponsePositionID,
+        evidenceAppends: [ProfileEvidenceAppend],
+        createdAt: UTCInstant
+    ) throws {
+        guard !evidenceAppends.isEmpty else {
+            throw ProfileEvidencePublicationError.emptyEvidenceAppends
+        }
+
+        var targets: [ProfileStatementID: ProfileProposalTarget] = [:]
+        var evidenceByTarget: [ProfileStatementID: [EvidenceReference]] = [:]
+        var targetOrder: [ProfileStatementID] = []
+        var seenSessions: [ProfileStatementID: Set<SessionID>] = [:]
+
+        for append in evidenceAppends {
+            let statementID = append.target.statementID
+            if let existing = targets[statementID] {
+                guard existing == append.target else {
+                    throw ProfileEvidencePublicationError.inconsistentTarget
+                }
+            } else {
+                targets[statementID] = append.target
+                evidenceByTarget[statementID] = []
+                seenSessions[statementID] = []
+                targetOrder.append(statementID)
+            }
+
+            for reference in append.evidence
+            where seenSessions[statementID, default: []]
+                .insert(reference.sessionID).inserted
+            {
+                evidenceByTarget[statementID, default: []].append(reference)
+            }
+        }
+
+        self.chatID = chatID
+        self.responsePositionID = responsePositionID
+        self.evidenceAppends = try targetOrder.map { statementID in
+            try ProfileEvidenceAppend(
+                target: targets[statementID]!,
+                evidence: evidenceByTarget[statementID]!
+            )
+        }
+        self.createdAt = createdAt
+    }
+}
+
+public enum ProfileEvidencePublicationApplicationError: Error, Equatable, Sendable {
+    case staleTarget
+    case intendedRevisionIDCollision
+    case generationOverflow
+}
+
+public enum ProfileEvidencePublicationApplicationResult: Equatable, Sendable {
+    case changed(ProfileRevision)
+    case noOp
+}
+
+public extension ProfileRevision {
+    /// Rebases pure evidence onto the current Profile while every exact target
+    /// remains active. Existing support and duplicate Sessions are no-ops.
+    func applying(
+        _ publication: ProfileEvidencePublication,
+        intendedRevisionID: ProfileRevisionID,
+        createdAt: UTCInstant
+    ) throws -> ProfileEvidencePublicationApplicationResult {
+        var revisedStatements = statements
+        var changed = false
+
+        for append in publication.evidenceAppends {
+            guard let index = revisedStatements.firstIndex(where: {
+                $0.statementID == append.target.statementID
+            }), append.target.matches(revisedStatements[index]) else {
+                throw ProfileEvidencePublicationApplicationError.staleTarget
+            }
+
+            let current = revisedStatements[index]
+            let unionedEvidence = ProfileEvidence.union(
+                current.evidence,
+                with: append.evidence
+            )
+            guard unionedEvidence != current.evidence else { continue }
+            revisedStatements[index] = try ProfileStatement.materialized(
+                statementID: current.statementID,
+                statementKind: current.statementKind,
+                wording: current.wording,
+                evidence: unionedEvidence
+            )
+            changed = true
+        }
+
+        guard changed else { return .noOp }
+        guard revisionID != intendedRevisionID else {
+            throw ProfileEvidencePublicationApplicationError
+                .intendedRevisionIDCollision
+        }
+        let (nextGeneration, overflow) = generation.addingReportingOverflow(1)
+        guard !overflow else {
+            throw ProfileEvidencePublicationApplicationError.generationOverflow
+        }
+
+        return .changed(
+            try ProfileRevision(
+                revisionID: intendedRevisionID,
+                parentRevisionID: revisionID,
+                generation: nextGeneration,
+                statementGeneration: statementGeneration,
+                createdAt: createdAt,
+                statements: revisedStatements
+            )
+        )
+    }
+}
+
 public enum ProfileChangeProposalError: Error, Equatable, Sendable {
     case emptyChanges
     case conflictingSemanticTarget

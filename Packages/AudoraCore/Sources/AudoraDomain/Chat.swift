@@ -619,13 +619,15 @@ public struct ChatAggregate: Equatable, Sendable {
     public let messages: [ChatMessage]
     public let pendingUserTurn: PendingUserTurn?
     public let profileProposal: ProfileChangeProposal?
+    public let profileEvidencePublication: ProfileEvidencePublication?
 
     public init(
         chat: Chat,
         memory: CoachMemory,
         messages: [ChatMessage] = [],
         pendingUserTurn: PendingUserTurn? = nil,
-        profileProposal: ProfileChangeProposal? = nil
+        profileProposal: ProfileChangeProposal? = nil,
+        profileEvidencePublication: ProfileEvidencePublication? = nil
     ) throws {
         guard chat.currentMemoryID == memory.memoryID else {
             throw ChatAggregateError.memoryPointerMismatch
@@ -697,6 +699,7 @@ public struct ChatAggregate: Equatable, Sendable {
         }
         if let profileProposal {
             guard pendingUserTurn == nil,
+                  profileEvidencePublication == nil,
                   profileProposal.chatID == chat.id
             else { throw ChatAggregateError.messageHistoryMismatch }
             if !messages.isEmpty {
@@ -728,11 +731,47 @@ public struct ChatAggregate: Equatable, Sendable {
                 )
             }) else { throw ChatAggregateError.messageHistoryMismatch }
         }
+        if let profileEvidencePublication {
+            guard pendingUserTurn == nil,
+                  profileProposal == nil,
+                  profileEvidencePublication.chatID == chat.id,
+                  !chat.messageIDs.isEmpty
+            else { throw ChatAggregateError.messageHistoryMismatch }
+            if !messages.isEmpty {
+                let sourceMessages = messages.filter { message in
+                    message.responsePositionID ==
+                        profileEvidencePublication.responsePositionID && {
+                            if case .coach = message.content { return true }
+                            return false
+                        }()
+                }
+                guard sourceMessages.count == 1 else {
+                    throw ChatAggregateError.messageHistoryMismatch
+                }
+            }
+            let attachmentPairs = Set(chat.attachments.values.map {
+                EvidenceAttachmentPair(
+                    sessionID: $0.sessionID,
+                    transcriptRevisionID: $0.transcriptRevisionID
+                )
+            })
+            let publicationEvidence = profileEvidencePublication
+                .evidenceAppends.flatMap(\.evidence)
+            guard publicationEvidence.allSatisfy({ reference in
+                attachmentPairs.contains(
+                    EvidenceAttachmentPair(
+                        sessionID: reference.sessionID,
+                        transcriptRevisionID: reference.transcriptRevisionID
+                    )
+                )
+            }) else { throw ChatAggregateError.messageHistoryMismatch }
+        }
         self.chat = chat
         self.memory = memory
         self.messages = messages
         self.pendingUserTurn = pendingUserTurn
         self.profileProposal = profileProposal
+        self.profileEvidencePublication = profileEvidencePublication
     }
 
     public static func emptyDevelopmentChat(

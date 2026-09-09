@@ -275,6 +275,30 @@ public final class ChatPresentationModel: ObservableObject {
         send(.discardProfileProposal(context, proposalID))
     }
 
+    public func retryProfileEvidencePublication(
+        _ responsePositionID: ChatResponsePositionID
+    ) {
+        guard let context = commandContext,
+              ChatInteractionPolicy.allowsNavigationAndMutation(in: snapshot),
+              case let .open(aggregate) = snapshot.selection,
+              aggregate.profileEvidencePublication?.responsePositionID ==
+                responsePositionID
+        else { return }
+        send(.retryProfileEvidencePublication(context, responsePositionID))
+    }
+
+    public func discardProfileEvidencePublication(
+        _ responsePositionID: ChatResponsePositionID
+    ) {
+        guard let context = commandContext,
+              ChatInteractionPolicy.allowsNavigationAndMutation(in: snapshot),
+              case let .open(aggregate) = snapshot.selection,
+              aggregate.profileEvidencePublication?.responsePositionID ==
+                responsePositionID
+        else { return }
+        send(.discardProfileEvidencePublication(context, responsePositionID))
+    }
+
     public func announceEvidenceUnavailable(_ explanation: String) {
         announcements.post("Evidence unavailable. \(explanation)")
     }

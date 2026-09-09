@@ -172,7 +172,8 @@ Transcript Revision pinned by its Chat attachment, stores typed Word-range or Au
 Event anchors with a trusted app-derived display snapshot, and rejects the whole
 response when an attachment or target does not resolve there. Semantic or mixed
 Profile effects now publish exactly one Chat-owned Proposal alongside the turn;
-pure evidence-only Profile publication remains outside this executable slice. Every
+pure evidence-only effects instead stage one mutually exclusive Chat-owned local
+publication operation alongside the turn. Every
 complete provider response remains opaque until Application validates its closed
 schema, collector and token limits, passive Markdown, response-position authority,
 Memory bounds, evidence pointers, active Profile targets, and effect conflicts as
@@ -183,8 +184,12 @@ with an optional bounded Memory replacement and, for semantic or mixed Profile
 effects, one reviewable Proposal. Omission or canonical equality retains the existing
 snapshot identity; a changed value is staged and selected by the same Chat-manifest
 compare-and-swap as the message pair, after which pointer-led recovery removes the
-superseded snapshot. Unsupported pure evidence-only Profile batches still fail
-closed. Invalid or unsupported batches publish no message or state effect, receive
+superseded snapshot. A staged evidence-only operation unions the first provider-order
+occurrence for each `(statementId, Session)` into the current exact active target,
+preserves `statementGeneration`, and creates no approval card, toast, or divider on
+success. A local write failure retains the exact operation for local Retry or Discard
+without rolling back messages or Memory. Invalid or unsupported batches publish no
+message or state effect, receive
 no automatic repair Attempt, and retain only
 closed metadata diagnostics behind the bounded Pending-turn **Retry** and
 **Discard** card.

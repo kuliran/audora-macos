@@ -6,8 +6,9 @@ portable Library document roots in
 [`portable-library.tsp`](portable-library.tsp), and the Library lifecycle
 scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp), and
 the portable Chat roots and scenarios in [`chat.tsp`](chat.tsp).
-Immutable Profile snapshots, reviewed semantic-or-mixed Proposals, and accepted
-Proposal write intents live in [`profile.tsp`](profile.tsp).
+Immutable Profile snapshots, reviewed semantic-or-mixed Proposals, pure-evidence
+publication operations, and accepted Proposal write intents live in
+[`profile.tsp`](profile.tsp).
 [`session-audio.tsp`](session-audio.tsp) is the single source of truth for
 shared Session identity and the imported/microphone audio and Session manifest
 variants. Imported-audio normalization and feature behavior live in
@@ -56,6 +57,7 @@ the current terminal reasons and legacy compatibility.
 - [`LibraryPreferences.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json)
 - [`PendingUserTurn.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/PendingUserTurn.json)
 - [`ProfileChangeProposal.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileChangeProposal.json)
+- [`ProfileEvidencePublication.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileEvidencePublication.json)
 - [`ProfileHead.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json)
 - [`ProfileRevision.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileRevision.json)
 - [`ProfileWriteIntent.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileWriteIntent.json)
@@ -89,6 +91,7 @@ the current terminal reasons and legacy compatibility.
 | `LibraryPreferences` | Portable Library storage | No |
 | `PendingUserTurn` | Portable Library operational storage | No |
 | `ProfileChangeProposal` | Chat-owned reviewed Profile proposal storage | No |
+| `ProfileEvidencePublication` | Chat-owned pure-evidence publication storage | No |
 | `ProfileHead` | Portable Library storage | No |
 | `ProfileRevision` | Immutable Development Profile snapshot storage | No |
 | `ProfileWriteIntent` | Profile commit-recovery storage | No |
@@ -140,7 +143,13 @@ closed over Add, Replace, and Retire. Application has already allocated every
 proposed Statement ID; Replace and Retire retain the target's complete ID, kind,
 and wording summary. Evidence remains in accepted provider order. Standalone
 Evidence Appends may accompany those semantic changes, but a wholly evidence-only
-publication is deliberately not a Proposal contract in this slice.
+operation uses the separate `ProfileEvidencePublication` root rather than becoming
+a Proposal.
+
+`ProfileEvidencePublication` binds the owning Chat and response position to one or
+more exact target summaries with nonempty Evidence Appends. It remains beside the
+Chat until the idempotent local union commits or the Speaker discards a retained
+failure; it never appears as Chat history.
 
 `ProfileWriteIntent` binds one accepted Proposal and its Chat to one intended
 Revision ID and creation time. Its sealed expected-head union records both
@@ -150,10 +159,11 @@ not Profile-recovery scenario contracts.
 
 The checked-in [`revision.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/Profile/v1/revision.json),
 [`proposal.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/Profile/v1/proposal.json),
+[`profile-publication.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/Profile/v1/profile-publication.json),
 and [`write-intent.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Examples/Profile/v1/write-intent.json)
 exercise an immutable snapshot, all three semantic change variants plus a mixed
-Evidence Append, and a selected expected-head authority whose digest binds the
-example Revision bytes.
+Evidence Append, a pure-evidence operation, and a selected expected-head authority
+whose digest binds the example Revision bytes.
 
 ## Session audio roots
 

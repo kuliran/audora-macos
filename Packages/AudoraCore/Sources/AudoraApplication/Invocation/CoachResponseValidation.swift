@@ -284,8 +284,7 @@ struct ValidatedCoachResponse: Equatable, Sendable {
     }
 
     var isSupportedByCurrentPublicationSlice: Bool {
-        !messageBlocks.isEmpty &&
-            (appendedProfileEvidence.isEmpty || !proposedProfileEdits.isEmpty)
+        !messageBlocks.isEmpty
     }
 }
 

@@ -16,6 +16,7 @@ Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryManifest.js
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/LibraryPreferences.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/PendingUserTurn.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileChangeProposal.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileEvidencePublication.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileRevision.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileWriteIntent.json

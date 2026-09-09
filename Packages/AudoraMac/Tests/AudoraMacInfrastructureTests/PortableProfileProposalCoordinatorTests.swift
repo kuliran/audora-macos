@@ -6,6 +6,562 @@ import Foundation
 import XCTest
 
 final class PortableProfileProposalCoordinatorTests: XCTestCase {
+    func testEvidencePublicationStagesWithTurnThenSilentlyRebasesProfile()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(in: parent)
+            let publicationURL = chatRoot(fixture).appendingPathComponent(
+                "profile-publication.json"
+            )
+
+            XCTAssertEqual(
+                try Data(contentsOf: publicationURL),
+                try fixture.persistence.encodeProfileEvidencePublication(
+                    fixture.profilePublication
+                )
+            )
+            guard case let .readWrite(reopened) = try fixture.persistence.load(
+                fixture.published.chat.id,
+                at: fixture.root,
+                in: fixture.scope
+            ) else {
+                return XCTFail("Published evidence operation did not reopen")
+            }
+            XCTAssertEqual(reopened, fixture.published)
+
+            let concurrent = try makeConcurrentEvidenceRevision(in: fixture)
+            try installProfileRevision(concurrent, in: fixture)
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+            let mutation = try PublishProfileEvidenceMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID: fixture.profilePublication.responsePositionID
+            )
+
+            guard case let .committed(resolved) = await coordinator.publishEvidence(
+                mutation
+            ) else {
+                return XCTFail("Evidence-only Profile publication did not commit")
+            }
+
+            XCTAssertNil(resolved.profileEvidencePublication)
+            XCTAssertEqual(resolved.chat, fixture.published.chat)
+            XCTAssertEqual(resolved.messages, fixture.published.messages)
+            XCTAssertEqual(resolved.memory, fixture.published.memory)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: publicationURL.path))
+            let head = try loadProfileHead(in: fixture)
+            XCTAssertEqual(head.generation, 3)
+            XCTAssertEqual(head.statementGeneration, 1)
+            guard case let .revision(pointer) = head.selection else {
+                return XCTFail("Evidence-only publication did not select a revision")
+            }
+            XCTAssertEqual(pointer.revisionID, mutation.intendedRevisionID)
+            let revision = try fixture.persistence.decodeProfileRevision(
+                Data(contentsOf: profileRevisionURL(pointer.revisionID, in: fixture))
+            )
+            XCTAssertEqual(revision.parentRevisionID, concurrent.revisionID)
+            XCTAssertEqual(revision.statementGeneration, concurrent.statementGeneration)
+            XCTAssertEqual(
+                revision.statement(id: fixture.target.statementID)?.evidence,
+                concurrent.statement(id: fixture.target.statementID)!.evidence +
+                    [fixture.appendedEvidence]
+            )
+        }
+    }
+
+    func testEvidencePublicationNoOpClearsOnlyOperationWithoutNewRevision()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(
+                in: parent,
+                existingEvidence: true
+            )
+            let beforeHead = try Data(
+                contentsOf: fixture.root.appendingPathComponent("profile/head.json")
+            )
+            let beforeRevisionNames = try profileRevisionDirectoryNames(in: fixture)
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+            let mutation = try PublishProfileEvidenceMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID: fixture.profilePublication.responsePositionID
+            )
+
+            guard case let .committed(resolved) = await coordinator.publishEvidence(
+                mutation
+            ) else { return XCTFail("Existing evidence did not resolve as a no-op") }
+
+            XCTAssertNil(resolved.profileEvidencePublication)
+            XCTAssertEqual(
+                try Data(
+                    contentsOf: fixture.root.appendingPathComponent(
+                        "profile/head.json"
+                    )
+                ),
+                beforeHead
+            )
+            XCTAssertEqual(
+                try profileRevisionDirectoryNames(in: fixture),
+                beforeRevisionNames
+            )
+        }
+    }
+
+    func testEvidencePublicationFailureRetainsExactOperationForLocalRetry()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(in: parent)
+            let injected = OneShot()
+            let faulting = PortableChatPersistence { point in
+                guard point == .afterProfileRevisionInstall, injected.take() else {
+                    return
+                }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+            let mutation = try PublishProfileEvidenceMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID: fixture.profilePublication.responsePositionID
+            )
+            let first = PortableProfileProposalCoordinator(
+                persistence: faulting,
+                workspace: fixture.workspace
+            )
+
+            let firstOutcome = await first.publishEvidence(mutation)
+            XCTAssertEqual(firstOutcome, .failed)
+            XCTAssertTrue(injected.wasTaken)
+            XCTAssertEqual(try loadProfileHead(in: fixture).generation, 1)
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: chatRoot(fixture).appendingPathComponent(
+                        "profile-publication.json"
+                    ).path
+                )
+            )
+
+            let retry = PortableProfileProposalCoordinator(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+            guard case let .committed(resolved) = await retry.publishEvidence(
+                mutation
+            ) else { return XCTFail("Local retry did not finish the exact operation") }
+            XCTAssertNil(resolved.profileEvidencePublication)
+            XCTAssertEqual(try loadProfileHead(in: fixture).generation, 2)
+        }
+    }
+
+    func testEvidenceDiscardAfterRevisionInstallFailureRemovesProvedOrphan()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(in: parent)
+            let injected = OneShot()
+            let faulting = PortableChatPersistence { point in
+                guard point == .afterProfileRevisionInstall, injected.take() else {
+                    return
+                }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+            let publish = try PublishProfileEvidenceMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID:
+                    fixture.profilePublication.responsePositionID
+            )
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: faulting,
+                workspace: fixture.workspace
+            )
+
+            let publishOutcome = await coordinator.publishEvidence(publish)
+            XCTAssertEqual(publishOutcome, .failed)
+            XCTAssertEqual(try loadProfileHead(in: fixture).generation, 1)
+            XCTAssertTrue(
+                try profileRevisionDirectoryNames(in: fixture).contains(
+                    publish.intendedRevisionID.rawValue
+                )
+            )
+
+            let discard = try DiscardProfileEvidencePublicationMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID:
+                    fixture.profilePublication.responsePositionID
+            )
+            guard case let .committed(resolved) = await coordinator
+                .discardEvidence(discard)
+            else {
+                return XCTFail("Discard did not remove the interrupted operation")
+            }
+            XCTAssertNil(resolved.profileEvidencePublication)
+            XCTAssertEqual(resolved.chat, fixture.published.chat)
+            XCTAssertEqual(resolved.messages, fixture.published.messages)
+            XCTAssertEqual(resolved.memory, fixture.published.memory)
+            XCTAssertEqual(try loadProfileHead(in: fixture).generation, 1)
+            XCTAssertEqual(
+                try profileRevisionDirectoryNames(in: fixture),
+                [fixture.baseRevision.revisionID.rawValue]
+            )
+        }
+    }
+
+    func testEvidencePublicationRetryReplacesProvedOrphanAfterLostHeadCAS()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(in: parent)
+            let concurrent = try makeConcurrentEvidenceRevision(in: fixture)
+            let concurrentHead = try installProfileRevision(
+                concurrent,
+                in: fixture
+            )
+            let baseData = try fixture.persistence.encodeProfileRevision(
+                fixture.baseRevision
+            )
+            let baseHead = ProfileHead(
+                generation: fixture.baseRevision.generation,
+                statementGeneration: fixture.baseRevision.statementGeneration,
+                selection: .revision(
+                    try ProfileRevisionPointer(
+                        revisionID: fixture.baseRevision.revisionID,
+                        sha256: sha256(baseData)
+                    )
+                ),
+                updatedAt: fixture.baseRevision.createdAt
+            )
+            let library = PortableLibraryPersistence()
+            try library.atomicallyReplaceRootForTesting(
+                library.encodeProfileHead(baseHead),
+                relativePath: try LibraryRelativePath("profile/head.json"),
+                under: fixture.root
+            )
+            let moved = OneShot()
+            let racing = PortableChatPersistence { point in
+                guard point == .beforeProfileHeadInstall, moved.take() else {
+                    return
+                }
+                try library.atomicallyReplaceRootForTesting(
+                    library.encodeProfileHead(concurrentHead),
+                    relativePath: try LibraryRelativePath("profile/head.json"),
+                    under: fixture.root
+                )
+            }
+            let mutation = try PublishProfileEvidenceMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID:
+                    fixture.profilePublication.responsePositionID
+            )
+            let first = PortableProfileProposalCoordinator(
+                persistence: racing,
+                workspace: fixture.workspace
+            )
+
+            let firstOutcome = await first.publishEvidence(mutation)
+            XCTAssertEqual(firstOutcome, .stale(fixture.published))
+            XCTAssertTrue(moved.wasTaken)
+            XCTAssertEqual(try loadProfileHead(in: fixture), concurrentHead)
+            XCTAssertTrue(
+                try profileRevisionDirectoryNames(in: fixture).contains(
+                    mutation.intendedRevisionID.rawValue
+                )
+            )
+
+            let retry = PortableProfileProposalCoordinator(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+            guard case let .committed(resolved) = await retry.publishEvidence(
+                mutation
+            ) else {
+                return XCTFail("Retry did not safely replace the proved orphan")
+            }
+            XCTAssertNil(resolved.profileEvidencePublication)
+            let head = try loadProfileHead(in: fixture)
+            XCTAssertEqual(head.generation, 3)
+            guard case let .revision(pointer) = head.selection else {
+                return XCTFail("Retry did not select the rebased revision")
+            }
+            XCTAssertEqual(pointer.revisionID, mutation.intendedRevisionID)
+            let installed = try fixture.persistence.decodeProfileRevision(
+                Data(
+                    contentsOf: profileRevisionURL(
+                        mutation.intendedRevisionID,
+                        in: fixture
+                    )
+                )
+            )
+            XCTAssertEqual(installed.parentRevisionID, concurrent.revisionID)
+        }
+    }
+
+    func testEvidencePublicationNoOpRetryRemovesProvedPreHeadOrphan()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(in: parent)
+            let concurrentStatement = try ProfileStatement(
+                statementID: fixture.target.statementID,
+                statementKind: fixture.target.statementKind,
+                wording: fixture.target.wording,
+                supportingSessionCount: 1,
+                evidence: [fixture.appendedEvidence]
+            )
+            let concurrent = try ProfileRevision(
+                revisionID: ProfileRevisionID(
+                    "prf-20260910T125300000Z-8ABC"
+                ),
+                parentRevisionID: fixture.baseRevision.revisionID,
+                generation: 2,
+                statementGeneration: 1,
+                createdAt: UTCInstant("2026-09-10T12:53:00.000Z"),
+                statements: [concurrentStatement]
+            )
+            let concurrentHead = try installProfileRevision(
+                concurrent,
+                in: fixture
+            )
+            let baseData = try fixture.persistence.encodeProfileRevision(
+                fixture.baseRevision
+            )
+            let baseHead = ProfileHead(
+                generation: fixture.baseRevision.generation,
+                statementGeneration: fixture.baseRevision.statementGeneration,
+                selection: .revision(
+                    try ProfileRevisionPointer(
+                        revisionID: fixture.baseRevision.revisionID,
+                        sha256: sha256(baseData)
+                    )
+                ),
+                updatedAt: fixture.baseRevision.createdAt
+            )
+            let library = PortableLibraryPersistence()
+            try library.atomicallyReplaceRootForTesting(
+                library.encodeProfileHead(baseHead),
+                relativePath: try LibraryRelativePath("profile/head.json"),
+                under: fixture.root
+            )
+            let moved = OneShot()
+            let racing = PortableChatPersistence { point in
+                guard point == .beforeProfileHeadInstall, moved.take() else {
+                    return
+                }
+                try library.atomicallyReplaceRootForTesting(
+                    library.encodeProfileHead(concurrentHead),
+                    relativePath: try LibraryRelativePath("profile/head.json"),
+                    under: fixture.root
+                )
+            }
+            let mutation = try PublishProfileEvidenceMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID:
+                    fixture.profilePublication.responsePositionID
+            )
+            let first = PortableProfileProposalCoordinator(
+                persistence: racing,
+                workspace: fixture.workspace
+            )
+
+            let firstOutcome = await first.publishEvidence(mutation)
+            XCTAssertEqual(firstOutcome, .stale(fixture.published))
+            XCTAssertTrue(
+                try profileRevisionDirectoryNames(in: fixture).contains(
+                    mutation.intendedRevisionID.rawValue
+                )
+            )
+
+            let retry = PortableProfileProposalCoordinator(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+            guard case let .committed(resolved) = await retry.publishEvidence(
+                mutation
+            ) else { return XCTFail("Concurrent support did not become a no-op") }
+            XCTAssertNil(resolved.profileEvidencePublication)
+            XCTAssertEqual(try loadProfileHead(in: fixture), concurrentHead)
+            XCTAssertFalse(
+                try profileRevisionDirectoryNames(in: fixture).contains(
+                    mutation.intendedRevisionID.rawValue
+                )
+            )
+        }
+    }
+
+    func testEvidencePublicationPostCommitFaultsReconcileAndCleanOperation()
+        async throws
+    {
+        for point in [
+            PortableChatFaultPoint.afterProfileHeadInstall,
+            .afterProfileHeadDirectoryFlush,
+            .afterProfileEvidencePublicationRemoval,
+        ] {
+            try await withTemporaryParent { parent in
+                let fixture = try await makePublishedEvidenceFixture(in: parent)
+                let injected = OneShot()
+                let faulting = PortableChatPersistence { visited in
+                    guard visited == point, injected.take() else { return }
+                    throw PortableChatPersistenceError.injectedFault(visited)
+                }
+                let coordinator = PortableProfileProposalCoordinator(
+                    persistence: faulting,
+                    workspace: fixture.workspace
+                )
+                let mutation = try PublishProfileEvidenceMutation(
+                    library: fixture.scope,
+                    base: fixture.published,
+                    responsePositionID:
+                        fixture.profilePublication.responsePositionID
+                )
+
+                guard case let .committed(resolved) = await coordinator
+                    .publishEvidence(mutation)
+                else {
+                    return XCTFail("Post-commit fault did not reconcile at \(point)")
+                }
+
+                XCTAssertTrue(injected.wasTaken)
+                XCTAssertNil(resolved.profileEvidencePublication)
+                XCTAssertEqual(try loadProfileHead(in: fixture).generation, 2)
+                XCTAssertFalse(
+                    FileManager.default.fileExists(
+                        atPath: chatRoot(fixture).appendingPathComponent(
+                            "profile-publication.json"
+                        ).path
+                    )
+                )
+            }
+        }
+    }
+
+    func testEvidenceNoOpRemovalFaultFlushesBeforeReportingReconciledCommit()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(
+                in: parent,
+                existingEvidence: true
+            )
+            let injected = OneShot()
+            let faulting = PortableChatPersistence { point in
+                guard point == .afterProfileEvidencePublicationRemoval,
+                      injected.take()
+                else { return }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: faulting,
+                workspace: fixture.workspace
+            )
+            let mutation = try PublishProfileEvidenceMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID:
+                    fixture.profilePublication.responsePositionID
+            )
+
+            guard case let .committed(resolved) = await coordinator
+                .publishEvidence(mutation)
+            else { return XCTFail("No-op removal was not reconciled") }
+            XCTAssertTrue(injected.wasTaken)
+            XCTAssertNil(resolved.profileEvidencePublication)
+            XCTAssertFalse(
+                fileExists(chatRoot(fixture), "profile-publication.json")
+            )
+            XCTAssertEqual(try loadProfileHead(in: fixture).generation, 1)
+        }
+    }
+
+    func testEvidenceDiscardRemovalFaultFlushesBeforeReportingReconciledCommit()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(in: parent)
+            let injected = OneShot()
+            let faulting = PortableChatPersistence { point in
+                guard point == .afterProfileEvidencePublicationRemoval,
+                      injected.take()
+                else { return }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: faulting,
+                workspace: fixture.workspace
+            )
+            let mutation = try DiscardProfileEvidencePublicationMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID:
+                    fixture.profilePublication.responsePositionID
+            )
+
+            guard case let .committed(resolved) = await coordinator
+                .discardEvidence(mutation)
+            else { return XCTFail("Discard removal was not reconciled") }
+            XCTAssertTrue(injected.wasTaken)
+            XCTAssertNil(resolved.profileEvidencePublication)
+            XCTAssertFalse(
+                fileExists(chatRoot(fixture), "profile-publication.json")
+            )
+            XCTAssertEqual(try loadProfileHead(in: fixture).generation, 1)
+        }
+    }
+
+    func testStaleEvidenceTargetIsRetainedAndDiscardDoesNotRollbackTurn()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(in: parent)
+            let retired = try ProfileRevision(
+                revisionID: ProfileRevisionID("prf-20260910T130000000Z-2DEF"),
+                parentRevisionID: fixture.baseRevision.revisionID,
+                generation: 2,
+                statementGeneration: 2,
+                createdAt: UTCInstant("2026-09-10T13:00:00.000Z"),
+                statements: []
+            )
+            let retiredHead = try installProfileRevision(retired, in: fixture)
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+            let publish = try PublishProfileEvidenceMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID: fixture.profilePublication.responsePositionID
+            )
+
+            let staleOutcome = await coordinator.publishEvidence(publish)
+            XCTAssertEqual(staleOutcome, .stale(fixture.published))
+            XCTAssertEqual(try loadProfileHead(in: fixture), retiredHead)
+
+            let discard = try DiscardProfileEvidencePublicationMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                responsePositionID: fixture.profilePublication.responsePositionID
+            )
+            guard case let .committed(resolved) = await coordinator.discardEvidence(
+                discard
+            ) else { return XCTFail("Evidence operation was not discarded") }
+            XCTAssertNil(resolved.profileEvidencePublication)
+            XCTAssertEqual(resolved.chat, fixture.published.chat)
+            XCTAssertEqual(resolved.messages, fixture.published.messages)
+            XCTAssertEqual(resolved.memory, fixture.published.memory)
+            XCTAssertEqual(try loadProfileHead(in: fixture), retiredHead)
+        }
+    }
+
     func testProposalPublicationReopensTheExactChatOwnedProposal() async throws {
         try await withTemporaryParent { parent in
             let fixture = try await makePublishedProposalFixture(in: parent)
@@ -1192,6 +1748,292 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
         }
     }
 
+    private struct PublishedEvidenceFixture {
+        let root: URL
+        let scope: LibraryScope
+        let workspace: PortableLibraryWorkspace
+        let persistence: PortableChatPersistence
+        let publication: PublishCoachInvocationMutation
+        let profilePublication: ProfileEvidencePublication
+        let target: ProfileStatement
+        let appendedEvidence: EvidenceReference
+        let baseRevision: ProfileRevision
+        let published: ChatAggregate
+    }
+
+    private func makePublishedEvidenceFixture(
+        in parent: URL,
+        existingEvidence: Bool = false
+    ) async throws -> PublishedEvidenceFixture {
+        let root = parent.appendingPathComponent(
+            "ProfileEvidencePublication.audoralibrary",
+            isDirectory: true
+        )
+        let libraryID = try LibraryID("lib-20260910T115900000Z-1ABC")
+        _ = try PortableLibraryPersistence().create(
+            at: root,
+            seed: makeSeed(id: libraryID.rawValue)
+        )
+        let scope = LibraryScope(libraryID: libraryID)
+        let attachment = try await installRecordedChatAttachmentFixture(
+            at: root,
+            in: scope
+        )
+        let appendedEvidence = try EvidenceReference(
+            sessionID: attachment.sessionID,
+            transcriptRevisionID: attachment.transcriptRevisionID,
+            target: .wordRange(
+                startWordID: TranscriptWordID("w000000"),
+                endWordID: TranscriptWordID("w000000")
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Planning reflection",
+                trustedText: "Hi",
+                startMilliseconds: 0,
+                endMilliseconds: 1
+            )
+        )
+        let target = try ProfileStatement(
+            statementID: ProfileStatementID(
+                "stm-20260910T110000000Z-2DEF"
+            ),
+            statementKind: .speakingObservation,
+            wording: "Pause briefly between points.",
+            supportingSessionCount: existingEvidence ? 1 : 0,
+            evidence: existingEvidence ? [appendedEvidence] : []
+        )
+        let baseRevision = try ProfileRevision(
+            revisionID: ProfileRevisionID("prf-20260910T110100000Z-3GHJ"),
+            parentRevisionID: nil,
+            generation: 1,
+            statementGeneration: 1,
+            createdAt: UTCInstant("2026-09-10T11:01:00.000Z"),
+            statements: [target]
+        )
+        let persistence = PortableChatPersistence()
+        _ = try installProfileRevision(
+            baseRevision,
+            at: root,
+            persistence: persistence
+        )
+        let workspace = PortableLibraryWorkspace(
+            locations: QueueLocations(existing: [root]),
+            bookmarks: SyntheticBookmarks(),
+            access: RecordingAccessGrantor(),
+            locatorStore: MemoryLocatorStore(),
+            revealer: RecordingRevealer()
+        )
+        guard case .opened = await workspace.chooseLibrary() else {
+            throw FixtureError.workspaceDidNotOpen
+        }
+        let attachments = try ChatAttachments(validating: [attachment])
+        let created = try persistence.create(
+            NewChatSeed(
+                library: scope,
+                chatID: ChatID("cht-20260910T120000000Z-4KMN"),
+                draftID: ChatDraftID("drf-20260910T120000000Z-5PQR"),
+                memoryID: CoachMemoryID("mem-20260910T120000000Z-6RST"),
+                instant: UTCInstant("2026-09-10T12:00:00.000Z"),
+                profileStatementGeneration: 1,
+                attachments: attachments
+            ),
+            at: root
+        )
+        let editedDraft = try created.chat.draft.edited(
+            text: "Keep the exact supporting evidence.",
+            at: UTCInstant("2026-09-10T12:00:00.500Z")
+        )
+        guard case let .committed(drafted) = try persistence.saveDraft(
+            SaveChatDraftMutation(
+                library: scope,
+                chatID: created.chat.id,
+                replacement: editedDraft
+            ),
+            at: root
+        ) else { throw FixtureError.chatMutationDidNotCommit }
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260910T120001000Z-7VWX"),
+            draftID: drafted.chat.draft.draftID,
+            draftVersion: drafted.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260910T120001000Z-8XYZ"
+            )
+        )
+        guard case let .committed(locked) = try persistence.lockPendingUserTurn(
+            LockPendingUserTurnMutation(
+                library: scope,
+                chatID: drafted.chat.id,
+                pendingUserTurn: pending
+            ),
+            at: root
+        ) else { throw FixtureError.chatMutationDidNotCommit }
+        let request = PendingCoachInvocationRequest(
+            library: scope,
+            chatID: locked.chat.id,
+            pendingUserTurnID: pending.id
+        )
+        let identity = InvocationLaunchIdentity(
+            invocationID: try CoachInvocationID(
+                "inv-20260910T120002000Z-9ABC"
+            ),
+            attemptID: try CoachProviderAttemptID(
+                "atm-20260910T120002000Z-1DEF"
+            ),
+            idempotencyValue: try ProviderIdempotencyValue(
+                "synthetic-profile-evidence-publication"
+            ),
+            userMessageID: try ChatMessageID(
+                "msg-20260910T120003000Z-2GHJ"
+            ),
+            coachMessageID: try ChatMessageID(
+                "msg-20260910T120003000Z-3KMN"
+            ),
+            freshDraftID: try ChatDraftID(
+                "drf-20260910T120003000Z-4PQR"
+            )
+        )
+        let preparedProfile = CoachProfileProvenance(
+            revisionID: baseRevision.revisionID,
+            statementGeneration: baseRevision.statementGeneration
+        )
+        let install = try InstallCoachInvocationMutation(
+            authority: InvocationPendingAuthority(
+                request: request,
+                aggregate: locked
+            ),
+            identity: identity,
+            preparedProfile: preparedProfile,
+            admittedAt: UTCInstant("2026-09-10T12:00:02.000Z")
+        )
+        guard case .installed = try persistence.installInvocation(
+            install,
+            at: root
+        ) else { throw FixtureError.invocationDidNotInstall }
+        let profilePublication = try ProfileEvidencePublication(
+            chatID: locked.chat.id,
+            responsePositionID: pending.responsePositionID,
+            evidenceAppends: [
+                ProfileEvidenceAppend(
+                    target: ProfileProposalTarget(statement: target),
+                    evidence: [appendedEvidence]
+                ),
+            ],
+            createdAt: UTCInstant("2026-09-10T12:00:03.000Z")
+        )
+        let publication = try PublishCoachInvocationMutation(
+            base: install.processingAggregate,
+            invocation: install.invocation,
+            coachBlocks: [.markdown("A complete synthetic Coach response.")],
+            profileEvidencePublication: profilePublication,
+            completedAt: profilePublication.createdAt
+        )
+        guard case let .committed(published) = try persistence.publishInvocation(
+            publication,
+            at: root,
+            in: scope
+        ) else { throw FixtureError.invocationDidNotPublish }
+        return PublishedEvidenceFixture(
+            root: root,
+            scope: scope,
+            workspace: workspace,
+            persistence: persistence,
+            publication: publication,
+            profilePublication: profilePublication,
+            target: target,
+            appendedEvidence: appendedEvidence,
+            baseRevision: baseRevision,
+            published: published
+        )
+    }
+
+    private func makeConcurrentEvidenceRevision(
+        in fixture: PublishedEvidenceFixture
+    ) throws -> ProfileRevision {
+        let concurrentEvidence = try EvidenceReference(
+            sessionID: SessionID("ses-20260910T125000000Z-5RST"),
+            transcriptRevisionID: TranscriptRevisionID(
+                "trv-20260910T125100000Z-6VWX"
+            ),
+            target: .wordRange(
+                startWordID: TranscriptWordID("w000010"),
+                endWordID: TranscriptWordID("w000010")
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Concurrent reflection",
+                trustedText: "Pause",
+                startMilliseconds: 10,
+                endMilliseconds: 20
+            )
+        )
+        let statement = try ProfileStatement(
+            statementID: fixture.target.statementID,
+            statementKind: fixture.target.statementKind,
+            wording: fixture.target.wording,
+            supportingSessionCount: fixture.target.evidence.isEmpty ? 1 : 2,
+            evidence: fixture.target.evidence + [concurrentEvidence]
+        )
+        return try ProfileRevision(
+            revisionID: ProfileRevisionID("prf-20260910T125200000Z-7XYZ"),
+            parentRevisionID: fixture.baseRevision.revisionID,
+            generation: 2,
+            statementGeneration: 1,
+            createdAt: UTCInstant("2026-09-10T12:52:00.000Z"),
+            statements: [statement]
+        )
+    }
+
+    @discardableResult
+    private func installProfileRevision(
+        _ revision: ProfileRevision,
+        in fixture: PublishedEvidenceFixture
+    ) throws -> ProfileHead {
+        try installProfileRevision(
+            revision,
+            at: fixture.root,
+            persistence: fixture.persistence
+        )
+    }
+
+    @discardableResult
+    private func installProfileRevision(
+        _ revision: ProfileRevision,
+        at root: URL,
+        persistence: PortableChatPersistence
+    ) throws -> ProfileHead {
+        let data = try persistence.encodeProfileRevision(revision)
+        let digest = sha256(data)
+        let revisionRoot = root.appendingPathComponent(
+            "profile/revisions/\(revision.revisionID.rawValue)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: revisionRoot,
+            withIntermediateDirectories: false
+        )
+        try data.write(to: revisionRoot.appendingPathComponent("revision.json"))
+        try Data(digest.utf8).write(
+            to: revisionRoot.appendingPathComponent("revision.sha256")
+        )
+        let head = ProfileHead(
+            generation: revision.generation,
+            statementGeneration: revision.statementGeneration,
+            selection: .revision(
+                try ProfileRevisionPointer(
+                    revisionID: revision.revisionID,
+                    sha256: digest
+                )
+            ),
+            updatedAt: revision.createdAt
+        )
+        let library = PortableLibraryPersistence()
+        try library.atomicallyReplaceRootForTesting(
+            library.encodeProfileHead(head),
+            relativePath: LibraryRelativePath("profile/head.json"),
+            under: root
+        )
+        return head
+    }
+
     private struct PublishedProposalFixture {
         let root: URL
         let scope: LibraryScope
@@ -1420,8 +2262,30 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
         )
     }
 
+    private func loadProfileHead(
+        in fixture: PublishedEvidenceFixture
+    ) throws -> ProfileHead {
+        try PortableLibraryPersistence().decodeProfileHead(
+            Data(
+                contentsOf: fixture.root.appendingPathComponent(
+                    "profile/head.json"
+                )
+            )
+        )
+    }
+
     private func profileRevisionDirectoryNames(
         in fixture: PublishedProposalFixture
+    ) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(
+            atPath: fixture.root.appendingPathComponent(
+                "profile/revisions"
+            ).path
+        ).sorted()
+    }
+
+    private func profileRevisionDirectoryNames(
+        in fixture: PublishedEvidenceFixture
     ) throws -> [String] {
         try FileManager.default.contentsOfDirectory(
             atPath: fixture.root.appendingPathComponent(
@@ -1439,7 +2303,23 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
         )
     }
 
+    private func profileRevisionURL(
+        _ revisionID: ProfileRevisionID,
+        in fixture: PublishedEvidenceFixture
+    ) -> URL {
+        fixture.root.appendingPathComponent(
+            "profile/revisions/\(revisionID.rawValue)/revision.json"
+        )
+    }
+
     private func chatRoot(_ fixture: PublishedProposalFixture) -> URL {
+        fixture.root.appendingPathComponent(
+            "chats/\(fixture.published.chat.id.rawValue)",
+            isDirectory: true
+        )
+    }
+
+    private func chatRoot(_ fixture: PublishedEvidenceFixture) -> URL {
         fixture.root.appendingPathComponent(
             "chats/\(fixture.published.chat.id.rawValue)",
             isDirectory: true

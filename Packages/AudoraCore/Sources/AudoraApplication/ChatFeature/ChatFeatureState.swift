@@ -128,6 +128,9 @@ public struct ChatFeatureState: Equatable, Sendable {
         case discardingPendingUserTurn(ChatID)
         case acceptingProfileProposal(ChatID)
         case discardingProfileProposal(ChatID)
+        case publishingProfileEvidence(ChatID)
+        case retryingProfileEvidencePublication(ChatID)
+        case discardingProfileEvidencePublication(ChatID)
     }
 
     public let catalog: Catalog

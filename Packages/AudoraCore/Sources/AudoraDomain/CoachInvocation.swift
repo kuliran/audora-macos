@@ -721,6 +721,7 @@ public extension ChatAggregate {
         freshDraft: ChatDraft,
         replacementMemory: CoachMemory? = nil,
         profileProposal: ProfileChangeProposal? = nil,
+        profileEvidencePublication: ProfileEvidencePublication? = nil,
         at instant: UTCInstant
     ) throws -> ChatAggregate {
         try invocation.validate(against: self)
@@ -765,11 +766,18 @@ public extension ChatAggregate {
             throw InvocationPublicationError.freshDraftRequired
         }
         guard self.profileProposal == nil,
+              self.profileEvidencePublication == nil,
+              profileProposal == nil || profileEvidencePublication == nil,
               profileProposal?.chatID == chat.id || profileProposal == nil,
               profileProposal?.responsePositionID == invocation.responsePositionID ||
                 profileProposal == nil,
               profileProposal?.baseProfile == invocation.preparedProfile ||
-                profileProposal == nil
+                profileProposal == nil,
+              profileEvidencePublication?.chatID == chat.id ||
+                profileEvidencePublication == nil,
+              profileEvidencePublication?.responsePositionID ==
+                invocation.responsePositionID ||
+                profileEvidencePublication == nil
         else {
             throw InvocationPublicationError.responsePositionMismatch
         }
@@ -812,7 +820,8 @@ public extension ChatAggregate {
             chat: replacement,
             memory: replacementMemory ?? memory,
             messages: replacementMessages,
-            profileProposal: profileProposal
+            profileProposal: profileProposal,
+            profileEvidencePublication: profileEvidencePublication
         )
     }
 }

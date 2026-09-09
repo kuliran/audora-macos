@@ -323,6 +323,7 @@ public actor DefaultChatFeature: ChatFeature {
                   aggregate.chat.id == chatID,
                   aggregate.pendingUserTurn == nil,
                   aggregate.profileProposal == nil,
+                  aggregate.profileEvidencePublication == nil,
                   aggregate.chat.draft.draftID == draftID,
                   draft.draftID == draftID
             else {
@@ -342,6 +343,7 @@ public actor DefaultChatFeature: ChatFeature {
                   aggregate.chat.id == chatID,
                   aggregate.pendingUserTurn == nil,
                   aggregate.profileProposal == nil,
+                  aggregate.profileEvidencePublication == nil,
                   aggregate.chat.draft.draftID == expectedDraft.draftID,
                   draft == expectedDraft
             else {
@@ -386,6 +388,7 @@ public actor DefaultChatFeature: ChatFeature {
                       aggregate.chat.id == chatID,
                       aggregate.pendingUserTurn == nil,
                       aggregate.profileProposal == nil,
+                      aggregate.profileEvidencePublication == nil,
                       case let .editable(draft, _) = state.composer,
                       draft.draftID == draftID
                 else {
@@ -398,6 +401,7 @@ public actor DefaultChatFeature: ChatFeature {
                       aggregate.chat.id == chatID,
                       aggregate.pendingUserTurn == nil,
                       aggregate.profileProposal == nil,
+                      aggregate.profileEvidencePublication == nil,
                       case let .editable(draft, _) = state.composer,
                       draft == expectedDraft
                 else {
@@ -457,6 +461,16 @@ public actor DefaultChatFeature: ChatFeature {
             await acceptProfileProposal(proposalID, context: context)
         case let .discardProfileProposal(context, proposalID):
             await discardProfileProposal(proposalID, context: context)
+        case let .retryProfileEvidencePublication(context, responsePositionID):
+            await retryProfileEvidencePublication(
+                responsePositionID,
+                context: context
+            )
+        case let .discardProfileEvidencePublication(context, responsePositionID):
+            await discardProfileEvidencePublication(
+                responsePositionID,
+                context: context
+            )
         case .start, .setFilter, .setNewChatAttachmentFilter,
              .editDraft, .sendDraft:
             break
@@ -1633,7 +1647,8 @@ public actor DefaultChatFeature: ChatFeature {
               case let .open(aggregate) = state.selection,
               case let .editable(draft, _) = state.composer,
               aggregate.pendingUserTurn == nil,
-              aggregate.profileProposal == nil
+              aggregate.profileProposal == nil,
+              aggregate.profileEvidencePublication == nil
         else {
             return
         }
@@ -1696,6 +1711,7 @@ public actor DefaultChatFeature: ChatFeature {
               draft == expectedDraft,
               aggregate.pendingUserTurn == nil,
               aggregate.profileProposal == nil,
+              aggregate.profileEvidencePublication == nil,
               draft.text.unicodeScalars.contains(where: { !$0.properties.isWhitespace })
         else {
             state = replacing(activity: nil, notice: .invalidDraft)
@@ -1807,7 +1823,10 @@ public actor DefaultChatFeature: ChatFeature {
             publish()
             return
         case .activeInvocation:
-            applyInvocationOutcome(.rejected(nil, .activeInvocation))
+            await applyInvocationOutcome(
+                .rejected(nil, .activeInvocation),
+                context: context
+            )
             return
         case let .prepared(value):
             await gateway.abandonPreparedInvocation(value)
@@ -1832,7 +1851,7 @@ public actor DefaultChatFeature: ChatFeature {
         )
         retainProviderReapAuthority(from: outcome)
         guard isActive(context) else { return }
-        applyInvocationOutcome(outcome)
+        await applyInvocationOutcome(outcome, context: context)
         await refreshSelectionIfInvocationEligibilityVanished(
             outcome,
             request: prepared.request,
@@ -1946,12 +1965,13 @@ public actor DefaultChatFeature: ChatFeature {
                current.pendingUserTurn?.id == request.pendingUserTurnID,
                current.pendingUserTurn?.failure == nil
             {
-                applyInvocationOutcome(
+                await applyInvocationOutcome(
                     .operationallyInterrupted(
                         current,
                         retryRequest,
                         .persistenceUnavailable
-                    )
+                    ),
+                    context: context
                 )
             } else if let current, current.chat.id == request.chatID {
                 install(
@@ -2003,9 +2023,10 @@ public actor DefaultChatFeature: ChatFeature {
 
     private func applyInvocationOutcome(
         _ outcome: InvocationTryOutcome,
+        context: ChatCommandContext,
         rejectedOperationalInterruption: PendingCoachInvocationRequest? = nil,
         rejectedNotice: ChatNotice? = nil
-    ) {
+    ) async {
         switch outcome {
         case .stopped:
             // The concurrent Stop command exclusively installs (or retains)
@@ -2024,10 +2045,20 @@ public actor DefaultChatFeature: ChatFeature {
             state = replacing(
                 contextAdvisory: .available(quote),
                 clearsRecoveryIntent: true,
-                activity: nil,
+                activity: current.profileEvidencePublication == nil
+                    ? nil
+                    : .publishingProfileEvidence(current.chat.id),
                 notice: nil
             )
-            install(current, selection: .open(current), notice: nil)
+            install(
+                current,
+                selection: .open(current),
+                notice: nil,
+                activity: current.profileEvidencePublication == nil
+                    ? nil
+                    : .publishingProfileEvidence(current.chat.id)
+            )
+            await publishProfileEvidenceIfNeeded(current, context: context)
         case let .contextCapacityFailure(current, quote):
             state = replacing(
                 contextAdvisory: .available(quote),
@@ -2285,6 +2316,94 @@ public actor DefaultChatFeature: ChatFeature {
         }
     }
 
+    private func publishProfileEvidenceIfNeeded(
+        _ aggregate: ChatAggregate,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context),
+              let publication = aggregate.profileEvidencePublication
+        else { return }
+        guard let mutation = try? PublishProfileEvidenceMutation(
+            library: context.libraryScope,
+            base: aggregate,
+            responsePositionID: publication.responsePositionID
+        ) else {
+            state = replacing(activity: nil, notice: nil)
+            publish()
+            return
+        }
+        let outcome = await profileProposals.publishEvidence(mutation)
+        guard isActive(context) else { return }
+        applyProfileEvidencePublicationOutcome(outcome)
+    }
+
+    private func retryProfileEvidencePublication(
+        _ responsePositionID: ChatResponsePositionID,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context), state.activity == nil,
+              case let .open(aggregate) = state.selection,
+              aggregate.pendingUserTurn == nil,
+              aggregate.profileProposal == nil,
+              aggregate.profileEvidencePublication?.responsePositionID ==
+                responsePositionID,
+              let mutation = try? PublishProfileEvidenceMutation(
+                  library: context.libraryScope,
+                  base: aggregate,
+                  responsePositionID: responsePositionID
+              )
+        else { return }
+        state = replacing(
+            activity: .retryingProfileEvidencePublication(aggregate.chat.id),
+            notice: nil
+        )
+        publish()
+        let outcome = await profileProposals.publishEvidence(mutation)
+        guard isActive(context) else { return }
+        applyProfileEvidencePublicationOutcome(outcome)
+    }
+
+    private func discardProfileEvidencePublication(
+        _ responsePositionID: ChatResponsePositionID,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context), state.activity == nil,
+              case let .open(aggregate) = state.selection,
+              aggregate.pendingUserTurn == nil,
+              aggregate.profileProposal == nil,
+              aggregate.profileEvidencePublication?.responsePositionID ==
+                responsePositionID,
+              let mutation = try? DiscardProfileEvidencePublicationMutation(
+                  library: context.libraryScope,
+                  base: aggregate,
+                  responsePositionID: responsePositionID
+              )
+        else { return }
+        state = replacing(
+            activity: .discardingProfileEvidencePublication(aggregate.chat.id),
+            notice: nil
+        )
+        publish()
+        let outcome = await profileProposals.discardEvidence(mutation)
+        guard isActive(context) else { return }
+        applyProfileEvidencePublicationOutcome(outcome)
+    }
+
+    private func applyProfileEvidencePublicationOutcome(
+        _ outcome: ProfileEvidencePublicationMutationOutcome
+    ) {
+        switch outcome {
+        case let .committed(current), let .stale(current):
+            install(current, selection: .open(current), notice: nil)
+        case .readOnlyLibrary:
+            state = replacing(activity: nil, notice: .readOnlyLibrary)
+            publish()
+        case .failed:
+            state = replacing(activity: nil, notice: nil)
+            publish()
+        }
+    }
+
     private func retryPendingUserTurn(
         _ pendingUserTurnID: PendingUserTurnID,
         context: ChatCommandContext
@@ -2311,7 +2430,8 @@ public actor DefaultChatFeature: ChatFeature {
             memory: aggregate.memory,
             messages: aggregate.messages,
             pendingUserTurn: processingPending,
-            profileProposal: aggregate.profileProposal
+            profileProposal: aggregate.profileProposal,
+            profileEvidencePublication: aggregate.profileEvidencePublication
         ) else {
             state = replacing(activity: nil, notice: .pendingUserTurnFailed)
             publish()
@@ -2378,8 +2498,9 @@ public actor DefaultChatFeature: ChatFeature {
         default:
             nil
         }
-        applyInvocationOutcome(
+        await applyInvocationOutcome(
             presentedOutcome,
+            context: context,
             rejectedOperationalInterruption: rejectedOperationalInterruption,
             rejectedNotice: rejectedNotice
         )
@@ -3048,7 +3169,8 @@ private extension ChatCommand {
              .refreshContextQuote, .sendDraft, .retryPendingUserTurn,
              .stopCoachResponse, .createNewChatFromCapacityFailure,
              .discardPendingUserTurn, .acceptProfileProposal,
-             .discardProfileProposal:
+             .discardProfileProposal, .retryProfileEvidencePublication,
+             .discardProfileEvidencePublication:
             false
         }
     }
@@ -3070,7 +3192,9 @@ private extension ChatCommand {
              let .createNewChatFromCapacityFailure(context, _),
              let .discardPendingUserTurn(context, _),
              let .acceptProfileProposal(context, _),
-             let .discardProfileProposal(context, _):
+             let .discardProfileProposal(context, _),
+             let .retryProfileEvidencePublication(context, _),
+             let .discardProfileEvidencePublication(context, _):
             context
         }
     }

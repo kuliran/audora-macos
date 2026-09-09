@@ -34,6 +34,7 @@ Audora Library.audoralibrary/
 │       ├── memory/
 │       │   └── <memory-id>.json      # current structured Memory only
 │       ├── proposal.json             # present only while unresolved
+│       ├── profile-publication.json  # pure-evidence write until resolved
 │       └── profile-write.json        # present only while unresolved
 ├── invocations/
 │   └── <invocation-id>/              # the one active Library Invocation

@@ -143,6 +143,61 @@ final class ChatTests: XCTestCase {
         }
     }
 
+    func testAggregateRejectsEvidencePublicationWithoutPublishedResponse() throws {
+        let attachment = try makeAttachment()
+        let original = try ChatAggregate.newChat(
+            chatID: ChatID("cht-20260830T120000000Z-2ABC"),
+            draftID: ChatDraftID("drf-20260830T120000000Z-3DEF"),
+            memoryID: CoachMemoryID("mem-20260830T120000000Z-4GHJ"),
+            instant: UTCInstant("2026-08-30T12:00:00.000Z"),
+            profileStatementGeneration: 7,
+            attachments: ChatAttachments(validating: [attachment])
+        )
+        let evidence = try EvidenceReference(
+            sessionID: attachment.sessionID,
+            transcriptRevisionID: attachment.transcriptRevisionID,
+            target: .wordRange(
+                startWordID: TranscriptWordID("w000001"),
+                endWordID: TranscriptWordID("w000001")
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Practice Session",
+                trustedText: "A grounded observation.",
+                startMilliseconds: 100,
+                endMilliseconds: 200
+            )
+        )
+        let publication = try ProfileEvidencePublication(
+            chatID: original.chat.id,
+            responsePositionID: ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            ),
+            evidenceAppends: [
+                ProfileEvidenceAppend(
+                    target: ProfileProposalTarget(
+                        statementID: ProfileStatementID(
+                            "stm-20260830T110000000Z-1ABC"
+                        ),
+                        statementKind: .speakingObservation,
+                        wording: "I rush transitions between ideas."
+                    ),
+                    evidence: [evidence]
+                ),
+            ],
+            createdAt: UTCInstant("2026-08-30T12:01:00.000Z")
+        )
+
+        XCTAssertThrowsError(
+            try ChatAggregate(
+                chat: original.chat,
+                memory: original.memory,
+                profileEvidencePublication: publication
+            )
+        ) { error in
+            XCTAssertEqual(error as? ChatAggregateError, .messageHistoryMismatch)
+        }
+    }
+
     func testCapacityFailureReplacementPreservesPendingTurnIdentity() throws {
         let pending = PendingUserTurn(
             id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),

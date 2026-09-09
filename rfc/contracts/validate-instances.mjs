@@ -147,11 +147,19 @@ const sessionProcessingScenario = await validator(
 );
 const profileRevision = await validator("ProfileRevision.json");
 const profileChangeProposal = await validator("ProfileChangeProposal.json");
+const profileEvidencePublication = await validator(
+  "ProfileEvidencePublication.json",
+);
 const profileWriteIntent = await validator("ProfileWriteIntent.json");
 
 await assertInventory(
   profileExamplesDirectory,
-  ["proposal.json", "revision.json", "write-intent.json"],
+  [
+    "profile-publication.json",
+    "proposal.json",
+    "revision.json",
+    "write-intent.json",
+  ],
   "Profile fixture",
 );
 const profileRevisionFixture = await loadFixture(
@@ -159,6 +167,9 @@ const profileRevisionFixture = await loadFixture(
 );
 const profileProposalFixture = await loadJSON(
   path.join(profileExamplesDirectory, "proposal.json"),
+);
+const profileEvidencePublicationFixture = await loadJSON(
+  path.join(profileExamplesDirectory, "profile-publication.json"),
 );
 const profileWriteIntentFixture = await loadJSON(
   path.join(profileExamplesDirectory, "write-intent.json"),
@@ -174,6 +185,12 @@ assertValidation(
   profileProposalFixture,
   true,
   "profile/proposal.json",
+);
+assertValidation(
+  profileEvidencePublication,
+  profileEvidencePublicationFixture,
+  true,
+  "profile/profile-publication.json",
 );
 assertValidation(
   profileWriteIntent,
@@ -211,6 +228,16 @@ assertValidation(
   pureEvidenceProposal,
   false,
   "profile/proposal-pure-evidence",
+);
+const emptyEvidencePublication = structuredClone(
+  profileEvidencePublicationFixture,
+);
+emptyEvidencePublication.evidenceAppends = [];
+assertValidation(
+  profileEvidencePublication,
+  emptyEvidencePublication,
+  false,
+  "profile/profile-publication-empty-appends",
 );
 const incompleteProposalTarget = structuredClone(profileProposalFixture);
 delete incompleteProposalTarget.changes[1].target.wording;

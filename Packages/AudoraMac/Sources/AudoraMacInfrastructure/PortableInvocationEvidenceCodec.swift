@@ -14,6 +14,7 @@ struct PortableInvocationPublicationSourceEvidence {
     let coachMessage: Data
     let freshDraft: Data
     let proposal: Data?
+    let profileEvidencePublication: Data?
 }
 
 /// Bounded persisted evidence gathered under the Chat and Invocation locks.
@@ -32,6 +33,7 @@ struct PortableInvocationPublicationCurrentEvidence {
     let coachMessageData: Data
     let coachMessage: ChatMessage
     let proposalData: Data?
+    let profileEvidencePublicationData: Data?
 }
 
 /// The schema-stable identity shared by every supported and future Invocation
@@ -102,7 +104,7 @@ struct PortableChatDurablePublicIDs {
 }
 
 struct InvocationPublicationProof: Equatable {
-    static let schemaVersion: UInt32 = 2
+    static let schemaVersion: UInt32 = 3
 
     let invocationID: CoachInvocationID
     let libraryID: LibraryID
@@ -123,6 +125,7 @@ struct InvocationPublicationProof: Equatable {
     let freshDraftVersion: UInt64
     let freshDraftSHA256: String
     let proposalSHA256: String?
+    let profileEvidencePublicationSHA256: String?
 }
 
 /// Pure schema and exact-publication policy for durable Coach Invocation
@@ -427,7 +430,9 @@ struct PortableInvocationEvidenceCodec {
         for mutation: PublishCoachInvocationMutation,
         evidence: PortableInvocationPublicationSourceEvidence
     ) throws -> InvocationPublicationProof {
-        guard mutation.base.pendingUserTurn != nil else {
+        guard mutation.base.pendingUserTurn != nil,
+              evidence.proposal == nil || evidence.profileEvidencePublication == nil
+        else {
             throw PortableChatPersistenceError.invalidLayout
         }
         let published = mutation.replacement
@@ -450,7 +455,9 @@ struct PortableInvocationEvidenceCodec {
             freshDraftID: mutation.freshDraft.draftID,
             freshDraftVersion: mutation.freshDraft.version,
             freshDraftSHA256: Self.sha256(evidence.freshDraft),
-            proposalSHA256: evidence.proposal.map(Self.sha256)
+            proposalSHA256: evidence.proposal.map(Self.sha256),
+            profileEvidencePublicationSHA256: evidence
+                .profileEvidencePublication.map(Self.sha256)
         )
     }
 
@@ -475,7 +482,9 @@ struct PortableInvocationEvidenceCodec {
             freshDraftId: proof.freshDraftID.rawValue,
             freshDraftVersion: proof.freshDraftVersion,
             freshDraftSha256: proof.freshDraftSHA256,
-            proposalSha256: proof.proposalSHA256
+            proposalSha256: proof.proposalSHA256,
+            profileEvidencePublicationSha256:
+                proof.profileEvidencePublicationSHA256
         ))
     }
 
@@ -492,26 +501,45 @@ struct PortableInvocationEvidenceCodec {
             "userMessageSha256", "coachMessageId", "coachMessageSha256",
             "freshDraftId", "freshDraftVersion", "freshDraftSha256",
         ]
+        let v2Keys = v1Keys.union(["proposalSha256"])
+        let v3Keys = v2Keys.union(["profileEvidencePublicationSha256"])
         let dto = try json.decode(InvocationPublicationProofDTO.self, from: data)
-        guard dto.schemaVersion == 1 ||
-                dto.schemaVersion == InvocationPublicationProof.schemaVersion
-        else {
+        guard (1 ... InvocationPublicationProof.schemaVersion).contains(
+            dto.schemaVersion
+        ) else {
             throw PortableChatPersistenceError.invalidSchemaVersion
         }
-        if dto.schemaVersion == 1 {
+        switch dto.schemaVersion {
+        case 1:
             try json.requireExactKeys(dictionary, v1Keys)
-            guard dto.proposalSha256 == nil else {
+            guard dto.proposalSha256 == nil,
+                  dto.profileEvidencePublicationSha256 == nil
+            else {
                 throw PortableChatPersistenceError.invalidJSON
             }
-        } else {
+        case 2:
             let actual = Set(dictionary.keys)
-            guard actual == v1Keys || actual == v1Keys.union(["proposalSha256"])
+            guard actual == v1Keys || actual == v2Keys,
+                  dto.profileEvidencePublicationSha256 == nil
             else { throw PortableChatPersistenceError.unknownKey }
             if actual.contains("proposalSha256"),
                dictionary["proposalSha256"] is NSNull
             {
                 throw PortableChatPersistenceError.invalidJSON
             }
+        case InvocationPublicationProof.schemaVersion:
+            let actual = Set(dictionary.keys)
+            guard actual.isSubset(of: v3Keys), v1Keys.isSubset(of: actual),
+                  dto.proposalSha256 == nil ||
+                    dto.profileEvidencePublicationSha256 == nil
+            else { throw PortableChatPersistenceError.unknownKey }
+            for key in [
+                "proposalSha256", "profileEvidencePublicationSha256",
+            ] where actual.contains(key) && dictionary[key] is NSNull {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        default:
+            throw PortableChatPersistenceError.invalidSchemaVersion
         }
         guard Self.isSHA256(dto.publishedChatSha256),
               Self.isSHA256(dto.stableChatSha256),
@@ -521,6 +549,7 @@ struct PortableInvocationEvidenceCodec {
               Self.isSHA256(dto.coachMessageSha256),
               Self.isSHA256(dto.freshDraftSha256),
               dto.proposalSha256.map(Self.isSHA256) ?? true,
+              dto.profileEvidencePublicationSha256.map(Self.isSHA256) ?? true,
               dto.messageIds.count <= maximumMessageCount
         else { throw PortableChatPersistenceError.invalidJSON }
         return try mapPersistedDomainValidation {
@@ -543,7 +572,9 @@ struct PortableInvocationEvidenceCodec {
                 freshDraftID: try ChatDraftID(dto.freshDraftId),
                 freshDraftVersion: dto.freshDraftVersion,
                 freshDraftSHA256: dto.freshDraftSha256,
-                proposalSHA256: dto.proposalSha256
+                proposalSHA256: dto.proposalSha256,
+                profileEvidencePublicationSHA256:
+                    dto.profileEvidencePublicationSha256
             )
         }
     }
@@ -626,6 +657,13 @@ struct PortableInvocationEvidenceCodec {
         } else if evidence.proposalData != nil {
             return false
         }
+        if let publicationSHA256 = proof.profileEvidencePublicationSHA256 {
+            guard let publicationData = evidence.profileEvidencePublicationData,
+                  Self.sha256(publicationData) == publicationSHA256
+            else { return false }
+        } else if evidence.profileEvidencePublicationData != nil {
+            return false
+        }
         if current.manifestRevision == proof.publishedManifestRevision,
            Self.sha256(evidence.canonicalChat) != proof.publishedChatSHA256
         {
@@ -659,6 +697,16 @@ struct PortableInvocationEvidenceCodec {
     ) -> Bool {
         guard let expected = proof.proposalSHA256 else { return false }
         return Self.sha256(proposalData) == expected
+    }
+
+    func proof(
+        _ proof: InvocationPublicationProof,
+        bindsProfileEvidencePublicationData publicationData: Data
+    ) -> Bool {
+        guard let expected = proof.profileEvidencePublicationSHA256 else {
+            return false
+        }
+        return Self.sha256(publicationData) == expected
     }
 
     private func boundedDeterministicJSON<T: Encodable>(_ value: T) throws -> Data {
@@ -1381,4 +1429,5 @@ private struct InvocationPublicationProofDTO: Codable {
     let freshDraftVersion: UInt64
     let freshDraftSha256: String
     let proposalSha256: String?
+    let profileEvidencePublicationSha256: String?
 }

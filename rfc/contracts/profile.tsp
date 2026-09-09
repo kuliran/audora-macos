@@ -67,6 +67,21 @@ namespace Audora.Contracts {
     evidence: PersistedEvidenceReference[];
   }
 
+  // CHAT-OWNED PURE-EVIDENCE PUBLICATION STORAGE
+  /** One validated pure-evidence Profile operation awaiting local publication. */
+  @jsonSchema
+  @id("ProfileEvidencePublication.json")
+  model ProfileEvidencePublication {
+    schemaVersion: 1;
+    chatId: ChatId;
+    responsePositionId: ChatResponsePositionId;
+
+    @minItems(1)
+    evidenceAppends: ProfileProposalEvidenceAppend[];
+
+    createdAt: UTCInstant;
+  }
+
   model ProfileProposalAdd {
     kind: "add";
     statement: ProfileProposedStatement;

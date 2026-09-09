@@ -40,8 +40,13 @@ and one shorter complete repair. Its process-live Stop authority bypasses queued
 Chat mutations, revokes result publication before cancellation, and retains
 Invocation liveness until the exact Attempt is reaped and the Pending User Turn is
 durably interrupted. Retry builds a fresh Invocation from current context; Discard
-restores the unchanged Draft. Real provider adapters, transcript tools, and Profile
-or Memory effects remain later vertical slices.
+restores the unchanged Draft. Valid complete responses now retain structured
+evidence observations, may atomically replace the current Coach Memory, and stage
+one Chat-owned Profile effect. Semantic or mixed Profile effects remain behind an
+explicit Accept/Discard proposal. Pure evidence appends use an idempotent local
+Profile union: success is silent, while a failed local write retains the exact
+operation for Retry or Discard without rolling back the published turn. Real
+provider adapters and stale-Proposal Reconsider remain later vertical slices.
 
 ## Requirements
 

@@ -209,6 +209,81 @@ struct ProfileProposalCardPresentation: Equatable {
     }
 }
 
+struct ProfileEvidencePublicationFailureCardPresentation: Equatable {
+    static let headingText = "Profile evidence couldn't be saved"
+    static let retryActionTitle = "Retry"
+    static let discardActionTitle = "Discard"
+
+    let responsePositionID: ChatResponsePositionID
+    let updates: [String]
+
+    var heading: String { Self.headingText }
+    var actionTitles: [String] {
+        [Self.retryActionTitle, Self.discardActionTitle]
+    }
+    var accessibilityLabel: String {
+        ([heading + "."] + updates).joined(separator: " ")
+    }
+}
+
+enum ProfileEvidencePublicationFailurePresentation {
+    private struct AttachmentPair: Hashable {
+        let sessionID: SessionID
+        let transcriptRevisionID: TranscriptRevisionID
+    }
+
+    static func card(
+        for publication: ProfileEvidencePublication?,
+        openedAttachments: OpenedChatAttachmentsState,
+        activity: ChatFeatureState.Activity? = nil
+    ) -> ProfileEvidencePublicationFailureCardPresentation? {
+        guard let publication else { return nil }
+        if activity == .publishingProfileEvidence(publication.chatID) {
+            return nil
+        }
+        let resolvedSessionLabels = resolvedSessionLabels(
+            in: openedAttachments
+        )
+        let updates = publication.evidenceAppends.flatMap { append in
+            append.evidence.map { reference in
+                let key = AttachmentPair(
+                    sessionID: reference.sessionID,
+                    transcriptRevisionID: reference.transcriptRevisionID
+                )
+                let sessionLabel = resolvedSessionLabels[key] ??
+                    reference.display.sessionLabel
+                return "Add evidence from “\(sessionLabel)” to " +
+                    "“\(append.target.wording)”"
+            }
+        }
+        return ProfileEvidencePublicationFailureCardPresentation(
+            responsePositionID: publication.responsePositionID,
+            updates: updates
+        )
+    }
+
+    private static func resolvedSessionLabels(
+        in openedAttachments: OpenedChatAttachmentsState
+    ) -> [AttachmentPair: String] {
+        guard case let .resolved(resolutions) = openedAttachments else {
+            return [:]
+        }
+        return Dictionary(
+            uniqueKeysWithValues: resolutions.compactMap { resolution in
+                guard case let .available(candidate) = resolution.resolution
+                else { return nil }
+                return (
+                    AttachmentPair(
+                        sessionID: candidate.sessionID,
+                        transcriptRevisionID: candidate.transcriptRevisionID
+                    ),
+                    candidate.displayLabel
+                )
+            }
+        )
+    }
+}
+
 enum ChatActivityPresentation {
     static func progressLabel(
         for activity: ChatFeatureState.Activity?
@@ -223,6 +298,9 @@ enum ChatActivityPresentation {
         case .discardingPendingUserTurn: "Unlocking Draft…"
         case .acceptingProfileProposal: "Accepting Profile changes…"
         case .discardingProfileProposal: "Discarding Profile changes…"
+        case .publishingProfileEvidence: nil
+        case .retryingProfileEvidencePublication: "Retrying Profile evidence…"
+        case .discardingProfileEvidencePublication: "Discarding Profile evidence…"
         case nil: nil
         }
     }
@@ -798,6 +876,15 @@ public struct ChatRootView: View {
                 if let proposal = aggregate.profileProposal {
                     profileProposalView(proposal)
                 }
+                if let publicationCard =
+                    ProfileEvidencePublicationFailurePresentation.card(
+                        for: aggregate.profileEvidencePublication,
+                        openedAttachments: model.snapshot.openedAttachments,
+                        activity: model.snapshot.activity
+                    )
+                {
+                    profileEvidencePublicationFailureView(publicationCard)
+                }
                 composerView
                 Spacer()
             }
@@ -922,6 +1009,51 @@ public struct ChatRootView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityElement(children: .contain)
+    }
+
+    private func profileEvidencePublicationFailureView(
+        _ presentation: ProfileEvidencePublicationFailureCardPresentation
+    ) -> some View {
+        GroupBox("Profile Publication Failure") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(presentation.heading)
+                    .font(.callout.weight(.semibold))
+
+                ForEach(Array(presentation.updates.enumerated()), id: \.offset) {
+                    _, update in
+                    Text(update)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack {
+                    Spacer()
+                    Button(
+                        ProfileEvidencePublicationFailureCardPresentation
+                            .retryActionTitle
+                    ) {
+                        model.retryProfileEvidencePublication(
+                            presentation.responsePositionID
+                        )
+                    }
+                    .accessibilityLabel("Retry Profile Evidence Publication")
+                    .disabled(!allowsNavigationAndMutation)
+
+                    Button(
+                        ProfileEvidencePublicationFailureCardPresentation
+                            .discardActionTitle
+                    ) {
+                        model.discardProfileEvidencePublication(
+                            presentation.responsePositionID
+                        )
+                    }
+                    .accessibilityLabel("Discard Profile Evidence Publication")
+                    .disabled(!allowsNavigationAndMutation)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(presentation.accessibilityLabel)
     }
 
     private func profileProposalChangeView(

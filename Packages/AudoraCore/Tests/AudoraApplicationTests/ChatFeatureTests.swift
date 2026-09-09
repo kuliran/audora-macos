@@ -3537,6 +3537,206 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(invocationCount, 0)
     }
 
+    func testPublishedPureEvidenceFailureKeepsExactOperationAndBlocksAnotherSend()
+        async throws
+    {
+        let attachments = try ChatAttachments(
+            validating: [Self.attachment()]
+        )
+        let base = try Self.aggregate(
+            draftText: "Keep this evidence with my Profile.",
+            attachments: attachments
+        )
+        let published = try Self.aggregateWithProfileEvidencePublication(
+            from: base
+        )
+        let quote = try await Self.quote(for: base)
+        let invocations = PublishedProfileEvidenceInvocationGateway(
+            published: published,
+            quote: quote
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            evidencePublishOutcomes: [.failed]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(base)]),
+            invocations: invocations,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, base.chat.id))
+
+        await feature.send(.sendDraft(Self.context, base.chat.id, base.chat.draft))
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), published)
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.profileEvidencePublication,
+            published.profileEvidencePublication
+        )
+        XCTAssertNil(state.activity)
+        XCTAssertNil(state.notice)
+        XCTAssertFalse(ChatInteractionPolicy.allowsComposerEditing(in: state))
+        XCTAssertFalse(ChatInteractionPolicy.allowsCoachInvocation(in: state))
+        let mutations = await coordinator.evidencePublishMutations
+        XCTAssertEqual(mutations.count, 1)
+        XCTAssertEqual(mutations.first?.library, Self.scope)
+        XCTAssertEqual(mutations.first?.base, published)
+        XCTAssertEqual(
+            mutations.first?.responsePositionID,
+            try ChatResponsePositionID("rsp-20260830T120000000Z-6PQR")
+        )
+        XCTAssertEqual(
+            mutations.first?.intendedRevisionID,
+            try ProfileRevisionID("prf-20260830T120000000Z-6PQR")
+        )
+        let invocationCount = await invocations.invocationCount
+        XCTAssertEqual(invocationCount, 1)
+    }
+
+    func testPublishedPureEvidenceAppliesLocallyAndResolvesSilently()
+        async throws
+    {
+        let attachments = try ChatAttachments(
+            validating: [Self.attachment()]
+        )
+        let base = try Self.aggregate(
+            draftText: "Keep this evidence with my Profile.",
+            attachments: attachments
+        )
+        let published = try Self.aggregateWithProfileEvidencePublication(
+            from: base
+        )
+        let resolved = try Self.resolvingProfileEvidencePublication(
+            in: published
+        )
+        let invocations = PublishedProfileEvidenceInvocationGateway(
+            published: published,
+            quote: try await Self.quote(for: base)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            evidencePublishOutcomes: [.committed(resolved)]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(base)]),
+            invocations: invocations,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, base.chat.id))
+
+        await feature.send(.sendDraft(Self.context, base.chat.id, base.chat.draft))
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), resolved)
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.messages,
+            published.messages
+        )
+        XCTAssertEqual(Self.openAggregate(in: state)?.memory, published.memory)
+        XCTAssertNil(Self.openAggregate(in: state)?.profileEvidencePublication)
+        XCTAssertNil(state.activity)
+        XCTAssertNil(state.notice)
+        XCTAssertTrue(ChatInteractionPolicy.allowsComposerEditing(in: state))
+        let invocationCount = await invocations.invocationCount
+        let evidenceMutationCount = await coordinator.evidencePublishMutations.count
+        XCTAssertEqual(invocationCount, 1)
+        XCTAssertEqual(evidenceMutationCount, 1)
+    }
+
+    func testRetryProfileEvidencePublicationRepeatsOnlyTheLocalUnion()
+        async throws
+    {
+        let base = try Self.aggregate(
+            draftText: "Already published.",
+            attachments: ChatAttachments(validating: [Self.attachment()])
+        )
+        let failed = try Self.aggregateWithProfileEvidencePublication(from: base)
+        let resolved = try Self.resolvingProfileEvidencePublication(in: failed)
+        let invocations = RecordingInterruptedInvocationGateway()
+        let coordinator = RecordingProfileProposalCoordinator(
+            evidencePublishOutcomes: [.committed(resolved)]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failed)]),
+            invocations: invocations,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, failed.chat.id))
+        let responsePositionID = try XCTUnwrap(
+            failed.profileEvidencePublication?.responsePositionID
+        )
+
+        await feature.send(
+            .retryProfileEvidencePublication(Self.context, responsePositionID)
+        )
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), resolved)
+        XCTAssertNil(Self.openAggregate(in: state)?.profileEvidencePublication)
+        XCTAssertNil(state.activity)
+        XCTAssertNil(state.notice)
+        XCTAssertTrue(ChatInteractionPolicy.allowsComposerEditing(in: state))
+        let evidenceMutations = await coordinator.evidencePublishMutations
+        XCTAssertEqual(evidenceMutations.map(\.base), [failed])
+        XCTAssertEqual(
+            evidenceMutations.map(\.intendedRevisionID),
+            [try ProfileRevisionID("prf-20260830T120000000Z-6PQR")]
+        )
+        let preparationCount = await invocations.preparations.count
+        let invocationCount = await invocations.requests.count
+        XCTAssertEqual(preparationCount, 0)
+        XCTAssertEqual(invocationCount, 0)
+    }
+
+    func testDiscardProfileEvidencePublicationKeepsPublishedTurnAndMemory()
+        async throws
+    {
+        let base = try Self.aggregate(
+            draftText: "Already published.",
+            attachments: ChatAttachments(validating: [Self.attachment()])
+        )
+        let failed = try Self.aggregateWithProfileEvidencePublication(from: base)
+        let resolved = try Self.resolvingProfileEvidencePublication(in: failed)
+        let invocations = RecordingInterruptedInvocationGateway()
+        let coordinator = RecordingProfileProposalCoordinator(
+            evidenceDiscardOutcomes: [.committed(resolved)]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failed)]),
+            invocations: invocations,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, failed.chat.id))
+        let responsePositionID = try XCTUnwrap(
+            failed.profileEvidencePublication?.responsePositionID
+        )
+
+        await feature.send(
+            .discardProfileEvidencePublication(Self.context, responsePositionID)
+        )
+
+        let state = await feature.currentState
+        let current = try XCTUnwrap(Self.openAggregate(in: state))
+        XCTAssertEqual(current, resolved)
+        XCTAssertEqual(current.messages, failed.messages)
+        XCTAssertEqual(current.memory, failed.memory)
+        XCTAssertNil(current.profileEvidencePublication)
+        XCTAssertNil(state.activity)
+        XCTAssertNil(state.notice)
+        XCTAssertTrue(ChatInteractionPolicy.allowsComposerEditing(in: state))
+        let discarded = await coordinator.evidenceDiscardMutations
+        XCTAssertEqual(discarded.map(\.base), [failed])
+        let retried = await coordinator.evidencePublishMutations.count
+        XCTAssertEqual(retried, 0)
+        let preparationCount = await invocations.preparations.count
+        let invocationCount = await invocations.requests.count
+        XCTAssertEqual(preparationCount, 0)
+        XCTAssertEqual(invocationCount, 0)
+    }
+
     func testAcceptProfileProposalDispatchesOnceAndInstallsResolvedAggregate()
         async throws
     {
@@ -3904,6 +4104,116 @@ final class ChatFeatureTests: XCTestCase {
         )
     }
 
+    private static func aggregateWithProfileEvidencePublication(
+        from base: ChatAggregate
+    ) throws -> ChatAggregate {
+        let completedAt = try UTCInstant("2026-08-30T12:01:00.000Z")
+        let responsePositionID = try ChatResponsePositionID(
+            "rsp-20260830T120000000Z-6PQR"
+        )
+        guard let attachment = base.chat.attachments.values.first else {
+            throw TestError.unexpectedState
+        }
+        let messages = [
+            try ChatMessage(
+                id: ChatMessageID("msg-20260830T120100000Z-7QRS"),
+                responsePositionID: responsePositionID,
+                content: .user(text: base.chat.draft.text),
+                createdAt: completedAt
+            ),
+            try ChatMessage(
+                id: ChatMessageID("msg-20260830T120100000Z-8TVW"),
+                responsePositionID: responsePositionID,
+                content: .coach(markdown: "I linked this reflection to your Profile."),
+                coachProfile: CoachProfileProvenance(
+                    revisionID: nil,
+                    statementGeneration: 7
+                ),
+                createdAt: completedAt
+            ),
+        ]
+        let memory = try CoachMemory(
+            memoryID: CoachMemoryID("mem-20260830T120100000Z-9XYZ"),
+            chatID: base.chat.id,
+            generalNotes: "Keep practicing deliberate transitions.",
+            sessionSummaries: [],
+            attachments: base.chat.attachments
+        )
+        let freshDraft = try ChatDraft(
+            draftID: ChatDraftID("drf-20260830T120100000Z-ABCD"),
+            version: 0,
+            text: "",
+            updatedAt: completedAt
+        )
+        let chat = try Chat(
+            id: base.chat.id,
+            manifestRevision: base.chat.manifestRevision + 1,
+            title: base.chat.title,
+            createdAt: base.chat.createdAt,
+            updatedAt: completedAt,
+            creation: base.chat.creation,
+            profileStatementGenerationAtCreation:
+                base.chat.profileStatementGenerationAtCreation,
+            attachments: base.chat.attachments,
+            draft: freshDraft,
+            messageIDs: messages.map(\.id),
+            currentMemoryID: memory.memoryID
+        )
+        let target = try ProfileProposalTarget(
+            statementID: ProfileStatementID(
+                "stm-20260830T115900000Z-5KMN"
+            ),
+            statementKind: .goal,
+            wording: "Pause briefly between points."
+        )
+        let evidence = try EvidenceReference(
+            sessionID: attachment.sessionID,
+            transcriptRevisionID: attachment.transcriptRevisionID,
+            target: .audioEvent(
+                audioEventID: AudioEventID("a000001")
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Planning reflection",
+                trustedText: "Silent pause",
+                startMilliseconds: 100,
+                endMilliseconds: 200
+            )
+        )
+        let publication = try ProfileEvidencePublication(
+            chatID: base.chat.id,
+            responsePositionID: responsePositionID,
+            evidenceAppends: [
+                ProfileEvidenceAppend(target: target, evidence: [evidence]),
+            ],
+            createdAt: completedAt
+        )
+        return try ChatAggregate(
+            chat: chat,
+            memory: memory,
+            messages: messages,
+            profileEvidencePublication: publication
+        )
+    }
+
+    private static func quote(for aggregate: ChatAggregate) async throws
+        -> CoachContextQuote
+    {
+        let context = DefaultCoachContextFeature(
+            source: AlwaysFitCoachContextSnapshotPort()
+        )
+        let outcome = await context.quoteChat(
+            CoachContextChatQuoteRequest(
+                library: scope,
+                chatID: aggregate.chat.id,
+                draft: aggregate.chat.draft
+            )
+        )
+        guard case let .available(quote) = outcome else {
+            throw TestError.unexpectedState
+        }
+        return quote
+    }
+
     private static func resolvingProfileProposal(
         in aggregate: ChatAggregate
     ) throws -> ChatAggregate {
@@ -3912,6 +4222,18 @@ final class ChatFeatureTests: XCTestCase {
             memory: aggregate.memory,
             messages: aggregate.messages,
             pendingUserTurn: aggregate.pendingUserTurn
+        )
+    }
+
+    private static func resolvingProfileEvidencePublication(
+        in aggregate: ChatAggregate
+    ) throws -> ChatAggregate {
+        try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            messages: aggregate.messages,
+            pendingUserTurn: aggregate.pendingUserTurn,
+            profileProposal: aggregate.profileProposal
         )
     }
 
@@ -3962,18 +4284,29 @@ final class ChatFeatureTests: XCTestCase {
 private actor RecordingProfileProposalCoordinator: ProfileProposalCoordinating {
     private var acceptOutcomes: [ProfileProposalMutationOutcome]
     private var discardOutcomes: [ProfileProposalMutationOutcome]
+    private var evidencePublishOutcomes:
+        [ProfileEvidencePublicationMutationOutcome]
+    private var evidenceDiscardOutcomes:
+        [ProfileEvidencePublicationMutationOutcome]
     private var suspendFirstAccept: Bool
     private var firstAcceptContinuation: CheckedContinuation<Void, Never>?
     private(set) var acceptMutations: [AcceptProfileProposalMutation] = []
     private(set) var discardMutations: [DiscardProfileProposalMutation] = []
+    private(set) var evidencePublishMutations: [PublishProfileEvidenceMutation] = []
+    private(set) var evidenceDiscardMutations:
+        [DiscardProfileEvidencePublicationMutation] = []
 
     init(
         acceptOutcomes: [ProfileProposalMutationOutcome] = [],
         discardOutcomes: [ProfileProposalMutationOutcome] = [],
+        evidencePublishOutcomes: [ProfileEvidencePublicationMutationOutcome] = [],
+        evidenceDiscardOutcomes: [ProfileEvidencePublicationMutationOutcome] = [],
         suspendFirstAccept: Bool = false
     ) {
         self.acceptOutcomes = acceptOutcomes
         self.discardOutcomes = discardOutcomes
+        self.evidencePublishOutcomes = evidencePublishOutcomes
+        self.evidenceDiscardOutcomes = evidenceDiscardOutcomes
         self.suspendFirstAccept = suspendFirstAccept
     }
 
@@ -3995,6 +4328,22 @@ private actor RecordingProfileProposalCoordinator: ProfileProposalCoordinating {
         discardMutations.append(mutation)
         guard !discardOutcomes.isEmpty else { return .failed }
         return discardOutcomes.removeFirst()
+    }
+
+    func publishEvidence(
+        _ mutation: PublishProfileEvidenceMutation
+    ) async -> ProfileEvidencePublicationMutationOutcome {
+        evidencePublishMutations.append(mutation)
+        guard !evidencePublishOutcomes.isEmpty else { return .failed }
+        return evidencePublishOutcomes.removeFirst()
+    }
+
+    func discardEvidence(
+        _ mutation: DiscardProfileEvidencePublicationMutation
+    ) async -> ProfileEvidencePublicationMutationOutcome {
+        evidenceDiscardMutations.append(mutation)
+        guard !evidenceDiscardOutcomes.isEmpty else { return .failed }
+        return evidenceDiscardOutcomes.removeFirst()
     }
 
     func waitUntilFirstAcceptIsSuspended() async {
@@ -4664,6 +5013,50 @@ private actor RecordingInterruptedInvocationGateway: Invocations {
     func tryInvoke(_ request: PendingCoachInvocationRequest) async -> InvocationTryOutcome {
         requests.append(request)
         return .interrupted(nil, .providerFailed)
+    }
+}
+
+private actor PublishedProfileEvidenceInvocationGateway: Invocations {
+    private let published: ChatAggregate
+    private let quote: CoachContextQuote
+    private(set) var invocationCount = 0
+
+    init(published: ChatAggregate, quote: CoachContextQuote) {
+        self.published = published
+        self.quote = quote
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .prepared(try! PreparedPendingCoachInvocation(preparing: request))
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        invocationCount += 1
+        guard prepared.aggregate.chat.id == published.chat.id,
+              prepared.aggregate.pendingUserTurn?.responsePositionID ==
+                published.profileEvidencePublication?.responsePositionID
+        else { return .rejected(prepared.aggregate, .eligibilityChanged) }
+        return .published(published, quote)
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        .rejected(nil, .eligibilityChanged)
     }
 }
 

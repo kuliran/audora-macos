@@ -85,7 +85,9 @@ public struct PreparedPendingCoachInvocation: Equatable, Sendable {
             memory: newRequest.observedAggregate.memory,
             messages: newRequest.observedAggregate.messages,
             pendingUserTurn: newRequest.pendingUserTurn,
-            profileProposal: newRequest.observedAggregate.profileProposal
+            profileProposal: newRequest.observedAggregate.profileProposal,
+            profileEvidencePublication:
+                newRequest.observedAggregate.profileEvidencePublication
         )
         let request = PendingCoachInvocationRequest(
             library: newRequest.library,
@@ -499,7 +501,9 @@ public struct InstallCoachInvocationMutation: Equatable, Sendable {
             memory: authority.aggregate.memory,
             messages: authority.aggregate.messages,
             pendingUserTurn: authority.pendingUserTurn.replacingFailure(nil),
-            profileProposal: authority.aggregate.profileProposal
+            profileProposal: authority.aggregate.profileProposal,
+            profileEvidencePublication:
+                authority.aggregate.profileEvidencePublication
         )
         invocation = try CoachInvocation(
             id: invocationID,
@@ -605,6 +609,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
     public let freshDraft: ChatDraft
     public let replacementMemory: CoachMemory?
     public let profileProposal: ProfileChangeProposal?
+    public let profileEvidencePublication: ProfileEvidencePublication?
     public let replacement: ChatAggregate
 
     /// Internal construction seam for persistence tests over app-owned
@@ -632,6 +637,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         coachBlocks: [CoachMessageBlock],
         replacementMemory: CoachMemory? = nil,
         profileProposal: ProfileChangeProposal? = nil,
+        profileEvidencePublication: ProfileEvidencePublication? = nil,
         completedAt: UTCInstant
     ) throws {
         self.base = base
@@ -660,6 +666,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         )
         self.replacementMemory = replacementMemory
         self.profileProposal = profileProposal
+        self.profileEvidencePublication = profileEvidencePublication
         replacement = try base.publishingTurn(
             invocation: invocation,
             userMessage: userMessage,
@@ -667,6 +674,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
             freshDraft: freshDraft,
             replacementMemory: replacementMemory,
             profileProposal: profileProposal,
+            profileEvidencePublication: profileEvidencePublication,
             at: completedAt
         )
     }
@@ -693,13 +701,42 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
             invocation: invocation,
             completedAt: completedAt
         )
+        let evidencePublication = try Self.materializeProfileEvidencePublication(
+            from: validatedResponse,
+            base: base,
+            invocation: invocation,
+            completedAt: completedAt
+        )
         try self.init(
             base: base,
             invocation: invocation,
             coachBlocks: validatedResponse.publicationBlocks,
             replacementMemory: replacementMemory,
             profileProposal: proposal,
+            profileEvidencePublication: evidencePublication,
             completedAt: completedAt
+        )
+    }
+
+    private static func materializeProfileEvidencePublication(
+        from response: ValidatedCoachResponse,
+        base: ChatAggregate,
+        invocation: CoachInvocation,
+        completedAt: UTCInstant
+    ) throws -> ProfileEvidencePublication? {
+        guard response.proposedProfileEdits.isEmpty,
+              !response.appendedProfileEvidence.isEmpty
+        else { return nil }
+        return try ProfileEvidencePublication(
+            chatID: base.chat.id,
+            responsePositionID: invocation.responsePositionID,
+            evidenceAppends: response.appendedProfileEvidence.map {
+                try ProfileEvidenceAppend(
+                    target: $0.target,
+                    evidence: $0.evidence
+                )
+            },
+            createdAt: completedAt
         )
     }
 

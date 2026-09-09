@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "chatId": "cht-20260909T115500000Z-6PQR",
+  "responsePositionId": "rsp-20260909T120030000Z-7RST",
+  "evidenceAppends": [
+    {
+      "target": {
+        "statementId": "stm-20260903T120000000Z-4GHJ",
+        "statementKind": "growthDirection",
+        "wording": "Pause briefly before introducing the next point."
+      },
+      "evidence": [
+        {
+          "sessionId": "ses-20260908T140000000Z-8VWX",
+          "transcriptRevisionId": "trv-20260908T143000000Z-9XYZ",
+          "target": {
+            "kind": "wordRange",
+            "startWordId": "w000320",
+            "endWordId": "w000331"
+          },
+          "display": {
+            "sessionLabel": "Design rehearsal",
+            "trustedText": "That covers the interface. Next, the storage rule.",
+            "startMs": 196000,
+            "endMs": 201500
+          }
+        }
+      ]
+    }
+  ],
+  "createdAt": "2026-09-09T12:00:30.000Z"
+}
