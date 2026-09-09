@@ -1,4 +1,5 @@
 import "./chat.tsp";
+import "./transcript-revision.tsp";
 import "@typespec/json-schema";
 
 using TypeSpec.JsonSchema;
@@ -9,8 +10,10 @@ namespace Audora.Contracts {
   union ChatMessage {
     legacyUser: PersistedUserChatMessageV1,
     legacyCoach: PersistedCoachChatMessageV1,
-    user: PersistedUserChatMessageV2,
-    coach: PersistedCoachChatMessageV2,
+    legacyProfileUser: PersistedUserChatMessageV2,
+    legacyProfileCoach: PersistedCoachChatMessageV2,
+    user: PersistedUserChatMessageV3,
+    coach: PersistedCoachChatMessageV3,
   }
 
   model PersistedUserChatMessageV1 {
@@ -54,6 +57,95 @@ namespace Audora.Contracts {
     markdown: string;
   }
 
+  model PersistedUserChatMessageV3 {
+    ...PersistedChatMessageFieldsV3;
+    role: "user";
+
+    /** Application additionally enforces a 16,384 UTF-8-byte ceiling. */
+    @maxLength(16384)
+    text: string;
+  }
+
+  model PersistedCoachChatMessageV3 {
+    ...PersistedChatMessageFieldsV3;
+    role: "coach";
+
+    /** Exact Profile authority used to prepare this Coach response. */
+    profileRevisionId?: ProfileRevisionId;
+
+    profileStatementGeneration: NonnegativeWholeNumber;
+
+    /** Ordered prose and locally resolved evidence observations. */
+    @minItems(1)
+    blocks: PersistedCoachMessageBlock[];
+  }
+
+  union PersistedCoachMessageBlock {
+    markdown: PersistedCoachMarkdownBlock,
+    evidenceObservation: PersistedCoachEvidenceObservationBlock,
+  }
+
+  model PersistedCoachMarkdownBlock {
+    kind: "markdown";
+
+    @maxLength(64000)
+    markdown: string;
+  }
+
+  model PersistedCoachEvidenceObservationBlock {
+    kind: "evidenceObservation";
+
+    @maxLength(64000)
+    markdown: string;
+
+    @minItems(1)
+    evidence: PersistedEvidenceReference[];
+  }
+
+  model PersistedEvidenceReference {
+    sessionId: SessionId;
+    transcriptRevisionId: TranscriptRevisionId;
+    target: PersistedEvidenceReferenceTarget;
+    display: PersistedEvidenceReferenceDisplay;
+  }
+
+  union PersistedEvidenceReferenceTarget {
+    wordRange: PersistedEvidenceWordRange,
+    audioEvent: PersistedEvidenceAudioEvent,
+  }
+
+  model PersistedEvidenceWordRange {
+    kind: "wordRange";
+    startWordId: TranscriptWordId;
+    endWordId: TranscriptWordId;
+  }
+
+  model PersistedEvidenceAudioEvent {
+    kind: "audioEvent";
+    audioEventId: TranscriptAudioEventId;
+  }
+
+  model PersistedEvidenceReferenceDisplay {
+    @minLength(1)
+    @maxLength(1024)
+    sessionLabel: string;
+
+    @minLength(1)
+    @maxLength(16384)
+    trustedText: string;
+
+    startMs: PersistedEvidenceStartMilliseconds;
+    endMs: PersistedEvidenceEndMilliseconds;
+  }
+
+  @minValue(0)
+  @maxValue(2700000)
+  scalar PersistedEvidenceStartMilliseconds extends integer;
+
+  @minValue(1)
+  @maxValue(2700000)
+  scalar PersistedEvidenceEndMilliseconds extends integer;
+
   model PersistedChatMessageFieldsV1 {
     schemaVersion: 1;
     messageId: ChatMessageId;
@@ -63,6 +155,13 @@ namespace Audora.Contracts {
 
   model PersistedChatMessageFieldsV2 {
     schemaVersion: 2;
+    messageId: ChatMessageId;
+    responsePositionId: ChatResponsePositionId;
+    createdAt: UTCInstant;
+  }
+
+  model PersistedChatMessageFieldsV3 {
+    schemaVersion: 3;
     messageId: ChatMessageId;
     responsePositionId: ChatResponsePositionId;
     createdAt: UTCInstant;

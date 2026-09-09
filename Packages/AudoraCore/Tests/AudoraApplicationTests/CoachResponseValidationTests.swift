@@ -123,6 +123,23 @@ final class CoachResponseValidationTests: XCTestCase {
         )
 
         XCTAssertEqual(validated.messageBlocks.count, 2)
+        guard case let .evidenceObservation(_, evidence) =
+            validated.messageBlocks[1]
+        else {
+            return XCTFail("expected a resolved evidence observation")
+        }
+        XCTAssertEqual(evidence.count, 2)
+        XCTAssertEqual(
+            evidence[0].sessionID,
+            try SessionID("ses-20260830T110000000Z-1KMN")
+        )
+        XCTAssertEqual(
+            evidence[0].transcriptRevisionID,
+            try TranscriptRevisionID("trv-20260830T111000000Z-1PQR")
+        )
+        XCTAssertEqual(evidence[0].display.trustedText, "w1 w2 w3")
+        XCTAssertEqual(evidence[0].display.startMilliseconds, 0)
+        XCTAssertEqual(evidence[0].display.endMilliseconds, 3)
         XCTAssertEqual(
             validated.publicationMarkdown,
             "Start with **one** clear point.\n\nYour transition lands too quickly."

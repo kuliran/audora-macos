@@ -3,6 +3,88 @@ import AudoraDomain
 import XCTest
 
 final class TranscriptSeekResolverTests: XCTestCase {
+    func testEvidenceResolutionRequiresExactRevisionAndUsesCanonicalTiming() throws {
+        let text = "One two"
+        let first = try word(
+            id: "w000000",
+            ordinal: 0,
+            text: "One",
+            in: text,
+            time: nil
+        )
+        let second = try word(
+            id: "w000001",
+            ordinal: 1,
+            text: "two",
+            in: text,
+            time: (300, 450)
+        )
+        let line = try transcriptLine(
+            text: text,
+            words: [first, second],
+            time: (80, 500)
+        )
+        let sessionID = try SessionID("ses-20260830T120000000Z-2ABC")
+        let revisionID = try TranscriptRevisionID(
+            "trv-20260830T121000000Z-4FGH"
+        )
+        let event = TranscriptAudioEvent(
+            audioEventID: try AudioEventID("a000001"),
+            category: .silentPause,
+            audioSourceID: .microphone,
+            timeRange: try SessionTimeRange(
+                startMilliseconds: 600,
+                endMilliseconds: 750,
+                sessionDurationMilliseconds: 1_000
+            )
+        )
+        let resolver = TranscriptSeekResolver(
+            sessionID: sessionID,
+            transcriptRevisionID: revisionID,
+            lines: [line],
+            audioEvents: [event],
+            canonicalAudioDurationMilliseconds: 1_000
+        )
+        let wordReference = try evidenceReference(
+            sessionID: sessionID,
+            revisionID: revisionID,
+            target: .wordRange(
+                startWordID: first.wordID,
+                endWordID: second.wordID
+            )
+        )
+
+        XCTAssertEqual(
+            resolver.resolveEvidence(wordReference),
+            ResolvedReviewEvidence(
+                highlight: .wordRange([first.wordID, second.wordID]),
+                seekMilliseconds: 80
+            )
+        )
+        XCTAssertEqual(
+            resolver.resolveEvidence(
+                try evidenceReference(
+                    sessionID: sessionID,
+                    revisionID: revisionID,
+                    target: .audioEvent(audioEventID: event.audioEventID)
+                )
+            ),
+            ResolvedReviewEvidence(
+                highlight: .audioEvent(event.audioEventID),
+                seekMilliseconds: 600
+            )
+        )
+        XCTAssertNil(
+            resolver.resolveEvidence(
+                try evidenceReference(
+                    sessionID: SessionID("ses-20260830T120000000Z-9XYZ"),
+                    revisionID: revisionID,
+                    target: wordReference.target
+                )
+            )
+        )
+    }
+
     func testUTF8PunctuationUsesPreviousThenFollowingTimedWord() throws {
         let text = "— Привет, мир!"
         let hello = try word(
@@ -165,6 +247,24 @@ final class TranscriptSeekResolverTests: XCTestCase {
         XCTAssertEqual(resolver.activeWord(atMilliseconds: 300), second.wordID)
         XCTAssertNil(resolver.activeWord(atMilliseconds: 450))
     }
+}
+
+private func evidenceReference(
+    sessionID: SessionID,
+    revisionID: TranscriptRevisionID,
+    target: EvidenceReferenceTarget
+) throws -> EvidenceReference {
+    try EvidenceReference(
+        sessionID: sessionID,
+        transcriptRevisionID: revisionID,
+        target: target,
+        display: EvidenceReferenceDisplay(
+            sessionLabel: "Practice Session",
+            trustedText: "Trusted display",
+            startMilliseconds: 1,
+            endMilliseconds: 2
+        )
+    )
 }
 
 private func transcriptLine(

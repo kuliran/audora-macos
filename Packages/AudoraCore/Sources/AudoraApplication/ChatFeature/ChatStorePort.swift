@@ -134,6 +134,7 @@ public struct RenameChatMutation: Equatable, Sendable {
         replacement = try ChatAggregate(
             chat: base.chat.renamed(to: title, at: updatedAt),
             memory: base.memory,
+            messages: base.messages,
             pendingUserTurn: base.pendingUserTurn
         )
     }

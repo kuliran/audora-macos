@@ -4,11 +4,14 @@ import AudoraDomain
 public actor DefaultReviewFeature: ReviewFeature {
     private enum PendingSelectionCommand {
         case select(ReviewSelection)
+        case evidence(LibraryScope, EvidenceReference)
         case clear
 
         var command: ReviewCommand {
             switch self {
             case let .select(selection): .selectSession(selection)
+            case let .evidence(scope, reference):
+                .openEvidence(scope: scope, reference: reference)
             case .clear: .clearSelection
             }
         }
@@ -95,6 +98,9 @@ public actor DefaultReviewFeature: ReviewFeature {
         case let .selectSession(selection):
             pendingSelectionCommand = .select(selection)
             refreshPending = false
+        case let .openEvidence(scope, reference):
+            pendingSelectionCommand = .evidence(scope, reference)
+            refreshPending = false
         case .clearSelection:
             pendingSelectionCommand = .clear
             refreshPending = false
@@ -115,6 +121,8 @@ public actor DefaultReviewFeature: ReviewFeature {
         switch command {
         case let .selectSession(selection):
             await selectSession(selection)
+        case let .openEvidence(scope, reference):
+            await openEvidence(reference, in: scope)
         case .clearSelection:
             await clearSelection()
         case .refresh:
@@ -122,8 +130,10 @@ public actor DefaultReviewFeature: ReviewFeature {
         case let .seek(lineID, utf8ByteOffset):
             await seek(lineID: lineID, utf8ByteOffset: utf8ByteOffset)
         case .play:
+            guard readySnapshot?.playbackAvailable == true else { return }
             await applyPlayback(await playback.play())
         case .pause:
+            guard readySnapshot?.playbackAvailable == true else { return }
             await applyPlayback(await playback.pause())
         case let .setAnnotationsVisible(visible):
             await setAnnotationsVisible(visible)
@@ -167,6 +177,108 @@ public actor DefaultReviewFeature: ReviewFeature {
         }
     }
 
+    private func openEvidence(
+        _ reference: EvidenceReference,
+        in scope: LibraryScope
+    ) async {
+        let selection = ReviewSelection(scope: scope, sessionID: reference.sessionID)
+        let annotationsVisible = await annotationVisibility.annotationsVisible(
+            in: scope
+        ) ?? readySnapshot?.annotations.isVisible ?? true
+        let previousCapability = readySnapshot?.playback.audioCapabilityID
+        let previousPlayback = readySnapshot?.selection == selection &&
+            readySnapshot?.playbackAvailable == true
+            ? readySnapshot?.playback
+            : nil
+        resolver = nil
+        transition(to: .loading(selection))
+
+        switch await exactSnapshot(for: reference, selection: selection) {
+        case let .available(snapshot):
+            await install(
+                snapshot,
+                preserving: previousPlayback,
+                annotationsVisible: annotationsVisible,
+                notice: nil,
+                evidenceReference: reference
+            )
+        case .unavailable:
+            await invalidateReview(
+                selection: selection,
+                reason: .noTranscript,
+                clearing: previousCapability
+            )
+        case .integrityMismatch:
+            await invalidateReview(
+                selection: selection,
+                reason: .integrityMismatch,
+                clearing: previousCapability
+            )
+        }
+    }
+
+    private func exactSnapshot(
+        for reference: EvidenceReference,
+        selection: ReviewSelection
+    ) async -> ReviewSessionReadResult {
+        let loaded: ReviewSessionSnapshot
+        switch await sessions.load(selection) {
+        case let .available(snapshot): loaded = snapshot
+        case .unavailable: return .unavailable
+        case .integrityMismatch: return .integrityMismatch
+        }
+        guard loaded.revisionIDs.contains(reference.transcriptRevisionID) else {
+            return .integrityMismatch
+        }
+        if loaded.selectedRevisionID == reference.transcriptRevisionID {
+            return .available(loaded)
+        }
+        let first = await sessions.selectRevision(
+            reference.transcriptRevisionID,
+            for: selection,
+            expectedSelectedRevisionID: loaded.selectedRevisionID
+        )
+        switch first {
+        case let .selected(snapshot):
+            return snapshot.selectedRevisionID == reference.transcriptRevisionID
+                ? .available(snapshot)
+                : .integrityMismatch
+        case .stale:
+            break
+        case .unavailable, .failed:
+            return .unavailable
+        case .integrityMismatch:
+            return .integrityMismatch
+        }
+
+        let refreshed: ReviewSessionSnapshot
+        switch await sessions.load(selection) {
+        case let .available(snapshot): refreshed = snapshot
+        case .unavailable: return .unavailable
+        case .integrityMismatch: return .integrityMismatch
+        }
+        guard refreshed.revisionIDs.contains(reference.transcriptRevisionID) else {
+            return .integrityMismatch
+        }
+        if refreshed.selectedRevisionID == reference.transcriptRevisionID {
+            return .available(refreshed)
+        }
+        switch await sessions.selectRevision(
+            reference.transcriptRevisionID,
+            for: selection,
+            expectedSelectedRevisionID: refreshed.selectedRevisionID
+        ) {
+        case let .selected(snapshot):
+            return snapshot.selectedRevisionID == reference.transcriptRevisionID
+                ? .available(snapshot)
+                : .integrityMismatch
+        case .integrityMismatch:
+            return .integrityMismatch
+        case .stale, .unavailable, .failed:
+            return .unavailable
+        }
+    }
+
     private func clearSelection() async {
         let capability = readySnapshot?.playback.audioCapabilityID
         await invalidateReview(
@@ -182,7 +294,7 @@ public actor DefaultReviewFeature: ReviewFeature {
         switch state {
         case let .ready(ready):
             selection = ready.selection
-            previousPlayback = ready.playback
+            previousPlayback = ready.playbackAvailable ? ready.playback : nil
         case let .unavailable(.some(selected), _):
             selection = selected
             previousPlayback = nil
@@ -196,7 +308,7 @@ public actor DefaultReviewFeature: ReviewFeature {
         case let .available(snapshot):
             await install(
                 snapshot,
-                preserving: readySnapshot?.playback ?? previousPlayback,
+                preserving: availableReadyPlayback ?? previousPlayback,
                 annotationsVisible: annotationsVisible,
                 notice: nil
             )
@@ -218,7 +330,8 @@ public actor DefaultReviewFeature: ReviewFeature {
     }
 
     private func seek(lineID: TranscriptLineID, utf8ByteOffset: Int) async {
-        guard resolver != nil,
+        guard readySnapshot?.playbackAvailable == true,
+              resolver != nil,
               let milliseconds = resolver?.seekTime(
                   lineID: lineID,
                   utf8ByteOffset: utf8ByteOffset
@@ -288,7 +401,8 @@ public actor DefaultReviewFeature: ReviewFeature {
         case let .selected(snapshot):
             await install(
                 snapshot,
-                preserving: readySnapshot?.playback ?? ready.playback,
+                preserving: availableReadyPlayback ??
+                    (ready.playbackAvailable ? ready.playback : nil),
                 annotationsVisible: readySnapshot?.annotations.isVisible ??
                     ready.annotations.isVisible,
                 notice: nil
@@ -298,7 +412,8 @@ public actor DefaultReviewFeature: ReviewFeature {
             case let .available(snapshot):
                 await install(
                     snapshot,
-                    preserving: readySnapshot?.playback ?? ready.playback,
+                    preserving: availableReadyPlayback ??
+                        (ready.playbackAvailable ? ready.playback : nil),
                     annotationsVisible: readySnapshot?.annotations.isVisible ??
                         ready.annotations.isVisible,
                     notice: .selectionChanged
@@ -353,7 +468,8 @@ public actor DefaultReviewFeature: ReviewFeature {
             case let .available(snapshot):
                 await install(
                     snapshot,
-                    preserving: readySnapshot?.playback ?? ready.playback,
+                    preserving: availableReadyPlayback ??
+                        (ready.playbackAvailable ? ready.playback : nil),
                     annotationsVisible: readySnapshot?.annotations.isVisible ??
                         ready.annotations.isVisible,
                     notice: .retranscribed
@@ -389,8 +505,25 @@ public actor DefaultReviewFeature: ReviewFeature {
         _ snapshot: ReviewSessionSnapshot,
         preserving previousPlayback: ReviewPlaybackSnapshot?,
         annotationsVisible: Bool,
-        notice: ReviewNotice?
+        notice: ReviewNotice?,
+        evidenceReference: EvidenceReference? = nil
     ) async {
+        let nextResolver = TranscriptSeekResolver(
+            revision: snapshot.selectedRevision,
+            canonicalAudioDurationMilliseconds:
+                snapshot.canonicalAudioDurationMilliseconds
+        )
+        let resolvedEvidence = evidenceReference.flatMap {
+            nextResolver.resolveEvidence($0)
+        }
+        if evidenceReference != nil, resolvedEvidence == nil {
+            await invalidateReview(
+                selection: snapshot.selection,
+                reason: .integrityMismatch,
+                clearing: previousPlayback?.audioCapabilityID
+            )
+            return
+        }
         let playbackSnapshot: ReviewPlaybackSnapshot?
         if let previousPlayback,
            previousPlayback.audioCapabilityID == snapshot.audioCapabilityID,
@@ -401,11 +534,11 @@ public actor DefaultReviewFeature: ReviewFeature {
         } else {
             playbackSnapshot = await playback.load(snapshot.audioSource)
         }
-        guard let playbackSnapshot,
-              playbackSnapshot.audioCapabilityID == snapshot.audioCapabilityID,
-              playbackSnapshot.durationMilliseconds ==
-                snapshot.canonicalAudioDurationMilliseconds
-        else {
+        let hasAvailablePlayback = playbackSnapshot?.audioCapabilityID ==
+            snapshot.audioCapabilityID &&
+            playbackSnapshot?.durationMilliseconds ==
+            snapshot.canonicalAudioDurationMilliseconds
+        guard hasAvailablePlayback || resolvedEvidence != nil else {
             await invalidateReview(
                 selection: snapshot.selection,
                 reason: .playbackUnavailable,
@@ -413,24 +546,40 @@ public actor DefaultReviewFeature: ReviewFeature {
             )
             return
         }
-        let nextResolver = TranscriptSeekResolver(
-            revision: snapshot.selectedRevision,
-            canonicalAudioDurationMilliseconds:
-                snapshot.canonicalAudioDurationMilliseconds
-        )
         let annotations = ReviewAnnotations(
             isVisible: annotationsVisible,
             projection: annotationProjection(for: snapshot)
         )
         let latestPlayback: ReviewPlaybackSnapshot
-        if let current = readySnapshot?.playback,
+        if hasAvailablePlayback,
+           let current = readySnapshot?.playback,
            current.audioCapabilityID == snapshot.audioCapabilityID,
            current.durationMilliseconds ==
             snapshot.canonicalAudioDurationMilliseconds
         {
             latestPlayback = current
-        } else {
+        } else if hasAvailablePlayback, let playbackSnapshot {
             latestPlayback = playbackSnapshot
+        } else {
+            latestPlayback = ReviewPlaybackSnapshot(
+                audioCapabilityID: snapshot.audioCapabilityID,
+                positionMilliseconds: resolvedEvidence?.seekMilliseconds ?? 0,
+                durationMilliseconds: snapshot.canonicalAudioDurationMilliseconds,
+                status: .paused
+            )
+        }
+        let navigatedPlayback: ReviewPlaybackSnapshot
+        if hasAvailablePlayback,
+           let resolvedEvidence,
+           let sought = await playback.seek(
+               toMilliseconds: resolvedEvidence.seekMilliseconds
+           ),
+           sought.audioCapabilityID == snapshot.audioCapabilityID,
+           sought.durationMilliseconds == snapshot.canonicalAudioDurationMilliseconds
+        {
+            navigatedPlayback = sought
+        } else {
+            navigatedPlayback = latestPlayback
         }
         resolver = nextResolver
         transition(
@@ -439,12 +588,14 @@ public actor DefaultReviewFeature: ReviewFeature {
                     selection: snapshot.selection,
                     revisionIDs: snapshot.revisionIDs,
                     selectedRevision: snapshot.selectedRevision,
-                    playback: latestPlayback,
+                    playback: navigatedPlayback,
+                    playbackAvailable: hasAvailablePlayback,
                     activeWordID: nextResolver.activeWord(
-                        atMilliseconds: latestPlayback.positionMilliseconds
+                        atMilliseconds: navigatedPlayback.positionMilliseconds
                     ),
+                    evidenceHighlight: resolvedEvidence?.highlight,
                     annotations: annotations,
-                    notice: notice
+                    notice: hasAvailablePlayback ? notice : .playbackUnavailable
                 )
             )
         )
@@ -469,6 +620,7 @@ public actor DefaultReviewFeature: ReviewFeature {
     private func receivePlayback(_ playbackSnapshot: ReviewPlaybackSnapshot?) {
         guard let playbackSnapshot,
               let ready = readySnapshot,
+              ready.playbackAvailable,
               let resolver,
               playbackSnapshot.audioCapabilityID == ready.playback.audioCapabilityID,
               playbackSnapshot.durationMilliseconds == ready.playback.durationMilliseconds
@@ -480,9 +632,11 @@ public actor DefaultReviewFeature: ReviewFeature {
                     revisionIDs: ready.revisionIDs,
                     selectedRevision: ready.selectedRevision,
                     playback: playbackSnapshot,
+                    playbackAvailable: ready.playbackAvailable,
                     activeWordID: resolver.activeWord(
                         atMilliseconds: playbackSnapshot.positionMilliseconds
                     ),
+                    evidenceHighlight: ready.evidenceHighlight,
                     annotations: ready.annotations,
                     activity: ready.activity,
                     notice: ready.notice
@@ -507,6 +661,11 @@ public actor DefaultReviewFeature: ReviewFeature {
         return snapshot
     }
 
+    private var availableReadyPlayback: ReviewPlaybackSnapshot? {
+        guard let ready = readySnapshot, ready.playbackAvailable else { return nil }
+        return ready.playback
+    }
+
     private func replacing(
         _ ready: ReviewReadySnapshot,
         annotations: ReviewAnnotations? = nil,
@@ -518,7 +677,9 @@ public actor DefaultReviewFeature: ReviewFeature {
             revisionIDs: ready.revisionIDs,
             selectedRevision: ready.selectedRevision,
             playback: ready.playback,
+            playbackAvailable: ready.playbackAvailable,
             activeWordID: ready.activeWordID,
+            evidenceHighlight: ready.evidenceHighlight,
             annotations: annotations ?? ready.annotations,
             activity: activity,
             notice: notice

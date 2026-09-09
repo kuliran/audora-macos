@@ -158,12 +158,34 @@ public struct ReviewAnnotations: Equatable, Sendable {
     }
 }
 
+/// A transient highlight derived again from the exact immutable Transcript
+/// revision when an Evidence-backed Observation is opened.
+public enum ReviewEvidenceHighlight: Equatable, Sendable {
+    case wordRange([TranscriptWordID])
+    case audioEvent(AudioEventID)
+}
+
+public struct ResolvedReviewEvidence: Equatable, Sendable {
+    public let highlight: ReviewEvidenceHighlight
+    public let seekMilliseconds: UInt64
+
+    public init(
+        highlight: ReviewEvidenceHighlight,
+        seekMilliseconds: UInt64
+    ) {
+        self.highlight = highlight
+        self.seekMilliseconds = seekMilliseconds
+    }
+}
+
 public struct ReviewReadySnapshot: Equatable, Sendable {
     public let selection: ReviewSelection
     public let revisionIDs: [TranscriptRevisionID]
     public let selectedRevision: TranscriptRevision
     public let playback: ReviewPlaybackSnapshot
+    public let playbackAvailable: Bool
     public let activeWordID: TranscriptWordID?
+    public let evidenceHighlight: ReviewEvidenceHighlight?
     public let annotations: ReviewAnnotations
     public let activity: ReviewActivity?
     public let notice: ReviewNotice?
@@ -173,7 +195,9 @@ public struct ReviewReadySnapshot: Equatable, Sendable {
         revisionIDs: [TranscriptRevisionID],
         selectedRevision: TranscriptRevision,
         playback: ReviewPlaybackSnapshot,
+        playbackAvailable: Bool = true,
         activeWordID: TranscriptWordID?,
+        evidenceHighlight: ReviewEvidenceHighlight? = nil,
         annotations: ReviewAnnotations,
         activity: ReviewActivity? = nil,
         notice: ReviewNotice? = nil
@@ -182,7 +206,9 @@ public struct ReviewReadySnapshot: Equatable, Sendable {
         self.revisionIDs = revisionIDs
         self.selectedRevision = selectedRevision
         self.playback = playback
+        self.playbackAvailable = playbackAvailable
         self.activeWordID = activeWordID
+        self.evidenceHighlight = evidenceHighlight
         self.annotations = annotations
         self.activity = activity
         self.notice = notice
@@ -208,6 +234,7 @@ public enum ReviewFeatureState: Equatable, Sendable {
 
 public enum ReviewCommand: Equatable, Sendable {
     case selectSession(ReviewSelection)
+    case openEvidence(scope: LibraryScope, reference: EvidenceReference)
     case clearSelection
     case refresh
     case seek(lineID: TranscriptLineID, utf8ByteOffset: Int)

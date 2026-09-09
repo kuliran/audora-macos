@@ -371,22 +371,151 @@ private extension View {
     }
 }
 
+struct CoachEvidenceObservationView: View {
+    let markdown: String
+    let evidence: [EvidenceReference]
+    let availability: (EvidenceReference) -> CoachEvidenceLinkAvailability
+    let onOpenEvidence: (EvidenceReference) -> Void
+    let onUnavailable: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Evidence-backed observation", systemImage: "quote.bubble")
+                .font(.caption.weight(.semibold))
+            Text(renderedMarkdown)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(Array(evidence.enumerated()), id: \.offset) { _, reference in
+                CoachEvidenceLinkView(
+                    reference: reference,
+                    availability: availability(reference),
+                    onOpen: onOpenEvidence,
+                    onUnavailable: onUnavailable
+                )
+            }
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var renderedMarkdown: AttributedString {
+        (try? AttributedString(markdown: markdown)) ?? AttributedString(markdown)
+    }
+}
+
+enum CoachEvidenceLinkAvailability: Equatable {
+    case available
+    case unavailable(String)
+
+    var explanation: String? {
+        guard case let .unavailable(explanation) = self else { return nil }
+        return explanation
+    }
+}
+
+struct CoachEvidenceLinkView: View {
+    let reference: EvidenceReference
+    let availability: CoachEvidenceLinkAvailability
+    let onOpen: (EvidenceReference) -> Void
+    let onUnavailable: (String) -> Void
+    @State private var isHovering = false
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button {
+            if availability == .available {
+                onOpen(reference)
+            } else if let explanation = availability.explanation {
+                onUnavailable(explanation)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "play.circle.fill")
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(reference.display.sessionLabel)
+                        .font(.caption.weight(.semibold))
+                        .underline(isHovering || isFocused)
+                    Text(
+                        "\(Self.format(reference.display.startMilliseconds)) · " +
+                            reference.display.trustedText
+                    )
+                    .font(.caption)
+                    .lineLimit(2)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "arrow.up.right")
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                isHovering || isFocused
+                    ? Color.accentColor.opacity(0.12)
+                    : Color.secondary.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(
+                        isFocused ? Color.accentColor : Color.secondary.opacity(0.45),
+                        lineWidth: isFocused ? 2 : 1
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+        .focused($isFocused)
+        .onHover { isHovering = $0 }
+        .accessibilityLabel(
+            "Open evidence in \(reference.display.sessionLabel) at " +
+                Self.format(reference.display.startMilliseconds)
+        )
+        .accessibilityHint(
+            availability.explanation ??
+                "Opens Transcript Review, highlights this evidence, and seeks audio."
+        )
+        if let explanation = availability.explanation {
+            Text(explanation)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Evidence unavailable: \(explanation)")
+        }
+    }
+
+    private static func format(_ milliseconds: UInt64) -> String {
+        let totalSeconds = milliseconds / 1_000
+        return String(
+            format: "%02llu:%02llu.%03llu",
+            totalSeconds / 60,
+            totalSeconds % 60,
+            milliseconds % 1_000
+        )
+    }
+}
+
 public struct ChatRootView: View {
     @StateObject private var model: ChatPresentationModel
     @ObservedObject private var dispatcher: ChatCommandDispatcher
     @State private var renameTitle = ""
     private let scope: LibraryScope
     private let onOpenSession: (SessionID) -> Void
+    private let onOpenEvidence: (EvidenceReference) -> Void
 
     public init(
         dispatcher: ChatCommandDispatcher,
         scope: LibraryScope,
-        onOpenSession: @escaping (SessionID) -> Void = { _ in }
+        onOpenSession: @escaping (SessionID) -> Void = { _ in },
+        onOpenEvidence: @escaping (EvidenceReference) -> Void = { _ in }
     ) {
         _model = StateObject(wrappedValue: ChatPresentationModel(dispatcher: dispatcher))
         _dispatcher = ObservedObject(wrappedValue: dispatcher)
         self.scope = scope
         self.onOpenSession = onOpenSession
+        self.onOpenEvidence = onOpenEvidence
     }
 
     public var body: some View {
@@ -524,9 +653,20 @@ public struct ChatRootView: View {
                         Text("No completed Coach turns yet.")
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
+                    } else if aggregate.messages.isEmpty {
                         Text("\(aggregate.chat.messageIDs.count) completed messages")
+                            .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 12) {
+                                ForEach(aggregate.messages, id: \.id) { message in
+                                    successfulMessageView(message)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 300)
                     }
                 }
                 composerView
@@ -539,6 +679,69 @@ public struct ChatRootView: View {
                 )
             ) {
                 renameTitle = aggregate.chat.title.rawValue
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func successfulMessageView(_ message: ChatMessage) -> some View {
+        switch message.content {
+        case let .user(text):
+            VStack(alignment: .leading, spacing: 4) {
+                Text("You").font(.caption.weight(.semibold))
+                Text(text)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        case let .coach(blocks):
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Coach").font(.caption.weight(.semibold))
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                    switch block {
+                    case let .markdown(markdown):
+                        Text(renderedMarkdown(markdown))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    case let .evidenceObservation(markdown, evidence):
+                        CoachEvidenceObservationView(
+                            markdown: markdown,
+                            evidence: evidence,
+                            availability: evidenceAvailability,
+                            onOpenEvidence: onOpenEvidence,
+                            onUnavailable: model.announceEvidenceUnavailable
+                        )
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func renderedMarkdown(_ source: String) -> AttributedString {
+        (try? AttributedString(markdown: source)) ?? AttributedString(source)
+    }
+
+    private func evidenceAvailability(
+        _ reference: EvidenceReference
+    ) -> CoachEvidenceLinkAvailability {
+        switch model.snapshot.openedAttachments {
+        case .notRequested, .resolving:
+            .unavailable("Checking the exact Transcript Revision…")
+        case .failed:
+            .unavailable("The exact Transcript Revision could not be verified.")
+        case let .resolved(resolutions):
+            guard let resolved = resolutions.first(where: {
+                $0.attachment.sessionID == reference.sessionID &&
+                    $0.attachment.transcriptRevisionID ==
+                    reference.transcriptRevisionID
+            }) else {
+                return .unavailable("The attached Transcript Revision is unavailable.")
+            }
+            switch resolved.resolution {
+            case .available:
+                return .available
+            case let .unavailable(reason):
+                return .unavailable(
+                    "The supporting Session is \(Self.attachmentUnavailableText(reason))."
+                )
             }
         }
     }

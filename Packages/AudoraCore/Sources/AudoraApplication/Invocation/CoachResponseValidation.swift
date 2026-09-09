@@ -157,7 +157,7 @@ enum ValidatedCoachResponseBlock: Equatable, Sendable {
     case markdown(String)
     case evidenceObservation(
         markdown: String,
-        evidence: [CoachResponseEvidencePointer]
+        evidence: [EvidenceReference]
     )
 
     var markdown: String {
@@ -166,9 +166,12 @@ enum ValidatedCoachResponseBlock: Equatable, Sendable {
         }
     }
 
-    var isPlainMarkdown: Bool {
-        guard case .markdown = self else { return false }
-        return true
+    var messageBlock: CoachMessageBlock {
+        switch self {
+        case let .markdown(markdown): .markdown(markdown)
+        case let .evidenceObservation(markdown, evidence):
+            .evidenceObservation(markdown: markdown, evidence: evidence)
+        }
     }
 }
 
@@ -260,14 +263,17 @@ struct ValidatedCoachResponse: Equatable, Sendable {
         return messageBlocks.map(\.markdown).joined(separator: "\n\n")
     }
 
-    /// #29 and #30 add evidence-block and Profile-effect publication. Until
-    /// then, fail closed rather than silently dropping a validated component
-    /// while publishing its message and optional Memory replacement.
+    var publicationBlocks: [CoachMessageBlock] {
+        messageBlocks.map(\.messageBlock)
+    }
+
+    /// #30 adds Profile-effect publication. Until then, fail closed rather than
+    /// silently dropping a validated Profile component while publishing prose,
+    /// evidence observations, and an optional Memory replacement.
     var isSupportedByCurrentPublicationSlice: Bool {
         proposedProfileEdits.isEmpty &&
             appendedProfileEvidence.isEmpty &&
-            messageBlocks.count == 1 &&
-            messageBlocks.allSatisfy(\.isPlainMarkdown)
+            !messageBlocks.isEmpty
     }
 }
 
@@ -277,6 +283,27 @@ enum CoachResponseTriggerPosition: Equatable, Sendable {
 }
 
 struct CoachResponseTranscriptEvidenceIndex: Equatable, Sendable {
+    struct Word: Equatable, Sendable {
+        let id: CoachResponseWordID
+        let durableID: TranscriptWordID
+        let text: String
+        let startMilliseconds: UInt64
+        let endMilliseconds: UInt64
+    }
+
+    struct AudioEvent: Equatable, Sendable {
+        let id: CoachResponseAudioEventID
+        let durableID: AudioEventID
+        let trustedText: String
+        let startMilliseconds: UInt64
+        let endMilliseconds: UInt64
+    }
+
+    let sessionID: SessionID
+    let transcriptRevisionID: TranscriptRevisionID
+    let displayLabel: String
+    let words: [Word]
+    let audioEvents: [CoachResponseAudioEventID: AudioEvent]
     let wordPositions: [CoachResponseWordID: Int]
     let audioEventIDs: Set<CoachResponseAudioEventID>
     let audioEventIDsIneligibleForProfileSupport: Set<CoachResponseAudioEventID>
@@ -284,7 +311,14 @@ struct CoachResponseTranscriptEvidenceIndex: Equatable, Sendable {
     init(
         wordIDs: [String],
         audioEventIDs: [String],
-        audioEventIDsIneligibleForProfileSupport: Set<String> = []
+        audioEventIDsIneligibleForProfileSupport: Set<String> = [],
+        sessionID: SessionID = try! SessionID(
+            "ses-20260830T110000000Z-1KMN"
+        ),
+        transcriptRevisionID: TranscriptRevisionID = try! TranscriptRevisionID(
+            "trv-20260830T111000000Z-1PQR"
+        ),
+        displayLabel: String = "Synthetic Session"
     ) throws {
         let parsedWordIDs = wordIDs.compactMap(CoachResponseWordID.init)
         let parsedAudioEventIDs = audioEventIDs.compactMap(
@@ -304,14 +338,71 @@ struct CoachResponseTranscriptEvidenceIndex: Equatable, Sendable {
                   of: Set(parsedAudioEventIDs)
               )
         else { throw CoachResponseValidationError.invalidPreparedContext }
-        wordPositions = Dictionary(
-            uniqueKeysWithValues: parsedWordIDs.enumerated().map {
-                ($0.element, $0.offset)
-            }
-        )
+        self.sessionID = sessionID
+        self.transcriptRevisionID = transcriptRevisionID
+        self.displayLabel = displayLabel
+        words = parsedWordIDs.enumerated().map { index, id in
+            Word(
+                id: id,
+                durableID: try! TranscriptWordID(
+                    String(format: "w%06d", index + 1)
+                ),
+                text: id.rawValue,
+                startMilliseconds: UInt64(index),
+                endMilliseconds: UInt64(index + 1)
+            )
+        }
+        wordPositions = Dictionary(uniqueKeysWithValues: words.enumerated().map {
+            ($0.element.id, $0.offset)
+        })
+        audioEvents = Dictionary(uniqueKeysWithValues: parsedAudioEventIDs.enumerated()
+            .map { index, id in
+                (
+                    id,
+                    AudioEvent(
+                        id: id,
+                        durableID: try! AudioEventID(
+                            String(format: "a%06d", index + 1)
+                        ),
+                        trustedText: id.rawValue,
+                        startMilliseconds: UInt64(index),
+                        endMilliseconds: UInt64(index + 1)
+                    )
+                )
+            })
         self.audioEventIDs = Set(parsedAudioEventIDs)
         self.audioEventIDsIneligibleForProfileSupport =
             Set(parsedIneligibleAudioEventIDs)
+    }
+
+    init(
+        sessionID: SessionID,
+        transcriptRevisionID: TranscriptRevisionID,
+        displayLabel: String,
+        words: [Word],
+        audioEvents: [AudioEvent],
+        audioEventIDsIneligibleForProfileSupport: Set<CoachResponseAudioEventID>
+    ) throws {
+        guard !displayLabel.isEmpty,
+              Set(words.map(\.id)).count == words.count,
+              Set(audioEvents.map(\.id)).count == audioEvents.count,
+              audioEventIDsIneligibleForProfileSupport.isSubset(
+                  of: Set(audioEvents.map(\.id))
+              )
+        else { throw CoachResponseValidationError.invalidPreparedContext }
+        self.sessionID = sessionID
+        self.transcriptRevisionID = transcriptRevisionID
+        self.displayLabel = displayLabel
+        self.words = words
+        self.audioEvents = Dictionary(uniqueKeysWithValues: audioEvents.map {
+            ($0.id, $0)
+        })
+        wordPositions = Dictionary(uniqueKeysWithValues: words.enumerated().map {
+            ($0.element.id, $0.offset)
+        })
+        audioEventIDs = Set(audioEvents.map(\.id))
+        self.audioEventIDsIneligibleForProfileSupport =
+            audioEventIDsIneligibleForProfileSupport
     }
 }
 
@@ -381,6 +472,7 @@ struct CoachResponseValidationContext: Equatable, Sendable {
                   case let .string(rawAttachmentID)? = fields["sessionAttachmentId"],
                   let attachmentID = try? ChatSessionAttachmentID(rawAttachmentID),
                   attachmentID == expectedAttachments[index].attachmentID,
+                  case let .string(displayLabel)? = fields["displayLabel"],
                   case let .string(kind)? = fields["kind"]
             else { throw CoachResponseValidationError.invalidPreparedContext }
 
@@ -404,7 +496,11 @@ struct CoachResponseValidationContext: Equatable, Sendable {
                 throw CoachResponseValidationError.invalidPreparedContext
             }
             guard transcriptIndexes.updateValue(
-                try Self.index(transcript: transcript),
+                try Self.index(
+                    transcript: transcript,
+                    attachment: expectedAttachments[index],
+                    displayLabel: displayLabel
+                ),
                 forKey: attachmentID
             ) == nil else {
                 throw CoachResponseValidationError.invalidPreparedContext
@@ -420,47 +516,107 @@ struct CoachResponseValidationContext: Equatable, Sendable {
     }
 
     private static func index(
-        transcript: CanonicalJSONValue
+        transcript: CanonicalJSONValue,
+        attachment: ChatSessionAttachment,
+        displayLabel: String
     ) throws -> CoachResponseTranscriptEvidenceIndex {
         guard case let .object(fields) = transcript,
               case let .array(lines)? = fields["lines"],
               case let .array(audioEvents)? = fields["audioEvents"]
         else { throw CoachResponseValidationError.invalidPreparedContext }
-        var wordIDs: [CoachResponseWordID] = []
+        var indexedWords: [CoachResponseTranscriptEvidenceIndex.Word] = []
         for line in lines {
             guard case let .object(lineFields) = line,
-                  case let .array(words)? = lineFields["words"]
+                  case let .array(words)? = lineFields["words"],
+                  let lineRange = try? timeRange(lineFields["timeRange"])
             else { throw CoachResponseValidationError.invalidPreparedContext }
             for word in words {
                 guard case let .object(wordFields) = word,
                       case let .string(rawWordID)? = wordFields["wordId"],
-                      let wordID = CoachResponseWordID(rawWordID)
+                      let wordID = CoachResponseWordID(rawWordID),
+                      let durableWordID = try? TranscriptWordID(rawWordID),
+                      case let .string(text)? = wordFields["text"]
                 else { throw CoachResponseValidationError.invalidPreparedContext }
-                wordIDs.append(wordID)
+                let range: (UInt64, UInt64)
+                if let wordRangeValue = wordFields["timeRange"] {
+                    range = try timeRange(wordRangeValue)
+                } else {
+                    range = lineRange
+                }
+                indexedWords.append(
+                    .init(
+                        id: wordID,
+                        durableID: durableWordID,
+                        text: text,
+                        startMilliseconds: range.0,
+                        endMilliseconds: range.1
+                    )
+                )
             }
         }
         let parsedAudioEvents = try audioEvents.map {
-            event -> (CoachResponseAudioEventID, TranscriptAudioEventCategory) in
+            event -> (
+                CoachResponseTranscriptEvidenceIndex.AudioEvent,
+                TranscriptAudioEventCategory
+            ) in
             guard case let .object(eventFields) = event,
                   case let .string(rawAudioEventID)? = eventFields["audioEventId"],
                   let audioEventID = CoachResponseAudioEventID(rawAudioEventID),
+                  let durableAudioEventID = try? AudioEventID(rawAudioEventID),
                   case let .string(rawCategory)? = eventFields["category"],
-                  let category = TranscriptAudioEventCategory(rawValue: rawCategory)
+                  let category = TranscriptAudioEventCategory(rawValue: rawCategory),
+                  let range = try? timeRange(eventFields["timeRange"])
             else { throw CoachResponseValidationError.invalidPreparedContext }
-            return (audioEventID, category)
+            return (
+                .init(
+                    id: audioEventID,
+                    durableID: durableAudioEventID,
+                    trustedText: trustedText(for: category),
+                    startMilliseconds: range.0,
+                    endMilliseconds: range.1
+                ),
+                category
+            )
         }
         return try CoachResponseTranscriptEvidenceIndex(
-            wordIDs: wordIDs.map(\.rawValue),
-            audioEventIDs: parsedAudioEvents.map(\.0.rawValue),
+            sessionID: attachment.sessionID,
+            transcriptRevisionID: attachment.transcriptRevisionID,
+            displayLabel: displayLabel,
+            words: indexedWords,
+            audioEvents: parsedAudioEvents.map(\.0),
             audioEventIDsIneligibleForProfileSupport: Set(
-                parsedAudioEvents.compactMap { eventID, category in
+                parsedAudioEvents.compactMap { event, category in
                     switch category {
-                    case .muted, .captureGap: eventID.rawValue
+                    case .muted, .captureGap: event.id
                     case .nonSpeech, .silentPause, .untranscribedVoicedInterval: nil
                     }
                 }
             )
         )
+    }
+
+    private static func timeRange(
+        _ value: CanonicalJSONValue?
+    ) throws -> (UInt64, UInt64) {
+        guard case let .object(fields)? = value,
+              case let .integer(rawStart)? = fields["startMs"],
+              case let .integer(rawEnd)? = fields["endMs"],
+              rawStart >= 0,
+              rawEnd > rawStart
+        else { throw CoachResponseValidationError.invalidPreparedContext }
+        return (UInt64(rawStart), UInt64(rawEnd))
+    }
+
+    private static func trustedText(
+        for category: TranscriptAudioEventCategory
+    ) -> String {
+        switch category {
+        case .nonSpeech: "Non-speech sound"
+        case .silentPause: "Silent pause"
+        case .untranscribedVoicedInterval: "Untranscribed voiced interval"
+        case .muted: "Muted interval"
+        case .captureGap: "Capture gap"
+        }
     }
 }
 
@@ -498,13 +654,19 @@ struct CoachResponseValidator: Sendable {
             throw CoachResponseValidationError.messageBlocksRequired
         }
 
-        for block in decoded.messageBlocks {
+        let resolvedMessageBlocks = try decoded.messageBlocks.map { block in
             try validateMarkdown(block.markdown)
-            if case let .evidenceObservation(_, evidence) = block {
-                try validate(
+            switch block {
+            case let .markdown(markdown):
+                return ValidatedCoachResponseBlock.markdown(markdown)
+            case let .evidenceObservation(markdown, evidence):
+                return .evidenceObservation(
+                    markdown: markdown,
+                    evidence: try resolve(
                     evidence: evidence,
                     purpose: .messageObservation,
                     in: context
+                    )
                 )
             }
         }
@@ -512,14 +674,14 @@ struct CoachResponseValidator: Sendable {
             try validate(memory: memory, in: context)
         }
         for proposal in decoded.proposedProfileEdits {
-            try validate(
+            _ = try resolve(
                 evidence: proposal.evidence,
                 purpose: .profileSupport,
                 in: context
             )
         }
         for append in decoded.appendedProfileEvidence {
-            try validate(
+            _ = try resolve(
                 evidence: append.evidence,
                 purpose: .profileSupport,
                 in: context
@@ -528,7 +690,7 @@ struct CoachResponseValidator: Sendable {
         try validateProfileEffects(decoded, in: context)
 
         return ValidatedCoachResponse(
-            messageBlocks: decoded.messageBlocks,
+            messageBlocks: resolvedMessageBlocks,
             newMemory: decoded.newMemory,
             proposedProfileEdits: decoded.proposedProfileEdits,
             appendedProfileEvidence: decoded.appendedProfileEvidence
@@ -775,12 +937,12 @@ struct CoachResponseValidator: Sendable {
 
     private enum EvidencePurpose { case messageObservation, profileSupport }
 
-    private func validate(
+    private func resolve(
         evidence: [CoachResponseEvidencePointer],
         purpose: EvidencePurpose,
         in context: CoachResponseValidationContext
-    ) throws {
-        for pointer in evidence {
+    ) throws -> [EvidenceReference] {
+        try evidence.map { pointer in
             guard let transcript = context.transcripts[pointer.sessionAttachmentID]
             else { throw CoachResponseValidationError.invalidEvidencePointer }
             switch pointer.target {
@@ -789,8 +951,27 @@ struct CoachResponseValidator: Sendable {
                       let end = transcript.wordPositions[endWordID],
                       start <= end
                 else { throw CoachResponseValidationError.invalidEvidencePointer }
+                let words = Array(transcript.words[start ... end])
+                do {
+                    return try EvidenceReference(
+                        sessionID: transcript.sessionID,
+                        transcriptRevisionID: transcript.transcriptRevisionID,
+                        target: .wordRange(
+                            startWordID: words[0].durableID,
+                            endWordID: words[words.count - 1].durableID
+                        ),
+                        display: EvidenceReferenceDisplay(
+                            sessionLabel: transcript.displayLabel,
+                            trustedText: words.map(\.text).joined(separator: " "),
+                            startMilliseconds: words[0].startMilliseconds,
+                            endMilliseconds: words[words.count - 1].endMilliseconds
+                        )
+                    )
+                } catch {
+                    throw CoachResponseValidationError.invalidEvidencePointer
+                }
             case let .audioEvent(audioEventID):
-                guard transcript.audioEventIDs.contains(audioEventID) else {
+                guard let event = transcript.audioEvents[audioEventID] else {
                     throw CoachResponseValidationError.invalidEvidencePointer
                 }
                 if purpose == .profileSupport,
@@ -798,6 +979,23 @@ struct CoachResponseValidator: Sendable {
                        audioEventID
                    )
                 {
+                    throw CoachResponseValidationError.invalidEvidencePointer
+                }
+                do {
+                    return try EvidenceReference(
+                        sessionID: transcript.sessionID,
+                        transcriptRevisionID: transcript.transcriptRevisionID,
+                        target: .audioEvent(
+                            audioEventID: event.durableID
+                        ),
+                        display: EvidenceReferenceDisplay(
+                            sessionLabel: transcript.displayLabel,
+                            trustedText: event.trustedText,
+                            startMilliseconds: event.startMilliseconds,
+                            endMilliseconds: event.endMilliseconds
+                        )
+                    )
+                } catch {
                     throw CoachResponseValidationError.invalidEvidencePointer
                 }
             }
@@ -833,10 +1031,24 @@ struct CoachResponseValidator: Sendable {
 }
 
 private struct ParsedCoachResponse {
-    let messageBlocks: [ValidatedCoachResponseBlock]
+    let messageBlocks: [ParsedCoachResponseBlock]
     let newMemory: ValidatedCoachResponseMemory?
     let proposedProfileEdits: [ValidatedCoachProfileEditProposal]
     let appendedProfileEvidence: [ValidatedCoachProfileEvidenceAppend]
+}
+
+private enum ParsedCoachResponseBlock {
+    case markdown(String)
+    case evidenceObservation(
+        markdown: String,
+        evidence: [CoachResponseEvidencePointer]
+    )
+
+    var markdown: String {
+        switch self {
+        case let .markdown(value), let .evidenceObservation(value, _): value
+        }
+    }
 }
 
 private struct CoachResponseSchemaDecoder {
@@ -866,7 +1078,7 @@ private struct CoachResponseSchemaDecoder {
         )
     }
 
-    private func block(_ value: Any) throws -> ValidatedCoachResponseBlock {
+    private func block(_ value: Any) throws -> ParsedCoachResponseBlock {
         let discriminator = try discriminatedObject(value)
         switch discriminator.kind {
         case "markdown":

@@ -2209,6 +2209,7 @@ public actor DefaultChatFeature: ChatFeature {
         guard let processingAggregate = try? ChatAggregate(
             chat: aggregate.chat,
             memory: aggregate.memory,
+            messages: aggregate.messages,
             pendingUserTurn: processingPending
         ) else {
             state = replacing(activity: nil, notice: .pendingUserTurnFailed)

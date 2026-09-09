@@ -3,6 +3,173 @@ import AudoraDomain
 import XCTest
 
 final class ReviewFeatureTests: XCTestCase {
+    func testOpenEvidenceSelectsExactHistoricalRevisionHighlightsAndSeeks()
+        async throws
+    {
+        let historical = try reviewRevision(
+            id: "trv-20260830T121000000Z-4FGH",
+            text: "Hello, world!"
+        )
+        let current = try reviewRevision(
+            id: "trv-20260830T122000000Z-5GHJ",
+            text: "Hello, world!"
+        )
+        let scope = LibraryScope(libraryID: revisionFixtureLibraryID)
+        let selection = ReviewSelection(scope: scope, sessionID: historical.sessionID)
+        let revisions = [historical.revisionID, current.revisionID]
+        let capability = try ReviewAudioCapabilityID("review-evidence")
+        let snapshots = try [historical, current].map { revision in
+            try ReviewSessionSnapshot(
+                selection: selection,
+                revisionIDs: revisions,
+                selectedRevision: revision,
+                audioCapabilityID: capability,
+                canonicalAudioDurationMilliseconds: revision.durationMilliseconds
+            )
+        }
+        let sessions = ReviewSessionStoreStub(
+            snapshots: snapshots,
+            selectedRevisionID: current.revisionID
+        )
+        let playback = ReviewPlaybackStub()
+        let visibility = ReviewAnnotationVisibilityStub(visible: false)
+        let feature = DefaultReviewFeature(
+            sessions: sessions,
+            playback: playback,
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: visibility
+        )
+        let reference = try EvidenceReference(
+            sessionID: historical.sessionID,
+            transcriptRevisionID: historical.revisionID,
+            target: .wordRange(
+                startWordID: historical.lines[0].words[0].wordID,
+                endWordID: historical.lines[0].words[1].wordID
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Historical practice",
+                trustedText: "Hello world",
+                startMilliseconds: 999,
+                endMilliseconds: 1_000
+            )
+        )
+
+        await feature.send(.openEvidence(scope: scope, reference: reference))
+
+        guard case let .ready(ready) = await feature.currentState else {
+            return XCTFail("evidence target must open in Review")
+        }
+        XCTAssertEqual(ready.selectedRevisionID, historical.revisionID)
+        XCTAssertEqual(
+            ready.evidenceHighlight,
+            .wordRange(historical.lines[0].words.map(\.wordID))
+        )
+        XCTAssertEqual(ready.playback.positionMilliseconds, 100)
+        XCTAssertFalse(ready.annotations.isVisible)
+        let seekTimes = await playback.seekTimes
+        let selectionCount = await sessions.successfulSelectionCount
+        let visibilityWrites = await visibility.writes
+        XCTAssertEqual(seekTimes, [100])
+        XCTAssertEqual(selectionCount, 1)
+        XCTAssertEqual(visibilityWrites, [])
+    }
+
+    func testOpenEvidenceKeepsCanonicalHighlightWhenAudioIsUnavailable()
+        async throws
+    {
+        let revision = try reviewRevision(
+            id: "trv-20260830T121000000Z-4FGH",
+            text: "Hello, world!"
+        )
+        let scope = LibraryScope(libraryID: revisionFixtureLibraryID)
+        let selection = ReviewSelection(scope: scope, sessionID: revision.sessionID)
+        let stored = try ReviewSessionSnapshot(
+            selection: selection,
+            revisionIDs: [revision.revisionID],
+            selectedRevision: revision,
+            audioCapabilityID: ReviewAudioCapabilityID("review-evidence-no-audio"),
+            canonicalAudioDurationMilliseconds: revision.durationMilliseconds
+        )
+        let reference = try EvidenceReference(
+            sessionID: revision.sessionID,
+            transcriptRevisionID: revision.revisionID,
+            target: .wordRange(
+                startWordID: revision.lines[0].words[0].wordID,
+                endWordID: revision.lines[0].words[1].wordID
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Practice",
+                trustedText: "Hello world",
+                startMilliseconds: 900,
+                endMilliseconds: 1_000
+            )
+        )
+        let feature = DefaultReviewFeature(
+            sessions: ReviewSessionStoreStub(snapshot: stored),
+            playback: UnavailableReviewPlaybackStub(),
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: ReviewAnnotationVisibilityStub(visible: true)
+        )
+
+        await feature.send(.openEvidence(scope: scope, reference: reference))
+        await feature.send(.openEvidence(scope: scope, reference: reference))
+
+        guard case let .ready(ready) = await feature.currentState else {
+            return XCTFail("exact transcript evidence must remain available")
+        }
+        XCTAssertFalse(ready.playbackAvailable)
+        XCTAssertEqual(ready.notice, .playbackUnavailable)
+        XCTAssertEqual(ready.playback.positionMilliseconds, 100)
+        XCTAssertEqual(
+            ready.evidenceHighlight,
+            .wordRange(revision.lines[0].words.map(\.wordID))
+        )
+    }
+
+    func testOpenEvidenceRejectsDanglingCanonicalAnchor() async throws {
+        let revision = try reviewRevision(
+            id: "trv-20260830T121000000Z-4FGH",
+            text: "Hello, world!"
+        )
+        let scope = LibraryScope(libraryID: revisionFixtureLibraryID)
+        let selection = ReviewSelection(scope: scope, sessionID: revision.sessionID)
+        let stored = try ReviewSessionSnapshot(
+            selection: selection,
+            revisionIDs: [revision.revisionID],
+            selectedRevision: revision,
+            audioCapabilityID: ReviewAudioCapabilityID("review-dangling-evidence"),
+            canonicalAudioDurationMilliseconds: revision.durationMilliseconds
+        )
+        let reference = try EvidenceReference(
+            sessionID: revision.sessionID,
+            transcriptRevisionID: revision.revisionID,
+            target: .wordRange(
+                startWordID: TranscriptWordID("w999998"),
+                endWordID: TranscriptWordID("w999999")
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Practice",
+                trustedText: "Unavailable words",
+                startMilliseconds: 900,
+                endMilliseconds: 1_000
+            )
+        )
+        let feature = DefaultReviewFeature(
+            sessions: ReviewSessionStoreStub(snapshot: stored),
+            playback: ReviewPlaybackStub(),
+            retranscriber: ReviewRetranscriberStub(),
+            annotationVisibility: ReviewAnnotationVisibilityStub(visible: true)
+        )
+
+        await feature.send(.openEvidence(scope: scope, reference: reference))
+
+        let state = await feature.currentState
+        XCTAssertEqual(
+            state,
+            .unavailable(selection: selection, reason: .integrityMismatch)
+        )
+    }
+
     func testAnnotationVisibilityChangesOnlyOverlayPresentation() async throws {
         let revision = try reviewRevision(
             id: "trv-20260830T121000000Z-4FGH",
@@ -977,6 +1144,20 @@ private actor ReviewPlaybackStub: ReviewPlaybackPort {
             status: status
         )
     }
+}
+
+private actor UnavailableReviewPlaybackStub: ReviewPlaybackPort {
+    nonisolated var states: AsyncStream<ReviewPlaybackSnapshot> {
+        AsyncStream { $0.finish() }
+    }
+
+    func load(_ source: ReviewAudioSource) async -> ReviewPlaybackSnapshot? { nil }
+    func play() async -> ReviewPlaybackSnapshot? { nil }
+    func pause() async -> ReviewPlaybackSnapshot? { nil }
+    func seek(
+        toMilliseconds milliseconds: UInt64
+    ) async -> ReviewPlaybackSnapshot? { nil }
+    func clear(_ audioCapabilityID: ReviewAudioCapabilityID?) async {}
 }
 
 private actor MutableReviewSessionStub: ReviewSessionPort {

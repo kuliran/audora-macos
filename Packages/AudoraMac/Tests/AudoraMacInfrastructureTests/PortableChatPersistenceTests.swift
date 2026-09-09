@@ -2044,6 +2044,13 @@ final class PortableChatPersistenceTests: XCTestCase {
                 object.removeValue(forKey: "profileStatementGeneration")
                 if message.id == fixture.publication.userMessage.id {
                     object["text"] = String(repeating: "é", count: 8_193)
+                } else {
+                    let blocks = try XCTUnwrap(
+                        object.removeValue(forKey: "blocks") as? [[String: Any]]
+                    )
+                    object["markdown"] = try XCTUnwrap(
+                        blocks.first?["markdown"] as? String
+                    )
                 }
                 try JSONSerialization.data(
                     withJSONObject: object,
@@ -2051,13 +2058,98 @@ final class PortableChatPersistenceTests: XCTestCase {
                 ).write(to: url, options: .atomic)
             }
 
-            XCTAssertEqual(
-                try persistence.load(
-                    fixture.locked.chat.id,
-                    at: root,
-                    in: scope
+            guard case let .readWrite(reopened) = try persistence.load(
+                fixture.locked.chat.id,
+                at: root,
+                in: scope
+            ) else { return XCTFail("legacy v1 pair did not reopen") }
+            XCTAssertEqual(reopened.chat, fixture.publication.replacement.chat)
+            XCTAssertEqual(reopened.memory, fixture.publication.replacement.memory)
+            XCTAssertEqual(reopened.messages.map(\.persistedSchemaVersion), [1, 1])
+            XCTAssertEqual(reopened.messages[0].coachProfile, nil)
+            XCTAssertEqual(reopened.messages[1].coachProfile, nil)
+        }
+    }
+
+    func testStructuredEvidenceMessageUsesV3AndReopensExactly() throws {
+        try withCreatedLibrary { root, scope in
+            let persistence = PortableChatPersistence()
+            let fixture = try makeInvocationFixture(
+                persistence: persistence,
+                root: root,
+                scope: scope,
+                attachments: try ChatAttachments(
+                    validating: [
+                        ChatSessionAttachment(
+                            attachmentID: try ChatSessionAttachmentID(
+                                "practice-session"
+                            ),
+                            sessionID: try SessionID(
+                                "ses-20260830T115900000Z-1ABC"
+                            ),
+                            transcriptRevisionID: try TranscriptRevisionID(
+                                "trv-20260830T115900000Z-2DEF"
+                            )
+                        ),
+                    ]
+                )
+            )
+            let reference = try EvidenceReference(
+                sessionID: SessionID("ses-20260830T115900000Z-1ABC"),
+                transcriptRevisionID: TranscriptRevisionID(
+                    "trv-20260830T115900000Z-2DEF"
                 ),
-                .readWrite(fixture.publication.replacement)
+                target: .wordRange(
+                    startWordID: TranscriptWordID("w000001"),
+                    endWordID: TranscriptWordID("w000003")
+                ),
+                display: EvidenceReferenceDisplay(
+                    sessionLabel: "Practice Session",
+                    trustedText: "Pause before the transition",
+                    startMilliseconds: 1_000,
+                    endMilliseconds: 2_250
+                )
+            )
+            let publication = try PublishCoachInvocationMutation(
+                base: fixture.locked,
+                invocation: fixture.install.invocation,
+                coachBlocks: [
+                    .markdown("Try a deliberate pause."),
+                    .evidenceObservation(
+                        markdown: "This transition was well separated.",
+                        evidence: [reference]
+                    ),
+                ],
+                completedAt: UTCInstant("2026-08-30T12:00:03.000Z")
+            )
+            guard case .installed = try persistence.installInvocation(
+                fixture.install,
+                at: root
+            ) else { return XCTFail("Invocation did not install") }
+            XCTAssertEqual(
+                try persistence.publishInvocation(publication, at: root, in: scope),
+                .committed(publication.replacement)
+            )
+
+            let messageURL = chatRoot(root, fixture.locked.chat.id)
+                .appendingPathComponent(
+                    "messages/\(publication.coachMessage.id.rawValue).json"
+                )
+            let object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: messageURL))
+                    as? [String: Any]
+            )
+            XCTAssertEqual(object["schemaVersion"] as? Int, 3)
+            XCTAssertNil(object["markdown"])
+            XCTAssertEqual((object["blocks"] as? [[String: Any]])?.count, 2)
+            XCTAssertEqual(
+                try persistence.load(fixture.locked.chat.id, at: root, in: scope),
+                .readWrite(publication.replacement)
+            )
+            XCTAssertEqual(
+                try persistence.publishInvocation(publication, at: root, in: scope),
+                .committed(publication.replacement),
+                "idempotent replay must decode and compare the exact evidence"
             )
         }
     }
@@ -2071,6 +2163,13 @@ final class PortableChatPersistenceTests: XCTestCase {
             var object = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: Data(contentsOf: url))
                     as? [String: Any]
+            )
+            object["schemaVersion"] = 2
+            let blocks = try XCTUnwrap(
+                object.removeValue(forKey: "blocks") as? [[String: Any]]
+            )
+            object["markdown"] = try XCTUnwrap(
+                blocks.first?["markdown"] as? String
             )
             object.removeValue(forKey: "profileRevisionId")
             object.removeValue(forKey: "profileStatementGeneration")
@@ -2804,7 +2903,8 @@ final class PortableChatPersistenceTests: XCTestCase {
         persistence: PortableChatPersistence,
         root: URL,
         scope: LibraryScope,
-        ordinal: Int = 0
+        ordinal: Int = 0,
+        attachments: ChatAttachments = .empty
     ) throws -> InvocationPersistenceFixture {
         let minute = ordinal == 0 ? "00" : "01"
         let chatID = try ChatID("cht-20260830T12\(minute)00000Z-2ABC")
@@ -2818,7 +2918,8 @@ final class PortableChatPersistenceTests: XCTestCase {
                 draftID: draftID,
                 memoryID: memoryID,
                 instant: createdAt,
-                profileStatementGeneration: 7
+                profileStatementGeneration: 7,
+                attachments: attachments
             ),
             at: root
         )

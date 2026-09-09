@@ -110,11 +110,11 @@ Retry/Discard publication failure when the local write fails.
 | Worker | App-supervised local process behind a transport-neutral port; first profile uses versioned JSON Lines over anonymous pipes |
 | Processing | Durable states, visible phases, monotonic progress, approximate ETA, Cancel, Retry |
 | Transcript | Immutable revisions retained in version one, stable line/word IDs, integer-millisecond timings |
-| Review | Audio player, word-level seek with line fallback, active-word highlighting |
+| Review | Audio player, word-level seek with line fallback, active-word highlighting, and exact-revision Evidence Reference highlighting and seek |
 | Annotation | Local Textual Events and Audio Events; broader reformulation interpretation belongs to coaching |
 | Coach | Required user-triggered capability behind a replaceable provider port; Codex is the only version-one provider, receives small attached transcripts inline and can retrieve large ones through a capability-scoped batch read, and runs only when Engine-use Policy permits external processing |
 | Development Profile | One compact, revisioned structured statement set included in every coaching request; it records goals, preferences, accepted speaking observations, and growth directions without becoming a chronological log or character inference |
-| Chat | Persisted but disposable, finite-capacity reflection over the Development Profile and zero or more immutable Chat Session Attachments; it owns current bounded structured Coach Memory, one recoverable Chat Draft, at most one Pending User Turn, successful message history, and at most one unresolved Profile Change Proposal or Profile-publication failure |
+| Chat | Persisted but disposable, finite-capacity reflection over the Development Profile and zero or more immutable Chat Session Attachments; it owns current bounded structured Coach Memory, one recoverable Chat Draft, at most one Pending User Turn, successful ordered Markdown/Evidence Observation message blocks, and at most one unresolved Profile Change Proposal or Profile-publication failure |
 | Storage | One active portable Library, isolated from every other Library, containing its preferences, Development Profile, Sessions with owned audio, and chats |
 | Recovery | Explicit missing/corrupt/in-trash states; moving a Session to Trash never cascades to Chats or changes accepted Development Profile statements; version one never empties Trash |
 
@@ -165,17 +165,22 @@ receive fresh opaque handles, and one atomic all-or-none batch read may disclose
 only the allowlisted canonical transcript fields. The broker permits one exact
 transport replay, rejects any second semantic request, and revokes its capability
 when the Attempt ends. Live composition still does not launch because the shipping
-Provider descriptor remains unqualified; evidence-block and Profile response
-effects remain outside this executable slice. Every complete provider response remains
-opaque until Application validates its closed schema, collector and token limits,
-passive Markdown, response-position authority, Memory bounds, evidence pointers,
-active Profile targets, and effect conflicts as one indivisible batch. Ordinary
-answers require at least one message block; the future Reconsider trigger may
-return none. The current publisher accepts one plain Markdown block with an
-optional bounded Memory replacement. Omission or canonical equality retains the
-existing snapshot identity; a changed value is staged and selected by the same
+Provider descriptor remains unqualified. The #29 evidence slice durably preserves
+ordered Markdown and Evidence Observation blocks in the published coach message.
+It resolves every provider pointer locally through the exact immutable Session and
+Transcript Revision pinned by its Chat attachment, stores typed Word-range or Audio
+Event anchors with a trusted app-derived display snapshot, and rejects the whole
+response when an attachment or target does not resolve there. Profile response
+effects remain outside this executable slice. Every complete provider response
+remains opaque until Application validates its closed schema, collector and token
+limits, passive Markdown, response-position authority, Memory bounds, evidence
+pointers, active Profile targets, and effect conflicts as one indivisible batch.
+Ordinary answers require at least one message block; the future Reconsider trigger may
+return none. The current publisher accepts the ordered supported message blocks
+with an optional bounded Memory replacement. Omission or canonical equality retains
+the existing snapshot identity; a changed value is staged and selected by the same
 Chat-manifest compare-and-swap as the message pair, after which pointer-led recovery
-removes the superseded snapshot. It fails closed on evidence and Profile components
+removes the superseded snapshot. It still fails closed on Profile components
 assigned to later persistence slices. Invalid or unsupported batches publish no
 message or state effect, receive no automatic repair Attempt, and retain only
 closed metadata diagnostics behind the bounded Pending-turn **Retry** and
@@ -331,24 +336,35 @@ removes content from copy or export.
 Coach messages combine flexible Markdown with optional, always-visible inset
 Evidence-backed Observation blocks whose app-generated controls open the exact
 supporting Transcript Revision, highlight its trusted anchor, and seek audio when
-available. Hovering an available evidence control adds a subtle background highlight
-and underlines its label; keyboard focus receives the same emphasis plus the native
-focus ring. They do not create transcript comments or Session-owned feedback.
+available. Every control is visibly interactive at rest. Hovering adds a subtle
+background highlight and underlines its label; keyboard focus receives the same
+emphasis plus the native focus ring. Click, Enter, or Space performs the same open,
+highlight, and seek command. The resulting highlight is transient Review state;
+the command does not create an Annotation, transcript comment, or Session-owned
+feedback.
+
 When a requested transcript batch is unavailable or cannot fit, Application stops
 that Attempt and exposes the ordinary UserRetryable turn failure, listing at most
 three affected Sessions as accessible links. It does not ask the coach to improvise
 an incomplete answer.
 
-Nested Evidence References resolve structured Session, Transcript Revision, and
-trusted word or time anchors into links. If evidence is missing, in Trash,
+Nested Evidence References are immutable local values containing an exact Session
+ID, Transcript Revision ID, and typed Word range or Audio Event anchor. Application
+creates one only after resolving the provider pointer inside the exact revision
+pinned by the Chat attachment; it never searches or substitutes another revision,
+and a dangling or cross-attachment pointer invalidates the complete response. Each
+Reference durably stores the locally derived Session label, trusted text, and
+canonical time range for display and accessibility fallback. On activation, Review
+loads that exact revision and re-resolves the typed anchor there; the saved display
+snapshot never drives highlighting or seeking. If evidence is missing, in Trash,
 corrupt, or unsupported, the reference remains visible but unavailable, with an
-explanation accessible by click/focus rather than hover alone. A compact label
-such as **Unavailable Session · 23 Aug 2026, 14:35** uses the reference's saved
-display label rather than showing a raw ID; dimming or strikethrough is
-supplemental. Restoring matching evidence heals the link. The accepted Profile
-insight remains active throughout: Session removal or loss never edits or
-re-evaluates the Profile. Evidence References are nested values, not independently
-identified Citation entities.
+explanation accessible by click/focus rather than hover alone. A compact label such
+as **Unavailable Session · 23 Aug 2026, 14:35** uses the reference's saved display
+label rather than showing a raw ID; dimming or strikethrough is supplemental.
+Restoring matching evidence heals the link. The accepted Profile insight remains
+active throughout: Session removal or loss never edits or re-evaluates the Profile.
+Evidence References are nested values, not independently identified Citation
+entities.
 
 ## Layered architecture
 

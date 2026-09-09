@@ -16,6 +16,11 @@ public struct TranscriptSeekResolver: Sendable {
         let endMilliseconds: UInt64
     }
 
+    private struct EvidenceWord: Sendable {
+        let wordID: TranscriptWordID
+        let seekMilliseconds: UInt64
+    }
+
     private struct IndexedLine: Sendable {
         let textUTF8ByteCount: Int
         let startMilliseconds: UInt64
@@ -25,6 +30,11 @@ public struct TranscriptSeekResolver: Sendable {
 
     private let linesByID: [TranscriptLineID: IndexedLine]
     private let timedWords: [TimedWord]
+    private let evidenceWords: [EvidenceWord]
+    private let evidenceWordPositions: [TranscriptWordID: Int]
+    private let audioEventsByID: [AudioEventID: TranscriptAudioEvent]
+    private let sessionID: SessionID?
+    private let transcriptRevisionID: TranscriptRevisionID?
     private let canonicalAudioDurationMilliseconds: UInt64
 
     public init(
@@ -32,7 +42,10 @@ public struct TranscriptSeekResolver: Sendable {
         canonicalAudioDurationMilliseconds: UInt64
     ) {
         self.init(
+            sessionID: revision.sessionID,
+            transcriptRevisionID: revision.revisionID,
             lines: revision.lines,
+            audioEvents: revision.audioEvents,
             canonicalAudioDurationMilliseconds: canonicalAudioDurationMilliseconds
         )
     }
@@ -48,10 +61,30 @@ public struct TranscriptSeekResolver: Sendable {
         lines: [TranscriptLine],
         canonicalAudioDurationMilliseconds: UInt64
     ) {
+        self.init(
+            sessionID: nil,
+            transcriptRevisionID: nil,
+            lines: lines,
+            audioEvents: [],
+            canonicalAudioDurationMilliseconds: canonicalAudioDurationMilliseconds
+        )
+    }
+
+    init(
+        sessionID: SessionID?,
+        transcriptRevisionID: TranscriptRevisionID?,
+        lines: [TranscriptLine],
+        audioEvents: [TranscriptAudioEvent],
+        canonicalAudioDurationMilliseconds: UInt64
+    ) {
         var indexedLines: [TranscriptLineID: IndexedLine] = [:]
         indexedLines.reserveCapacity(lines.count)
         var playbackWords: [TimedWord] = []
         playbackWords.reserveCapacity(lines.reduce(into: 0) { count, line in
+            count += line.words.count
+        })
+        var resolvedEvidenceWords: [EvidenceWord] = []
+        resolvedEvidenceWords.reserveCapacity(lines.reduce(into: 0) { count, line in
             count += line.words.count
         })
 
@@ -77,11 +110,57 @@ public struct TranscriptSeekResolver: Sendable {
                 words: line.words,
                 timedWords: displayTimedWords
             )
+            resolvedEvidenceWords.append(contentsOf: line.words.map { word in
+                EvidenceWord(
+                    wordID: word.wordID,
+                    seekMilliseconds: word.timeRange?.startMilliseconds ??
+                        line.timeRange.startMilliseconds
+                )
+            })
         }
 
         linesByID = indexedLines
         timedWords = playbackWords
+        evidenceWords = resolvedEvidenceWords
+        evidenceWordPositions = Dictionary(
+            uniqueKeysWithValues: resolvedEvidenceWords.enumerated().map {
+                ($0.element.wordID, $0.offset)
+            }
+        )
+        audioEventsByID = Dictionary(uniqueKeysWithValues: audioEvents.map {
+            ($0.audioEventID, $0)
+        })
+        self.sessionID = sessionID
+        self.transcriptRevisionID = transcriptRevisionID
         self.canonicalAudioDurationMilliseconds = canonicalAudioDurationMilliseconds
+    }
+
+    /// Re-resolves a durable reference against the exact loaded revision. The
+    /// saved display snapshot is never used as seek or highlight authority.
+    public func resolveEvidence(
+        _ reference: EvidenceReference
+    ) -> ResolvedReviewEvidence? {
+        guard reference.sessionID == sessionID,
+              reference.transcriptRevisionID == transcriptRevisionID
+        else { return nil }
+        switch reference.target {
+        case let .wordRange(startWordID, endWordID):
+            guard let start = evidenceWordPositions[startWordID],
+                  let end = evidenceWordPositions[endWordID],
+                  start <= end
+            else { return nil }
+            let words = Array(evidenceWords[start ... end])
+            return ResolvedReviewEvidence(
+                highlight: .wordRange(words.map(\.wordID)),
+                seekMilliseconds: clamped(words[0].seekMilliseconds)
+            )
+        case let .audioEvent(audioEventID):
+            guard let event = audioEventsByID[audioEventID] else { return nil }
+            return ResolvedReviewEvidence(
+                highlight: .audioEvent(audioEventID),
+                seekMilliseconds: clamped(event.timeRange.startMilliseconds)
+            )
+        }
     }
 
     /// Resolves a click in canonical line UTF-8 coordinates. A direct untimed

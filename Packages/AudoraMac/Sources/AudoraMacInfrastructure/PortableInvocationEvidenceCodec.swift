@@ -585,8 +585,11 @@ struct PortableInvocationEvidenceCodec {
               coach.id == proof.coachMessageID,
               user.responsePositionID == invocation.responsePositionID,
               coach.responsePositionID == invocation.responsePositionID,
-              user.persistedSchemaVersion == ChatMessage.schemaVersion,
-              coach.persistedSchemaVersion == ChatMessage.schemaVersion,
+              user.persistedSchemaVersion == coach.persistedSchemaVersion,
+              [
+                  ChatMessage.profileProvenanceSchemaVersion,
+                  ChatMessage.schemaVersion,
+              ].contains(user.persistedSchemaVersion),
               user.coachProfile == nil,
               coach.coachProfile == invocation.preparedProfile,
               case .user = user.content,

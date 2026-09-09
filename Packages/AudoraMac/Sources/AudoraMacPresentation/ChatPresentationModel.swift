@@ -255,6 +255,10 @@ public final class ChatPresentationModel: ObservableObject {
         send(.createNewChatFromCapacityFailure(context, pendingUserTurnID))
     }
 
+    public func announceEvidenceUnavailable(_ explanation: String) {
+        announcements.post("Evidence unavailable. \(explanation)")
+    }
+
     private func send(_ command: ChatCommand) {
         dispatcher.enqueue(command)
     }

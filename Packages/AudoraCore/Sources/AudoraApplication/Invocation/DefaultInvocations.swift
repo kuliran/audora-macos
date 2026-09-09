@@ -83,6 +83,7 @@ public struct PreparedPendingCoachInvocation: Equatable, Sendable {
         let aggregate = try ChatAggregate(
             chat: newRequest.observedAggregate.chat,
             memory: newRequest.observedAggregate.memory,
+            messages: newRequest.observedAggregate.messages,
             pendingUserTurn: newRequest.pendingUserTurn
         )
         let request = PendingCoachInvocationRequest(
@@ -495,6 +496,7 @@ public struct InstallCoachInvocationMutation: Equatable, Sendable {
         processingAggregate = try ChatAggregate(
             chat: authority.aggregate.chat,
             memory: authority.aggregate.memory,
+            messages: authority.aggregate.messages,
             pendingUserTurn: authority.pendingUserTurn.replacingFailure(nil)
         )
         invocation = try CoachInvocation(
@@ -612,6 +614,22 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         replacementMemory: CoachMemory? = nil,
         completedAt: UTCInstant
     ) throws {
+        try self.init(
+            base: base,
+            invocation: invocation,
+            coachBlocks: [.markdown(coachMarkdown)],
+            replacementMemory: replacementMemory,
+            completedAt: completedAt
+        )
+    }
+
+    init(
+        base: ChatAggregate,
+        invocation: CoachInvocation,
+        coachBlocks: [CoachMessageBlock],
+        replacementMemory: CoachMemory? = nil,
+        completedAt: UTCInstant
+    ) throws {
         self.base = base
         self.invocation = invocation
         guard let authority = invocation.attempt.publicationAuthority else {
@@ -626,7 +644,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         coachMessage = try ChatMessage(
             id: authority.coachMessageID,
             responsePositionID: invocation.responsePositionID,
-            content: .coach(markdown: coachMarkdown),
+            content: .coach(blocks: coachBlocks),
             coachProfile: invocation.preparedProfile,
             createdAt: completedAt
         )
@@ -655,7 +673,6 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         completedAt: UTCInstant
     ) throws {
         guard validatedResponse.isSupportedByCurrentPublicationSlice,
-              let markdown = validatedResponse.publicationMarkdown,
               Self.matchesValidatedMemory(
                   validatedResponse.newMemory,
                   replacement: replacementMemory,
@@ -667,7 +684,7 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
         try self.init(
             base: base,
             invocation: invocation,
-            coachMarkdown: markdown,
+            coachBlocks: validatedResponse.publicationBlocks,
             replacementMemory: replacementMemory,
             completedAt: completedAt
         )

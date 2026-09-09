@@ -113,7 +113,16 @@ range or Audio Event exists in that attachment's canonical Transcript Revision.
 This rule is identical for new and repeated pointers and does not require the
 transcript to have been disclosed during the current Provider Attempt. Application
 validates structure and identity, not whether the material semantically supports
-the coach's claim.
+the coach's claim. It never searches a Session's current or other Transcript
+Revisions to make a pointer resolve; an unknown attachment, dangling target, or
+misordered range invalidates the complete Coach Response.
+
+A successful local resolution promotes the compact provider pointer into an
+immutable Evidence Reference. That value carries the local Session ID and exact
+Transcript Revision ID, plus a typed `TranscriptWordID` range or `AudioEventID`.
+Its durable display snapshot contains the locally derived Session label, trusted
+text, and canonical time range. Provider-returned labels, quotes, identity, and
+timestamps are not retained as authority.
 
 `transcriptRevisionId` remains deliberately precise. Retranscription with another
 engine, language, model, or settings creates another immutable Transcript Revision
@@ -150,14 +159,24 @@ from the canonical UTF-8 display ranges to stable Word IDs:
 - clicking punctuation seeks to the nearest preceding timed Word in its line, then
   the nearest following timed Word or line start when none precedes it;
 - clicking an untimed word falls back to `line.timeRange.startMs`;
-- opening a word-range Evidence Reference seeks to its first timed word, or to the
-  containing line start when the complete range is untimed;
+- opening an Evidence Reference first loads its exact saved Session and Transcript
+  Revision, then re-resolves the typed target against that revision; the durable
+  display snapshot is never seek or highlight authority;
+- a resolved Word range highlights every Word from its start ID through its end ID
+  and seeks to the first Word's start, falling back to that Word's containing line
+  start when it is untimed;
+- a resolved Audio Event highlights that canonical event and seeks to its start;
+- a missing revision, dangling target, or Session/revision mismatch remains
+  unavailable instead of opening or substituting another revision;
 - playback time selects the active word by binary search, not a full scan per
   frame;
 - seek validation clamps times to the canonical audio duration.
 
 Word timestamps already exist for transcript integrity and pause analysis, so word
-clicking adds no further model inference. It does add UI mapping tests.
+clicking adds no further model inference. Evidence highlighting is transient Review
+state, independent of playback highlighting and annotation visibility; opening
+evidence never creates an Annotation or transcript comment. These paths add UI
+mapping tests.
 
 ## Copy and export
 

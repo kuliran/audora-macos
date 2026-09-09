@@ -1348,8 +1348,21 @@ final class ContractResourcesTests: XCTestCase {
         )
         XCTAssertEqual(invocation["draftVersion"] as? Int, 1)
         XCTAssertEqual(invocation["expectedManifestRevision"] as? Int, 1)
-        XCTAssertEqual(user["schemaVersion"] as? Int, 2)
-        XCTAssertEqual(coach["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(user["schemaVersion"] as? Int, 3)
+        XCTAssertEqual(coach["schemaVersion"] as? Int, 3)
+        let blocks = try XCTUnwrap(coach["blocks"] as? [[String: Any]])
+        XCTAssertEqual(blocks.map { $0["kind"] as? String }, [
+            "markdown", "evidenceObservation",
+        ])
+        let evidence = try XCTUnwrap(
+            blocks.last?["evidence"] as? [[String: Any]]
+        )
+        XCTAssertEqual(
+            evidence.compactMap {
+                ($0["target"] as? [String: Any])?["kind"] as? String
+            },
+            ["wordRange", "audioEvent"]
+        )
         XCTAssertEqual(invocation["schemaVersion"] as? Int, 4)
         let attempts = try XCTUnwrap(invocation["attempts"] as? [[String: Any]])
         XCTAssertEqual(attempts.map { $0["ordinal"] as? Int }, [1, 2])

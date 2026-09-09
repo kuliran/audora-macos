@@ -45,6 +45,12 @@ enum ReviewActiveWordStyleTokens {
     }
 }
 
+enum ReviewEvidenceStyleTokens {
+    static var backgroundColor: NSColor {
+        NSColor.systemYellow.withAlphaComponent(0.22)
+    }
+}
+
 public struct ReviewView: View {
     @ObservedObject private var model: ReviewPresentationModel
 
@@ -85,7 +91,12 @@ public struct ReviewView: View {
                             : "play.fill"
                     )
                 }
-                .disabled(snapshot.activity != nil)
+                .disabled(snapshot.activity != nil || !snapshot.playbackAvailable)
+                .accessibilityHint(
+                    snapshot.playbackAvailable
+                        ? ""
+                        : "Canonical audio is unavailable; transcript evidence remains highlighted."
+                )
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Canonical audio")
@@ -160,6 +171,7 @@ public struct ReviewView: View {
             ReviewTranscriptTextView(
                 revision: snapshot.selectedRevision,
                 activeWordID: snapshot.activeWordID,
+                evidenceHighlight: snapshot.evidenceHighlight,
                 annotations: snapshot.annotations,
                 allowsSeeking: snapshot.activity == nil
             ) { lineID, utf8ByteOffset in
@@ -167,6 +179,22 @@ public struct ReviewView: View {
             }
             .frame(minHeight: 150, idealHeight: 210, maxHeight: 260)
             .accessibilityLabel("Immutable selected transcript")
+
+            if case let .audioEvent(audioEventID)? = snapshot.evidenceHighlight,
+               let event = snapshot.selectedRevision.audioEvents.first(where: {
+                   $0.audioEventID == audioEventID
+               })
+            {
+                let accessibilityLabel =
+                    ReviewPresentationModel.audioEventAccessibilityLabel(for: event)
+                Label(accessibilityLabel, systemImage: "scope")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color.yellow.opacity(0.18), in: Capsule())
+                    .overlay { Capsule().stroke(Color.yellow.opacity(0.65)) }
+                    .accessibilityLabel("Highlighted evidence, \(accessibilityLabel)")
+            }
 
             if snapshot.annotations.isVisible,
                !snapshot.annotations.projection.audioEvents.isEmpty
@@ -264,6 +292,7 @@ public struct ReviewView: View {
 private struct ReviewTranscriptTextView: NSViewRepresentable {
     let revision: TranscriptRevision
     let activeWordID: TranscriptWordID?
+    let evidenceHighlight: ReviewEvidenceHighlight?
     let annotations: ReviewAnnotations
     let allowsSeeking: Bool
     let onSeek: (TranscriptLineID, Int) -> Void
@@ -304,6 +333,7 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         context.coordinator.install(
             revision: revision,
             activeWordID: activeWordID,
+            evidenceHighlight: evidenceHighlight,
             annotations: annotations,
             allowsSeeking: allowsSeeking
         )
@@ -315,6 +345,7 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         context.coordinator.install(
             revision: revision,
             activeWordID: activeWordID,
+            evidenceHighlight: evidenceHighlight,
             annotations: annotations,
             allowsSeeking: allowsSeeking
         )
@@ -332,6 +363,7 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         var onSeek: (TranscriptLineID, Int) -> Void
         private var installedRevisionID: TranscriptRevisionID?
         private var installedActiveWordID: TranscriptWordID?
+        private var installedEvidenceHighlight: ReviewEvidenceHighlight?
         private var installedAnnotations: ReviewAnnotations?
         private var allowsSeeking = true
         private var linePlacements: [LinePlacement] = []
@@ -344,6 +376,7 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
         func install(
             revision: TranscriptRevision,
             activeWordID: TranscriptWordID?,
+            evidenceHighlight: ReviewEvidenceHighlight?,
             annotations: ReviewAnnotations,
             allowsSeeking: Bool
         ) {
@@ -352,10 +385,14 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
                 rebuild(revision)
                 installedRevisionID = revision.revisionID
                 installedActiveWordID = nil
+                installedEvidenceHighlight = nil
                 installedAnnotations = nil
             }
             updateAnnotations(annotations)
-            updateHighlight(activeWordID)
+            updateHighlights(
+                activeWordID: activeWordID,
+                evidenceHighlight: evidenceHighlight
+            )
         }
 
         func seek(characterIndex: Int) {
@@ -417,22 +454,46 @@ private struct ReviewTranscriptTextView: NSViewRepresentable {
             textView?.textStorage?.setAttributedString(document)
         }
 
-        private func updateHighlight(_ activeWordID: TranscriptWordID?) {
-            guard activeWordID != installedActiveWordID else { return }
-            if let previous = installedActiveWordID,
-               let range = wordRanges[previous]
-            {
-                textView?.textStorage?.removeAttribute(.backgroundColor, range: range)
+        private func updateHighlights(
+            activeWordID: TranscriptWordID?,
+            evidenceHighlight: ReviewEvidenceHighlight?
+        ) {
+            guard activeWordID != installedActiveWordID ||
+                evidenceHighlight != installedEvidenceHighlight,
+                let storage = textView?.textStorage
+            else { return }
+            storage.removeAttribute(
+                .backgroundColor,
+                range: NSRange(location: 0, length: storage.length)
+            )
+            if case let .wordRange(wordIDs)? = evidenceHighlight {
+                for wordID in wordIDs {
+                    guard let range = wordRanges[wordID] else { continue }
+                    storage.addAttribute(
+                        .backgroundColor,
+                        value: ReviewEvidenceStyleTokens.backgroundColor,
+                        range: range
+                    )
+                }
+                if evidenceHighlight != installedEvidenceHighlight,
+                   let first = wordIDs.first,
+                   let range = wordRanges[first]
+                {
+                    textView?.scrollRangeToVisible(range)
+                }
             }
             if let activeWordID, let range = wordRanges[activeWordID] {
-                textView?.textStorage?.addAttribute(
+                storage.addAttribute(
                     .backgroundColor,
                     value: ReviewActiveWordStyleTokens.backgroundColor,
                     range: range
                 )
-                textView?.scrollRangeToVisible(range)
+                if evidenceHighlight == installedEvidenceHighlight {
+                    textView?.scrollRangeToVisible(range)
+                }
             }
             installedActiveWordID = activeWordID
+            installedEvidenceHighlight = evidenceHighlight
         }
 
         private func updateAnnotations(_ annotations: ReviewAnnotations) {

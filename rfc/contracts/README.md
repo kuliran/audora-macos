@@ -307,8 +307,14 @@ local miss, typed Create New Chat intent, identity-preserving Retry, and Discard
 its Send and Retry declare exactly two Invocation-gateway calls, one Provider call,
 and one admission call.
 
-`ChatMessage.json` seals the mutually exclusive stored user-text and Coach-Markdown
-shapes. `CoachInvocation.json` is the portable launch authority bound to one
+`ChatMessage.json` seals the mutually exclusive stored user-text and ordered Coach
+block shapes. Current v3 Coach messages preserve plain Markdown and locally
+resolved Evidence-backed Observations. Each Evidence reference binds a canonical
+Word range or Audio Event to one exact Session and Transcript Revision, plus a
+bounded app-derived display snapshot; v1/v2 scalar-Markdown messages remain
+reopenable. Runtime additionally requires ordered Word endpoints, `startMs < endMs`,
+an exact encoded envelope no larger than 64 KiB, and a Session/Revision pair owned
+by the Chat. `CoachInvocation.json` is the portable launch authority bound to one
 Library, Chat, Pending User Turn, Draft version, response position, and expected
 manifest revision. Its current v4 record contains one to four durable Provider
 Attempts and may pair transcript-read terminal failure with its required bounded

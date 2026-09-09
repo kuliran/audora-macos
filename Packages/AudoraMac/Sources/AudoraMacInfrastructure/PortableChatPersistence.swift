@@ -1716,7 +1716,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
         let replacement = try ChatAggregate(
             chat: current.chat.replacingDraft(with: mutation.replacement),
-            memory: current.memory
+            memory: current.memory,
+            messages: current.messages
         )
 
         try fault(.beforeDraftPartialWrite)
@@ -1855,6 +1856,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let replacement = try ChatAggregate(
             chat: current.chat,
             memory: current.memory,
+            messages: current.messages,
             pendingUserTurn: mutation.pendingUserTurn
         )
 
@@ -2133,6 +2135,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let replacement = try ChatAggregate(
             chat: current.chat,
             memory: current.memory,
+            messages: current.messages,
             pendingUserTurn: mutation.replacement
         )
 
@@ -2323,7 +2326,11 @@ public struct PortableChatPersistence: @unchecked Sendable {
             pendingMutationLease = nil
         }
         defer { pendingMutationLease?.release() }
-        let replacement = try ChatAggregate(chat: current.chat, memory: current.memory)
+        let replacement = try ChatAggregate(
+            chat: current.chat,
+            memory: current.memory,
+            messages: current.messages
+        )
         try fault(.beforePendingRemoval)
         if let livenessAuthority {
             try revalidateInvocationLivenessAuthority(
@@ -4882,15 +4889,26 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let role: String
         let text: String?
         let markdown: String?
+        let blocks: [ChatMessageBlockDTO]?
         switch message.content {
         case let .user(value):
             role = "user"
             text = value
             markdown = nil
+            blocks = nil
         case let .coach(value):
             role = "coach"
             text = nil
-            markdown = value
+            if message.persistedSchemaVersion < ChatMessage.schemaVersion {
+                guard value.count == 1,
+                      case let .markdown(legacyMarkdown) = value[0]
+                else { throw PortableChatPersistenceError.invalidJSON }
+                markdown = legacyMarkdown
+                blocks = nil
+            } else {
+                markdown = nil
+                blocks = value.map(ChatMessageBlockDTO.init)
+            }
         }
         let data = try deterministicJSON(
             ChatMessageDTO(
@@ -4900,6 +4918,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 role: role,
                 text: text,
                 markdown: markdown,
+                blocks: blocks,
                 profileRevisionId: message.coachProfile?.revisionID?.rawValue,
                 profileStatementGeneration: message.coachProfile?.statementGeneration,
                 createdAt: message.createdAt.rawValue
@@ -5316,6 +5335,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             try ChatAggregate(
                 chat: chat,
                 memory: memory,
+                messages: orderedMessages,
                 pendingUserTurn: pendingUserTurn
             )
         }
@@ -5699,6 +5719,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             reopened == (try ChatAggregate(
                 chat: current.chat,
                 memory: current.memory,
+                messages: current.messages,
                 pendingUserTurn: pending.replacingFailure(terminalFailure)
             ))
         else { throw PortableChatPersistenceError.invalidLayout }
@@ -7183,7 +7204,10 @@ public struct PortableChatPersistence: @unchecked Sendable {
             throw PortableChatPersistenceError.invalidJSON
         }
         let schemaVersion = schemaVersionNumber.uint32Value
-        guard schemaVersion == 1 || schemaVersion == ChatMessage.schemaVersion else {
+        guard schemaVersion == 1 ||
+            schemaVersion == ChatMessage.profileProvenanceSchemaVersion ||
+            schemaVersion == ChatMessage.schemaVersion
+        else {
             throw PortableChatPersistenceError.invalidSchemaVersion
         }
         let common: Set<String> = [
@@ -7195,7 +7219,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         case "coach":
             if schemaVersion == 1 {
                 try requireExactKeys(dictionary, common.union(["markdown"]))
-            } else {
+            } else if schemaVersion == ChatMessage.profileProvenanceSchemaVersion {
                 let coachKeys = common.union([
                     "markdown", "profileStatementGeneration",
                 ])
@@ -7208,6 +7232,20 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 {
                     throw PortableChatPersistenceError.invalidJSON
                 }
+            } else {
+                let coachKeys = common.union([
+                    "blocks", "profileStatementGeneration",
+                ])
+                let actualKeys = Set(dictionary.keys)
+                guard actualKeys == coachKeys ||
+                    actualKeys == coachKeys.union(["profileRevisionId"])
+                else { throw PortableChatPersistenceError.unknownKey }
+                if actualKeys.contains("profileRevisionId"),
+                   dictionary["profileRevisionId"] is NSNull
+                {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                try validateMessageBlocks(dictionary["blocks"])
             }
         default:
             throw PortableChatPersistenceError.invalidJSON
@@ -7224,6 +7262,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         switch role {
         case "user":
             guard let text = dto.text, dto.markdown == nil,
+                  dto.blocks == nil,
                   dto.profileRevisionId == nil,
                   dto.profileStatementGeneration == nil
             else {
@@ -7232,11 +7271,24 @@ public struct PortableChatPersistence: @unchecked Sendable {
             content = .user(text: text)
             coachProfile = nil
         case "coach":
-            guard let markdown = dto.markdown, dto.text == nil
-            else {
+            guard dto.text == nil else {
                 throw PortableChatPersistenceError.invalidJSON
             }
-            content = .coach(markdown: markdown)
+            if dto.schemaVersion == ChatMessage.schemaVersion {
+                guard dto.markdown == nil, let blocks = dto.blocks else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                do {
+                    content = .coach(blocks: try blocks.map(\.domainValue))
+                } catch {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+            } else {
+                guard let markdown = dto.markdown, dto.blocks == nil else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                content = .coach(markdown: markdown)
+            }
             if dto.schemaVersion == 1 {
                 guard dto.profileRevisionId == nil,
                       dto.profileStatementGeneration == nil
@@ -7262,6 +7314,55 @@ public struct PortableChatPersistence: @unchecked Sendable {
             coachProfile: coachProfile,
             createdAt: createdAt
         )
+    }
+
+    private func validateMessageBlocks(_ value: Any?) throws {
+        guard let blocks = value as? [[String: Any]], !blocks.isEmpty else {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        for block in blocks {
+            guard let kind = block["kind"] as? String else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            switch kind {
+            case "markdown":
+                try requireExactKeys(block, ["kind", "markdown"])
+            case "evidenceObservation":
+                try requireExactKeys(block, ["kind", "markdown", "evidence"])
+                guard let evidence = block["evidence"] as? [[String: Any]],
+                      !evidence.isEmpty
+                else { throw PortableChatPersistenceError.invalidJSON }
+                for reference in evidence {
+                    try requireExactKeys(
+                        reference,
+                        ["sessionId", "transcriptRevisionId", "target", "display"]
+                    )
+                    guard let target = reference["target"] as? [String: Any],
+                          let targetKind = target["kind"] as? String,
+                          let display = reference["display"] as? [String: Any]
+                    else { throw PortableChatPersistenceError.invalidJSON }
+                    switch targetKind {
+                    case "wordRange":
+                        try requireExactKeys(
+                            target,
+                            ["kind", "startWordId", "endWordId"]
+                        )
+                    case "audioEvent":
+                        try requireExactKeys(target, ["kind", "audioEventId"])
+                    default:
+                        throw PortableChatPersistenceError.invalidJSON
+                    }
+                    try requireExactKeys(
+                        display,
+                        [
+                            "sessionLabel", "trustedText", "startMs", "endMs",
+                        ]
+                    )
+                }
+            default:
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        }
     }
 
     private func decodeInvocation(_ data: Data) throws -> CoachInvocation {
@@ -8000,9 +8101,145 @@ private struct ChatMessageDTO: Codable {
     let role: String
     let text: String?
     let markdown: String?
+    let blocks: [ChatMessageBlockDTO]?
     let profileRevisionId: String?
     let profileStatementGeneration: UInt64?
     let createdAt: String
+}
+
+private struct ChatMessageBlockDTO: Codable {
+    let kind: String
+    let markdown: String
+    let evidence: [EvidenceReferenceDTO]?
+
+    init(_ block: CoachMessageBlock) {
+        switch block {
+        case let .markdown(markdown):
+            kind = "markdown"
+            self.markdown = markdown
+            evidence = nil
+        case let .evidenceObservation(markdown, references):
+            kind = "evidenceObservation"
+            self.markdown = markdown
+            evidence = references.map(EvidenceReferenceDTO.init)
+        }
+    }
+
+    var domainValue: CoachMessageBlock {
+        get throws {
+            switch kind {
+            case "markdown":
+                guard evidence == nil else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                return .markdown(markdown)
+            case "evidenceObservation":
+                guard let evidence, !evidence.isEmpty else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                return .evidenceObservation(
+                    markdown: markdown,
+                    evidence: try evidence.map(\.domainValue)
+                )
+            default:
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        }
+    }
+}
+
+private struct EvidenceReferenceDTO: Codable {
+    let sessionId: String
+    let transcriptRevisionId: String
+    let target: EvidenceReferenceTargetDTO
+    let display: EvidenceReferenceDisplayDTO
+
+    init(_ reference: EvidenceReference) {
+        sessionId = reference.sessionID.rawValue
+        transcriptRevisionId = reference.transcriptRevisionID.rawValue
+        target = EvidenceReferenceTargetDTO(reference.target)
+        display = EvidenceReferenceDisplayDTO(reference.display)
+    }
+
+    var domainValue: EvidenceReference {
+        get throws {
+            try EvidenceReference(
+                sessionID: SessionID(sessionId),
+                transcriptRevisionID: TranscriptRevisionID(transcriptRevisionId),
+                target: target.domainValue,
+                display: display.domainValue
+            )
+        }
+    }
+}
+
+private struct EvidenceReferenceTargetDTO: Codable {
+    let kind: String
+    let startWordId: String?
+    let endWordId: String?
+    let audioEventId: String?
+
+    init(_ target: EvidenceReferenceTarget) {
+        switch target {
+        case let .wordRange(startWordID, endWordID):
+            kind = "wordRange"
+            startWordId = startWordID.rawValue
+            endWordId = endWordID.rawValue
+            audioEventId = nil
+        case let .audioEvent(audioEventID):
+            kind = "audioEvent"
+            startWordId = nil
+            endWordId = nil
+            audioEventId = audioEventID.rawValue
+        }
+    }
+
+    var domainValue: EvidenceReferenceTarget {
+        get throws {
+            switch kind {
+            case "wordRange":
+                guard let startWordId, let endWordId, audioEventId == nil else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                return .wordRange(
+                    startWordID: try TranscriptWordID(startWordId),
+                    endWordID: try TranscriptWordID(endWordId)
+                )
+            case "audioEvent":
+                guard startWordId == nil, endWordId == nil, let audioEventId else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                return .audioEvent(audioEventID: try AudioEventID(audioEventId))
+            default:
+                throw PortableChatPersistenceError.invalidJSON
+            }
+        }
+    }
+}
+
+private struct EvidenceReferenceDisplayDTO: Codable {
+    let sessionLabel: String
+    let trustedText: String
+    let startMs: UInt64
+    let endMs: UInt64
+
+    init(_ display: EvidenceReferenceDisplay) {
+        sessionLabel = display.sessionLabel
+        trustedText = display.trustedText
+        startMs = display.startMilliseconds
+        endMs = display.endMilliseconds
+    }
+
+    var domainValue: EvidenceReferenceDisplay {
+        get throws {
+            try EvidenceReferenceDisplay(
+                sessionLabel: sessionLabel,
+                trustedText: trustedText,
+                startMilliseconds: startMs,
+                endMilliseconds: endMs
+            )
+        }
+    }
 }
 
 private struct InvocationPublicationProofAuthority {

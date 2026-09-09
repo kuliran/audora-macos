@@ -7,12 +7,23 @@ struct LibrarySessionLinkRouting {
     let scope: LibraryScope
     let selectProcessing: (SessionProcessingSelection) -> Void
     let selectReview: (ReviewSelection) -> Void
+    let openReviewEvidence: (EvidenceReference, LibraryScope) -> Void = { _, _ in }
 
     func openSession(_ sessionID: SessionID) {
         selectProcessing(
             SessionProcessingSelection(scope: scope, sessionID: sessionID)
         )
         selectReview(ReviewSelection(scope: scope, sessionID: sessionID))
+    }
+
+    func openEvidence(_ reference: EvidenceReference) {
+        selectProcessing(
+            SessionProcessingSelection(
+                scope: scope,
+                sessionID: reference.sessionID
+            )
+        )
+        openReviewEvidence(reference, scope)
     }
 }
 
@@ -97,7 +108,8 @@ public struct LibraryRootView: View {
                 let sessionLinkRouting = LibrarySessionLinkRouting(
                     scope: activeScope,
                     selectProcessing: sessionProcessingModel.selectSession,
-                    selectReview: reviewModel.selectSession
+                    selectReview: reviewModel.selectSession,
+                    openReviewEvidence: reviewModel.openEvidence
                 )
                 Image(systemName: "waveform.circle.fill")
                     .font(.system(size: 54))
@@ -130,7 +142,8 @@ public struct LibraryRootView: View {
                 ChatRootView(
                     dispatcher: chatDispatcher,
                     scope: activeScope,
-                    onOpenSession: sessionLinkRouting.openSession
+                    onOpenSession: sessionLinkRouting.openSession,
+                    onOpenEvidence: sessionLinkRouting.openEvidence
                 )
                 .id(library.libraryID.rawValue)
 

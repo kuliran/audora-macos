@@ -156,6 +156,46 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    func testEvidenceLinkRoutesExactReferenceToProcessingAndReview() throws {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T120000000Z-1ABC")
+        )
+        let reference = try EvidenceReference(
+            sessionID: SessionID("ses-20260830T120000000Z-2DEF"),
+            transcriptRevisionID: TranscriptRevisionID(
+                "trv-20260830T120000000Z-3GHJ"
+            ),
+            target: .wordRange(
+                startWordID: TranscriptWordID("w000001"),
+                endWordID: TranscriptWordID("w000002")
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Opening practice",
+                trustedText: "A trusted phrase",
+                startMilliseconds: 100,
+                endMilliseconds: 300
+            )
+        )
+        var processingSelections: [SessionProcessingSelection] = []
+        var openedEvidence: [(EvidenceReference, LibraryScope)] = []
+        let routing = LibrarySessionLinkRouting(
+            scope: scope,
+            selectProcessing: { processingSelections.append($0) },
+            selectReview: { _ in },
+            openReviewEvidence: { openedEvidence.append(($0, $1)) }
+        )
+
+        routing.openEvidence(reference)
+
+        XCTAssertEqual(
+            processingSelections,
+            [SessionProcessingSelection(scope: scope, sessionID: reference.sessionID)]
+        )
+        XCTAssertEqual(openedEvidence.count, 1)
+        XCTAssertEqual(openedEvidence[0].0, reference)
+        XCTAssertEqual(openedEvidence[0].1, scope)
+    }
+
     func testTranscriptFailureCardBoundsLinksAndSummarizesAdditionalSessions()
         throws
     {
@@ -873,6 +913,22 @@ final class ChatPresentationModelTests: XCTestCase {
             for: issue
         )
         XCTAssertEqual(announcements.values, [announcement, announcement])
+    }
+
+    @MainActor
+    func testUnavailableEvidenceActivationIsAnnounced() {
+        let announcements = ChatAnnouncementRecorder()
+        let model = makeChatPresentationModel(
+            feature: RecordingPresentationChatFeature(initial: ChatFeatureState()),
+            announcements: announcements
+        )
+
+        model.announceEvidenceUnavailable("The supporting Session is in Trash.")
+
+        XCTAssertEqual(
+            announcements.values,
+            ["Evidence unavailable. The supporting Session is in Trash."]
+        )
     }
 
     func testCoachContextPresentationExplainsAllNineNonadditiveCategories() {

@@ -2,6 +2,69 @@ import AudoraDomain
 import XCTest
 
 final class CoachInvocationDomainTests: XCTestCase {
+    func testEvidenceObservationCarriesOnlyResolvedLocalEvidence() throws {
+        let reference = try EvidenceReference(
+            sessionID: SessionID("ses-20260830T110000000Z-1KMN"),
+            transcriptRevisionID: TranscriptRevisionID(
+                "trv-20260830T111000000Z-1PQR"
+            ),
+            target: .wordRange(
+                startWordID: TranscriptWordID("w000001"),
+                endWordID: TranscriptWordID("w000003")
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Practice Session",
+                trustedText: "A locally resolved phrase",
+                startMilliseconds: 1_250,
+                endMilliseconds: 2_100
+            )
+        )
+
+        let message = try ChatMessage(
+            id: ChatMessageID("msg-20260830T120000000Z-8VWX"),
+            responsePositionID: ChatResponsePositionID(
+                "rsp-20260830T120000000Z-5MNP"
+            ),
+            content: .coach(blocks: [
+                .markdown("A concise answer."),
+                .evidenceObservation(
+                    markdown: "You kept the transition crisp.",
+                    evidence: [reference]
+                ),
+            ]),
+            coachProfile: CoachProfileProvenance(
+                revisionID: nil,
+                statementGeneration: 9
+            ),
+            createdAt: UTCInstant("2026-08-30T12:00:00.000Z")
+        )
+
+        XCTAssertEqual(
+            message.content,
+            .coach(blocks: [
+                .markdown("A concise answer."),
+                .evidenceObservation(
+                    markdown: "You kept the transition crisp.",
+                    evidence: [reference]
+                ),
+            ])
+        )
+        XCTAssertEqual(message.persistedSchemaVersion, 3)
+        XCTAssertThrowsError(
+            try EvidenceReference(
+                sessionID: reference.sessionID,
+                transcriptRevisionID: reference.transcriptRevisionID,
+                target: .wordRange(
+                    startWordID: TranscriptWordID("w000003"),
+                    endWordID: TranscriptWordID("w000001")
+                ),
+                display: reference.display
+            )
+        ) {
+            XCTAssertEqual($0 as? EvidenceReferenceError, .invalidAnchor)
+        }
+    }
+
     func testInvocationAndMessagesPublishOneCompleteTurnAndFreshDraft() throws {
         let fixture = try Fixture()
         let invocation = try fixture.invocation()
@@ -37,6 +100,7 @@ final class CoachInvocationDomainTests: XCTestCase {
             published.chat.messageIDs,
             [fixture.userMessageID, fixture.coachMessageID]
         )
+        XCTAssertEqual(published.messages, [user, coach])
         XCTAssertEqual(published.chat.draft, freshDraft)
         XCTAssertEqual(
             published.chat.manifestRevision,

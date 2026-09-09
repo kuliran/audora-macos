@@ -72,15 +72,29 @@ final class ReviewPresentationModelTests: XCTestCase {
             ),
             sessionID: try SessionID("ses-20260830T120100000Z-2CDE")
         )
+        let evidence = try EvidenceReference(
+            sessionID: selection.sessionID,
+            transcriptRevisionID: TranscriptRevisionID(
+                "trv-20260830T120200000Z-3DEF"
+            ),
+            target: .audioEvent(audioEventID: AudioEventID("a000001")),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Practice Session",
+                trustedText: "Silent pause",
+                startMilliseconds: 100,
+                endMilliseconds: 200
+            )
+        )
 
         await model.start()
         model.selectSession(selection)
+        model.openEvidence(evidence, in: selection.scope)
         model.play()
         model.pause()
         model.setAnnotationsVisible(false)
         model.retranscribe()
         model.clearSelection()
-        await feature.waitForCommandCount(6)
+        await feature.waitForCommandCount(7)
 
         guard case let .unavailable(_, reason) = model.state else {
             return XCTFail("expected initial Review projection")
@@ -91,6 +105,7 @@ final class ReviewPresentationModelTests: XCTestCase {
             commands,
             [
                 .selectSession(selection),
+                .openEvidence(scope: selection.scope, reference: evidence),
                 .play,
                 .pause,
                 .setAnnotationsVisible(false),

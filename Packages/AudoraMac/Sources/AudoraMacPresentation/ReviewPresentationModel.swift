@@ -27,6 +27,13 @@ public final class ReviewPresentationModel: ObservableObject {
         send(.selectSession(selection))
     }
 
+    public func openEvidence(
+        _ reference: EvidenceReference,
+        in scope: LibraryScope
+    ) {
+        send(.openEvidence(scope: scope, reference: reference))
+    }
+
     public func clearSelection() {
         send(.clearSelection)
     }

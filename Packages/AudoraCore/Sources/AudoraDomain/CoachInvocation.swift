@@ -237,9 +237,24 @@ public struct CoachProviderAttempt: Equatable, Sendable {
     }
 }
 
+public enum CoachMessageBlock: Equatable, Sendable {
+    case markdown(String)
+    case evidenceObservation(markdown: String, evidence: [EvidenceReference])
+
+    public var markdown: String {
+        switch self {
+        case let .markdown(value), let .evidenceObservation(value, _): value
+        }
+    }
+}
+
 public enum ChatMessageContent: Equatable, Sendable {
     case user(text: String)
-    case coach(markdown: String)
+    case coach(blocks: [CoachMessageBlock])
+
+    public static func coach(markdown: String) -> Self {
+        .coach(blocks: [.markdown(markdown)])
+    }
 }
 
 /// Exact Profile authority used to prepare one Coach response. A `nil`
@@ -264,10 +279,12 @@ public enum ChatMessageError: Error, Equatable, Sendable {
     case contentTooLong
     case invalidContent
     case profileProvenanceMismatch
+    case invalidCoachBlocks
 }
 
 public struct ChatMessage: Equatable, Sendable {
-    public static let schemaVersion: UInt32 = 2
+    public static let schemaVersion: UInt32 = 3
+    public static let profileProvenanceSchemaVersion: UInt32 = 2
     public static let maximumUserTextUTF8Bytes = 16_384
     /// Bounded provider text; persistence separately checks the exact encoded envelope.
     public static let maximumCoachMarkdownUTF8Bytes = 64_000
@@ -287,31 +304,54 @@ public struct ChatMessage: Equatable, Sendable {
         coachProfile: CoachProfileProvenance? = nil,
         createdAt: UTCInstant
     ) throws {
-        let text: String
+        let texts: [String]
         let maximum: Int
         switch content {
         case let .user(value):
-            text = value
+            texts = [value]
             maximum = schemaVersion == 1
                 ? ChatDraft.maximumUTF8Bytes
                 : Self.maximumUserTextUTF8Bytes
-        case let .coach(value):
-            text = value
+        case let .coach(blocks):
+            guard !blocks.isEmpty,
+                  blocks.allSatisfy({ block in
+                      guard case let .evidenceObservation(_, evidence) = block else {
+                          return true
+                      }
+                      return !evidence.isEmpty
+                  }),
+                  schemaVersion == Self.schemaVersion ||
+                    (blocks.count == 1 && {
+                        guard case .markdown = blocks[0] else { return false }
+                        return true
+                    }())
+            else { throw ChatMessageError.invalidCoachBlocks }
+            texts = blocks.map(\.markdown)
             maximum = Self.maximumCoachMarkdownUTF8Bytes
         }
-        guard text.unicodeScalars.contains(where: { !$0.properties.isWhitespace }) else {
+        guard texts.allSatisfy({
+            $0.unicodeScalars.contains(where: { !$0.properties.isWhitespace })
+        }) else {
             throw ChatMessageError.emptyContent
         }
-        guard text.utf8.count <= maximum else { throw ChatMessageError.contentTooLong }
-        guard !text.unicodeScalars.contains(where: { $0.value == 0 }) else {
+        guard texts.reduce(0, { $0 + $1.utf8.count }) <= maximum else {
+            throw ChatMessageError.contentTooLong
+        }
+        guard !texts.contains(where: {
+            $0.unicodeScalars.contains(where: { $0.value == 0 })
+        }) else {
             throw ChatMessageError.invalidContent
         }
         switch (schemaVersion, content, coachProfile) {
         case (1, .user, nil), (1, .coach, nil),
+             (Self.profileProvenanceSchemaVersion, .user, nil),
+             (Self.profileProvenanceSchemaVersion, .coach, .some),
              (Self.schemaVersion, .user, nil),
              (Self.schemaVersion, .coach, .some):
             break
-        case (1, _, .some), (Self.schemaVersion, _, _):
+        case (1, _, .some),
+             (Self.profileProvenanceSchemaVersion, _, _),
+             (Self.schemaVersion, _, _):
             throw ChatMessageError.profileProvenanceMismatch
         default:
             throw ChatMessageError.invalidSchemaVersion
@@ -755,9 +795,13 @@ public extension ChatAggregate {
             messageIDs: chat.messageIDs + [userMessage.id, coachMessage.id],
             currentMemoryID: replacementMemory?.memoryID ?? chat.currentMemoryID
         )
+        let replacementMessages = messages.isEmpty && !chat.messageIDs.isEmpty
+            ? []
+            : messages + [userMessage, coachMessage]
         return try ChatAggregate(
             chat: replacement,
-            memory: replacementMemory ?? memory
+            memory: replacementMemory ?? memory,
+            messages: replacementMessages
         )
     }
 }

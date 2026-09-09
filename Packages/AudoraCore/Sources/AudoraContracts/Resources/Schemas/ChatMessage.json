@@ -13,6 +13,12 @@
         },
         {
             "$ref": "#/$defs/PersistedCoachChatMessageV2"
+        },
+        {
+            "$ref": "#/$defs/PersistedUserChatMessageV3"
+        },
+        {
+            "$ref": "#/$defs/PersistedCoachChatMessageV3"
         }
     ],
     "$defs": {
@@ -176,6 +182,93 @@
                 "not": {}
             }
         },
+        "PersistedUserChatMessageV3": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 3
+                },
+                "messageId": {
+                    "$ref": "#/$defs/ChatMessageId"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "createdAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "role": {
+                    "type": "string",
+                    "const": "user"
+                },
+                "text": {
+                    "type": "string",
+                    "maxLength": 16384,
+                    "description": "Application additionally enforces a 16,384 UTF-8-byte ceiling."
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "messageId",
+                "responsePositionId",
+                "createdAt",
+                "role",
+                "text"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedCoachChatMessageV3": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 3
+                },
+                "messageId": {
+                    "$ref": "#/$defs/ChatMessageId"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "createdAt": {
+                    "$ref": "#/$defs/UTCInstant"
+                },
+                "role": {
+                    "type": "string",
+                    "const": "coach"
+                },
+                "profileRevisionId": {
+                    "$ref": "#/$defs/ProfileRevisionId",
+                    "description": "Exact Profile authority used to prepare this Coach response."
+                },
+                "profileStatementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "blocks": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/PersistedCoachMessageBlock"
+                    },
+                    "minItems": 1,
+                    "description": "Ordered prose and locally resolved evidence observations."
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "messageId",
+                "responsePositionId",
+                "createdAt",
+                "role",
+                "profileStatementGeneration",
+                "blocks"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
         "ChatMessageId": {
             "type": "string",
             "pattern": "^msg-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
@@ -195,6 +288,198 @@
         "NonnegativeWholeNumber": {
             "type": "integer",
             "minimum": 0
+        },
+        "PersistedCoachMessageBlock": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/PersistedCoachMarkdownBlock"
+                },
+                {
+                    "$ref": "#/$defs/PersistedCoachEvidenceObservationBlock"
+                }
+            ]
+        },
+        "PersistedCoachMarkdownBlock": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "markdown"
+                },
+                "markdown": {
+                    "type": "string",
+                    "maxLength": 64000
+                }
+            },
+            "required": [
+                "kind",
+                "markdown"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedCoachEvidenceObservationBlock": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "evidenceObservation"
+                },
+                "markdown": {
+                    "type": "string",
+                    "maxLength": 64000
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/PersistedEvidenceReference"
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": [
+                "kind",
+                "markdown",
+                "evidence"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedEvidenceReference": {
+            "type": "object",
+            "properties": {
+                "sessionId": {
+                    "$ref": "#/$defs/SessionId"
+                },
+                "transcriptRevisionId": {
+                    "$ref": "#/$defs/TranscriptRevisionId"
+                },
+                "target": {
+                    "$ref": "#/$defs/PersistedEvidenceReferenceTarget"
+                },
+                "display": {
+                    "$ref": "#/$defs/PersistedEvidenceReferenceDisplay"
+                }
+            },
+            "required": [
+                "sessionId",
+                "transcriptRevisionId",
+                "target",
+                "display"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "SessionId": {
+            "type": "string",
+            "pattern": "^ses-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "TranscriptRevisionId": {
+            "type": "string",
+            "pattern": "^trv-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "PersistedEvidenceReferenceTarget": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/PersistedEvidenceWordRange"
+                },
+                {
+                    "$ref": "#/$defs/PersistedEvidenceAudioEvent"
+                }
+            ]
+        },
+        "PersistedEvidenceReferenceDisplay": {
+            "type": "object",
+            "properties": {
+                "sessionLabel": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                },
+                "trustedText": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16384
+                },
+                "startMs": {
+                    "$ref": "#/$defs/PersistedEvidenceStartMilliseconds"
+                },
+                "endMs": {
+                    "$ref": "#/$defs/PersistedEvidenceEndMilliseconds"
+                }
+            },
+            "required": [
+                "sessionLabel",
+                "trustedText",
+                "startMs",
+                "endMs"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedEvidenceWordRange": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "wordRange"
+                },
+                "startWordId": {
+                    "$ref": "#/$defs/TranscriptWordId"
+                },
+                "endWordId": {
+                    "$ref": "#/$defs/TranscriptWordId"
+                }
+            },
+            "required": [
+                "kind",
+                "startWordId",
+                "endWordId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedEvidenceAudioEvent": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "audioEvent"
+                },
+                "audioEventId": {
+                    "$ref": "#/$defs/TranscriptAudioEventId"
+                }
+            },
+            "required": [
+                "kind",
+                "audioEventId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PersistedEvidenceStartMilliseconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2700000
+        },
+        "PersistedEvidenceEndMilliseconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2700000
+        },
+        "TranscriptWordId": {
+            "type": "string",
+            "pattern": "^w[0-9]{6}$"
+        },
+        "TranscriptAudioEventId": {
+            "type": "string",
+            "pattern": "^a[0-9]{6}$"
         }
     }
 }

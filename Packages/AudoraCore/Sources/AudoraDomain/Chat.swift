@@ -517,6 +517,7 @@ public enum ChatAggregateError: Error, Equatable, Sendable {
     case memoryPointerMismatch
     case memoryOwnerMismatch
     case manifestRevisionOverflow
+    case messageHistoryMismatch
 }
 
 public struct Chat: Equatable, Sendable {
@@ -615,11 +616,13 @@ public struct Chat: Equatable, Sendable {
 public struct ChatAggregate: Equatable, Sendable {
     public let chat: Chat
     public let memory: CoachMemory
+    public let messages: [ChatMessage]
     public let pendingUserTurn: PendingUserTurn?
 
     public init(
         chat: Chat,
         memory: CoachMemory,
+        messages: [ChatMessage] = [],
         pendingUserTurn: PendingUserTurn? = nil
     ) throws {
         guard chat.currentMemoryID == memory.memoryID else {
@@ -627,6 +630,43 @@ public struct ChatAggregate: Equatable, Sendable {
         }
         guard chat.id == memory.chatID else {
             throw ChatAggregateError.memoryOwnerMismatch
+        }
+        if !messages.isEmpty || chat.messageIDs.isEmpty {
+            guard messages.map(\.id) == chat.messageIDs,
+                  messages.count.isMultiple(of: 2)
+            else { throw ChatAggregateError.messageHistoryMismatch }
+            for index in stride(from: 0, to: messages.count, by: 2) {
+                guard case .user = messages[index].content,
+                      case .coach = messages[index + 1].content,
+                      messages[index].responsePositionID ==
+                        messages[index + 1].responsePositionID,
+                      messages[index].persistedSchemaVersion ==
+                        messages[index + 1].persistedSchemaVersion
+                else { throw ChatAggregateError.messageHistoryMismatch }
+            }
+            let attachmentPairs = Set(chat.attachments.values.map {
+                EvidenceAttachmentPair(
+                    sessionID: $0.sessionID,
+                    transcriptRevisionID: $0.transcriptRevisionID
+                )
+            })
+            for message in messages {
+                guard case let .coach(blocks) = message.content else { continue }
+                for block in blocks {
+                    guard case let .evidenceObservation(_, evidence) = block else {
+                        continue
+                    }
+                    guard evidence.allSatisfy({ reference in
+                        attachmentPairs.contains(
+                            EvidenceAttachmentPair(
+                                sessionID: reference.sessionID,
+                                transcriptRevisionID:
+                                    reference.transcriptRevisionID
+                            )
+                        )
+                    }) else { throw ChatAggregateError.messageHistoryMismatch }
+                }
+            }
         }
         if let pendingUserTurn {
             guard pendingUserTurn.draftID == chat.draft.draftID,
@@ -648,6 +688,7 @@ public struct ChatAggregate: Equatable, Sendable {
         }
         self.chat = chat
         self.memory = memory
+        self.messages = messages
         self.pendingUserTurn = pendingUserTurn
     }
 
@@ -709,4 +750,9 @@ public struct ChatAggregate: Equatable, Sendable {
         )
         return try ChatAggregate(chat: chat, memory: memory)
     }
+}
+
+private struct EvidenceAttachmentPair: Hashable {
+    let sessionID: SessionID
+    let transcriptRevisionID: TranscriptRevisionID
 }

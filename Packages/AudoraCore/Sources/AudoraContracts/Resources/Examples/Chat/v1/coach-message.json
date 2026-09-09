@@ -1,10 +1,50 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "messageId": "msg-20260830T120003000Z-8WXY",
   "responsePositionId": "rsp-20260830T120001000Z-6PQR",
   "createdAt": "2026-08-30T12:00:03.000Z",
   "profileRevisionId": "prf-20260830T120100000Z-3DEF",
   "profileStatementGeneration": 1,
   "role": "coach",
-  "markdown": "A complete **synthetic** Coach response."
+  "blocks": [
+    {
+      "kind": "markdown",
+      "markdown": "A complete **synthetic** Coach response."
+    },
+    {
+      "kind": "evidenceObservation",
+      "markdown": "The transition was clearly separated.",
+      "evidence": [
+        {
+          "sessionId": "ses-20260830T115900000Z-1ABC",
+          "transcriptRevisionId": "trv-20260830T115900000Z-2DEF",
+          "target": {
+            "kind": "wordRange",
+            "startWordId": "w000001",
+            "endWordId": "w000003"
+          },
+          "display": {
+            "sessionLabel": "Practice Session",
+            "trustedText": "Pause before the transition",
+            "startMs": 1000,
+            "endMs": 2250
+          }
+        },
+        {
+          "sessionId": "ses-20260830T115900000Z-1ABC",
+          "transcriptRevisionId": "trv-20260830T115900000Z-2DEF",
+          "target": {
+            "kind": "audioEvent",
+            "audioEventId": "a000000"
+          },
+          "display": {
+            "sessionLabel": "Practice Session",
+            "trustedText": "Brief pause",
+            "startMs": 2250,
+            "endMs": 2500
+          }
+        }
+      ]
+    }
+  ]
 }

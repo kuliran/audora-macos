@@ -44,7 +44,7 @@ Attempts, cancellation, and terminal failure creation. Chat, Proposal, and futur
 maintenance use cases submit stable entity IDs and an `InvocationIntent`; they do
 not duplicate these checks or construct provider DTOs.
 
-The current #28 vertical slice implements `answerPendingUserTurn` with a bounded
+The #28 vertical slice implements `answerPendingUserTurn` with a bounded
 deterministic synthetic provider. It durably claims the rolling ledger, installs
 one portable Invocation, persists each fresh Provider Attempt before launch,
 retries transient failures on the 5/10/15-second schedule, permits at most one
@@ -55,13 +55,18 @@ all-or-none on-demand read through fresh opaque handles and a hidden capability.
 It treats the complete provider result as opaque bytes until one whole-response
 trust gate has checked encoding, duplicate keys, closed schema, exact admitted
 byte/token limits, Markdown, Memory, evidence, Profile targets, and effect
-conflicts. The current publisher can durably represent exactly one plain Markdown
-block plus an optional complete Memory replacement. Omission or canonical equality
-retains the selected snapshot; a changed value switches with the successful turn
-and pointer-led recovery deletes staged or superseded snapshots. Any otherwise-valid
-structured evidence block or Profile effect fails closed as one batch until its
-later persistence slice exists. Real provider adapters and Reconsider remain owned
-by their later slices.
+conflicts. The #29 evidence slice expands the current publisher to durably preserve
+ordered plain Markdown and Evidence Observation blocks plus an optional complete
+Memory replacement. Before publication, Application resolves each provider pointer
+only through its Chat attachment and the exact immutable Transcript Revision named
+by that attachment. It promotes the pointer into typed Session, revision, Word, or
+Audio Event anchors and a bounded, locally derived display snapshot; a dangling or
+cross-attachment target invalidates the whole response. Omitted or canonically
+equal Memory retains the selected snapshot; a changed value switches with the
+successful turn and pointer-led recovery deletes staged or superseded snapshots.
+Any otherwise-valid Profile effect still fails closed as one batch until its later
+persistence slice exists. Real provider adapters and Reconsider remain owned by
+their later slices.
 
 ```text
 InvocationIntent
@@ -503,9 +508,9 @@ or retried semantic reads. A non-complete read must not be answered around, and 
 detected Session conflation asks the user to send the message again. The adapter and
 broker independently enforce the atomic batch and sole exact transport redelivery.
 The complete response validator rejects invalid Memory, evidence, and Profile
-components before any message may publish; valid Memory replacement is now part of
-the turn transaction, while evidence and Profile publication remain outside this
-slice.
+components before any message may publish. Valid Memory replacement and locally
+resolved message Evidence Observations are part of the turn transaction, while
+Profile publication remains outside this slice.
 
 A non-complete read does not permit an incomplete coach answer. Audora terminates
 the Attempt and creates a user-retryable application failure. For unavailable
@@ -646,8 +651,10 @@ The inset is always rendered inline in the Chat; it does not appear only on hove
 Each evidence control is visibly interactive at rest. Hover adds a subtle
 background highlight and underlines the label. Keyboard focus adds the platform
 focus ring. Click, Enter, or Space opens the exact Session, highlights the evidence,
-and seeks available audio. An unavailable target keeps its saved label and becomes
-a focusable unavailable control whose activation explains the reason.
+and seeks available audio. The highlight is transient Review state; activation
+never creates an Annotation, transcript comment, or Session-owned feedback. An
+unavailable target keeps its saved label and becomes a focusable unavailable
+control whose activation explains the reason.
 
 ## Evidence pointers and references
 
@@ -682,12 +689,18 @@ same checks regardless of how the coach learned them. The app does not decide
 whether a structurally valid pointer semantically proves the coach's wording; the
 Speaker reviews semantic Profile changes.
 
-Application derives text, time, Session identity, and display labels from the
-canonical revision. Model-returned quotes or timestamps are never authoritative.
-The resulting Evidence Reference is nested in the coach message or Profile
-Statement; it has no independent lifecycle. Missing, in-Trash, corrupt, or
-unsupported source data changes navigation and presentation only. It does not
-silently change an accepted Profile Statement.
+Application promotes a valid pointer into an immutable Evidence Reference carrying
+the exact local Session ID, Transcript Revision ID, and typed Word-range or Audio
+Event target. It also derives a durable display snapshot—trusted text, canonical
+time range, and Session label—from that same revision. Model-returned identity,
+quotes, labels, or timestamps are never authoritative. The snapshot remains the
+trusted display and accessibility fallback when the source is unavailable, but it
+is never highlight or seek authority: activation reloads the exact saved revision
+and re-resolves the typed target there, without substituting the Session's current
+or any other revision. The resulting Evidence Reference is nested in the coach
+message or Profile Statement; it has no independent lifecycle. Missing, in-Trash,
+corrupt, or unsupported source data changes navigation and presentation only. It
+does not silently change an accepted Profile Statement.
 
 ## Development Profile context
 

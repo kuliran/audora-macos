@@ -2114,22 +2114,6 @@ final class DefaultInvocationsTests: XCTestCase {
             (
                 """
                 {
-                  "messageBlocks":[{
-                    "kind":"evidenceObservation",
-                    "markdown":"Do not publish alone.",
-                    "evidence":[{
-                      "sessionAttachmentId":"attachment-1",
-                      "target":{"kind":"wordRange","startWordId":"word-1","endWordId":"word-1"}
-                    }]
-                  }]
-                }
-                """,
-                true,
-                []
-            ),
-            (
-                """
-                {
                   "messageBlocks":[{"kind":"markdown","markdown":"Do not publish alone."}],
                   "appendProfileEvidence":[{
                     "targetStatementId":"profile-1",
@@ -2186,6 +2170,60 @@ final class DefaultInvocationsTests: XCTestCase {
                 .responsePublicationUnsupported
             )
         }
+    }
+
+    func testEvidenceObservationPublishesResolvedStructuredCoachBlocks() async throws {
+        let response = CoachProviderCompleteResponse(
+            body: Data(
+                """
+                {
+                  "messageBlocks":[
+                    {"kind":"markdown","markdown":"Try one deliberate pause."},
+                    {
+                      "kind":"evidenceObservation",
+                      "markdown":"This pause clearly separated your points.",
+                      "evidence":[{
+                        "sessionAttachmentId":"attachment-1",
+                        "target":{"kind":"wordRange","startWordId":"word-1","endWordId":"word-1"}
+                      }]
+                    }
+                  ]
+                }
+                """.utf8
+            )
+        )
+        let fixture = try InvocationFixture(
+            contextWindow: 100_000,
+            providerOutcomes: [.complete(response)],
+            includesOnDemandAttachment: true
+        )
+
+        guard case let .published(aggregate, _) =
+            await fixture.invocations.tryInvoke(fixture.request)
+        else { return XCTFail("resolved evidence response must publish") }
+
+        XCTAssertEqual(
+            aggregate.chat.messageIDs,
+            [fixture.userMessageID, fixture.coachMessageID]
+        )
+        let recordedPublication = await fixture.persistence.lastPublication
+        let publication = try XCTUnwrap(recordedPublication)
+        guard case let .coach(blocks) = publication.coachMessage.content,
+              case let .evidenceObservation(_, evidence) = blocks[1]
+        else { return XCTFail("expected structured evidence block") }
+        XCTAssertEqual(blocks.count, 2)
+        XCTAssertEqual(evidence[0].display.sessionLabel, "Fixture Session")
+        XCTAssertEqual(evidence[0].display.trustedText, "Pause")
+        XCTAssertEqual(evidence[0].display.startMilliseconds, 0)
+        XCTAssertEqual(evidence[0].display.endMilliseconds, 900)
+        XCTAssertEqual(
+            evidence[0].sessionID,
+            try SessionID("ses-20260830T115900000Z-1ABC")
+        )
+        XCTAssertEqual(
+            evidence[0].transcriptRevisionID,
+            try TranscriptRevisionID("trv-20260830T115900000Z-2DEF")
+        )
     }
 
     func testContextCapacityFailureIsDurableAndConsumesNoAdmissionOrProviderLaunch() async throws {
