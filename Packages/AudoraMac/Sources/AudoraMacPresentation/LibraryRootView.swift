@@ -7,7 +7,19 @@ struct LibrarySessionLinkRouting {
     let scope: LibraryScope
     let selectProcessing: (SessionProcessingSelection) -> Void
     let selectReview: (ReviewSelection) -> Void
-    let openReviewEvidence: (EvidenceReference, LibraryScope) -> Void = { _, _ in }
+    let openReviewEvidence: (EvidenceReference, LibraryScope) -> Void
+
+    init(
+        scope: LibraryScope,
+        selectProcessing: @escaping (SessionProcessingSelection) -> Void,
+        selectReview: @escaping (ReviewSelection) -> Void,
+        openReviewEvidence: @escaping (EvidenceReference, LibraryScope) -> Void = { _, _ in }
+    ) {
+        self.scope = scope
+        self.selectProcessing = selectProcessing
+        self.selectReview = selectReview
+        self.openReviewEvidence = openReviewEvidence
+    }
 
     func openSession(_ sessionID: SessionID) {
         selectProcessing(
