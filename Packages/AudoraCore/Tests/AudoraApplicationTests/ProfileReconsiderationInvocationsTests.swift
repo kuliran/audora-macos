@@ -654,6 +654,13 @@ final class ProfileReconsiderationInvocationsTests: XCTestCase {
             return XCTFail("unproved sidecar cleanup must retain exact Retry")
         }
         XCTAssertEqual(retry, prepared.request)
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().first)
+        XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
+        XCTAssertEqual(event.reason, .admissionCooldown)
+        XCTAssertEqual(event.classification, .admissionRejected)
+        XCTAssertEqual(event.disposition, .userRetryableFailure)
+        XCTAssertNil(event.invocationID)
+        XCTAssertNil(event.attemptID)
         await fixture.admission.setDecision(.admitted)
 
         guard case .withdrawn =
@@ -661,6 +668,7 @@ final class ProfileReconsiderationInvocationsTests: XCTestCase {
         else { return XCTFail("exact Retry must resume without relaunch state") }
         let providerCount = await fixture.provider.requests.count
         XCTAssertEqual(providerCount, 1)
+        XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
     }
 
     func testConcurrentInstallRaceCleansProvisionalSidecarOnly() async throws {

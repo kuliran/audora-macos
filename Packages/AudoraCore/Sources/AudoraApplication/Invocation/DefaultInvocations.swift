@@ -3706,18 +3706,27 @@ public actor DefaultInvocations: Invocations {
                 outcome: { .rejected($0, .persistenceUnavailable) }
             )
         }
-        guard case let .rejected(current, outcomeReason) = outcome else {
+        let diagnosticReason: InvocationRejectionReason
+        let preservesOperationalRetry: Bool
+        switch outcome {
+        case let .rejected(current, outcomeReason):
+            diagnosticReason = outcomeReason
+            preservesOperationalRetry =
+                outcomeReason != .eligibilityChanged &&
+                hasExactProfileReconsideration(current, request: request) &&
+                current?.profileReconsideration?.failure == nil
+        case .operationallyInterrupted:
+            diagnosticReason = reason
+            preservesOperationalRetry = false
+        default:
             return outcome
         }
-        let preservesOperationalRetry = outcomeReason != .eligibilityChanged &&
-            hasExactProfileReconsideration(current, request: request) &&
-            current?.profileReconsideration?.failure == nil
         guard presentsProfileReconsiderationUserRetry(
             outcome,
             request: request
         ) || preservesOperationalRetry else { return outcome }
         let diagnostic = Self.profileReconsiderationRejectionDiagnostic(
-            outcomeReason
+            diagnosticReason
         )
         await recordRetryDiagnostic(
             reason: diagnostic.reason,
