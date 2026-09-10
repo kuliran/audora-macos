@@ -42,9 +42,10 @@ at runtime.
 `PendingUserTurn.json` is a versioned union: strict legacy v1 permits no failure
 or `coachContextCannotFit`; legacy v2 additionally permits
 `coachResponseInterrupted`; v3 distinguishes retryable Provider failure from an
-invalid complete response; and current v4 adds transcript-read failure paired with
-its required privacy-bounded Session-link summary. The committed examples cover
-the current terminal reasons and legacy compatibility.
+invalid complete response; legacy v4 adds transcript-read failure paired with its
+required privacy-bounded Session-link summary; and current v5 optionally records
+the semantic Profile generation frozen into the most recently installed Invocation.
+The committed examples cover the current terminal reasons and legacy compatibility.
 
 - [`AudioImportFeatureScenario.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioImportFeatureScenario.json)
 - [`AudioManifest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/AudioManifest.json)
@@ -157,11 +158,13 @@ more exact target summaries with nonempty Evidence Appends. It remains beside th
 Chat until the idempotent local union commits or the Speaker discards a retained
 failure; it never appears as Chat history.
 
-`ProfileReconsideration` is the durable sidecar stored as
+`ProfileReconsideration` is the durable schema-v2 sidecar stored as
 `profile-reconsideration.json` beside the exact unresolved source effect. Its
 sealed source identity is either one Proposal ID or one evidence-publication
-response position, and its distinct result response position is reserved for the
-whole Reconsider lifecycle. No failure means preparation or execution is active.
+response position, its distinct result response position is reserved for the
+whole Reconsider lifecycle, and its optional prepared Profile statement generation
+records the most recently installed Invocation. Legacy v1 and provisional state
+omit that generation. No failure means preparation or execution is active.
 An ordinary failure stores only its closed reason; transcript-read failure is a
 separate sealed variant requiring the bounded Session summary. Runtime also
 requires the result response position to differ from the source position and all

@@ -105,6 +105,11 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
             )
             guard case let .installed(active) = await pending.install(install)
             else { return XCTFail("Reconsider Invocation did not install") }
+            XCTAssertEqual(
+                active.processingAggregate.profileReconsideration?
+                    .preparedProfileStatementGeneration,
+                fixture.basis.latestProfile.provenance.statementGeneration
+            )
             let response = ValidatedCoachResponse(
                 messageBlocks: [],
                 newMemory: nil,
@@ -199,20 +204,20 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
                 )
             else { return XCTFail("Reconsider Invocation did not install") }
             let mutation = try PublishProfileReconsiderationInvocationMutation(
-                    base: install.processingAggregate,
-                    invocation: install.invocation,
-                    reconsideration: authority.reconsideration,
-                    basis: authority.basis,
-                    validatedResponse: ValidatedCoachResponse(
-                        messageBlocks: [],
-                        newMemory: nil,
-                        proposedProfileEdits: [],
-                        appendedProfileEvidence: [],
-                        profileEffectPublicationMode: .reviewRequired
-                    ),
-                    replacementMemory: nil,
-                    completedAt: UTCInstant("2026-09-10T14:00:03.000Z")
-                )
+                base: install.processingAggregate,
+                invocation: install.invocation,
+                reconsideration: install.processingReconsideration,
+                basis: authority.basis,
+                validatedResponse: ValidatedCoachResponse(
+                    messageBlocks: [],
+                    newMemory: nil,
+                    proposedProfileEdits: [],
+                    appendedProfileEvidence: [],
+                    profileEffectPublicationMode: .reviewRequired
+                ),
+                replacementMemory: nil,
+                completedAt: UTCInstant("2026-09-10T14:00:03.000Z")
+            )
             XCTAssertThrowsError(
                 try persistence.publishProfileReconsideration(
                     mutation,
@@ -310,7 +315,7 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
             let mutation = try PublishProfileReconsiderationInvocationMutation(
                 base: install.processingAggregate,
                 invocation: install.invocation,
-                reconsideration: authority.reconsideration,
+                reconsideration: install.processingReconsideration,
                 basis: authority.basis,
                 validatedResponse: replacementReconsiderationResponse(),
                 replacementMemory: nil,
@@ -377,8 +382,17 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
                 "chats/\(fixture.observed.chat.id.rawValue)",
                 isDirectory: true
             )
-            try fixture.persistence.encodeProfileReconsideration(
-                fixture.reconsideration
+            var legacySidecar = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: fixture.persistence.encodeProfileReconsideration(
+                        fixture.reconsideration
+                    )
+                ) as? [String: Any]
+            )
+            legacySidecar["schemaVersion"] = 1
+            try JSONSerialization.data(
+                withJSONObject: legacySidecar,
+                options: [.sortedKeys]
             ).write(
                 to: chatRoot.appendingPathComponent(
                     "profile-reconsideration.json"
@@ -397,6 +411,55 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
                 fixture.reconsideration.replacingFailure(
                     .coachResponseInterrupted
                 )
+            )
+        }
+    }
+
+    func testRelaunchRetainsInstalledReconsiderPreparedProfileGeneration()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePortableReconsiderationFixture(
+                in: parent
+            )
+            guard case let .prepared(authority, lease) = try fixture.persistence
+                .prepareNewProfileReconsiderationInvocation(
+                    fixture.request,
+                    at: fixture.root,
+                    in: fixture.scope
+                )
+            else { return XCTFail("Reconsider reservation did not open") }
+            let install = try makeReconsiderationInstall(
+                authority: authority,
+                basis: fixture.basis
+            )
+            guard case .installed = try fixture.persistence
+                .installProfileReconsiderationInvocation(
+                    install,
+                    at: fixture.root,
+                    holding: lease
+                )
+            else { return XCTFail("Reconsider Invocation did not install") }
+            lease.release()
+
+            try fixture.persistence.reconcileInterruptedInvocations(
+                at: fixture.root,
+                in: fixture.scope
+            )
+
+            guard case let .readWrite(reopened) = try fixture.persistence.load(
+                fixture.observed.chat.id,
+                at: fixture.root,
+                in: fixture.scope
+            ) else { return XCTFail("Interrupted Reconsider did not reload") }
+            XCTAssertEqual(
+                reopened.profileReconsideration?.failure,
+                .coachResponseInterrupted
+            )
+            XCTAssertEqual(
+                reopened.profileReconsideration?
+                    .preparedProfileStatementGeneration,
+                fixture.basis.latestProfile.provenance.statementGeneration
             )
         }
     }
@@ -3100,7 +3163,7 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
         let mutation = try PublishProfileReconsiderationInvocationMutation(
             base: install.processingAggregate,
             invocation: install.invocation,
-            reconsideration: authority.reconsideration,
+            reconsideration: install.processingReconsideration,
             basis: authority.basis,
             validatedResponse: response,
             replacementMemory: nil,

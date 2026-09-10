@@ -454,7 +454,7 @@ public actor PortableInvocationStore: InvocationPersistencePort {
             invocationLeases[libraryID] = .profileReconsiderationActive(
                 invocation: mutation.invocation,
                 processingAggregate: mutation.processingAggregate,
-                reconsideration: mutation.authority.reconsideration,
+                reconsideration: mutation.processingReconsideration,
                 basis: mutation.authority.basis,
                 lease: reservation.lease
             )
@@ -1170,7 +1170,7 @@ private actor PortableProfileReconsiderationInvocationSession:
                     store: store,
                     invocation: mutation.invocation,
                     processingAggregate: mutation.processingAggregate,
-                    reconsideration: mutation.authority.reconsideration,
+                    reconsideration: mutation.processingReconsideration,
                     basis: mutation.authority.basis
                 )
             )

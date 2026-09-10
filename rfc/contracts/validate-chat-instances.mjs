@@ -405,12 +405,31 @@ assertValidation(
   "synthetic Reconsider sidecar with unknown field",
 );
 const newerReconsideration = structuredClone(activeReconsideration);
-newerReconsideration.schemaVersion = 2;
+newerReconsideration.schemaVersion = 3;
 assertValidation(
   profileReconsideration,
   newerReconsideration,
   false,
   "synthetic newer Reconsider sidecar",
+);
+const legacyReconsideration = structuredClone(activeReconsideration);
+legacyReconsideration.schemaVersion = 1;
+delete legacyReconsideration.preparedProfileStatementGeneration;
+assertProfileReconsiderationIdentityValidation(
+  profileReconsideration,
+  legacyReconsideration,
+  true,
+  "synthetic legacy-v1 Reconsider sidecar",
+);
+const legacyReconsiderationWithPreparedGeneration = structuredClone(
+  legacyReconsideration,
+);
+legacyReconsiderationWithPreparedGeneration.preparedProfileStatementGeneration = 9;
+assertValidation(
+  profileReconsideration,
+  legacyReconsiderationWithPreparedGeneration,
+  false,
+  "synthetic legacy-v1 Reconsider sidecar with current generation field",
 );
 const transcriptReadReconsideration = await loadJSON(
   path.join(
@@ -462,12 +481,29 @@ assertValidation(
 const unknownNewerPending = await loadJSON(
   path.join(examplesDirectory, "pending-user-turn-interrupted.json"),
 );
-unknownNewerPending.schemaVersion = 5;
+unknownNewerPending.schemaVersion = 6;
 assertValidation(
   pendingUserTurn,
   unknownNewerPending,
   false,
   "synthetic unknown-newer Pending",
+);
+const legacyV4Pending = structuredClone(unknownNewerPending);
+legacyV4Pending.schemaVersion = 4;
+delete legacyV4Pending.preparedProfileStatementGeneration;
+assertValidation(
+  pendingUserTurn,
+  legacyV4Pending,
+  true,
+  "synthetic legacy-v4 Pending",
+);
+const legacyV4PendingWithPreparedGeneration = structuredClone(legacyV4Pending);
+legacyV4PendingWithPreparedGeneration.preparedProfileStatementGeneration = 1;
+assertValidation(
+  pendingUserTurn,
+  legacyV4PendingWithPreparedGeneration,
+  false,
+  "synthetic legacy-v4 Pending with current generation field",
 );
 const legacyV2ProviderFailure = await loadJSON(
   path.join(examplesDirectory, "pending-user-turn-provider-failure.json"),

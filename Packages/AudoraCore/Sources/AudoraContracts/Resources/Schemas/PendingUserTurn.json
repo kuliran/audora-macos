@@ -16,6 +16,12 @@
         },
         {
             "$ref": "#/$defs/PendingUserTurnTranscriptReadFailureV4"
+        },
+        {
+            "$ref": "#/$defs/PendingUserTurnV5"
+        },
+        {
+            "$ref": "#/$defs/PendingUserTurnTranscriptReadFailureV5"
         }
     ],
     "$defs": {
@@ -180,6 +186,86 @@
                 },
                 "transcriptReadFailure": {
                     "$ref": "#/$defs/CoachTranscriptReadFailureSummary"
+                }
+            },
+            "required": [
+                "pendingUserTurnId",
+                "draftId",
+                "draftVersion",
+                "responsePositionId",
+                "schemaVersion",
+                "failure",
+                "transcriptReadFailure"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PendingUserTurnV5": {
+            "type": "object",
+            "properties": {
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                },
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "draftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 5
+                },
+                "failure": {
+                    "$ref": "#/$defs/PendingUserTurnFailureV3"
+                },
+                "preparedProfileStatementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                }
+            },
+            "required": [
+                "pendingUserTurnId",
+                "draftId",
+                "draftVersion",
+                "responsePositionId",
+                "schemaVersion"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PendingUserTurnTranscriptReadFailureV5": {
+            "type": "object",
+            "properties": {
+                "pendingUserTurnId": {
+                    "$ref": "#/$defs/PendingUserTurnId"
+                },
+                "draftId": {
+                    "$ref": "#/$defs/ChatDraftId"
+                },
+                "draftVersion": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 5
+                },
+                "failure": {
+                    "type": "string",
+                    "const": "coachTranscriptReadFailed"
+                },
+                "transcriptReadFailure": {
+                    "$ref": "#/$defs/CoachTranscriptReadFailureSummary"
+                },
+                "preparedProfileStatementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
                 }
             },
             "required": [

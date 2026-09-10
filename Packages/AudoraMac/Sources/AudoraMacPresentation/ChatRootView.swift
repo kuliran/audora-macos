@@ -984,6 +984,10 @@ public struct ChatRootView: View {
                 description: Text("Create a new Chat to continue reflecting.")
             )
         case let .open(aggregate):
+            let timeline = ChatTimelinePresentation.project(
+                aggregate,
+                state: model.snapshot
+            )
             VStack(alignment: .leading, spacing: 16) {
                 Text(aggregate.chat.title.rawValue)
                     .font(.title2.weight(.semibold))
@@ -1013,8 +1017,8 @@ public struct ChatRootView: View {
                     } else {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 12) {
-                                ForEach(aggregate.messages, id: \.id) { message in
-                                    successfulMessageView(message)
+                                ForEach(timeline.successfulHistory) { entry in
+                                    successfulTimelineEntryView(entry)
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1022,8 +1026,22 @@ public struct ChatRootView: View {
                         .frame(maxHeight: 300)
                     }
                 }
+                if timeline.tailPlacement == .afterSuccessfulContent,
+                   let divider = timeline.tailProfileUpdate
+                {
+                    profileUpdateDividerView(divider)
+                }
+                if let divider = timeline.profileEffectProfileUpdate {
+                    profileUpdateDividerView(divider)
+                }
                 if let proposal = aggregate.profileProposal {
-                    profileProposalView(proposal)
+                    profileProposalView(
+                        proposal,
+                        preparedTimelineDivider:
+                            profileEffectPreparedTimelineDivider(timeline),
+                        tailTimelineDivider:
+                            profileEffectTailTimelineDivider(timeline)
+                    )
                 }
                 if let publicationCard =
                     ProfileEvidencePublicationFailurePresentation.card(
@@ -1032,9 +1050,30 @@ public struct ChatRootView: View {
                         activity: model.snapshot.activity
                     )
                 {
-                    profileEvidencePublicationFailureView(publicationCard)
+                    profileEvidencePublicationFailureView(
+                        publicationCard,
+                        preparedTimelineDivider:
+                            profileEffectPreparedTimelineDivider(timeline),
+                        tailTimelineDivider:
+                            profileEffectTailTimelineDivider(timeline)
+                    )
+                }
+                if timeline.tailPlacement == .afterProfileEffectCard,
+                   let divider = timeline.tailProfileUpdate
+                {
+                    profileUpdateDividerView(divider)
+                }
+                if timeline.pendingActionPlacement == .beforePendingUserTurn,
+                   let divider = timeline.pendingActionProfileUpdate
+                {
+                    profileUpdateDividerView(divider)
                 }
                 composerView
+                if timeline.tailPlacement == .afterPendingUserTurn,
+                   let divider = timeline.tailProfileUpdate
+                {
+                    profileUpdateDividerView(divider)
+                }
                 Spacer()
             }
             .task(
@@ -1046,6 +1085,61 @@ public struct ChatRootView: View {
                 renameTitle = aggregate.chat.title.rawValue
             }
         }
+    }
+
+    @ViewBuilder
+    private func successfulTimelineEntryView(
+        _ entry: ChatTimelineEntryPresentation
+    ) -> some View {
+        switch entry {
+        case let .profileUpdate(divider):
+            profileUpdateDividerView(divider)
+        case let .message(message):
+            successfulMessageView(message)
+        }
+    }
+
+    private func profileUpdateDividerView(
+        _ presentation: ProfileUpdateDividerPresentation
+    ) -> some View {
+        HStack(spacing: 8) {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.28))
+                .frame(height: 1)
+                .accessibilityHidden(true)
+            Text(presentation.visibleText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize()
+            Rectangle()
+                .fill(Color.secondary.opacity(0.28))
+                .frame(height: 1)
+                .accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(presentation.accessibilityLabel)
+    }
+
+    private func profileEffectPreparedTimelineDivider(
+        _ timeline: ChatTimelinePresentation
+    ) -> ProfileUpdateDividerPresentation? {
+        guard timeline.pendingActionPlacement ==
+            .beforeProfileReconsiderationResult
+        else {
+            return nil
+        }
+        return timeline.pendingActionProfileUpdate
+    }
+
+    private func profileEffectTailTimelineDivider(
+        _ timeline: ChatTimelinePresentation
+    ) -> ProfileUpdateDividerPresentation? {
+        guard timeline.tailPlacement == .afterProfileReconsideration else {
+            return nil
+        }
+        return timeline.tailProfileUpdate
     }
 
     @ViewBuilder
@@ -1112,7 +1206,9 @@ public struct ChatRootView: View {
     }
 
     private func profileProposalView(
-        _ proposal: ProfileChangeProposal
+        _ proposal: ProfileChangeProposal,
+        preparedTimelineDivider: ProfileUpdateDividerPresentation?,
+        tailTimelineDivider: ProfileUpdateDividerPresentation?
     ) -> some View {
         let presentation = ProfileProposalCardPresentation(proposal)
         return GroupBox("Profile Change Proposal") {
@@ -1139,10 +1235,16 @@ public struct ChatRootView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                if let preparedTimelineDivider {
+                    profileUpdateDividerView(preparedTimelineDivider)
+                }
                 if let reconsideration = currentProfileReconsideration(
                     for: .proposal(presentation.proposalID)
                 ) {
                     profileReconsiderationFailureDetails(reconsideration)
+                }
+                if let tailTimelineDivider {
+                    profileUpdateDividerView(tailTimelineDivider)
                 }
                 profileEffectRecoveryActions(
                     for: .proposal(presentation.proposalID)
@@ -1154,7 +1256,9 @@ public struct ChatRootView: View {
     }
 
     private func profileEvidencePublicationFailureView(
-        _ presentation: ProfileEvidencePublicationFailureCardPresentation
+        _ presentation: ProfileEvidencePublicationFailureCardPresentation,
+        preparedTimelineDivider: ProfileUpdateDividerPresentation?,
+        tailTimelineDivider: ProfileUpdateDividerPresentation?
     ) -> some View {
         GroupBox("Profile Publication Failure") {
             VStack(alignment: .leading, spacing: 12) {
@@ -1170,10 +1274,16 @@ public struct ChatRootView: View {
                 let identity = ChatProfileEffectIdentity.evidencePublication(
                     presentation.responsePositionID
                 )
+                if let preparedTimelineDivider {
+                    profileUpdateDividerView(preparedTimelineDivider)
+                }
                 if let reconsideration = currentProfileReconsideration(
                     for: identity
                 ) {
                     profileReconsiderationFailureDetails(reconsideration)
+                }
+                if let tailTimelineDivider {
+                    profileUpdateDividerView(tailTimelineDivider)
                 }
                 profileEffectRecoveryActions(for: identity)
             }

@@ -826,7 +826,8 @@ final class PortableInvocationStoreTests: XCTestCase {
 
                 XCTAssertEqual(
                     reopened.pendingUserTurn,
-                    fixture.locked.pendingUserTurn?.replacingFailure(expectedFailure),
+                    fixture.install.processingAggregate.pendingUserTurn?
+                        .replacingFailure(expectedFailure),
                     label
                 )
                 XCTAssertNotEqual(
@@ -1181,7 +1182,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                 .installNextAttempt(nextMutation)
             else { return XCTFail("corrupt sibling blocked the next Attempt") }
             let publication = try PublishCoachInvocationMutation(
-                base: fixture.locked,
+                base: fixture.install.processingAggregate,
                 invocation: nextSession.invocation,
                 coachMarkdown: "Healthy Chat response.",
                 completedAt: UTCInstant("2026-08-30T12:00:23.000Z")
@@ -1966,7 +1967,10 @@ final class PortableInvocationStoreTests: XCTestCase {
                 fixture,
                 rename: rename
             )
-            XCTAssertEqual(crash.outcome, .stale(fixture.locked))
+            XCTAssertEqual(
+                crash.outcome,
+                .stale(fixture.install.processingAggregate)
+            )
             XCTAssertTrue(crash.conflictReached)
             XCTAssertTrue(crash.livenessReleased)
             try assertPrecommitPublicationCrashArtifacts(
@@ -2356,7 +2360,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                 at: fixture.root,
                 in: fixture.scope
             ) else { return XCTFail("live Invocation froze its Chat") }
-            XCTAssertEqual(reopened, fixture.locked)
+            XCTAssertEqual(reopened, fixture.install.processingAggregate)
         }
     }
 
@@ -2419,7 +2423,10 @@ final class PortableInvocationStoreTests: XCTestCase {
             let competingRejection = await contender.rejectNewSend(
                 fixture.install.authority
             )
-            XCTAssertEqual(competingRejection, .stale(fixture.locked))
+            XCTAssertEqual(
+                competingRejection,
+                .stale(fixture.install.processingAggregate)
+            )
 
             guard case let .committed(published) = await owner.publish(
                 fixture.publication
@@ -2445,7 +2452,10 @@ final class PortableInvocationStoreTests: XCTestCase {
             let competingReplacement = await contender.markContextCapacityFailure(
                 fixture.install.authority
             )
-            XCTAssertEqual(competingReplacement, .stale(fixture.locked))
+            XCTAssertEqual(
+                competingReplacement,
+                .stale(fixture.install.processingAggregate)
+            )
 
             guard case let .committed(published) = await owner.publish(
                 fixture.publication
@@ -2577,7 +2587,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                 at: fixture.root,
                 in: fixture.scope
             ) else { return XCTFail("replacement Library did not retain its Chat") }
-            XCTAssertEqual(current, fixture.locked)
+            XCTAssertEqual(current, fixture.install.processingAggregate)
         }
     }
 
@@ -2686,7 +2696,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                 at: fixture.root,
                 in: fixture.scope
             ) else { return XCTFail("replacement Library did not retain its Chat") }
-            XCTAssertEqual(current, fixture.locked)
+            XCTAssertEqual(current, fixture.install.processingAggregate)
         }
     }
 
@@ -3856,7 +3866,10 @@ final class PortableInvocationStoreTests: XCTestCase {
             let reader = PortableChatStore(workspace: readingWorkspace)
             let load = await reader.load(fixture.locked.chat.id, in: fixture.scope)
 
-            XCTAssertEqual(load, .loaded(fixture.locked))
+            XCTAssertEqual(
+                load,
+                .loaded(fixture.install.processingAggregate)
+            )
             XCTAssertTrue(FileManager.default.fileExists(atPath: partial.path))
             _ = await owner.abortInstalledNewSend(fixture.install.invocation)
         }
@@ -4411,6 +4424,9 @@ final class PortableInvocationStoreTests: XCTestCase {
             pendingObject["schemaVersion"] = 2
             pendingObject["failure"] = PendingUserTurnFailure
                 .coachResponseInterrupted.rawValue
+            pendingObject.removeValue(
+                forKey: "preparedProfileStatementGeneration"
+            )
             let legacyPending = try JSONSerialization.data(
                 withJSONObject: pendingObject,
                 options: [.sortedKeys]
@@ -5784,9 +5800,8 @@ final class PortableInvocationStoreTests: XCTestCase {
     ) async throws {
         XCTAssertEqual(
             reopened.pendingUserTurn,
-            fixture.locked.pendingUserTurn?.replacingFailure(
-                .coachResponseInterrupted
-            ),
+            fixture.install.processingAggregate.pendingUserTurn?
+                .replacingFailure(.coachResponseInterrupted),
             label
         )
         XCTAssertEqual(

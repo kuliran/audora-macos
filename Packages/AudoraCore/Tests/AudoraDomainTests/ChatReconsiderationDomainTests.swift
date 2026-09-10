@@ -2,6 +2,23 @@ import AudoraDomain
 import XCTest
 
 final class ChatReconsiderationDomainTests: XCTestCase {
+    func testFailureReplacementRetainsPreparedProfileGeneration() throws {
+        let fixture = try makeStaleProposalFixture()
+        let reconsideration = ProfileReconsideration(
+            sourceEffect: .proposal(fixture.proposal),
+            resultResponsePositionID: try ChatResponsePositionID(
+                "rsp-20260909T101000000Z-2DEF"
+            )
+        ).recordingPreparedProfileStatementGeneration(14)
+
+        let failed = reconsideration.replacingFailure(
+            .coachResponseInterrupted
+        )
+
+        XCTAssertEqual(failed.preparedProfileStatementGeneration, 14)
+        XCTAssertEqual(failed.replacingFailure(nil), reconsideration)
+    }
+
     func testAggregateNormalizesLegacyProfileInputsIntoOneEffect() throws {
         let fixture = try makeStaleProposalFixture()
 

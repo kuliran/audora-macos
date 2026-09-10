@@ -58,8 +58,10 @@ namespace Audora.Contracts {
     legacyV1: PendingUserTurnV1,
     legacyV2: PendingUserTurnV2,
     legacyV3: PendingUserTurnV3,
-    current: PendingUserTurnV4,
-    currentTranscriptReadFailure: PendingUserTurnTranscriptReadFailureV4,
+    legacyV4: PendingUserTurnV4,
+    legacyTranscriptReadFailureV4: PendingUserTurnTranscriptReadFailureV4,
+    current: PendingUserTurnV5,
+    currentTranscriptReadFailure: PendingUserTurnTranscriptReadFailureV5,
   }
 
   model PendingUserTurnV1 {
@@ -91,6 +93,21 @@ namespace Audora.Contracts {
     schemaVersion: 4;
     failure: "coachTranscriptReadFailed";
     transcriptReadFailure: CoachTranscriptReadFailureSummary;
+  }
+
+  model PendingUserTurnV5 {
+    ...PendingUserTurnFields;
+    schemaVersion: 5;
+    failure?: PendingUserTurnFailureV3;
+    preparedProfileStatementGeneration?: NonnegativeWholeNumber;
+  }
+
+  model PendingUserTurnTranscriptReadFailureV5 {
+    ...PendingUserTurnFields;
+    schemaVersion: 5;
+    failure: "coachTranscriptReadFailed";
+    transcriptReadFailure: CoachTranscriptReadFailureSummary;
+    preparedProfileStatementGeneration?: NonnegativeWholeNumber;
   }
 
   model PendingUserTurnFields {

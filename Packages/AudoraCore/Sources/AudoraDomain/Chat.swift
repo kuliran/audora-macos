@@ -409,26 +409,33 @@ public enum PendingUserTurnFailure: RawRepresentable, Equatable, Sendable {
 }
 
 public struct PendingUserTurn: Equatable, Sendable {
-    public static let schemaVersion: UInt32 = 4
+    public static let schemaVersion: UInt32 = 5
 
     public let id: PendingUserTurnID
     public let draftID: ChatDraftID
     public let draftVersion: UInt64
     public let responsePositionID: ChatResponsePositionID
     public let failure: PendingUserTurnFailure?
+    /// The semantic Profile generation frozen into the most recently installed
+    /// Invocation for this unresolved turn. Legacy and provisional Pending
+    /// state has no value until an Invocation becomes durable.
+    public let preparedProfileStatementGeneration: UInt64?
 
     public init(
         id: PendingUserTurnID,
         draftID: ChatDraftID,
         draftVersion: UInt64,
         responsePositionID: ChatResponsePositionID,
-        failure: PendingUserTurnFailure? = nil
+        failure: PendingUserTurnFailure? = nil,
+        preparedProfileStatementGeneration: UInt64? = nil
     ) {
         self.id = id
         self.draftID = draftID
         self.draftVersion = draftVersion
         self.responsePositionID = responsePositionID
         self.failure = failure
+        self.preparedProfileStatementGeneration =
+            preparedProfileStatementGeneration
     }
 
     public func replacingFailure(
@@ -439,7 +446,22 @@ public struct PendingUserTurn: Equatable, Sendable {
             draftID: draftID,
             draftVersion: draftVersion,
             responsePositionID: responsePositionID,
-            failure: failure
+            failure: failure,
+            preparedProfileStatementGeneration:
+                preparedProfileStatementGeneration
+        )
+    }
+
+    public func recordingPreparedProfileStatementGeneration(
+        _ statementGeneration: UInt64
+    ) -> PendingUserTurn {
+        PendingUserTurn(
+            id: id,
+            draftID: draftID,
+            draftVersion: draftVersion,
+            responsePositionID: responsePositionID,
+            failure: failure,
+            preparedProfileStatementGeneration: statementGeneration
         )
     }
 }
@@ -447,31 +469,40 @@ public struct PendingUserTurn: Equatable, Sendable {
 /// Durable Chat-owned authority for one Reconsider Invocation. The source
 /// effect remains installed until a successful result replaces or withdraws it.
 public struct ProfileReconsideration: Equatable, Sendable {
-    public static let schemaVersion: UInt32 = 1
+    public static let schemaVersion: UInt32 = 2
 
     public let sourceEffectIdentity: ChatProfileEffectIdentity
     public let resultResponsePositionID: ChatResponsePositionID
     public let failure: PendingUserTurnFailure?
+    /// The semantic Profile generation frozen into the most recently installed
+    /// Reconsider Invocation. Legacy and provisional sidecars omit it.
+    public let preparedProfileStatementGeneration: UInt64?
 
     public init(
         sourceEffectIdentity: ChatProfileEffectIdentity,
         resultResponsePositionID: ChatResponsePositionID,
-        failure: PendingUserTurnFailure? = nil
+        failure: PendingUserTurnFailure? = nil,
+        preparedProfileStatementGeneration: UInt64? = nil
     ) {
         self.sourceEffectIdentity = sourceEffectIdentity
         self.resultResponsePositionID = resultResponsePositionID
         self.failure = failure
+        self.preparedProfileStatementGeneration =
+            preparedProfileStatementGeneration
     }
 
     public init(
         sourceEffect: ChatProfileEffect,
         resultResponsePositionID: ChatResponsePositionID,
-        failure: PendingUserTurnFailure? = nil
+        failure: PendingUserTurnFailure? = nil,
+        preparedProfileStatementGeneration: UInt64? = nil
     ) {
         self.init(
             sourceEffectIdentity: sourceEffect.identity,
             resultResponsePositionID: resultResponsePositionID,
-            failure: failure
+            failure: failure,
+            preparedProfileStatementGeneration:
+                preparedProfileStatementGeneration
         )
     }
 
@@ -481,7 +512,20 @@ public struct ProfileReconsideration: Equatable, Sendable {
         ProfileReconsideration(
             sourceEffectIdentity: sourceEffectIdentity,
             resultResponsePositionID: resultResponsePositionID,
-            failure: failure
+            failure: failure,
+            preparedProfileStatementGeneration:
+                preparedProfileStatementGeneration
+        )
+    }
+
+    public func recordingPreparedProfileStatementGeneration(
+        _ statementGeneration: UInt64
+    ) -> ProfileReconsideration {
+        ProfileReconsideration(
+            sourceEffectIdentity: sourceEffectIdentity,
+            resultResponsePositionID: resultResponsePositionID,
+            failure: failure,
+            preparedProfileStatementGeneration: statementGeneration
         )
     }
 }

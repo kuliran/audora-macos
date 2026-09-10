@@ -525,7 +525,9 @@ final class PortableChatPersistenceTests: XCTestCase {
         }
     }
 
-    func testPendingUserTurnEncoderWritesV4ForInterruptedFailure() throws {
+    func testPendingUserTurnEncoderWritesV5PreparedGenerationForInterruptedFailure()
+        throws
+    {
         let pending = PendingUserTurn(
             id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
             draftID: try ChatDraftID("drf-20260830T120000000Z-3DEF"),
@@ -533,7 +535,8 @@ final class PortableChatPersistenceTests: XCTestCase {
             responsePositionID: try ChatResponsePositionID(
                 "rsp-20260830T120001000Z-6PQR"
             ),
-            failure: .coachResponseInterrupted
+            failure: .coachResponseInterrupted,
+            preparedProfileStatementGeneration: 9
         )
 
         let object = try XCTUnwrap(
@@ -542,8 +545,13 @@ final class PortableChatPersistenceTests: XCTestCase {
             ) as? [String: Any]
         )
 
-        XCTAssertEqual((object["schemaVersion"] as? NSNumber)?.uint32Value, 4)
+        XCTAssertEqual((object["schemaVersion"] as? NSNumber)?.uint32Value, 5)
         XCTAssertEqual(object["failure"] as? String, "coachResponseInterrupted")
+        XCTAssertEqual(
+            (object["preparedProfileStatementGeneration"] as? NSNumber)?
+                .uint64Value,
+            9
+        )
     }
 
     func testPendingUserTurnEncoderWritesOnlyBoundedTranscriptFailureSummary() throws {
@@ -563,7 +571,8 @@ final class PortableChatPersistenceTests: XCTestCase {
             responsePositionID: try ChatResponsePositionID(
                 "rsp-20260830T120001000Z-6PQR"
             ),
-            failure: .coachTranscriptReadFailed(summary)
+            failure: .coachTranscriptReadFailed(summary),
+            preparedProfileStatementGeneration: 9
         )
 
         let object = try XCTUnwrap(
@@ -574,6 +583,7 @@ final class PortableChatPersistenceTests: XCTestCase {
         XCTAssertEqual(Set(object.keys), [
             "schemaVersion", "pendingUserTurnId", "draftId", "draftVersion",
             "responsePositionId", "failure", "transcriptReadFailure",
+            "preparedProfileStatementGeneration",
         ])
         XCTAssertEqual(object["failure"] as? String, "coachTranscriptReadFailed")
         let encodedSummary = try XCTUnwrap(
@@ -636,7 +646,7 @@ final class PortableChatPersistenceTests: XCTestCase {
             )
             XCTAssertEqual(
                 (upgradedObject["schemaVersion"] as? NSNumber)?.uint32Value,
-                4
+                5
             )
             XCTAssertEqual(upgraded.pendingUserTurn, capacity)
 
@@ -698,7 +708,24 @@ final class PortableChatPersistenceTests: XCTestCase {
 
             try rewritePending(
                 at: pendingURL,
-                schemaVersion: 5,
+                schemaVersion: 4,
+                failure: .coachResponseInterrupted
+            )
+            let legacyV4Interrupted = try ChatAggregate(
+                chat: upgraded.chat,
+                memory: upgraded.memory,
+                pendingUserTurn: pending.replacingFailure(
+                    .coachResponseInterrupted
+                )
+            )
+            XCTAssertEqual(
+                try persistence.load(original.chat.id, at: root, in: scope),
+                .readWrite(legacyV4Interrupted)
+            )
+
+            try rewritePending(
+                at: pendingURL,
+                schemaVersion: 6,
                 failure: .coachResponseInterrupted
             )
             XCTAssertEqual(
@@ -1546,7 +1573,12 @@ final class PortableChatPersistenceTests: XCTestCase {
                     at: root,
                     in: scope
                 ) else { return XCTFail("Invocation fault froze the Chat") }
-                XCTAssertEqual(reopened, fixture.locked)
+                XCTAssertEqual(
+                    reopened,
+                    preInstall.contains(point)
+                        ? fixture.locked
+                        : fixture.install.processingAggregate
+                )
                 XCTAssertEqual(reopened.chat.messageIDs, [])
             }
         }
@@ -1673,7 +1705,11 @@ final class PortableChatPersistenceTests: XCTestCase {
                     in: scope
                 ) else { return XCTFail("publication fault froze the Chat") }
                 if beforeCommit.contains(point) {
-                    XCTAssertEqual(reopened, fixture.locked, String(describing: point))
+                    XCTAssertEqual(
+                        reopened,
+                        fixture.install.processingAggregate,
+                        String(describing: point)
+                    )
                     XCTAssertEqual(reopened.chat.messageIDs, [], String(describing: point))
                     XCTAssertTrue(
                         try baseline.hasActiveInvocation(at: root, in: scope),
@@ -1857,6 +1893,10 @@ final class PortableChatPersistenceTests: XCTestCase {
                 unlocked.pendingUserTurn?.failure,
                 .coachResponseInterrupted
             )
+            XCTAssertEqual(
+                unlocked.pendingUserTurn?.preparedProfileStatementGeneration,
+                fixture.install.invocation.preparedProfile?.statementGeneration
+            )
             XCTAssertEqual(unlocked.chat.draft, fixture.locked.chat.draft)
             XCTAssertEqual(unlocked.chat.messageIDs, [])
             XCTAssertFalse(try persistence.hasActiveInvocation(at: root, in: scope))
@@ -1931,7 +1971,7 @@ final class PortableChatPersistenceTests: XCTestCase {
             guard case let .renamed(renamed) = try persistence.rename(
                 RenameChatMutation(
                     library: scope,
-                    base: fixture.locked,
+                    base: fixture.install.processingAggregate,
                     title: title,
                     updatedAt: try UTCInstant("2026-08-30T12:00:02.500Z")
                 ),
@@ -2113,7 +2153,7 @@ final class PortableChatPersistenceTests: XCTestCase {
                 )
             )
             let publication = try PublishCoachInvocationMutation(
-                base: fixture.locked,
+                base: fixture.install.processingAggregate,
                 invocation: fixture.install.invocation,
                 coachBlocks: [
                     .markdown("Try a deliberate pause."),
@@ -2240,6 +2280,10 @@ final class PortableChatPersistenceTests: XCTestCase {
             XCTAssertEqual(
                 reopened.pendingUserTurn?.failure,
                 .coachResponseInterrupted
+            )
+            XCTAssertEqual(
+                reopened.pendingUserTurn?.preparedProfileStatementGeneration,
+                fixture.install.invocation.preparedProfile?.statementGeneration
             )
             XCTAssertEqual(reopened.chat.draft, fixture.locked.chat.draft)
             XCTAssertEqual(reopened.chat.messageIDs, [])
@@ -2517,7 +2561,7 @@ final class PortableChatPersistenceTests: XCTestCase {
             guard case let .renamed(renamed) = try persistence.rename(
                 RenameChatMutation(
                     library: scope,
-                    base: fixture.locked,
+                    base: fixture.install.processingAggregate,
                     title: title,
                     updatedAt: try UTCInstant("2026-08-30T12:00:02.500Z")
                 ),
@@ -2780,7 +2824,7 @@ final class PortableChatPersistenceTests: XCTestCase {
                 fixture.install,
                 at: root
             ) else { return XCTFail("Invocation did not install") }
-            guard let pending = fixture.locked.pendingUserTurn,
+            guard let pending = fixture.install.processingAggregate.pendingUserTurn,
                   case let .committed(unlocked) = try persistence.discardPendingUserTurn(
                       DiscardPendingUserTurnMutation(
                           library: scope,
@@ -3018,7 +3062,7 @@ final class PortableChatPersistenceTests: XCTestCase {
             admittedAt: try UTCInstant("2026-08-30T12:\(minute):02.000Z")
         )
         let publication = try PublishCoachInvocationMutation(
-            base: locked,
+            base: install.processingAggregate,
             invocation: install.invocation,
             identity: identity,
             coachMarkdown: "A complete **synthetic** Coach response.",

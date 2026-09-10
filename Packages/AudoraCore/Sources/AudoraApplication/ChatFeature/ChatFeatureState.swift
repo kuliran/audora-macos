@@ -172,6 +172,9 @@ public struct ChatFeatureState: Equatable, Sendable {
     public let filterQuery: ChatFilterQuery
     public let selection: Selection
     public let composer: ChatComposerState?
+    /// Current verified Profile statement generation for timeline projection.
+    /// Dividers remain derived Presentation state and are never persisted.
+    public let currentProfileStatementGeneration: UInt64?
     public let contextAdvisory: CoachContextAdvisoryState
     public let admissionAvailability: InvocationAdmissionAvailability?
     public let createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent?
@@ -202,6 +205,7 @@ public struct ChatFeatureState: Equatable, Sendable {
         filterQuery: ChatFilterQuery = .empty,
         selection: Selection = .none,
         composer: ChatComposerState? = nil,
+        currentProfileStatementGeneration: UInt64? = nil,
         contextAdvisory: CoachContextAdvisoryState = .notRequested,
         admissionAvailability: InvocationAdmissionAvailability? = nil,
         createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
@@ -222,6 +226,8 @@ public struct ChatFeatureState: Equatable, Sendable {
         self.filterQuery = filterQuery
         self.selection = selection
         self.composer = composer
+        self.currentProfileStatementGeneration =
+            currentProfileStatementGeneration
         self.contextAdvisory = contextAdvisory
         self.admissionAvailability = admissionAvailability
         self.createNewChatRecoveryIntent = createNewChatRecoveryIntent

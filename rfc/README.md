@@ -193,8 +193,10 @@ evidence-publication target is retired or replaced before its union, that operat
 becomes stale and uses Reconsider.
 
 Reconsider is a full schema-v5 Invocation, not a Pending User Turn. Its durable
-`profile-reconsideration.json` sidecar binds the exact source Proposal ID or evidence
-response position and one distinct result response position. Its context includes
+schema-v2 `profile-reconsideration.json` sidecar binds the exact source Proposal ID
+or evidence response position, one distinct result response position, and the
+optional semantic Profile generation frozen by the most recently installed
+Invocation. Its context includes
 the complete previous edits with evidence, unique full snapshots for inactive edit
 targets, standalone evidence only for vanished targets, and retained standalone
 appends for targets still active; every inactive reference resolves exactly once.
@@ -214,12 +216,14 @@ exact Pending User Turn as interrupted and user-retryable; it never unlocks that
 Draft as a pre-admission rejection.
 Invocation liveness is acquired atomically with the first exact Pending
 resolution, so concurrent catalog recovery cannot interrupt a live Send between
-resolution and reservation. Pending User Turn schema v4 persists context-fit,
+resolution and reservation. Pending User Turn schema v5 persists context-fit,
 interrupted, Provider-error, invalid-response, and privacy-bounded transcript-read
-failures. Strict v1 compatibility permits only no failure or the context-fit
-failure; v2 additionally permits interruption, and v3 adds Provider and invalid
-response failures. Valid legacy Pending state upgrades to v4 when it is next
-written; a root newer than v4 freezes only its own Chat.
+failures plus the optional semantic Profile generation frozen by the most recently
+installed Invocation. Strict v1 compatibility permits only no failure or the
+context-fit failure; v2 additionally permits interruption, v3 adds Provider and
+invalid-response failures, and v4 adds transcript-read failure without the prepared
+generation. Valid legacy Pending state upgrades to v5 when it is next written; a
+root newer than v5 freezes only its own Chat.
 If response publication commits but immediate reconciliation is interrupted,
 Infrastructure proves the exact immutable user/Coach message pair, response
 position, consumed Pending, and fresh-Draft lineage before reporting success. A

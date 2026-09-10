@@ -347,6 +347,9 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(
             try rootUnionReferences(in: sidecarSchema),
             [
+                "LegacyActiveProfileReconsideration",
+                "LegacyFailedProfileReconsideration",
+                "LegacyTranscriptReadFailedProfileReconsideration",
                 "ActiveProfileReconsideration",
                 "FailedProfileReconsideration",
                 "TranscriptReadFailedProfileReconsideration",
@@ -385,6 +388,11 @@ final class ContractResourcesTests: XCTestCase {
             .profileReconsiderationTranscriptReadFailureExample
         )
         XCTAssertNil(activeSidecar["failure"])
+        XCTAssertEqual(activeSidecar["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(
+            activeSidecar["preparedProfileStatementGeneration"] as? Int,
+            9
+        )
         XCTAssertEqual(
             interruptedSidecar["failure"] as? String,
             "coachResponseInterrupted"
@@ -1453,7 +1461,7 @@ final class ContractResourcesTests: XCTestCase {
             pending["responsePositionId"] as? String,
             "rsp-20260830T120001000Z-6PQR"
         )
-        XCTAssertEqual((pending["schemaVersion"] as? NSNumber)?.uint32Value, 4)
+        XCTAssertEqual((pending["schemaVersion"] as? NSNumber)?.uint32Value, 5)
         XCTAssertNil(pending["failure"])
 
         let failed = try jsonObject(.pendingUserTurnCapacityFailureExample)
@@ -1465,7 +1473,7 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(failed["responsePositionId"] as? String,
                        pending["responsePositionId"] as? String)
         XCTAssertEqual(failed["failure"] as? String, "coachContextCannotFit")
-        XCTAssertEqual((failed["schemaVersion"] as? NSNumber)?.uint32Value, 4)
+        XCTAssertEqual((failed["schemaVersion"] as? NSNumber)?.uint32Value, 5)
 
         let interrupted = try jsonObject(.pendingUserTurnInterruptedExample)
         XCTAssertEqual(
@@ -1474,21 +1482,21 @@ final class ContractResourcesTests: XCTestCase {
         )
         XCTAssertEqual(
             (interrupted["schemaVersion"] as? NSNumber)?.uint32Value,
-            4
+            5
         )
 
         let providerFailure = try jsonObject(.pendingUserTurnProviderFailureExample)
         XCTAssertEqual(providerFailure["failure"] as? String, "coachProviderError")
         XCTAssertEqual(
             (providerFailure["schemaVersion"] as? NSNumber)?.uint32Value,
-            4
+            5
         )
 
         let invalid = try jsonObject(.pendingUserTurnInvalidResponseExample)
         XCTAssertEqual(invalid["failure"] as? String, "coachResponseInvalid")
         XCTAssertEqual(
             (invalid["schemaVersion"] as? NSNumber)?.uint32Value,
-            4
+            5
         )
 
         let legacy = try jsonObject(.pendingUserTurnLegacyV1Example)

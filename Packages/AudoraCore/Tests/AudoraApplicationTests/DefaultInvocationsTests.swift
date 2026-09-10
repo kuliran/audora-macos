@@ -2661,7 +2661,7 @@ final class DefaultInvocationsTests: XCTestCase {
         ) = outcome else {
             return XCTFail("unproven terminal persistence needs an operational Retry")
         }
-        XCTAssertEqual(aggregate, fixture.initial)
+        XCTAssertEqual(aggregate, fixture.installedAggregate)
         XCTAssertNil(aggregate?.pendingUserTurn?.failure)
         XCTAssertEqual(retryRequest, fixture.request)
         let recoveredRequests = await fixture.persistence.recoveredRequests
@@ -3008,7 +3008,7 @@ final class DefaultInvocationsTests: XCTestCase {
                 "an exact failure-free Pending must retain operational Retry authority"
             )
         }
-        XCTAssertEqual(fallback, fixture.initial)
+        XCTAssertEqual(fallback, fixture.installedAggregate)
         XCTAssertEqual(request, fixture.request)
         XCTAssertNil(fallback?.pendingUserTurn?.failure)
         XCTAssertEqual(
@@ -3108,7 +3108,7 @@ final class DefaultInvocationsTests: XCTestCase {
             .persistenceUnavailable
         ) = await fixture.invocations.tryInvoke(fixture.request)
         else { return XCTFail("unproven publication must retain operational Retry") }
-        XCTAssertEqual(fallback, fixture.initial)
+        XCTAssertEqual(fallback, fixture.installedAggregate)
         XCTAssertEqual(retryRequest, fixture.request)
         XCTAssertEqual(
             fixture.diagnostics.recordedEvents().map(\.reason),
@@ -3501,6 +3501,21 @@ private final class InvocationFixture: @unchecked Sendable {
     let diagnostics: RecordingInvocationRetryDiagnostics
     let contextSource: InvocationContextSource
     let invocations: DefaultInvocations
+
+    var installedAggregate: ChatAggregate {
+        try! ChatAggregate(
+            chat: initial.chat,
+            memory: initial.memory,
+            messages: initial.messages,
+            pendingUserTurn: pending
+                .recordingPreparedProfileStatementGeneration(
+                    contextSource.profile.statementGeneration
+                )
+                .replacingFailure(nil),
+            profileEffect: initial.profileEffect,
+            profileReconsideration: initial.profileReconsideration
+        )
+    }
 
     let userMessageID = try! ChatMessageID("msg-20260830T120000000Z-7RST")
     let coachMessageID = try! ChatMessageID("msg-20260830T120000000Z-8VWX")

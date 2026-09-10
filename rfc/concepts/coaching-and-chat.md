@@ -299,6 +299,7 @@ PendingUserTurn
   draftId
   draftVersion
   responsePositionId
+  preparedProfileStatementGeneration? // once an Invocation is installed
   state: processing(invocationId) | userRetryable(failure)
 ```
 
@@ -310,14 +311,16 @@ If the first Invocation preflight instead loses an eligibility, concurrency, or
 admission race, the provisional Pending User Turn is removed and the Draft is
 immediately unlocked; the fleeting notice is not a Failure Descriptor.
 
-The persisted Pending User Turn is currently schema v4. Legacy v1 may omit a
+The persisted Pending User Turn is currently schema v5. Legacy v1 may omit a
 failure or carry only `coachContextCannotFit`; v2 additionally accepts
 `coachResponseInterrupted`; and v3 adds `coachProviderError` and
-`coachResponseInvalid`. Current v4 adds `coachTranscriptReadFailed` paired with a
+`coachResponseInvalid`. Legacy v4 adds `coachTranscriptReadFailed` paired with a
 bounded summary containing one to three stable Chat attachment IDs and safe Session
-labels, plus an additional count only when three links are already present. All
-failure descriptors are UserRetryable and publish no partial turn. If persistence
-cannot prove the terminal v4 write, Application may display Retry for the exact
+labels, plus an additional count only when three links are already present. Current
+v5 additionally records the optional semantic Profile generation frozen by the
+most recently installed Invocation; provisional and legacy Pending state omits it.
+All failure descriptors are UserRetryable and publish no partial turn. If persistence
+cannot prove the terminal v5 write, Application may display Retry for the exact
 Pending identity as transient operational state, but it does not rewrite the last
 observed aggregate in memory as though that durable failure had committed.
 
@@ -857,7 +860,9 @@ another revision appended evidence.
 Admission installs `profile-reconsideration.json` beside that exact source effect.
 The sidecar records the source Proposal ID or evidence-publication response position,
 one distinct result response position reserved across Retry, and an optional typed
-failure. No failure means preparation or execution is active. The v5 Invocation
+failure. Current schema v2 also records the optional semantic Profile generation
+frozen by the most recently installed Invocation; provisional and legacy v1 state
+omits it. No failure means preparation or execution is active. The v5 Invocation
 repeats that exact identity in its sealed `reconsiderProfileChange` intent; each
 Attempt reserves only a possible coach-message ID, not a user message or fresh
 Draft. The source effect remains installed throughout the attempt.

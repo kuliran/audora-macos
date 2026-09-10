@@ -9,6 +9,9 @@ namespace Audora.Contracts {
   @id("ProfileReconsideration.json")
   @oneOf
   union ProfileReconsideration {
+    legacyActive: LegacyActiveProfileReconsideration,
+    legacyFailed: LegacyFailedProfileReconsideration,
+    legacyTranscriptReadFailed: LegacyTranscriptReadFailedProfileReconsideration,
     active: ActiveProfileReconsideration,
     failed: FailedProfileReconsideration,
     transcriptReadFailed: TranscriptReadFailedProfileReconsideration,
@@ -29,7 +32,29 @@ namespace Audora.Contracts {
     transcriptReadFailure: CoachTranscriptReadFailureSummary;
   }
 
+  model LegacyActiveProfileReconsideration {
+    ...LegacyProfileReconsiderationFields;
+  }
+
+  model LegacyFailedProfileReconsideration {
+    ...LegacyProfileReconsiderationFields;
+    failure: ProfileReconsiderationFailure;
+  }
+
+  model LegacyTranscriptReadFailedProfileReconsideration {
+    ...LegacyProfileReconsiderationFields;
+    failure: "coachTranscriptReadFailed";
+    transcriptReadFailure: CoachTranscriptReadFailureSummary;
+  }
+
   model ProfileReconsiderationFields {
+    schemaVersion: 2;
+    sourceEffectIdentity: ChatProfileEffectIdentity;
+    resultResponsePositionId: ChatResponsePositionId;
+    preparedProfileStatementGeneration?: NonnegativeWholeNumber;
+  }
+
+  model LegacyProfileReconsiderationFields {
     schemaVersion: 1;
     sourceEffectIdentity: ChatProfileEffectIdentity;
     resultResponsePositionId: ChatResponsePositionId;

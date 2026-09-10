@@ -10083,7 +10083,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 responsePositionId: pending.responsePositionID.rawValue,
                 failure: pending.failure?.rawValue,
                 transcriptReadFailure: pending.failure?.transcriptReadFailureSummary
-                    .map(PortableCoachTranscriptReadFailureSummaryDTO.init)
+                    .map(PortableCoachTranscriptReadFailureSummaryDTO.init),
+                preparedProfileStatementGeneration:
+                    pending.preparedProfileStatementGeneration
             )
         )
     }
@@ -11263,6 +11265,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             guard pendingVersion == 1 ||
                 pendingVersion == 2 ||
                 pendingVersion == 3 ||
+                pendingVersion == 4 ||
                 pendingVersion == UInt64(PendingUserTurn.schemaVersion)
             else {
                 throw PortableChatPersistenceError.unsupportedOlderSchema
@@ -11290,7 +11293,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     FrozenChatSnapshot(chatID: expectedID, reason: .newerSchema)
                 )
             }
-            guard version == UInt64(ProfileReconsideration.schemaVersion) else {
+            guard version == 1 ||
+                    version == UInt64(ProfileReconsideration.schemaVersion)
+            else {
                 throw PortableChatPersistenceError.unsupportedOlderSchema
             }
             profileReconsideration = try mapPersistedDomainValidation {
@@ -11777,7 +11782,15 @@ public struct PortableChatPersistence: @unchecked Sendable {
             sourceName = "pending-user-turn.json"
             partialName =
                 ".pending-user-turn.json.\(UUID().uuidString.lowercased()).partial"
-            let terminal = pending.replacingFailure(terminalFailure)
+            var terminal = pending.replacingFailure(terminalFailure)
+            if let preparedGeneration =
+                invocation.preparedProfile?.statementGeneration
+            {
+                terminal = terminal
+                    .recordingPreparedProfileStatementGeneration(
+                        preparedGeneration
+                    )
+            }
             replacementData = terminal == pending
                 ? nil
                 : try encodePendingUserTurn(terminal)
@@ -11799,7 +11812,15 @@ public struct PortableChatPersistence: @unchecked Sendable {
             sourceName = "profile-reconsideration.json"
             partialName =
                 ".profile-reconsideration.json.\(UUID().uuidString.lowercased()).partial"
-            let terminal = reconsideration.replacingFailure(terminalFailure)
+            var terminal = reconsideration.replacingFailure(terminalFailure)
+            if let preparedGeneration =
+                invocation.preparedProfile?.statementGeneration
+            {
+                terminal = terminal
+                    .recordingPreparedProfileStatementGeneration(
+                        preparedGeneration
+                    )
+            }
             replacementData = terminal == reconsideration
                 ? nil
                 : try encodeProfileReconsideration(terminal)
@@ -11864,7 +11885,15 @@ public struct PortableChatPersistence: @unchecked Sendable {
             guard let pending = current.pendingUserTurn else {
                 throw PortableChatPersistenceError.invalidLayout
             }
-            let replacement = pending.replacingFailure(terminalFailure)
+            var replacement = pending.replacingFailure(terminalFailure)
+            if let preparedGeneration =
+                invocation.preparedProfile?.statementGeneration
+            {
+                replacement = replacement
+                    .recordingPreparedProfileStatementGeneration(
+                        preparedGeneration
+                    )
+            }
             sourceName = "pending-user-turn.json"
             partialName =
                 ".pending-user-turn.json.\(UUID().uuidString.lowercased()).partial"
@@ -11882,7 +11911,15 @@ public struct PortableChatPersistence: @unchecked Sendable {
             guard let reconsideration = current.profileReconsideration else {
                 throw PortableChatPersistenceError.invalidLayout
             }
-            let replacement = reconsideration.replacingFailure(terminalFailure)
+            var replacement = reconsideration.replacingFailure(terminalFailure)
+            if let preparedGeneration =
+                invocation.preparedProfile?.statementGeneration
+            {
+                replacement = replacement
+                    .recordingPreparedProfileStatementGeneration(
+                        preparedGeneration
+                    )
+            }
             sourceName = "profile-reconsideration.json"
             partialName =
                 ".profile-reconsideration.json.\(UUID().uuidString.lowercased()).partial"
@@ -13907,8 +13944,13 @@ public struct PortableChatPersistence: @unchecked Sendable {
         switch dto.schemaVersion {
         case 1, 2, 3:
             allowedOptionalKeys = ["failure"]
-        case PendingUserTurn.schemaVersion:
+        case 4:
             allowedOptionalKeys = ["failure", "transcriptReadFailure"]
+        case PendingUserTurn.schemaVersion:
+            allowedOptionalKeys = [
+                "failure", "transcriptReadFailure",
+                "preparedProfileStatementGeneration",
+            ]
         default:
             throw PortableChatPersistenceError.invalidSchemaVersion
         }
@@ -13918,8 +13960,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
         if actualKeys.contains("failure"), dictionary["failure"] is NSNull {
             throw PortableChatPersistenceError.invalidJSON
         }
+        if actualKeys.contains("preparedProfileStatementGeneration"),
+           dictionary["preparedProfileStatementGeneration"] is NSNull
+        {
+            throw PortableChatPersistenceError.invalidJSON
+        }
         if actualKeys.contains("transcriptReadFailure") {
-            guard dto.schemaVersion == PendingUserTurn.schemaVersion,
+            guard (dto.schemaVersion == 4 ||
+                    dto.schemaVersion == PendingUserTurn.schemaVersion),
                   let summary = dictionary["transcriptReadFailure"]
                     as? [String: Any]
             else { throw PortableChatPersistenceError.invalidJSON }
@@ -13969,7 +14017,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             } else {
                 failure = nil
             }
-        case PendingUserTurn.schemaVersion:
+        case 4, PendingUserTurn.schemaVersion:
             if dto.failure == "coachTranscriptReadFailed" {
                 guard let summary = try dto.transcriptReadFailure?.domainValue() else {
                     throw PortableChatPersistenceError.invalidJSON
@@ -13996,7 +14044,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
             draftID: try ChatDraftID(dto.draftId),
             draftVersion: dto.draftVersion,
             responsePositionID: try ChatResponsePositionID(dto.responsePositionId),
-            failure: failure
+            failure: failure,
+            preparedProfileStatementGeneration:
+                dto.preparedProfileStatementGeneration
         )
     }
 
@@ -14008,13 +14058,22 @@ public struct PortableChatPersistence: @unchecked Sendable {
             ProfileReconsiderationDTO.self,
             data
         )
-        guard dto.schemaVersion == ProfileReconsideration.schemaVersion else {
+        guard dto.schemaVersion == 1 ||
+                dto.schemaVersion == ProfileReconsideration.schemaVersion
+        else {
             throw PortableChatPersistenceError.invalidSchemaVersion
         }
         let requiredKeys: Set<String> = [
             "schemaVersion", "sourceEffectIdentity", "resultResponsePositionId",
         ]
-        let optionalKeys: Set<String> = ["failure", "transcriptReadFailure"]
+        let optionalKeys: Set<String> = if dto.schemaVersion == 1 {
+            ["failure", "transcriptReadFailure"]
+        } else {
+            [
+                "failure", "transcriptReadFailure",
+                "preparedProfileStatementGeneration",
+            ]
+        }
         let actualKeys = Set(dictionary.keys)
         guard actualKeys.isSuperset(of: requiredKeys),
               actualKeys.subtracting(requiredKeys).isSubset(of: optionalKeys)
@@ -14074,7 +14133,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
             resultResponsePositionID: try ChatResponsePositionID(
                 dto.resultResponsePositionId
             ),
-            failure: failure
+            failure: failure,
+            preparedProfileStatementGeneration:
+                dto.preparedProfileStatementGeneration
         )
     }
 
@@ -15491,6 +15552,7 @@ private struct PendingUserTurnDTO: Codable {
     let responsePositionId: String
     let failure: String?
     let transcriptReadFailure: PortableCoachTranscriptReadFailureSummaryDTO?
+    let preparedProfileStatementGeneration: UInt64?
 }
 
 private struct ProfileReconsiderationDTO: Codable {
@@ -15499,6 +15561,7 @@ private struct ProfileReconsiderationDTO: Codable {
     let resultResponsePositionId: String
     let failure: String?
     let transcriptReadFailure: PortableCoachTranscriptReadFailureSummaryDTO?
+    let preparedProfileStatementGeneration: UInt64?
 
     init(_ value: ProfileReconsideration) {
         schemaVersion = ProfileReconsideration.schemaVersion
@@ -15510,6 +15573,8 @@ private struct ProfileReconsiderationDTO: Codable {
         transcriptReadFailure = value.failure?.transcriptReadFailureSummary.map(
             PortableCoachTranscriptReadFailureSummaryDTO.init
         )
+        preparedProfileStatementGeneration =
+            value.preparedProfileStatementGeneration
     }
 }
 

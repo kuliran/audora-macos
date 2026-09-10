@@ -5,6 +5,29 @@ import XCTest
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 final class ChatFeatureTests: XCTestCase {
+    func testOpeningChatPublishesCurrentProfileGenerationAndFilterKeepsIt()
+        async throws
+    {
+        let aggregate = try Self.aggregate()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            profileReader: SequencedProfileReader(generations: [11])
+        )
+        await feature.send(.start(Self.context))
+
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        let openedState = await feature.currentState
+        XCTAssertEqual(openedState.currentProfileStatementGeneration, 11)
+
+        await feature.send(
+            .setFilter(Self.context, try ChatFilterQuery("timeline"))
+        )
+
+        let filteredState = await feature.currentState
+        XCTAssertEqual(filteredState.currentProfileStatementGeneration, 11)
+    }
+
     func testAdmissionCooldownBlocksSendUntilItsExactDeadlineRefreshes() async throws {
         let aggregate = try Self.aggregate(draftText: "Coach this exact Draft.")
         let store = RecordingChatStore(catalog: [.available(aggregate)])
@@ -117,6 +140,7 @@ final class ChatFeatureTests: XCTestCase {
         let gateway = SuspendedRetryInvocationGateway()
         let feature = makeFeature(
             store: RecordingChatStore(catalog: [.available(failedAggregate)]),
+            profileReader: SequencedProfileReader(generations: [7, 9]),
             invocations: gateway
         )
         await feature.send(.start(Self.context))
@@ -156,6 +180,7 @@ final class ChatFeatureTests: XCTestCase {
             terminalState.composer,
             .locked(failedAggregate.chat.draft, failedPending)
         )
+        XCTAssertEqual(terminalState.currentProfileStatementGeneration, 9)
         XCTAssertNil(terminalState.activity)
     }
 
@@ -583,7 +608,7 @@ final class ChatFeatureTests: XCTestCase {
         let scheduler = ControlledChatAutosaveScheduler()
         let feature = makeFeature(
             store: store,
-            profileReader: SequencedProfileReader(generations: [7, 9]),
+            profileReader: SequencedProfileReader(generations: [7, 7, 9]),
             autosaveScheduler: scheduler
         )
         await feature.send(.start(Self.context))
@@ -2085,6 +2110,7 @@ final class ChatFeatureTests: XCTestCase {
         let gateway = StoppableInvocationGateway()
         let feature = makeFeature(
             store: RecordingChatStore(catalog: [.available(aggregate)]),
+            profileReader: SequencedProfileReader(generations: [7, 9]),
             invocations: gateway
         )
         await feature.send(.start(Self.context))
@@ -2117,6 +2143,7 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(pending.failure, .coachResponseInterrupted)
         XCTAssertEqual(finalAggregate.chat.messageIDs, [])
         XCTAssertEqual(finalState.composer, .locked(finalAggregate.chat.draft, pending))
+        XCTAssertEqual(finalState.currentProfileStatementGeneration, 9)
         XCTAssertNil(finalState.activity)
         XCTAssertNil(finalState.coachInvocationStopAuthority)
         let stops = await gateway.stops
@@ -2701,14 +2728,15 @@ final class ChatFeatureTests: XCTestCase {
                 "rsp-20260830T120000000Z-6PQR"
             )
         )
-        let staleGatewaySnapshot = try ChatAggregate(
+        let installedGatewaySnapshot = try ChatAggregate(
             chat: aggregate.chat,
             memory: aggregate.memory,
             pendingUserTurn: expectedPending
+                .recordingPreparedProfileStatementGeneration(9)
         )
         let store = RecordingChatStore(catalog: [.available(aggregate)])
         let gateway = OperationallyInterruptedInvocationGateway(
-            fallback: staleGatewaySnapshot
+            fallback: installedGatewaySnapshot
         )
         let feature = makeFeature(store: store, invocations: gateway)
         await feature.send(.start(Self.context))
@@ -2728,6 +2756,11 @@ final class ChatFeatureTests: XCTestCase {
             pendingUserTurnID: pending.id
         )
         XCTAssertNil(pending.failure, "the Application must not fake a durable write")
+        XCTAssertEqual(
+            pending.preparedProfileStatementGeneration,
+            9,
+            "equal-manifest operational recovery must retain prepared provenance"
+        )
         XCTAssertEqual(
             interruptedState.operationallyInterruptedInvocation,
             expectedRequest
@@ -3316,7 +3349,11 @@ final class ChatFeatureTests: XCTestCase {
         let aggregate = try Self.aggregate()
         let store = RecordingChatStore(catalog: [.available(aggregate)])
         let scheduler = ControlledChatAutosaveScheduler()
-        let feature = makeFeature(store: store, autosaveScheduler: scheduler)
+        let feature = makeFeature(
+            store: store,
+            profileReader: SequencedProfileReader(generations: [7, 7, 9]),
+            autosaveScheduler: scheduler
+        )
         await feature.send(.start(Self.context))
         await feature.send(.open(Self.context, aggregate.chat.id))
         await feature.send(
@@ -3349,6 +3386,7 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(draft.text, "Do not abandon this Draft.")
         XCTAssertNil(unlocked.pendingUserTurn)
         XCTAssertEqual(unlocked.chat.messageIDs, [])
+        XCTAssertEqual(state.currentProfileStatementGeneration, 9)
     }
 
     func testNavigationCancelsTimerButFlushesFinalDirtyVersionBeforeOpeningNextChat() async throws {
@@ -3664,6 +3702,7 @@ final class ChatFeatureTests: XCTestCase {
         )
         let feature = makeFeature(
             store: RecordingChatStore(catalog: [.available(source)]),
+            profileReader: SequencedProfileReader(generations: [7, 9]),
             invocations: gateway,
             profileProposals: coordinator
         )
@@ -3694,6 +3733,7 @@ final class ChatFeatureTests: XCTestCase {
             state.profileEffectReview,
             .current(.proposal(replacement.id))
         )
+        XCTAssertEqual(state.currentProfileStatementGeneration, 9)
         XCTAssertNil(state.activity)
         XCTAssertNil(state.notice)
     }
@@ -3841,6 +3881,7 @@ final class ChatFeatureTests: XCTestCase {
         )
         let feature = makeFeature(
             store: RecordingChatStore(catalog: [.available(source)]),
+            profileReader: SequencedProfileReader(generations: [7, 9]),
             invocations: gateway,
             profileProposals: coordinator
         )
@@ -3863,6 +3904,7 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(retained, failed.profileReconsideration)
         XCTAssertTrue(state.isProfileReconsiderationRetryableFailure(retained))
         XCTAssertEqual(state.profileEffectReview, .stale(basis))
+        XCTAssertEqual(state.currentProfileStatementGeneration, 9)
         XCTAssertNil(state.activity)
     }
 
@@ -3875,6 +3917,12 @@ final class ChatFeatureTests: XCTestCase {
         let basis = try Self.staleReconsiderationBasis(for: source)
         let processing = try Self.installingProfileReconsideration(in: source)
         let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let installedReconsideration = reconsideration
+            .recordingPreparedProfileStatementGeneration(8)
+        let installed = try Self.replacingProfileReconsideration(
+            in: processing,
+            with: installedReconsideration
+        )
         let request = ProfileReconsiderationInvocationRequest(
             library: Self.scope,
             chatID: source.chat.id,
@@ -3882,8 +3930,8 @@ final class ChatFeatureTests: XCTestCase {
             resultResponsePositionID: reconsideration.resultResponsePositionID
         )
         let completedAt = try UTCInstant("2026-09-09T12:25:00.000Z")
-        let withdrawn = try processing.publishingReconsideration(
-            expected: reconsideration,
+        let withdrawn = try installed.publishingReconsideration(
+            expected: installedReconsideration,
             basis: basis,
             preparedProfile: basis.latestProfile.provenance,
             coachMessage: nil,
@@ -3893,7 +3941,7 @@ final class ChatFeatureTests: XCTestCase {
         let quote = try await Self.quote(for: source)
         let gateway = RecordingProfileReconsiderationInvocationGateway(
             outcome: .operationallyInterrupted(
-                processing,
+                installed,
                 request,
                 .persistenceUnavailable
             ),
@@ -3903,7 +3951,7 @@ final class ChatFeatureTests: XCTestCase {
             assessmentOutcomes: [
                 .stale(source, basis),
                 .stale(source, basis),
-                .stale(processing, basis),
+                .stale(installed, basis),
             ]
         )
         let feature = makeFeature(
@@ -3918,14 +3966,20 @@ final class ChatFeatureTests: XCTestCase {
         )
 
         let interrupted = await feature.currentState
-        XCTAssertEqual(Self.openAggregate(in: interrupted), processing)
+        XCTAssertEqual(Self.openAggregate(in: interrupted), installed)
+        XCTAssertEqual(
+            Self.openAggregate(in: interrupted)?.profileReconsideration?
+                .preparedProfileStatementGeneration,
+            8,
+            "equal-manifest recovery must retain installed prepared provenance"
+        )
         XCTAssertEqual(
             interrupted.operationallyInterruptedProfileReconsideration,
             request
         )
         XCTAssertTrue(
             interrupted.isProfileReconsiderationRetryableFailure(
-                reconsideration
+                installedReconsideration
             )
         )
 
@@ -4427,6 +4481,7 @@ final class ChatFeatureTests: XCTestCase {
         )
         let feature = makeFeature(
             store: RecordingChatStore(catalog: [.available(failed)]),
+            profileReader: SequencedProfileReader(generations: [7, 9]),
             profileProposals: coordinator
         )
         await feature.send(.start(Self.context))
@@ -4455,6 +4510,7 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertTrue(
             ChatInteractionPolicy.allowsProfileReconsideration(in: state)
         )
+        XCTAssertEqual(state.currentProfileStatementGeneration, 9)
         XCTAssertNil(state.activity)
         XCTAssertNil(state.notice)
     }
@@ -4483,6 +4539,7 @@ final class ChatFeatureTests: XCTestCase {
         )
         let feature = makeFeature(
             store: RecordingChatStore(catalog: [.available(source)]),
+            profileReader: SequencedProfileReader(generations: [7, 9]),
             invocations: gateway,
             profileProposals: coordinator
         )
@@ -4535,6 +4592,7 @@ final class ChatFeatureTests: XCTestCase {
             Self.openAggregate(in: state)?.profileReconsideration?.failure,
             .coachResponseInterrupted
         )
+        XCTAssertEqual(state.currentProfileStatementGeneration, 9)
         XCTAssertNil(state.profileReconsiderationStopAuthority)
         XCTAssertNil(state.activity)
     }
@@ -4881,6 +4939,7 @@ final class ChatFeatureTests: XCTestCase {
         )
         let feature = makeFeature(
             store: RecordingChatStore(catalog: [.available(base)]),
+            profileReader: SequencedProfileReader(generations: [7, 9]),
             invocations: invocations,
             profileProposals: coordinator
         )
@@ -4897,6 +4956,7 @@ final class ChatFeatureTests: XCTestCase {
         )
         XCTAssertEqual(Self.openAggregate(in: state)?.memory, published.memory)
         XCTAssertNil(Self.openAggregate(in: state)?.profileEvidencePublication)
+        XCTAssertEqual(state.currentProfileStatementGeneration, 9)
         XCTAssertNil(state.activity)
         XCTAssertNil(state.notice)
         XCTAssertTrue(ChatInteractionPolicy.allowsComposerEditing(in: state))
@@ -5010,6 +5070,7 @@ final class ChatFeatureTests: XCTestCase {
         )
         let feature = makeFeature(
             store: RecordingChatStore(catalog: [.available(aggregate)]),
+            profileReader: SequencedProfileReader(generations: [7, 8]),
             profileProposals: coordinator
         )
         await feature.send(.start(Self.context))
@@ -5042,6 +5103,7 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertNil(Self.openAggregate(in: state)?.profileProposal)
         XCTAssertNil(state.activity)
         XCTAssertNil(state.notice)
+        XCTAssertEqual(state.currentProfileStatementGeneration, 8)
         XCTAssertTrue(ChatInteractionPolicy.allowsComposerEditing(in: state))
     }
 

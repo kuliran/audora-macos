@@ -131,12 +131,14 @@ Chat root cannot be migrated without changing its meaning, Audora freezes that
 Chat and instructs the user to create a new one; it does not invent replacement
 history.
 
-Pending User Turn v4 adds `coachTranscriptReadFailed` with its required bounded
-Session-link summary. V3 adds `coachProviderError` and `coachResponseInvalid`; v2
-adds `coachResponseInterrupted`. The reader still accepts each strict legacy value
-set and rejects a legacy record that claims a newer version's failure. The next
-write of a valid v1, v2, or v3 Pending upgrades it to v4, while a version newer than
-v4 freezes only its own Chat as newer-schema data.
+Pending User Turn v5 adds the optional semantic Profile generation frozen by the
+most recently installed Invocation. V4 adds `coachTranscriptReadFailed` with its
+required bounded Session-link summary, v3 adds `coachProviderError` and
+`coachResponseInvalid`, and v2 adds `coachResponseInterrupted`. The reader still
+accepts each strict legacy value set and rejects a legacy record that claims a newer
+version's field or failure. The next write of a valid v1 through v4 Pending upgrades
+it to v5, while a version newer than v5 freezes only its own Chat as newer-schema
+data.
 
 ## Development Profile
 
@@ -462,9 +464,11 @@ historical flat Attempt fields; v3/v4 keep the answer-only nested layout. All re
 read-only recovery inputs, the next valid legacy rewrite is v5, and a root newer
 than v5 freezes without provider resumption.
 
-`profile-reconsideration.json` remains beside its exact `proposal.json` or
+Schema-v2 `profile-reconsideration.json` remains beside its exact `proposal.json` or
 `profile-publication.json` source. It carries only that source identity, one fresh
-result response position reserved across Retry, and an optional typed failure.
+result response position reserved across Retry, the optional semantic Profile
+generation frozen by the most recently installed Invocation, and an optional typed
+failure. Legacy v1 and provisional state omit the generation.
 Relaunch never resumes its provider or timers: a v5 Invocation without a committed
 terminal reason becomes `coachResponseInterrupted`, while a committed typed reason
 is reconciled exactly into the sidecar. Retry creates a fresh Invocation around the

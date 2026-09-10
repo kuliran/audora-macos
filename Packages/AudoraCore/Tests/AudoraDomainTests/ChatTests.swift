@@ -208,7 +208,8 @@ final class ChatTests: XCTestCase {
             )
         )
 
-        let failed = pending.replacingFailure(.coachContextCannotFit)
+        let prepared = pending.recordingPreparedProfileStatementGeneration(12)
+        let failed = prepared.replacingFailure(.coachContextCannotFit)
         let retried = failed.replacingFailure(nil)
 
         XCTAssertEqual(failed.id, pending.id)
@@ -216,7 +217,8 @@ final class ChatTests: XCTestCase {
         XCTAssertEqual(failed.draftVersion, pending.draftVersion)
         XCTAssertEqual(failed.responsePositionID, pending.responsePositionID)
         XCTAssertEqual(failed.failure, .coachContextCannotFit)
-        XCTAssertEqual(retried, pending)
+        XCTAssertEqual(failed.preparedProfileStatementGeneration, 12)
+        XCTAssertEqual(retried, prepared)
     }
     func testTypedChatIdentitiesValidateTheirCompletePortableShape() throws {
         XCTAssertEqual(try ChatID("cht-20260830T120000000Z-2ABC").rawValue,

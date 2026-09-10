@@ -347,7 +347,9 @@ final class ProfileReconsiderationInvocationsTests: XCTestCase {
         XCTAssertEqual(current.profileEffect, fixture.observed.profileEffect)
         XCTAssertEqual(
             current.profileReconsideration,
-            fixture.reconsideration.replacingFailure(.coachResponseInvalid)
+            fixture.installedReconsideration.replacingFailure(
+                .coachResponseInvalid
+            )
         )
         XCTAssertEqual(current.chat.messageIDs, fixture.observed.chat.messageIDs)
         let publicationCount = await fixture.persistence.publicationCount
@@ -719,7 +721,7 @@ final class ProfileReconsiderationInvocationsTests: XCTestCase {
         }
         XCTAssertEqual(
             current.profileReconsideration,
-            fixture.reconsideration.replacingFailure(
+            fixture.installedReconsideration.replacingFailure(
                 .coachResponseInterrupted
             )
         )
@@ -910,6 +912,12 @@ private final class ProfileReconsiderationInvocationFixture:
     let contextSource: ProfileReconsiderationContextSource
     let invocations: DefaultInvocations
     let coachMessageIDs: [ChatMessageID]
+
+    var installedReconsideration: ProfileReconsideration {
+        reconsideration.recordingPreparedProfileStatementGeneration(
+            basis.latestProfile.provenance.statementGeneration
+        )
+    }
 
     init(
         retainedActiveEvidence: Bool,
@@ -1557,7 +1565,7 @@ private actor ProfileReconsiderationMemoryPersistence:
                 persistence: self,
                 invocation: mutation.invocation,
                 processingAggregate: mutation.processingAggregate,
-                reconsideration: mutation.authority.reconsideration
+                reconsideration: mutation.processingReconsideration
                     .replacingFailure(nil),
                 basis: mutation.authority.basis
             )

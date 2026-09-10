@@ -3,6 +3,15 @@
     "$id": "https://audora.local/contracts/ProfileReconsideration.json",
     "oneOf": [
         {
+            "$ref": "#/$defs/LegacyActiveProfileReconsideration"
+        },
+        {
+            "$ref": "#/$defs/LegacyFailedProfileReconsideration"
+        },
+        {
+            "$ref": "#/$defs/LegacyTranscriptReadFailedProfileReconsideration"
+        },
+        {
             "$ref": "#/$defs/ActiveProfileReconsideration"
         },
         {
@@ -14,7 +23,7 @@
     ],
     "description": "Durable Chat-owned authority for one Reconsider Invocation.",
     "$defs": {
-        "ActiveProfileReconsideration": {
+        "LegacyActiveProfileReconsideration": {
             "type": "object",
             "properties": {
                 "schemaVersion": {
@@ -37,7 +46,7 @@
                 "not": {}
             }
         },
-        "FailedProfileReconsideration": {
+        "LegacyFailedProfileReconsideration": {
             "type": "object",
             "properties": {
                 "schemaVersion": {
@@ -64,7 +73,7 @@
                 "not": {}
             }
         },
-        "TranscriptReadFailedProfileReconsideration": {
+        "LegacyTranscriptReadFailedProfileReconsideration": {
             "type": "object",
             "properties": {
                 "schemaVersion": {
@@ -76,6 +85,97 @@
                 },
                 "resultResponsePositionId": {
                     "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "failure": {
+                    "type": "string",
+                    "const": "coachTranscriptReadFailed"
+                },
+                "transcriptReadFailure": {
+                    "$ref": "#/$defs/CoachTranscriptReadFailureSummary"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "sourceEffectIdentity",
+                "resultResponsePositionId",
+                "failure",
+                "transcriptReadFailure"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ActiveProfileReconsideration": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 2
+                },
+                "sourceEffectIdentity": {
+                    "$ref": "#/$defs/ChatProfileEffectIdentity"
+                },
+                "resultResponsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "preparedProfileStatementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "sourceEffectIdentity",
+                "resultResponsePositionId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "FailedProfileReconsideration": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 2
+                },
+                "sourceEffectIdentity": {
+                    "$ref": "#/$defs/ChatProfileEffectIdentity"
+                },
+                "resultResponsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "preparedProfileStatementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
+                },
+                "failure": {
+                    "$ref": "#/$defs/ProfileReconsiderationFailure"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "sourceEffectIdentity",
+                "resultResponsePositionId",
+                "failure"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptReadFailedProfileReconsideration": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 2
+                },
+                "sourceEffectIdentity": {
+                    "$ref": "#/$defs/ChatProfileEffectIdentity"
+                },
+                "resultResponsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "preparedProfileStatementGeneration": {
+                    "$ref": "#/$defs/NonnegativeWholeNumber"
                 },
                 "failure": {
                     "type": "string",
@@ -139,6 +239,10 @@
                     "$ref": "#/$defs/TruncatedCoachTranscriptReadFailureSummary"
                 }
             ]
+        },
+        "NonnegativeWholeNumber": {
+            "type": "integer",
+            "minimum": 0
         },
         "ChatProfileProposalEffectIdentity": {
             "type": "object",

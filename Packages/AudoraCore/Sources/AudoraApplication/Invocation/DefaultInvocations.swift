@@ -389,12 +389,16 @@ public struct InvocationStopAuthority: Equatable, Sendable {
     public let pendingUserTurnID: PendingUserTurnID
     public let invocationID: CoachInvocationID
     public let attemptID: CoachProviderAttemptID
+    /// Exact Profile provenance frozen into the active Invocation. Presentation
+    /// uses only its statement generation to order derived timeline dividers.
+    public let preparedProfile: CoachProfileProvenance
     fileprivate let capabilityID: UUID
 
     fileprivate init(
         request: StopCoachInvocationRequest,
         invocationID: CoachInvocationID,
         attemptID: CoachProviderAttemptID,
+        preparedProfile: CoachProfileProvenance,
         capabilityID: UUID = UUID()
     ) {
         library = request.library
@@ -402,6 +406,7 @@ public struct InvocationStopAuthority: Equatable, Sendable {
         pendingUserTurnID = request.pendingUserTurnID
         self.invocationID = invocationID
         self.attemptID = attemptID
+        self.preparedProfile = preparedProfile
         self.capabilityID = capabilityID
     }
 
@@ -410,12 +415,17 @@ public struct InvocationStopAuthority: Equatable, Sendable {
         testingRequest request: StopCoachInvocationRequest,
         invocationID: CoachInvocationID,
         attemptID: CoachProviderAttemptID,
+        preparedProfile: CoachProfileProvenance = CoachProfileProvenance(
+            revisionID: nil,
+            statementGeneration: 0
+        ),
         capabilityID: UUID
     ) {
         self.init(
             request: request,
             invocationID: invocationID,
             attemptID: attemptID,
+            preparedProfile: preparedProfile,
             capabilityID: capabilityID
         )
     }
@@ -475,12 +485,15 @@ public struct ProfileReconsiderationInvocationStopAuthority:
     public let resultResponsePositionID: ChatResponsePositionID
     public let invocationID: CoachInvocationID
     public let attemptID: CoachProviderAttemptID
+    /// Exact Profile provenance frozen into the active Reconsider Invocation.
+    public let preparedProfile: CoachProfileProvenance
     fileprivate let capabilityID: UUID
 
     fileprivate init(
         request: StopProfileReconsiderationInvocationRequest,
         invocationID: CoachInvocationID,
         attemptID: CoachProviderAttemptID,
+        preparedProfile: CoachProfileProvenance,
         capabilityID: UUID = UUID()
     ) {
         library = request.library
@@ -489,6 +502,7 @@ public struct ProfileReconsiderationInvocationStopAuthority:
         resultResponsePositionID = request.resultResponsePositionID
         self.invocationID = invocationID
         self.attemptID = attemptID
+        self.preparedProfile = preparedProfile
         self.capabilityID = capabilityID
     }
 
@@ -497,12 +511,17 @@ public struct ProfileReconsiderationInvocationStopAuthority:
         testingRequest request: StopProfileReconsiderationInvocationRequest,
         invocationID: CoachInvocationID,
         attemptID: CoachProviderAttemptID,
+        preparedProfile: CoachProfileProvenance = CoachProfileProvenance(
+            revisionID: nil,
+            statementGeneration: 0
+        ),
         capabilityID: UUID
     ) {
         self.init(
             request: request,
             invocationID: invocationID,
             attemptID: attemptID,
+            preparedProfile: preparedProfile,
             capabilityID: capabilityID
         )
     }
@@ -1109,7 +1128,11 @@ public struct InstallCoachInvocationMutation: Equatable, Sendable {
             chat: authority.aggregate.chat,
             memory: authority.aggregate.memory,
             messages: authority.aggregate.messages,
-            pendingUserTurn: authority.pendingUserTurn.replacingFailure(nil),
+            pendingUserTurn: authority.pendingUserTurn
+                .recordingPreparedProfileStatementGeneration(
+                    preparedProfile.statementGeneration
+                )
+                .replacingFailure(nil),
             profileProposal: authority.aggregate.profileProposal,
             profileEvidencePublication:
                 authority.aggregate.profileEvidencePublication
@@ -1151,6 +1174,7 @@ public struct InstallProfileReconsiderationInvocationMutation:
     public let authority: InvocationProfileReconsiderationAuthority
     public let invocation: CoachInvocation
     public let processingAggregate: ChatAggregate
+    public let processingReconsideration: ProfileReconsideration
 
     public init(
         authority: InvocationProfileReconsiderationAuthority,
@@ -1159,7 +1183,10 @@ public struct InstallProfileReconsiderationInvocationMutation:
         admittedAt: UTCInstant
     ) throws {
         self.authority = authority
-        let processingReconsideration = authority.reconsideration
+        processingReconsideration = authority.reconsideration
+            .recordingPreparedProfileStatementGeneration(
+                preparedProfile.statementGeneration
+            )
             .replacingFailure(nil)
         processingAggregate = try ChatAggregate(
             chat: authority.aggregate.chat,
@@ -4436,7 +4463,8 @@ public actor DefaultInvocations: Invocations {
             let stopAuthority = ProfileReconsiderationInvocationStopAuthority(
                 request: StopProfileReconsiderationInvocationRequest(request),
                 invocationID: invocation.id,
-                attemptID: attempt.id
+                attemptID: attempt.id,
+                preparedProfile: prepared.authority.profile
             )
             activeProfileReconsiderationControls[
                 stopAuthority.capabilityID
@@ -5543,7 +5571,8 @@ public actor DefaultInvocations: Invocations {
             let stopAuthority = InvocationStopAuthority(
                 request: stopRequest(for: invocation),
                 invocationID: invocation.id,
-                attemptID: attempt.id
+                attemptID: attempt.id,
+                preparedProfile: prepared.authority.profile
             )
             activeInvocationControls[stopAuthority.capabilityID] = ActiveInvocationControl(
                 runID: runID,

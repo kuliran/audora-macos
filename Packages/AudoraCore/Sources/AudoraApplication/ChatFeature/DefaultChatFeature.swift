@@ -1147,7 +1147,14 @@ public actor DefaultChatFeature: ChatFeature {
                 activity: state.activity,
                 notice: state.notice
             )
-            install(committed, selection: .open(committed), notice: nil)
+            install(
+                committed,
+                selection: .open(committed),
+                notice: nil,
+                currentProfileStatementGeneration:
+                    committed.chat.profileStatementGenerationAtCreation,
+                replacesCurrentProfileStatementGeneration: true
+            )
             await resolveOpenedAttachments(for: committed, context: context)
             await refreshContextAdvisory(
                 for: committed,
@@ -1377,6 +1384,8 @@ public actor DefaultChatFeature: ChatFeature {
                 filterQuery: query,
                 selection: state.selection,
                 composer: state.composer,
+                currentProfileStatementGeneration:
+                    state.currentProfileStatementGeneration,
                 contextAdvisory: state.contextAdvisory,
                 admissionAvailability: state.admissionAvailability,
                 createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
@@ -1408,6 +1417,8 @@ public actor DefaultChatFeature: ChatFeature {
             filterQuery: query,
             selection: state.selection,
             composer: state.composer,
+            currentProfileStatementGeneration:
+                state.currentProfileStatementGeneration,
             contextAdvisory: state.contextAdvisory,
             admissionAvailability: state.admissionAvailability,
             createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
@@ -1451,10 +1462,15 @@ public actor DefaultChatFeature: ChatFeature {
                 context: context
             )
             guard isActive(context) else { return }
+            let profileStatementGeneration = await profileReader
+                .statementGeneration(in: context.libraryScope)
+            guard isActive(context) else { return }
             install(
                 assessed.aggregate,
                 selection: .open(assessed.aggregate),
                 notice: assessed.notice,
+                currentProfileStatementGeneration: profileStatementGeneration,
+                replacesCurrentProfileStatementGeneration: true,
                 profileEffectReview: assessed.review
             )
             await resolveOpenedAttachments(for: assessed.aggregate, context: context)
@@ -1470,6 +1486,8 @@ public actor DefaultChatFeature: ChatFeature {
                 selection: ChatFeatureState.Selection.none,
                 composer: nil,
                 replacesComposer: true,
+                currentProfileStatementGeneration: nil,
+                replacesCurrentProfileStatementGeneration: true,
                 activity: nil,
                 notice: .chatMissing
             )
@@ -1479,6 +1497,8 @@ public actor DefaultChatFeature: ChatFeature {
                 selection: ChatFeatureState.Selection.none,
                 composer: nil,
                 replacesComposer: true,
+                currentProfileStatementGeneration: nil,
+                replacesCurrentProfileStatementGeneration: true,
                 activity: nil,
                 notice: .readOnlyLibrary
             )
@@ -1488,6 +1508,8 @@ public actor DefaultChatFeature: ChatFeature {
                 selection: ChatFeatureState.Selection.none,
                 composer: nil,
                 replacesComposer: true,
+                currentProfileStatementGeneration: nil,
+                replacesCurrentProfileStatementGeneration: true,
                 activity: nil,
                 notice: .chatOpenFailed
             )
@@ -2069,10 +2091,16 @@ public actor DefaultChatFeature: ChatFeature {
                   current.pendingUserTurn?.failure == .coachResponseInterrupted
             else {
                 if current.chat.id == request.chatID {
+                    guard await stageCurrentProfileStatementGeneration(
+                        in: context
+                    ) else { return }
                     install(current, selection: .open(current), notice: nil)
                 } else {
                     await open(request.chatID, context: context)
                 }
+                return
+            }
+            guard await stageCurrentProfileStatementGeneration(in: context) else {
                 return
             }
             install(
@@ -2100,6 +2128,9 @@ public actor DefaultChatFeature: ChatFeature {
                     context: context
                 )
             } else if let current, current.chat.id == request.chatID {
+                guard await stageCurrentProfileStatementGeneration(
+                    in: context
+                ) else { return }
                 install(
                     current,
                     selection: .open(current),
@@ -2153,6 +2184,30 @@ public actor DefaultChatFeature: ChatFeature {
         rejectedOperationalInterruption: PendingCoachInvocationRequest? = nil,
         rejectedNotice: ChatNotice? = nil
     ) async {
+        if case .interrupted = outcome {
+            // Once Stop owns terminalization, the invocation continuation is
+            // stale even when a test double or adapter reports interruption
+            // instead of the ordinary `.stopped` fence. Do not refresh the
+            // Profile head twice or replace Stop's durable terminal state.
+            if case .some(.stoppingCoach(_)) = state.activity {
+                return
+            }
+            if state.activity == nil,
+               case let .open(aggregate) = state.selection,
+               aggregate.pendingUserTurn?.failure ==
+                .coachResponseInterrupted
+            {
+                return
+            }
+        }
+        switch outcome {
+        case .stopped, .providerReapPending:
+            break
+        default:
+            guard await stageCurrentProfileStatementGeneration(in: context) else {
+                return
+            }
+        }
         switch outcome {
         case .stopped:
             // The concurrent Stop command exclusively installs (or retains)
@@ -2318,9 +2373,14 @@ public actor DefaultChatFeature: ChatFeature {
         let observed = exactFailureFreePending(observed)
         switch (selected, observed) {
         case let (.some(selected), .some(observed)):
-            return observed.chat.manifestRevision > selected.chat.manifestRevision
-                ? observed
-                : selected
+            return preferredOperationalAggregate(
+                selected: selected,
+                observed: observed,
+                preparedGeneration: {
+                    $0.pendingUserTurn?
+                        .preparedProfileStatementGeneration
+                }
+            )
         case let (.some(selected), .none):
             return selected
         case let (.none, .some(observed)):
@@ -2374,6 +2434,9 @@ public actor DefaultChatFeature: ChatFeature {
             )
         )
         guard isActive(context) else { return }
+        guard await stageCurrentProfileStatementGeneration(in: context) else {
+            return
+        }
         applyPendingMutationOutcome(
             outcome,
             expectedChatID: aggregate.chat.id,
@@ -2453,17 +2516,31 @@ public actor DefaultChatFeature: ChatFeature {
         guard isActive(context) else { return }
         switch outcome {
         case let .committed(current):
-            install(current, selection: .open(current), notice: nil)
+            let profileStatementGeneration = await profileReader
+                .statementGeneration(in: context.libraryScope)
+            guard isActive(context) else { return }
+            install(
+                current,
+                selection: .open(current),
+                notice: nil,
+                currentProfileStatementGeneration: profileStatementGeneration,
+                replacesCurrentProfileStatementGeneration: true
+            )
         case let .stale(current):
             let assessed = await assessProfileEffectIfNeeded(
                 current,
                 context: context
             )
             guard isActive(context) else { return }
+            let profileStatementGeneration = await profileReader
+                .statementGeneration(in: context.libraryScope)
+            guard isActive(context) else { return }
             install(
                 assessed.aggregate,
                 selection: .open(assessed.aggregate),
                 notice: assessed.notice ?? .profileProposalStale,
+                currentProfileStatementGeneration: profileStatementGeneration,
+                replacesCurrentProfileStatementGeneration: true,
                 profileEffectReview: assessed.review
             )
         case .readOnlyLibrary:
@@ -2801,6 +2878,8 @@ public actor DefaultChatFeature: ChatFeature {
             filterQuery: state.filterQuery,
             selection: state.selection,
             composer: state.composer,
+            currentProfileStatementGeneration:
+                state.currentProfileStatementGeneration,
             contextAdvisory: state.contextAdvisory,
             admissionAvailability: availability,
             createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
@@ -3217,12 +3296,33 @@ public actor DefaultChatFeature: ChatFeature {
         activeContext == context
     }
 
+    /// Refreshes the monotonic Profile head at an action boundary without
+    /// publishing an intermediate state. The terminal install that follows
+    /// releases any derived divider on the correct side of that action.
+    private func stageCurrentProfileStatementGeneration(
+        in context: ChatCommandContext
+    ) async -> Bool {
+        let generation = await profileReader.statementGeneration(
+            in: context.libraryScope
+        )
+        guard isActive(context) else { return false }
+        state = replacing(
+            currentProfileStatementGeneration: generation,
+            replacesCurrentProfileStatementGeneration: true,
+            activity: state.activity,
+            notice: state.notice
+        )
+        return true
+    }
+
     private func install(
         _ aggregate: ChatAggregate,
         selection: ChatFeatureState.Selection,
         notice: ChatNotice?,
         composer override: ChatComposerState? = nil,
         activity: ChatFeatureState.Activity? = nil,
+        currentProfileStatementGeneration: UInt64? = nil,
+        replacesCurrentProfileStatementGeneration: Bool = false,
         operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
         operationallyInterruptedProfileReconsideration:
             ProfileReconsiderationInvocationRequest? = nil,
@@ -3288,6 +3388,10 @@ public actor DefaultChatFeature: ChatFeature {
             rows: rows,
             selection: selection,
             composer: installedComposer,
+            currentProfileStatementGeneration:
+                currentProfileStatementGeneration,
+            replacesCurrentProfileStatementGeneration:
+                replacesCurrentProfileStatementGeneration,
             activity: activity,
             notice: notice,
             operationallyInterruptedInvocation: installedOperationalInterruption,
@@ -3319,6 +3423,8 @@ public actor DefaultChatFeature: ChatFeature {
             rows: rows,
             selection: selection,
             composer: composer,
+            currentProfileStatementGeneration: nil,
+            replacesCurrentProfileStatementGeneration: true,
             activity: nil,
             notice: notice,
             operationallyInterruptedInvocation: nil,
@@ -3331,6 +3437,8 @@ public actor DefaultChatFeature: ChatFeature {
         rows: [ChatRowSnapshot],
         selection: ChatFeatureState.Selection,
         composer: ChatComposerState?,
+        currentProfileStatementGeneration: UInt64?,
+        replacesCurrentProfileStatementGeneration: Bool,
         activity: ChatFeatureState.Activity?,
         notice: ChatNotice?,
         operationallyInterruptedInvocation: PendingCoachInvocationRequest?,
@@ -3357,6 +3465,10 @@ public actor DefaultChatFeature: ChatFeature {
             filterQuery: state.filterQuery,
             selection: selection,
             composer: composer,
+            currentProfileStatementGeneration:
+                replacesCurrentProfileStatementGeneration
+                ? currentProfileStatementGeneration
+                : state.currentProfileStatementGeneration,
             contextAdvisory: preservesSelectedChat
                 ? state.contextAdvisory
                 : .notRequested,
@@ -3467,6 +3579,8 @@ public actor DefaultChatFeature: ChatFeature {
         selection: ChatFeatureState.Selection? = nil,
         composer: ChatComposerState? = nil,
         replacesComposer: Bool = false,
+        currentProfileStatementGeneration: UInt64? = nil,
+        replacesCurrentProfileStatementGeneration: Bool = false,
         contextAdvisory: CoachContextAdvisoryState? = nil,
         recoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
         clearsRecoveryIntent: Bool = false,
@@ -3494,6 +3608,10 @@ public actor DefaultChatFeature: ChatFeature {
             filterQuery: state.filterQuery,
             selection: selection ?? state.selection,
             composer: replacesComposer ? composer : state.composer,
+            currentProfileStatementGeneration:
+                replacesCurrentProfileStatementGeneration
+                ? currentProfileStatementGeneration
+                : state.currentProfileStatementGeneration,
             contextAdvisory: contextAdvisory ?? state.contextAdvisory,
             admissionAvailability: state.admissionAvailability,
             createNewChatRecoveryIntent: clearsRecoveryIntent
@@ -3903,6 +4021,9 @@ private extension DefaultChatFeature {
         let outcome = await profileProposals
             .discardReconsiderationFailure(mutation)
         guard isActive(context) else { return }
+        guard await stageCurrentProfileStatementGeneration(in: context) else {
+            return
+        }
         switch outcome {
         case let .committed(current):
             await installAssessedProfileEffect(
@@ -3974,6 +4095,14 @@ private extension DefaultChatFeature {
         rejectedOperationalInterruption:
             ProfileReconsiderationInvocationRequest? = nil
     ) async {
+        switch outcome {
+        case .stopped, .providerReapPending:
+            break
+        default:
+            guard await stageCurrentProfileStatementGeneration(in: context) else {
+                return
+            }
+        }
         switch outcome {
         case .stopped:
             return
@@ -4124,9 +4253,14 @@ private extension DefaultChatFeature {
         )
         switch (selected, observed) {
         case let (.some(selected), .some(observed)):
-            return observed.chat.manifestRevision > selected.chat.manifestRevision
-                ? observed
-                : selected
+            return preferredOperationalAggregate(
+                selected: selected,
+                observed: observed,
+                preparedGeneration: {
+                    $0.profileReconsideration?
+                        .preparedProfileStatementGeneration
+                }
+            )
         case let (.some(selected), .none):
             return selected
         case let (.none, .some(observed)):
@@ -4152,6 +4286,29 @@ private extension DefaultChatFeature {
               reconsideration.failure == nil
         else { return nil }
         return aggregate
+    }
+
+    /// Invocation installation rewrites its operational sidecar without
+    /// advancing the Chat manifest. On an equal manifest revision, keep the
+    /// aggregate that retains the newest exact prepared Profile generation.
+    private func preferredOperationalAggregate(
+        selected: ChatAggregate,
+        observed: ChatAggregate,
+        preparedGeneration: (ChatAggregate) -> UInt64?
+    ) -> ChatAggregate {
+        if observed.chat.manifestRevision != selected.chat.manifestRevision {
+            return observed.chat.manifestRevision > selected.chat.manifestRevision
+                ? observed
+                : selected
+        }
+        switch (preparedGeneration(selected), preparedGeneration(observed)) {
+        case let (.some(selectedGeneration), .some(observedGeneration)):
+            return observedGeneration > selectedGeneration ? observed : selected
+        case (.none, .some):
+            return observed
+        case (.some, .none), (.none, .none):
+            return selected
+        }
     }
 
     private func cachedOperationalProfileReconsiderationRetry(
@@ -4318,6 +4475,9 @@ private extension DefaultChatFeature {
         guard isActive(context) else { return }
         switch outcome {
         case let .interrupted(current):
+            guard await stageCurrentProfileStatementGeneration(in: context) else {
+                return
+            }
             guard current.chat.id == request.chatID,
                   current.profileEffect?.identity ==
                     request.sourceEffectIdentity,
@@ -4357,6 +4517,9 @@ private extension DefaultChatFeature {
                     fallbackReview: fallbackReview
                 )
             } else if let current, current.chat.id == request.chatID {
+                guard await stageCurrentProfileStatementGeneration(
+                    in: context
+                ) else { return }
                 await installAssessedProfileEffect(
                     current,
                     context: context,
