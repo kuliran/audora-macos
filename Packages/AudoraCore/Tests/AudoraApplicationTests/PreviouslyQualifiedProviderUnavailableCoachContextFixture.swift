@@ -5,7 +5,7 @@ import AudoraDomain
 /// provider transport became unavailable. Live composition must never create
 /// this authority on its own.
 struct PreviouslyQualifiedProviderUnavailableSnapshotPort:
-    CoachContextSnapshotPort
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
 {
     private let configurationGeneration: UInt64 = 7
     private let configuration = previouslyQualifiedProviderUnavailableConfiguration()

@@ -1368,7 +1368,9 @@ private struct ScenarioInvocationCounts: Equatable, Sendable {
     let admission: Int
 }
 
-private protocol ScenarioMeasuringInvocations: Invocations {
+private protocol ScenarioMeasuringInvocations:
+    ProfileReconsiderationUnavailableInvocations
+{
     func counts() async -> ScenarioInvocationCounts
     func waitUntilInvocationCompletes(_ count: Int) async
     func waitUntilProviderAttemptStarts() async
@@ -1550,7 +1552,9 @@ private actor ScenarioFakeInvocationGateway: ScenarioMeasuringInvocations {
     }
 }
 
-private actor ScenarioInvocationPersistence: InvocationPersistencePort {
+private actor ScenarioInvocationPersistence:
+    ProfileReconsiderationUnavailableInvocationPersistencePort
+{
     private let store: ChatScenarioStore
     private var reserved: PendingCoachInvocationRequest?
     private var active: CoachInvocation?
@@ -2335,6 +2339,12 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
         await base.preparePendingUserTurn(request)
     }
 
+    func prepareReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextReconsiderPreparationOutcome {
+        await base.prepareReconsider(request)
+    }
+
     func isPreparedContextCurrent(
         _ prepared: PreparedCoachLaunchContext
     ) async -> Bool {
@@ -2470,7 +2480,9 @@ private func scenarioProviderUnavailableCapacityLowerBound()
     )
 }
 
-private actor ScenarioCoachContextSnapshotPort: CoachContextSnapshotPort {
+private actor ScenarioCoachContextSnapshotPort:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     private let mode: String
     private var events: [ChatDependencyEventDTO]
     private let recorder: ChatScenarioRecorder

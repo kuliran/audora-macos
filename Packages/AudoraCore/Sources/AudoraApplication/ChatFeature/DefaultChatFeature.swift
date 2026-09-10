@@ -56,7 +56,9 @@ private struct UnavailableChatAdmissionRefreshScheduler:
     }
 }
 
-private struct UnavailableChatInvocations: Invocations {
+private struct UnavailableChatInvocations:
+    ProfileReconsiderationUnavailableInvocations
+{
     func admissionAvailability(
         in library: LibraryScope
     ) async -> InvocationAdmissionAvailability {

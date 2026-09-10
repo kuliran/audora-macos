@@ -7788,6 +7788,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             else { return .stale(current) }
             try revalidate()
 
+            let retainedWriteIntentData: Data?
             if try entryExists(
                 named: "profile-write.json",
                 under: chatDescriptor
@@ -7878,18 +7879,17 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 guard provedHead.authority == intent.expectedHead else {
                     return .stale(current)
                 }
-                try removeRegularFileIfPresent(
-                    named: "profile-write.json",
-                    under: chatDescriptor
-                )
+                retainedWriteIntentData = intentData
             } else {
                 guard current == mutation.base,
                       current.profileProposal == proposal
                 else { return .stale(current) }
+                retainedWriteIntentData = nil
             }
             return .committed(
                 try finishDiscardedProfileProposal(
                     expected: resolved,
+                    retainedWriteIntentData: retainedWriteIntentData,
                     chatDescriptor: chatDescriptor,
                     beforeMutation: revalidate
                 )
@@ -8790,6 +8790,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     private func finishDiscardedProfileProposal(
         expected: ChatAggregate,
+        retainedWriteIntentData: Data?,
         chatDescriptor: Int32,
         beforeMutation: () throws -> Void
     ) throws -> ChatAggregate {
@@ -8801,12 +8802,34 @@ public struct PortableChatPersistence: @unchecked Sendable {
         try fault(.afterProfileProposalRemoval)
         try beforeMutation()
         try flushDescriptor(chatDescriptor)
-        guard !(try entryExists(named: "proposal.json", under: chatDescriptor)),
-              !(try entryExists(
-                  named: "profile-write.json",
-                  under: chatDescriptor
-              ))
+        guard !(try entryExists(named: "proposal.json", under: chatDescriptor))
         else { throw PortableChatPersistenceError.invalidLayout }
+        if let retainedWriteIntentData {
+            guard try boundedData(
+                named: "profile-write.json",
+                under: chatDescriptor
+            ) == retainedWriteIntentData,
+                case let .readWrite(cleanedChat) = try loadChat(
+                    from: chatDescriptor,
+                    expectedID: expected.chat.id,
+                    reconcileTransients: true,
+                    allowsProfileWriteIntent: true,
+                    beforeDestructiveMutation: beforeMutation
+                ), cleanedChat == expected
+            else { throw PortableChatPersistenceError.invalidLayout }
+            try beforeMutation()
+            try removeRegularFileIfPresent(
+                named: "profile-write.json",
+                under: chatDescriptor
+            )
+            try fault(.afterProfileWriteIntentRemoval)
+            try beforeMutation()
+            try flushDescriptor(chatDescriptor)
+        }
+        guard !(try entryExists(
+            named: "profile-write.json",
+            under: chatDescriptor
+        )) else { throw PortableChatPersistenceError.invalidLayout }
         try beforeMutation()
         guard case let .readWrite(reopened) = try loadChat(
             from: chatDescriptor,
@@ -9168,15 +9191,23 @@ public struct PortableChatPersistence: @unchecked Sendable {
             else { return false }
             return true
         }
-        guard sourceMessages.count == 1,
-              let provenance = sourceMessages[0].coachProfile
-        else { throw PortableChatPersistenceError.invalidLayout }
-        if case let .proposal(proposal) = effect {
-            guard proposal.baseProfile == provenance else {
+        switch effect {
+        case let .proposal(proposal):
+            guard sourceMessages.count <= 1 else {
                 throw PortableChatPersistenceError.invalidLayout
             }
+            if let sourceMessage = sourceMessages.first,
+               sourceMessage.coachProfile != proposal.baseProfile
+            {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            return proposal.baseProfile
+        case .evidencePublication:
+            guard sourceMessages.count == 1,
+                  let provenance = sourceMessages[0].coachProfile
+            else { throw PortableChatPersistenceError.invalidLayout }
+            return provenance
         }
-        return provenance
     }
 
     private func loadProfileSnapshot(
@@ -9781,19 +9812,6 @@ public struct PortableChatPersistence: @unchecked Sendable {
         proposal: ProfileChangeProposal,
         under profileDescriptor: Int32
     ) throws -> Bool {
-        let (expectedGeneration, generationOverflow) =
-            intent.expectedHead.generation.addingReportingOverflow(1)
-        let (expectedStatementGeneration, statementOverflow) =
-            intent.expectedHead.statementGeneration.addingReportingOverflow(1)
-        guard !generationOverflow, !statementOverflow,
-              head.generation == expectedGeneration,
-              head.statementGeneration == expectedStatementGeneration,
-              head.authority.currentRevisionID == intent.intendedRevisionID,
-              let installed = try loadProfileRevision(
-                  selectedBy: head.selection,
-                  under: profileDescriptor
-              )
-        else { return false }
         let base = try loadProfileRevision(
             selectedBy: intent.expectedHead.selection,
             under: profileDescriptor
@@ -9804,6 +9822,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
             intendedRevisionID: intent.intendedRevisionID,
             createdAt: intent.createdAt
         )
+        guard head.generation == expected.generation,
+              head.statementGeneration == expected.statementGeneration,
+              head.authority.currentRevisionID == intent.intendedRevisionID,
+              let installed = try loadProfileRevision(
+                  selectedBy: head.selection,
+                  under: profileDescriptor
+              )
+        else { return false }
         return installed == expected
     }
 
@@ -10644,6 +10670,40 @@ public struct PortableChatPersistence: @unchecked Sendable {
             return
         }
 
+        if proposalData == nil,
+           head.authority == persisted.expectedHead
+        {
+            try beforeMutation()
+            try flushDescriptor(authority.revisionsDescriptor)
+            try beforeMutation()
+            guard !(try entryExists(
+                named: persisted.intendedRevisionID.rawValue,
+                under: authority.revisionsDescriptor
+            )),
+                try boundedData(
+                    named: "head.json",
+                    under: profileDescriptor
+                ) == headData,
+                try boundedData(
+                    named: "profile-write.json",
+                    under: chatDescriptor
+                ) == intentData,
+                case let .readWrite(current) = try loadChat(
+                    from: chatDescriptor,
+                    expectedID: expectedChatID,
+                    reconcileTransients: false,
+                    allowsProfileWriteIntent: true
+                ), current.profileProposal == nil
+            else { throw PortableChatPersistenceError.invalidLayout }
+            _ = try finishDiscardedProfileProposal(
+                expected: current,
+                retainedWriteIntentData: intentData,
+                chatDescriptor: chatDescriptor,
+                beforeMutation: beforeMutation
+            )
+            return
+        }
+
         guard head.authority == persisted.expectedHead,
               let proposalData
         else { throw PortableChatPersistenceError.invalidLayout }
@@ -10742,12 +10802,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         else { return false }
         let (generation, generationOverflow) =
             persisted.expectedHead.generation.addingReportingOverflow(1)
-        let (statementGeneration, statementOverflow) = persisted.expectedHead
-            .statementGeneration.addingReportingOverflow(1)
         guard !generationOverflow,
-              !statementOverflow,
               head.generation == generation,
-              head.statementGeneration == statementGeneration,
               case let .revision(pointer) = head.selection,
               pointer.revisionID == persisted.intendedRevisionID,
               pointer.sha256 == intendedRevisionSHA256,
@@ -10759,16 +10815,42 @@ public struct PortableChatPersistence: @unchecked Sendable {
               intended.parentRevisionID ==
                 persisted.expectedHead.currentRevisionID,
               intended.generation == generation,
-              intended.statementGeneration == statementGeneration,
               intended.createdAt == persisted.createdAt,
               Self.sha256(try encodeProfileRevision(intended)) ==
                 intendedRevisionSHA256
         else { return false }
-        _ = try loadProfileRevision(
+        let base = try loadProfileRevision(
             selectedBy: persisted.expectedHead.selection,
             under: profileDescriptor
         )
-        return true
+        let expectedStatementGeneration: UInt64
+        if preservesProfileStatementSemantics(from: base, to: intended) {
+            expectedStatementGeneration =
+                persisted.expectedHead.statementGeneration
+        } else {
+            let (advanced, overflow) = persisted.expectedHead
+                .statementGeneration.addingReportingOverflow(1)
+            guard !overflow else { return false }
+            expectedStatementGeneration = advanced
+        }
+        return intended.statementGeneration == expectedStatementGeneration &&
+            head.statementGeneration == expectedStatementGeneration
+    }
+
+    private func preservesProfileStatementSemantics(
+        from base: ProfileRevision?,
+        to intended: ProfileRevision
+    ) -> Bool {
+        let baseStatements = base?.statements ?? []
+        guard baseStatements.count == intended.statements.count else {
+            return false
+        }
+        return zip(baseStatements, intended.statements).allSatisfy {
+            current, replacement in
+            current.statementID == replacement.statementID &&
+                current.statementKind == replacement.statementKind &&
+                current.wording == replacement.wording
+        }
     }
 
     private func makeBoundProfileHeadDurable(
@@ -14125,8 +14207,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let actual = Set(dictionary.keys)
         guard actual == required || actual == required.union(["evidenceAppends"]),
               let base = dictionary["baseProfile"] as? [String: Any],
-              let changes = dictionary["changes"] as? [[String: Any]],
-              !changes.isEmpty
+              let changes = dictionary["changes"] as? [[String: Any]]
         else { throw PortableChatPersistenceError.invalidJSON }
         let baseKeys = Set(base.keys)
         guard baseKeys == ["statementGeneration"] ||
@@ -14171,6 +14252,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     allowsEmpty: false
                 )
             }
+        }
+        guard !changes.isEmpty || actual.contains("evidenceAppends") else {
+            throw PortableChatPersistenceError.invalidJSON
         }
         let dto: ProfileChangeProposalDTO = try decode(
             ProfileChangeProposalDTO.self,
@@ -15778,14 +15862,34 @@ private struct ProfileChangeProposalDTO: Codable {
     let createdAt: String
 
     func domainValue() throws -> ProfileChangeProposal {
-        try ProfileChangeProposal(
-            id: ProfileChangeProposalID(proposalId),
-            chatID: ChatID(chatId),
-            responsePositionID: ChatResponsePositionID(responsePositionId),
-            baseProfile: baseProfile.domainValue,
-            changes: try changes.map { try $0.domainValue },
-            evidenceAppends: try (evidenceAppends ?? []).map { try $0.domainValue },
-            createdAt: UTCInstant(createdAt)
+        let id = try ProfileChangeProposalID(proposalId)
+        let chatID = try ChatID(chatId)
+        let responsePositionID = try ChatResponsePositionID(responsePositionId)
+        let baseProfile = try baseProfile.domainValue
+        let changes = try changes.map { try $0.domainValue }
+        let evidenceAppends = try (evidenceAppends ?? []).map {
+            try $0.domainValue
+        }
+        let createdAt = try UTCInstant(createdAt)
+        if changes.isEmpty {
+            return try ProfileChangeProposal.reconsidered(
+                id: id,
+                chatID: chatID,
+                responsePositionID: responsePositionID,
+                baseProfile: baseProfile,
+                changes: changes,
+                evidenceAppends: evidenceAppends,
+                createdAt: createdAt
+            )
+        }
+        return try ProfileChangeProposal(
+            id: id,
+            chatID: chatID,
+            responsePositionID: responsePositionID,
+            baseProfile: baseProfile,
+            changes: changes,
+            evidenceAppends: evidenceAppends,
+            createdAt: createdAt
         )
     }
 }

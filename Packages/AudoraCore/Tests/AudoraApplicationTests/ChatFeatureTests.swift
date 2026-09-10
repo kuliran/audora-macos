@@ -5788,10 +5788,47 @@ private actor RecordingProfileReconsiderationInvocationGateway: Invocations {
     }
 
     func tryReconsiderProfileChange(
+        _ request: RetryProfileReconsiderationInvocationRequest
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        .rejected(request.observedAggregate, .persistenceUnavailable)
+    }
+
+    func tryReconsiderProfileChange(
         _ request: ProfileReconsiderationInvocationRequest
     ) async -> ProfileReconsiderationInvocationTryOutcome {
         operationalRequests.append(request)
         return operationalOutcome ?? .rejected(nil, .eligibilityChanged)
+    }
+
+    func tryReconsiderProfileChange(
+        _ prepared: PreparedProfileReconsiderationInvocation,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(prepared)
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: RetryProfileReconsiderationInvocationRequest,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(request)
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: ProfileReconsiderationInvocationRequest,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(request)
+    }
+
+    func stopProfileReconsideration(
+        _ request: StopProfileReconsiderationInvocationRequest,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) async -> ProfileReconsiderationInvocationStopOutcome {
+        .noActiveInvocation
     }
 }
 
@@ -5852,6 +5889,10 @@ private actor StoppableProfileReconsiderationInvocationGateway: Invocations {
         )
     }
 
+    func abandonPreparedProfileReconsiderationInvocation(
+        _ prepared: PreparedProfileReconsiderationInvocation
+    ) async {}
+
     func tryReconsiderProfileChange(
         _ prepared: PreparedProfileReconsiderationInvocation
     ) async -> ProfileReconsiderationInvocationTryOutcome {
@@ -5886,6 +5927,34 @@ private actor StoppableProfileReconsiderationInvocationGateway: Invocations {
         return await withCheckedContinuation {
             invocationContinuation = $0
         }
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: RetryProfileReconsiderationInvocationRequest
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        .rejected(request.observedAggregate, .persistenceUnavailable)
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        .rejected(nil, .eligibilityChanged)
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: RetryProfileReconsiderationInvocationRequest,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(request)
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: ProfileReconsiderationInvocationRequest,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(request)
     }
 
     func stopProfileReconsideration(
@@ -5925,7 +5994,9 @@ private actor StoppableProfileReconsiderationInvocationGateway: Invocations {
 /// Legacy Chat feature fixtures stop at the single typed Invocation boundary.
 /// The feature retains its already-installed lock while this recorder reports
 /// an interruption without fabricating provider execution in these tests.
-private actor StoppableInvocationGateway: Invocations {
+private actor StoppableInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     struct StopCall: Equatable, Sendable {
         let request: StopCoachInvocationRequest
         let authority: InvocationStopAuthority
@@ -6047,7 +6118,9 @@ private actor StoppableInvocationGateway: Invocations {
     }
 }
 
-private actor StoppableRetryInvocationGateway: Invocations {
+private actor StoppableRetryInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private let failedAggregate: ChatAggregate
     private var authority: InvocationStopAuthority?
     private var retryContinuation:
@@ -6161,7 +6234,9 @@ private actor StoppableRetryInvocationGateway: Invocations {
     }
 }
 
-private actor RetryableUnreapedInvocationGateway: Invocations {
+private actor RetryableUnreapedInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private let suspendSecondReap: Bool
     private let retryAggregate: ChatAggregate?
     private var authority: InvocationStopAuthority?
@@ -6344,7 +6419,9 @@ private actor RetryableUnreapedInvocationGateway: Invocations {
     }
 }
 
-private actor UnreapableStoppableInvocationGateway: Invocations {
+private actor UnreapableStoppableInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private var authority: InvocationStopAuthority?
     private var invocationContinuation:
         CheckedContinuation<InvocationTryOutcome, Never>?
@@ -6426,7 +6503,9 @@ private actor UnreapableStoppableInvocationGateway: Invocations {
     }
 }
 
-private actor AdmissionRefreshDuringUnreapableStopGateway: Invocations {
+private actor AdmissionRefreshDuringUnreapableStopGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private var admissionCallCount = 0
     private var admissionRefreshContinuation: CheckedContinuation<Void, Never>?
     private var authority: InvocationStopAuthority?
@@ -6547,7 +6626,9 @@ private actor AdmissionRefreshDuringUnreapableStopGateway: Invocations {
     }
 }
 
-private actor RecordingInterruptedInvocationGateway: Invocations {
+private actor RecordingInterruptedInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private(set) var preparations: [NewPendingCoachInvocationRequest] = []
     private(set) var requests: [PendingCoachInvocationRequest] = []
 
@@ -6582,7 +6663,9 @@ private actor RecordingInterruptedInvocationGateway: Invocations {
     }
 }
 
-private actor PublishedProfileEvidenceInvocationGateway: Invocations {
+private actor PublishedProfileEvidenceInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private let published: ChatAggregate
     private let quote: CoachContextQuote
     private(set) var invocationCount = 0
@@ -6626,7 +6709,9 @@ private actor PublishedProfileEvidenceInvocationGateway: Invocations {
     }
 }
 
-private actor TypedTerminalInvocationGateway: Invocations {
+private actor TypedTerminalInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private let failure: PendingUserTurnFailure
     private let reason: InvocationInterruptionReason
 
@@ -6675,7 +6760,9 @@ private actor TypedTerminalInvocationGateway: Invocations {
     }
 }
 
-private actor BusyPreparingInvocationGateway: Invocations {
+private actor BusyPreparingInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     func admissionAvailability(
         in library: LibraryScope
     ) async -> InvocationAdmissionAvailability {
@@ -6703,7 +6790,9 @@ private actor BusyPreparingInvocationGateway: Invocations {
     }
 }
 
-private actor SuspendedPreparingInvocationGateway: Invocations {
+private actor SuspendedPreparingInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private var preparation: NewPendingCoachInvocationRequest?
     private var preparationContinuation: CheckedContinuation<Void, Never>?
     private(set) var abandoned: [PreparedPendingCoachInvocation] = []
@@ -6753,7 +6842,9 @@ private actor SuspendedPreparingInvocationGateway: Invocations {
     }
 }
 
-private actor SuspendedRetryInvocationGateway: Invocations {
+private actor SuspendedRetryInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private var request: PendingCoachInvocationRequest?
     private var continuation: CheckedContinuation<InvocationTryOutcome, Never>?
 
@@ -6796,7 +6887,9 @@ private actor SuspendedRetryInvocationGateway: Invocations {
     }
 }
 
-private actor OperationallyInterruptedInvocationGateway: Invocations {
+private actor OperationallyInterruptedInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private let fallback: ChatAggregate?
     private(set) var requests: [PendingCoachInvocationRequest] = []
 
@@ -6832,7 +6925,9 @@ private actor OperationallyInterruptedInvocationGateway: Invocations {
     }
 }
 
-private actor OperationalInterruptionThenSuspendedRetryGateway: Invocations {
+private actor OperationalInterruptionThenSuspendedRetryGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private var retryRequest: PendingCoachInvocationRequest?
     private var continuation: CheckedContinuation<InvocationTryOutcome, Never>?
 
@@ -6879,7 +6974,9 @@ private actor OperationalInterruptionThenSuspendedRetryGateway: Invocations {
     }
 }
 
-private actor VanishingOperationalRetryInvocationGateway: Invocations {
+private actor VanishingOperationalRetryInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private(set) var requests: [PendingCoachInvocationRequest] = []
 
     func prepareNewInvocation(
@@ -6913,7 +7010,9 @@ private actor VanishingOperationalRetryInvocationGateway: Invocations {
     }
 }
 
-private actor ProjectedAdmissionInvocationGateway: Invocations {
+private actor ProjectedAdmissionInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private var availability: InvocationAdmissionAvailability
     private(set) var requests: [PendingCoachInvocationRequest] = []
 
@@ -7022,6 +7121,12 @@ private struct ChatFeatureBoundCoachContextFixture: ChatCoachContextCoordinating
         await base.preparePendingUserTurn(request)
     }
 
+    func prepareReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextReconsiderPreparationOutcome {
+        await base.prepareReconsider(request)
+    }
+
     func isPreparedContextCurrent(
         _ prepared: PreparedCoachLaunchContext
     ) async -> Bool {
@@ -7029,7 +7134,10 @@ private struct ChatFeatureBoundCoachContextFixture: ChatCoachContextCoordinating
     }
 }
 
-private actor ScriptedNewChatCoachContext: ChatCoachContextCoordinating {
+private actor ScriptedNewChatCoachContext:
+    ChatCoachContextCoordinating,
+    ProfileReconsiderationUnavailableCoachContextPreparing
+{
     private let candidates: [ChatAttachmentCandidate]
     private let suspendCatalog: Bool
     private let suspendResolution: Bool
@@ -7341,6 +7449,12 @@ private actor AdvancingConfigurationChatContextFixture:
         await base.preparePendingUserTurn(request)
     }
 
+    func prepareReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextReconsiderPreparationOutcome {
+        await base.prepareReconsider(request)
+    }
+
     func isPreparedContextCurrent(
         _ prepared: PreparedCoachLaunchContext
     ) async -> Bool {
@@ -7519,7 +7633,9 @@ private actor SequencedSuspendedCatalogChatStore: ChatStorePort {
 
 private enum TestError: Error { case unexpectedState }
 
-private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
+private struct AlwaysFitCoachContextSnapshotPort:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     func resolveNewChat(
         _ request: CoachContextNewChatQuoteRequest
     ) async -> CoachContextSnapshotOutcome {
@@ -7653,7 +7769,9 @@ private struct AlwaysFitCoachContextSnapshotPort: CoachContextSnapshotPort {
     }
 }
 
-private actor GrowingNewChatProfileSnapshotPort: CoachContextSnapshotPort {
+private actor GrowingNewChatProfileSnapshotPort:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     private var profileText = "Initial Profile"
     private var contextGeneration: UInt64 = 1
     private let configurationGeneration: UInt64 = 1

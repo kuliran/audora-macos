@@ -305,13 +305,13 @@ protocol CoachContextSnapshotPort: Sendable {
     ) async -> CoachContextAuthorityLeaseOutcome
 }
 
-extension CoachContextSnapshotPort {
-    func resolveReconsider(
-        _ request: CoachContextReconsiderRequest
-    ) async -> CoachContextSnapshotOutcome {
-        .sourceUnavailable
-    }
+/// Explicit fail-closed opt-in for snapshot sources that cannot resolve the
+/// Profile Reconsideration context.
+protocol ProfileReconsiderationUnavailableCoachContextSnapshotPort:
+    CoachContextSnapshotPort
+{}
 
+extension CoachContextSnapshotPort {
     func currentQualifiedConfiguration()
         async -> CoachQualifiedConfigurationOutcome
     {
@@ -337,6 +337,14 @@ extension CoachContextSnapshotPort {
         return current
             ? .acquired(CoachContextAuthorityLease())
             : .stale
+    }
+}
+
+extension ProfileReconsiderationUnavailableCoachContextSnapshotPort {
+    func resolveReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .sourceUnavailable
     }
 }
 
@@ -510,7 +518,13 @@ protocol CoachContextPendingPreparing: Sendable {
     ) async -> Bool
 }
 
-extension CoachContextPendingPreparing {
+/// Explicit fail-closed opt-in for coordinators that cannot prepare Profile
+/// Reconsideration launches.
+protocol ProfileReconsiderationUnavailableCoachContextPreparing:
+    CoachContextPendingPreparing
+{}
+
+extension ProfileReconsiderationUnavailableCoachContextPreparing {
     func prepareReconsider(
         _ request: CoachContextReconsiderRequest
     ) async -> CoachContextReconsiderPreparationOutcome {
@@ -915,7 +929,9 @@ public struct DefaultCoachContextFeature:
 }
 
 /// Live fail-closed source used until a provider/model configuration is qualified.
-struct UnavailableCoachContextSnapshotPort: CoachContextSnapshotPort {
+struct UnavailableCoachContextSnapshotPort:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     init() {}
 
     func resolveNewChat(

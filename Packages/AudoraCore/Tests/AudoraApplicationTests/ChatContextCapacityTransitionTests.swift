@@ -206,7 +206,9 @@ final class ChatContextCapacityTransitionTests: XCTestCase {
 /// Issue #21 fixtures exercise capacity recovery while still crossing the one
 /// Invocation gateway required by Send. A fitting request intentionally stops
 /// at that boundary because provider execution belongs to #22 tests.
-private actor CapacityOnlyInvocationGateway: Invocations {
+private actor CapacityOnlyInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private let store: CapacityChatStore
     private let context: DefaultCoachContextFeature
     private(set) var invocationCount = 0
@@ -313,7 +315,9 @@ private actor CapacityOnlyInvocationGateway: Invocations {
     }
 }
 
-private actor CooldownInvocationGateway: Invocations {
+private actor CooldownInvocationGateway:
+    ProfileReconsiderationUnavailableInvocations
+{
     private let store: CapacityChatStore
     private(set) var observedPending: PendingUserTurn?
 
@@ -370,7 +374,9 @@ private actor CooldownInvocationGateway: Invocations {
     }
 }
 
-private actor DynamicCapacitySnapshotPort: CoachContextSnapshotPort {
+private actor DynamicCapacitySnapshotPort:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     private var pendingWindows: [Int]
     private var profileText = "Synthetic profile"
     private var contextGeneration: UInt64 = 1

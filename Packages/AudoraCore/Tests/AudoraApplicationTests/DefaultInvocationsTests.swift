@@ -3333,7 +3333,9 @@ private func makePendingInvocationAggregate(
     )
 }
 
-private struct LibraryRoutingInvocationPersistence: InvocationPersistencePort {
+private struct LibraryRoutingInvocationPersistence:
+    ProfileReconsiderationUnavailableInvocationPersistencePort
+{
     let routes: [LibraryID: MemoryInvocationPersistence]
 
     func openNewPendingInvocation(
@@ -3639,7 +3641,9 @@ private struct FixedInvocationMemoryIDs: CoachMemoryIDGenerator {
     }
 }
 
-private actor MemoryInvocationPersistence: InvocationPersistencePort {
+private actor MemoryInvocationPersistence:
+    ProfileReconsiderationUnavailableInvocationPersistencePort
+{
     enum RevalidationDirective: Sendable {
         case current
         case ineligible
@@ -4833,7 +4837,9 @@ private final class ScriptedInvocationRetryTiming:
     }
 }
 
-private actor InvocationContextSource: CoachContextSnapshotPort {
+private actor InvocationContextSource:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     private let contextWindow: Int
     private let responseReservedTokens: Int
     private let current: Bool

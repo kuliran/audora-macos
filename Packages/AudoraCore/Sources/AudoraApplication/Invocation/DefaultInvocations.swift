@@ -609,6 +609,11 @@ public protocol Invocations: Sendable {
     ) async -> ProfileReconsiderationInvocationStopOutcome
 }
 
+/// Explicit fail-closed opt-in for adapters that do not expose Profile
+/// Reconsideration. Capable gateways conform to `Invocations` directly and
+/// implement the complete capability, including stop observers.
+public protocol ProfileReconsiderationUnavailableInvocations: Invocations {}
+
 public extension Invocations {
     func admissionAvailability(
         in library: LibraryScope
@@ -636,7 +641,9 @@ public extension Invocations {
     ) async -> InvocationStopOutcome {
         .noActiveInvocation
     }
+}
 
+public extension ProfileReconsiderationUnavailableInvocations {
     func prepareNewProfileReconsiderationInvocation(
         _ request: NewProfileReconsiderationInvocationRequest
     ) async -> NewProfileReconsiderationInvocationOutcome {
@@ -2120,6 +2127,13 @@ public protocol InvocationPersistencePort: Sendable {
     ) async -> InvocationPublicationRecoveryOutcome
 }
 
+/// Explicit fail-closed opt-in for persistence adapters that do not support
+/// Profile Reconsideration transactions.
+@_spi(InvocationInfrastructure)
+public protocol ProfileReconsiderationUnavailableInvocationPersistencePort:
+    InvocationPersistencePort
+{}
+
 @_spi(InvocationInfrastructure)
 public extension InvocationPersistencePort {
     func recoverPendingAfterTerminalFailure(
@@ -2133,7 +2147,10 @@ public extension InvocationPersistencePort {
     ) async -> InvocationPublicationRecoveryOutcome {
         .unavailable
     }
+}
 
+@_spi(InvocationInfrastructure)
+public extension ProfileReconsiderationUnavailableInvocationPersistencePort {
     func openNewProfileReconsiderationInvocation(
         _ request: NewProfileReconsiderationInvocationRequest
     ) async -> InvocationProfileReconsiderationSessionPreparationOutcome {

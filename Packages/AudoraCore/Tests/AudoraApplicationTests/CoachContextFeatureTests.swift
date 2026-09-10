@@ -358,7 +358,7 @@ final class CoachContextFeatureTests: XCTestCase {
 }
 
 private struct UnconfiguredProviderUnavailableSnapshotPort:
-    CoachContextSnapshotPort
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
 {
     func resolveNewChat(
         _ request: CoachContextNewChatQuoteRequest
@@ -389,7 +389,9 @@ private struct UnconfiguredProviderUnavailableSnapshotPort:
     }
 }
 
-private actor RecordingCoachContextSnapshotPort: CoachContextSnapshotPort {
+private actor RecordingCoachContextSnapshotPort:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     enum Request: Equatable {
         case newChat(CoachContextNewChatQuoteRequest)
         case chat(CoachContextChatQuoteRequest)
@@ -522,7 +524,9 @@ private actor RecordingCoachContextSnapshotPort: CoachContextSnapshotPort {
     ])
 }
 
-private actor SuspendingAuthoritySnapshotPort: CoachContextSnapshotPort {
+private actor SuspendingAuthoritySnapshotPort:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     private let configuration: CoachContextConfiguration
     private var contextGeneration: UInt64 = 1
     private var configurationGeneration: UInt64 = 1
@@ -630,7 +634,9 @@ private actor SuspendingAuthoritySnapshotPort: CoachContextSnapshotPort {
     }
 }
 
-private actor WrongBindingSnapshotPort: CoachContextSnapshotPort {
+private actor WrongBindingSnapshotPort:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     private let configuration: CoachContextConfiguration
     private let wrongDraft: ChatDraft
     private(set) var validationCount = 0

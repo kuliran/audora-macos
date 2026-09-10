@@ -1113,6 +1113,12 @@ private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating 
         await base.preparePendingUserTurn(request)
     }
 
+    func prepareReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextReconsiderPreparationOutcome {
+        await base.prepareReconsider(request)
+    }
+
     func isPreparedContextCurrent(
         _ prepared: PreparedCoachLaunchContext
     ) async -> Bool {
@@ -1211,6 +1217,12 @@ private struct CapacityBoundCoachContextFixture: ChatCoachContextCoordinating {
         await base.preparePendingUserTurn(request)
     }
 
+    func prepareReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextReconsiderPreparationOutcome {
+        await base.prepareReconsider(request)
+    }
+
     func isPreparedContextCurrent(
         _ prepared: PreparedCoachLaunchContext
     ) async -> Bool {
@@ -1218,7 +1230,9 @@ private struct CapacityBoundCoachContextFixture: ChatCoachContextCoordinating {
     }
 }
 
-private actor ChangingAttachmentConfigurationSource: CoachContextSnapshotPort {
+private actor ChangingAttachmentConfigurationSource:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     private var configurationGeneration: UInt64 = 1
     private var activeLeaseID: UUID?
     private var advancementWaiters: [CheckedContinuation<Void, Never>] = []
@@ -1523,6 +1537,12 @@ private actor MismatchedAttachmentAuthorityFixture:
         await base.preparePendingUserTurn(request)
     }
 
+    func prepareReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextReconsiderPreparationOutcome {
+        await base.prepareReconsider(request)
+    }
+
     func isPreparedContextCurrent(
         _ prepared: PreparedCoachLaunchContext
     ) async -> Bool {
@@ -1725,7 +1745,9 @@ private struct AttachmentAutosaveFixture: ChatAutosaveScheduling {
     func sleep(forNanoseconds nanoseconds: UInt64) async throws {}
 }
 
-private actor AttachmentCapacitySource: CoachContextSnapshotPort {
+private actor AttachmentCapacitySource:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
     private var contextWindow: Int
     private var contextGeneration: UInt64 = 1
     private let transcriptBytes: Int
@@ -1837,7 +1859,7 @@ private actor AttachmentCapacitySource: CoachContextSnapshotPort {
 }
 
 private struct KnownQualifiedProviderUnavailableCapacitySource:
-    CoachContextSnapshotPort
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
 {
     private let configurationGeneration: UInt64 = 1
     let configuration: CoachContextConfiguration
