@@ -28,23 +28,43 @@ namespace Audora.Contracts {
   }
 
   // CHAT-OWNED PROFILE PROPOSAL STORAGE
-  /** One validated semantic-or-mixed Profile proposal awaiting Speaker review. */
+  /** One validated reviewed Profile proposal awaiting Speaker review. */
   @jsonSchema
   @id("ProfileChangeProposal.json")
-  model ProfileChangeProposal {
+  @oneOf
+  union ProfileChangeProposal {
+    semanticOrMixed: SemanticOrMixedProfileChangeProposal,
+    reconsideredEvidenceOnly: ReconsideredEvidenceOnlyProfileChangeProposal,
+  }
+
+  model SemanticOrMixedProfileChangeProposal {
+    ...ProfileChangeProposalFields;
+
+    @minItems(1)
+    changes: ProfileProposalChange[];
+
+    /** Standalone appends retained inside the reviewed transaction. */
+    @minItems(1)
+    evidenceAppends?: ProfileProposalEvidenceAppend[];
+  }
+
+  /** Evidence-only replacement created only by Reconsider and still reviewed. */
+  model ReconsideredEvidenceOnlyProfileChangeProposal {
+    ...ProfileChangeProposalFields;
+
+    @maxItems(0)
+    changes: ProfileProposalChange[];
+
+    @minItems(1)
+    evidenceAppends: ProfileProposalEvidenceAppend[];
+  }
+
+  model ProfileChangeProposalFields {
     schemaVersion: 1;
     proposalId: ProfileChangeProposalId;
     chatId: ChatId;
     responsePositionId: ChatResponsePositionId;
     baseProfile: ProfileProposalBase;
-
-    @minItems(1)
-    changes: ProfileProposalChange[];
-
-    /** Standalone appends retained only when semantic changes make the proposal reviewed. */
-    @minItems(1)
-    evidenceAppends?: ProfileProposalEvidenceAppend[];
-
     createdAt: UTCInstant;
   }
 
@@ -150,9 +170,6 @@ namespace Audora.Contracts {
 
   @pattern("^stm-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
   scalar ProfileStatementId extends string;
-
-  @pattern("^prp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
-  scalar ProfileChangeProposalId extends string;
 
   @pattern("^pwi-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$")
   scalar ProfileWriteIntentId extends string;

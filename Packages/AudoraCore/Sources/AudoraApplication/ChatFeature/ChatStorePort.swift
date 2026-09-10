@@ -85,6 +85,20 @@ public struct SystemChatAutosaveScheduler: ChatAutosaveScheduling {
     }
 }
 
+public protocol ChatTransientNoticeScheduling: Sendable {
+    func sleep(forNanoseconds nanoseconds: UInt64) async throws
+}
+
+public struct SystemChatTransientNoticeScheduler:
+    ChatTransientNoticeScheduling
+{
+    public init() {}
+
+    public func sleep(forNanoseconds nanoseconds: UInt64) async throws {
+        try await Task.sleep(nanoseconds: nanoseconds)
+    }
+}
+
 public protocol ChatAdmissionRefreshScheduling: Sendable {
     func sleep(until deadline: UTCInstant) async throws
 }
@@ -136,8 +150,8 @@ public struct RenameChatMutation: Equatable, Sendable {
             memory: base.memory,
             messages: base.messages,
             pendingUserTurn: base.pendingUserTurn,
-            profileProposal: base.profileProposal,
-            profileEvidencePublication: base.profileEvidencePublication
+            profileEffect: base.profileEffect,
+            profileReconsideration: base.profileReconsideration
         )
     }
 

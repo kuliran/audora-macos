@@ -106,6 +106,7 @@ enum CoachContextHistoryTurn: Equatable, Sendable {
 enum CoachContextTrigger: Equatable, Sendable {
     case chatCreation(ChatCreation)
     case userMessage(String)
+    case reconsiderProfileChange(CoachContextReconsiderTrigger)
 
     var currentDraft: String? {
         guard case let .userMessage(text) = self else { return nil }
@@ -115,7 +116,7 @@ enum CoachContextTrigger: Equatable, Sendable {
     var costCategory: CoachContextCostCategory {
         switch self {
         case .chatCreation: .framing
-        case .userMessage: .draft
+        case .userMessage, .reconsiderProfileChange: .draft
         }
     }
 
@@ -135,6 +136,8 @@ enum CoachContextTrigger: Equatable, Sendable {
                 "kind": .string("userMessage"),
                 "text": .string(text),
             ])
+        case let .reconsiderProfileChange(trigger):
+            return trigger.canonicalValue()
         }
     }
 }
@@ -191,6 +194,55 @@ struct CoachContextQuoteInput: Equatable, Sendable {
             throw CoachContextQuoteInputError.draftTooLarge
         }
         let trigger = CoachContextTrigger.userMessage(currentDraft)
+        _ = try measureCanonicalValue(
+            trigger.canonicalValue(),
+            budget: &aggregateBudget,
+            valueTooLarge: .draftTooLarge
+        )
+        try Self.measureAttachments(attachments, budget: &aggregateBudget)
+
+        self.profile = profile
+        self.memory = memory
+        self.history = history
+        self.trigger = trigger
+        self.attachments = attachments
+    }
+
+    init(
+        memory: CanonicalJSONValue,
+        history: [CoachContextHistoryTurn],
+        reconsidering request: CoachContextReconsiderRequest,
+        attachments: [PreparedCoachAttachment] = []
+    ) throws {
+        let projector = CoachContextProfileProjector(
+            attachments: request.chat.attachments
+        )
+        let profile = projector.profile(request.basis.latestProfile)
+        var aggregateBudget = CoachContextAggregateBudget()
+        _ = try measureCanonicalValue(
+            profile,
+            budget: &aggregateBudget,
+            valueTooLarge: .profileTooLarge
+        )
+        _ = try measureCanonicalValue(
+            memory,
+            budget: &aggregateBudget,
+            valueTooLarge: .memoryTooLarge
+        )
+        guard history.count <= CoachContextInputLimits.maximumHistoryTurns else {
+            throw CoachContextQuoteInputError.tooManyHistoryTurns
+        }
+        for turn in history {
+            let value = try turn.canonicalValue()
+            _ = try measureCanonicalValue(
+                value,
+                budget: &aggregateBudget,
+                valueTooLarge: .historyTurnTooLarge
+            )
+        }
+        let trigger = CoachContextTrigger.reconsiderProfileChange(
+            request.trigger
+        )
         _ = try measureCanonicalValue(
             trigger.canonicalValue(),
             budget: &aggregateBudget,
@@ -507,7 +559,10 @@ struct CoachContextCapacity: Sendable {
         _ input: CoachContextQuoteInput,
         configuration: CoachContextConfiguration
     ) throws -> MeasuredCoachLaunchContext {
-        guard case .userMessage = input.trigger else {
+        switch input.trigger {
+        case .userMessage, .reconsiderProfileChange:
+            break
+        case .chatCreation:
             throw CoachContextQuoteInputError.invalidDraft
         }
         let measured = try measure(input, configuration: configuration)
@@ -537,6 +592,8 @@ struct CoachContextCapacity: Sendable {
         let messageLength: CoachContextMessageLength
         switch input.trigger {
         case .chatCreation:
+            messageLength = .eligible
+        case .reconsiderProfileChange:
             messageLength = .eligible
         case let .userMessage(text):
             messageLength = text.utf8.count <=

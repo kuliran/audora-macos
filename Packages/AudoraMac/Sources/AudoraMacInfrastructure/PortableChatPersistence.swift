@@ -17,6 +17,7 @@ private struct PortableInvocationLivenessAuthority {
     let root: PortableInvocationLivenessKey
     let invocations: PortableInvocationLivenessKey
     let pendingUserTurn: PortableInvocationLivenessKey?
+    let profileReconsideration: PortableInvocationLivenessKey?
 }
 
 /// `flock` provides the cross-process lifetime authority. Darwin may coalesce
@@ -94,6 +95,19 @@ private final class PortablePendingUserTurnFileLease: @unchecked Sendable {
     func release() { resource.release() }
 }
 
+/// Exact Reconsider-sidecar authority. It shares the Library Invocation
+/// namespace with Pending leases but never invents an answer-only file.
+private final class PortableProfileReconsiderationFileLease: @unchecked Sendable {
+    private let resource: PortableRegistryFileLockLease
+    var key: PortableInvocationLivenessKey { resource.key }
+
+    init(descriptor: Int32, key: PortableInvocationLivenessKey) {
+        resource = PortableRegistryFileLockLease(descriptor: descriptor, key: key)
+    }
+
+    func release() { resource.release() }
+}
+
 /// One live provider owner's confined Library lifetime authority. The descriptor
 /// remains locked from the first active check through terminal publication or
 /// abort. A process crash closes it in the kernel, proving that relaunch recovery
@@ -103,8 +117,12 @@ final class PortableInvocationLivenessLease: @unchecked Sendable {
     private var rootDescriptor: Int32?
     private var namespaceLock: PortableInvocationNamespaceLock?
     private var reservedAuthority: PortableInvocationLivenessAuthority
-    private var pendingUserTurnLease: PortablePendingUserTurnFileLease
-    private let reservedRequest: PendingCoachInvocationRequest
+    private var pendingUserTurnLease: PortablePendingUserTurnFileLease?
+    private var profileReconsiderationLease:
+        PortableProfileReconsiderationFileLease?
+    private let reservedPendingRequest: PendingCoachInvocationRequest?
+    private let reservedReconsiderationRequest:
+        ProfileReconsiderationInvocationRequest?
     private let didRelease: @Sendable () -> Void
 
     fileprivate init(
@@ -119,7 +137,27 @@ final class PortableInvocationLivenessLease: @unchecked Sendable {
         self.namespaceLock = namespaceLock
         reservedAuthority = authority
         self.pendingUserTurnLease = pendingUserTurnLease
-        self.reservedRequest = reservedRequest
+        profileReconsiderationLease = nil
+        reservedPendingRequest = reservedRequest
+        reservedReconsiderationRequest = nil
+        self.didRelease = didRelease
+    }
+
+    fileprivate init(
+        rootDescriptor: Int32,
+        namespaceLock: PortableInvocationNamespaceLock,
+        authority: PortableInvocationLivenessAuthority,
+        profileReconsiderationLease: PortableProfileReconsiderationFileLease,
+        reservedRequest: ProfileReconsiderationInvocationRequest,
+        didRelease: @escaping @Sendable () -> Void
+    ) {
+        self.rootDescriptor = rootDescriptor
+        self.namespaceLock = namespaceLock
+        reservedAuthority = authority
+        pendingUserTurnLease = nil
+        self.profileReconsiderationLease = profileReconsiderationLease
+        reservedPendingRequest = nil
+        reservedReconsiderationRequest = reservedRequest
         self.didRelease = didRelease
     }
 
@@ -133,18 +171,30 @@ final class PortableInvocationLivenessLease: @unchecked Sendable {
     fileprivate func authority(
         for request: PendingCoachInvocationRequest
     ) -> PortableInvocationLivenessAuthority? {
-        guard request == reservedRequest else { return nil }
+        guard request == reservedPendingRequest else { return nil }
+        return authority()
+    }
+
+    fileprivate func authority(
+        for request: ProfileReconsiderationInvocationRequest
+    ) -> PortableInvocationLivenessAuthority? {
+        guard request == reservedReconsiderationRequest else { return nil }
         return authority()
     }
 
     fileprivate func reservation() -> (
         authority: PortableInvocationLivenessAuthority,
-        request: PendingCoachInvocationRequest
+        pendingRequest: PendingCoachInvocationRequest?,
+        reconsiderationRequest: ProfileReconsiderationInvocationRequest?
     )? {
         lock.lock()
         defer { lock.unlock() }
         guard rootDescriptor != nil, namespaceLock != nil else { return nil }
-        return (reservedAuthority, reservedRequest)
+        return (
+            reservedAuthority,
+            reservedPendingRequest,
+            reservedReconsiderationRequest
+        )
     }
 
     /// Rebinds the lifetime fence after the Retry processing CAS replaces the
@@ -156,6 +206,7 @@ final class PortableInvocationLivenessLease: @unchecked Sendable {
         lock.lock()
         guard rootDescriptor != nil,
               namespaceLock != nil,
+              let pendingUserTurnLease,
               reservedAuthority.pendingUserTurn == pendingUserTurnLease.key
         else {
             lock.unlock()
@@ -163,12 +214,40 @@ final class PortableInvocationLivenessLease: @unchecked Sendable {
             throw PortableChatPersistenceError.ioFailure
         }
         let prior = pendingUserTurnLease
-        pendingUserTurnLease = replacement
+        self.pendingUserTurnLease = replacement
         reservedAuthority = PortableInvocationLivenessAuthority(
             libraryID: reservedAuthority.libraryID,
             root: reservedAuthority.root,
             invocations: reservedAuthority.invocations,
-            pendingUserTurn: replacement.key
+            pendingUserTurn: replacement.key,
+            profileReconsideration: nil
+        )
+        lock.unlock()
+        prior.release()
+    }
+
+    fileprivate func rebindProfileReconsiderationLease(
+        _ replacement: PortableProfileReconsiderationFileLease
+    ) throws {
+        lock.lock()
+        guard rootDescriptor != nil,
+              namespaceLock != nil,
+              let profileReconsiderationLease,
+              reservedAuthority.profileReconsideration ==
+                profileReconsiderationLease.key
+        else {
+            lock.unlock()
+            replacement.release()
+            throw PortableChatPersistenceError.ioFailure
+        }
+        let prior = profileReconsiderationLease
+        self.profileReconsiderationLease = replacement
+        reservedAuthority = PortableInvocationLivenessAuthority(
+            libraryID: reservedAuthority.libraryID,
+            root: reservedAuthority.root,
+            invocations: reservedAuthority.invocations,
+            pendingUserTurn: nil,
+            profileReconsideration: replacement.key
         )
         lock.unlock()
         prior.release()
@@ -188,7 +267,8 @@ final class PortableInvocationLivenessLease: @unchecked Sendable {
         // Invocation namespace is unowned. A Library activation that wins the
         // namespace after this point can then acquire Pending authority instead
         // of observing a transient half-released owner.
-        pendingUserTurnLease.release()
+        pendingUserTurnLease?.release()
+        profileReconsiderationLease?.release()
         namespaceLock.release()
         Darwin.close(rootDescriptor)
         didRelease()
@@ -280,6 +360,11 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
     case afterPendingDirectoryFlush
     case beforePendingFinalRead
     case afterPendingInvocationAuthorityBound
+    case beforeProfileReconsiderationPartialWrite
+    case afterProfileReconsiderationPartialWrite
+    case afterProfileReconsiderationFileFlush
+    case afterProfileReconsiderationInstall
+    case afterProfileReconsiderationDirectoryFlush
     case beforePendingRemoval
     case afterPendingRemoval
     case afterPendingRemovalDirectoryFlush
@@ -318,6 +403,9 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
     case afterPublicationProofFileFlush
     case afterPublicationProofInstall
     case afterPublicationProofDirectoryFlush
+    case afterReconsiderationSourceEffectBackupInstall
+    case afterReconsiderationReplacementProposalInstall
+    case afterReconsiderationReplacementProposalCommitInstall
     case afterUserMessageInstall
     case afterCoachMessageInstall
     case afterProfileProposalInstall
@@ -338,11 +426,18 @@ public enum PortableChatFaultPoint: Hashable, Sendable {
     case afterProfileHeadDirectoryFlush
     case afterProfileProposalRemoval
     case afterProfileEvidencePublicationRemoval
+    case beforeReconsiderationDiscardPartialWrite
+    case afterReconsiderationDiscardPartialWrite
+    case afterReconsiderationDiscardFileFlush
+    case afterReconsiderationDiscardManifestInstall
+    case afterReconsiderationDiscardDirectoryFlush
+    case afterReconsiderationDiscardSidecarRemoval
     case afterProfileWriteIntentRemoval
     case afterPublicationManifestFileFlush
     case afterPublicationManifestInstall
     case afterPublicationManifestDirectoryFlush
     case beforePublicationCleanup
+    case beforeReconsiderationPublishedInvocationRetirement
     case beforePublicationReconciliationRead
     case beforeStagedProfileRevisionCleanup
     case beforeStagedProfileRevisionLeafCleanup
@@ -385,10 +480,20 @@ public enum PortableChatMutationResult: Equatable, Sendable {
     case frozen(FrozenChatSnapshot)
 }
 
+enum PortableProfileEffectAssessmentResult: Equatable, Sendable {
+    case current(ChatAggregate)
+    case stale(ChatAggregate, ProfileReconsiderationBasis)
+}
+
 enum PortableInvocationPublicationRecoveryResult: Sendable {
     case published(ChatAggregate)
     case notPublished
     case owned
+}
+
+private enum PortableProfileReconsiderationPublicationReconciliation {
+    case base(ChatAggregate)
+    case published(ChatAggregate)
 }
 
 private func frozenChatSnapshot(
@@ -434,6 +539,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let proof: InvocationPublicationProof
         let proposalData: Data?
         let profileEvidencePublicationData: Data?
+    }
+
+    private struct ProfileReconsiderationPublicationArtifacts {
+        let proof: InvocationPublicationProof
+        let sourceEffectData: Data
+        let profileReconsiderationData: Data
+        let coachMessageData: Data?
+        let replacementProposalData: Data?
     }
 
     private struct RetryDiagnosticDependencies: Sendable {
@@ -509,9 +622,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     private struct DurablePublicIDCollisionCandidate {
         let attemptID: CoachProviderAttemptID
-        let userMessageID: ChatMessageID
+        let userMessageID: ChatMessageID?
         let coachMessageID: ChatMessageID
-        let freshDraftID: ChatDraftID
+        let freshDraftID: ChatDraftID?
 
         init(_ identity: InvocationLaunchIdentity) {
             attemptID = identity.attemptID
@@ -520,14 +633,32 @@ public struct PortableChatPersistence: @unchecked Sendable {
             freshDraftID = identity.freshDraftID
         }
 
+        init(_ identity: InvocationProfileReconsiderationLaunchIdentity) {
+            attemptID = identity.attemptID
+            userMessageID = nil
+            coachMessageID = identity.coachMessageID
+            freshDraftID = nil
+        }
+
         init(
             attemptID: CoachProviderAttemptID,
             authority: CoachProviderAttemptPublicationAuthority
         ) {
             self.attemptID = attemptID
-            userMessageID = authority.userMessageID
-            coachMessageID = authority.coachMessageID
-            freshDraftID = authority.freshDraftID
+            switch authority {
+            case let .answerPendingUserTurn(
+                userMessageID,
+                coachMessageID,
+                freshDraftID
+            ):
+                self.userMessageID = userMessageID
+                self.coachMessageID = coachMessageID
+                self.freshDraftID = freshDraftID
+            case let .reconsiderProfileChange(coachMessageID):
+                userMessageID = nil
+                self.coachMessageID = coachMessageID
+                freshDraftID = nil
+            }
         }
 
         /// Launch preflight preserves its category-major priority across every
@@ -540,10 +671,12 @@ public struct PortableChatPersistence: @unchecked Sendable {
             if attempts.contains(where: { $0.id == attemptID }) {
                 collisions.append(.attemptID(attemptID))
             }
-            if attempts.contains(where: {
-                $0.userMessageID == userMessageID ||
-                    $0.coachMessageID == userMessageID
-            }) {
+            if let userMessageID,
+               attempts.contains(where: {
+                   $0.userMessageID == userMessageID ||
+                       $0.coachMessageID == userMessageID
+               })
+            {
                 collisions.append(.userMessageID(userMessageID))
             }
             if attempts.contains(where: {
@@ -552,10 +685,19 @@ public struct PortableChatPersistence: @unchecked Sendable {
             }) {
                 collisions.append(.coachMessageID(coachMessageID))
             }
-            if attempts.contains(where: { $0.freshDraftID == freshDraftID }) ||
-                invocation.draftID == freshDraftID
-            {
-                collisions.append(.freshDraftID(freshDraftID))
+            if let freshDraftID {
+                let intentOwnsDraft: Bool = if case let .answerPendingUserTurn(
+                    _, draftID, _, _
+                ) = invocation.intent {
+                    draftID == freshDraftID
+                } else {
+                    false
+                }
+                if attempts.contains(where: {
+                    $0.freshDraftID == freshDraftID
+                }) || intentOwnsDraft {
+                    collisions.append(.freshDraftID(freshDraftID))
+                }
             }
             return collisions
         }
@@ -567,17 +709,24 @@ public struct PortableChatPersistence: @unchecked Sendable {
         ) -> DurablePublicIDCollisionCandidateID? {
             for attempt in invocation.attempts {
                 if attempt.id == attemptID { return .attemptID(attemptID) }
-                if attempt.userMessageID == userMessageID ||
+                if let userMessageID,
+                   attempt.userMessageID == userMessageID ||
                     attempt.coachMessageID == userMessageID
                 { return .userMessageID(userMessageID) }
                 if attempt.userMessageID == coachMessageID ||
                     attempt.coachMessageID == coachMessageID
                 { return .coachMessageID(coachMessageID) }
-                if attempt.freshDraftID == freshDraftID {
+                if let freshDraftID,
+                   attempt.freshDraftID == freshDraftID
+                {
                     return .freshDraftID(freshDraftID)
                 }
             }
-            if invocation.draftID == freshDraftID {
+            if let freshDraftID,
+               case let .answerPendingUserTurn(_, draftID, _, _) =
+                invocation.intent,
+               draftID == freshDraftID
+            {
                 return .freshDraftID(freshDraftID)
             }
             return nil
@@ -587,13 +736,13 @@ public struct PortableChatPersistence: @unchecked Sendable {
             in frozen: PortableInvocationCommonIdentityEnvelope
         ) -> DurablePublicIDCollisionCandidateID? {
             if frozen.contains(attemptID) { return .attemptID(attemptID) }
-            if frozen.contains(userMessageID) {
+            if let userMessageID, frozen.contains(userMessageID) {
                 return .userMessageID(userMessageID)
             }
             if frozen.contains(coachMessageID) {
                 return .coachMessageID(coachMessageID)
             }
-            if frozen.contains(freshDraftID) {
+            if let freshDraftID, frozen.contains(freshDraftID) {
                 return .freshDraftID(freshDraftID)
             }
             return nil
@@ -602,13 +751,13 @@ public struct PortableChatPersistence: @unchecked Sendable {
         func collision(
             in chat: PortableChatDurablePublicIDs
         ) -> DurablePublicIDCollisionCandidateID? {
-            if chat.contains(userMessageID) {
+            if let userMessageID, chat.contains(userMessageID) {
                 return .userMessageID(userMessageID)
             }
             if chat.contains(coachMessageID) {
                 return .coachMessageID(coachMessageID)
             }
-            if chat.contains(freshDraftID) {
+            if let freshDraftID, chat.contains(freshDraftID) {
                 return .freshDraftID(freshDraftID)
             }
             return nil
@@ -666,11 +815,13 @@ public struct PortableChatPersistence: @unchecked Sendable {
             mode: SiblingChatPublicIDProbeMode
         ) throws -> DurablePublicIDCollisionCandidateID? {
             var collision: DurablePublicIDCollisionCandidateID?
-            if try entryExists(
-                "\(candidate.userMessageID.rawValue).json",
-                messagesDescriptor
-            ) {
-                collision = .userMessageID(candidate.userMessageID)
+            if let userMessageID = candidate.userMessageID,
+               try entryExists(
+                   "\(userMessageID.rawValue).json",
+                   messagesDescriptor
+               )
+            {
+                collision = .userMessageID(userMessageID)
                 if mode == .stopAtFirstCollision { return collision }
             }
             if try entryExists(
@@ -718,6 +869,41 @@ public struct PortableChatPersistence: @unchecked Sendable {
         case activeExists
     }
 
+    enum PreparedProfileReconsiderationResult {
+        case prepared(
+            InvocationProfileReconsiderationAuthority,
+            PortableInvocationLivenessLease
+        )
+        case stale(ChatAggregate)
+        case frozen(FrozenChatSnapshot)
+        case activeExists
+    }
+
+    enum AcquiredProfileReconsiderationResult {
+        case acquired(
+            InvocationProfileReconsiderationAuthority,
+            PortableInvocationLivenessLease
+        )
+        case ineligible(ChatAggregate?)
+        case activeExists
+    }
+
+    private enum ProfileReconsiderationOpenMode {
+        case new(NewProfileReconsiderationInvocationRequest)
+        case retry(RetryProfileReconsiderationInvocationRequest)
+        case operational(ProfileReconsiderationInvocationRequest)
+    }
+
+    private enum ProfileReconsiderationOpenResult {
+        case opened(
+            InvocationProfileReconsiderationAuthority,
+            PortableInvocationLivenessLease
+        )
+        case ineligible(ChatAggregate?)
+        case frozen(FrozenChatSnapshot)
+        case activeExists
+    }
+
     private struct OpenedLibraryRootAuthority {
         let parentDescriptor: Int32
         let rootDescriptor: Int32
@@ -742,12 +928,50 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let chatIdentity: DirectoryIdentity
     }
 
+    private struct PersistedProfileWriteIntent {
+        let schemaVersion: UInt32
+        let id: ProfileWriteIntentID
+        let proposalID: ProfileChangeProposalID
+        let chatID: ChatID
+        let expectedHead: ProfileHeadAuthority
+        let intendedRevisionID: ProfileRevisionID
+        let createdAt: UTCInstant
+        let proposalSHA256: String?
+        let intendedRevisionSHA256: String?
+
+        var hasRecoveryBinding: Bool {
+            schemaVersion == PortableChatPersistence
+                .profileWriteIntentSchemaVersion &&
+                proposalSHA256 != nil && intendedRevisionSHA256 != nil
+        }
+
+        func domainValue(
+            proposal: ProfileChangeProposal
+        ) throws -> ProfileWriteIntent {
+            guard proposal.id == proposalID, proposal.chatID == chatID else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            return try ProfileWriteIntent(
+                id: id,
+                proposal: proposal,
+                expectedHead: expectedHead,
+                intendedRevisionID: intendedRevisionID,
+                createdAt: createdAt
+            )
+        }
+    }
+
     public static let maximumRootBytes = 65_536
     static let maximumChatCatalogEntries = 4_096
     static let maximumMessageDirectoryEntries = 4_096
     static let maximumChatRootEntries = 256
     static let maximumMemoryDirectoryEntries = 256
     static let maximumInvocationDirectoryEntries = 16
+    private static let profileWriteIntentSchemaVersion: UInt32 = 2
+    private static let reconsiderationSourceEffectName =
+        "reconsideration-source-effect.json"
+    private static let reconsiderationReplacementProposalName =
+        "reconsideration-replacement-proposal.json"
 
     private let fault: @Sendable (PortableChatFaultPoint) throws -> Void
     private let invocationLivenessReleased: @Sendable () -> Void
@@ -857,7 +1081,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 libraryID: scope.libraryID,
                 root: rootIdentity,
                 invocations: namespaceLock.key,
-                pendingUserTurn: pendingUserTurnLease.key
+                pendingUserTurn: pendingUserTurnLease.key,
+                profileReconsideration: nil
             ),
             pendingUserTurnLease: pendingUserTurnLease,
             reservedRequest: request,
@@ -910,7 +1135,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             libraryID: scope.libraryID,
             root: rootIdentity,
             invocations: namespaceLock.key,
-            pendingUserTurn: nil
+            pendingUserTurn: nil,
+            profileReconsideration: nil
         )
 
         let frozenChatIDs = try reconcileInterruptedInvocations(
@@ -966,7 +1192,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     libraryID: scope.libraryID,
                     root: rootIdentity,
                     invocations: namespaceLock.key,
-                    pendingUserTurn: pendingLease.key
+                    pendingUserTurn: pendingLease.key,
+                    profileReconsideration: nil
                 ),
                 pendingUserTurnLease: pendingLease,
                 reservedRequest: pendingRequest,
@@ -986,6 +1213,372 @@ public struct PortableChatPersistence: @unchecked Sendable {
             return .stale(aggregate)
         case let .frozen(frozen):
             return .frozen(frozen)
+        }
+    }
+
+    func prepareNewProfileReconsiderationInvocation(
+        _ request: NewProfileReconsiderationInvocationRequest,
+        at libraryRoot: URL,
+        in scope: LibraryScope
+    ) throws -> PreparedProfileReconsiderationResult {
+        guard request.library == scope else {
+            throw PortableChatPersistenceError.libraryScopeMismatch
+        }
+        return switch try openProfileReconsiderationAuthority(
+            .new(request),
+            at: libraryRoot,
+            in: scope
+        ) {
+        case let .opened(authority, lease): .prepared(authority, lease)
+        case let .ineligible(current):
+            if let current { .stale(current) }
+            else { throw PortableChatPersistenceError.chatMissing }
+        case let .frozen(frozen): .frozen(frozen)
+        case .activeExists: .activeExists
+        }
+    }
+
+    func acquireRetryProfileReconsiderationInvocation(
+        _ request: RetryProfileReconsiderationInvocationRequest,
+        at libraryRoot: URL,
+        in scope: LibraryScope
+    ) throws -> AcquiredProfileReconsiderationResult {
+        guard request.library == scope else {
+            throw PortableChatPersistenceError.libraryScopeMismatch
+        }
+        return switch try openProfileReconsiderationAuthority(
+            .retry(request),
+            at: libraryRoot,
+            in: scope
+        ) {
+        case let .opened(authority, lease): .acquired(authority, lease)
+        case let .ineligible(current): .ineligible(current)
+        case .frozen: .ineligible(nil)
+        case .activeExists: .activeExists
+        }
+    }
+
+    func acquireOperationalProfileReconsiderationInvocation(
+        _ request: ProfileReconsiderationInvocationRequest,
+        at libraryRoot: URL,
+        in scope: LibraryScope
+    ) throws -> AcquiredProfileReconsiderationResult {
+        guard request.library == scope else {
+            throw PortableChatPersistenceError.libraryScopeMismatch
+        }
+        return switch try openProfileReconsiderationAuthority(
+            .operational(request),
+            at: libraryRoot,
+            in: scope
+        ) {
+        case let .opened(authority, lease): .acquired(authority, lease)
+        case let .ineligible(current): .ineligible(current)
+        case .frozen: .ineligible(nil)
+        case .activeExists: .activeExists
+        }
+    }
+
+    private func openProfileReconsiderationAuthority(
+        _ mode: ProfileReconsiderationOpenMode,
+        at libraryRoot: URL,
+        in scope: LibraryScope
+    ) throws -> ProfileReconsiderationOpenResult {
+        try withReconciledProfileWritesBeforeChatExposure(
+            at: libraryRoot,
+            in: scope
+        ) { root, stagingDescriptor, stagingIdentity in
+            guard let namespaceLock = try acquireInvocationNamespaceLock(
+                under: root.rootDescriptor
+            ) else { return .activeExists }
+            var ownsNamespaceLock = true
+            defer {
+                if ownsNamespaceLock { namespaceLock.release() }
+            }
+            let rootIdentity = try invocationLivenessIdentity(
+                of: root.rootDescriptor
+            )
+            let invocationsDescriptor = try openDirectory(
+                named: "invocations",
+                under: root.rootDescriptor
+            )
+            defer { Darwin.close(invocationsDescriptor) }
+            let namespaceAuthority = PortableInvocationLivenessAuthority(
+                libraryID: scope.libraryID,
+                root: rootIdentity,
+                invocations: namespaceLock.key,
+                pendingUserTurn: nil,
+                profileReconsideration: nil
+            )
+            let revalidateNamespace = invocationLivenessRevalidator(
+                namespaceAuthority,
+                at: libraryRoot,
+                in: scope,
+                under: root.rootDescriptor,
+                invocationsDescriptor: invocationsDescriptor
+            )
+            try revalidateNamespace()
+            let invocationNames = try invocationDirectoryNamesRemovingEmptyResidue(
+                under: invocationsDescriptor,
+                beforeRemoving: revalidateNamespace
+            )
+            if !invocationNames.isEmpty {
+                // Operational recovery is allowed to retire its exact dead
+                // prepublication Invocation below. Other opens never consume
+                // an unclassified durable authority.
+                guard case .operational = mode,
+                      invocationNames.count == 1
+                else { return .activeExists }
+            }
+
+            let publicationsIdentity = try directoryIdentity(
+                named: "publications",
+                under: stagingDescriptor
+            )
+            let publicationsDescriptor = try openDirectory(
+                named: "publications",
+                under: stagingDescriptor
+            )
+            defer { Darwin.close(publicationsDescriptor) }
+            let profileIdentity = try directoryIdentity(
+                named: "profile",
+                under: root.rootDescriptor
+            )
+            let profileDescriptor = try openDirectory(
+                named: "profile",
+                under: root.rootDescriptor
+            )
+            defer { Darwin.close(profileDescriptor) }
+            let revisionsIdentity = try directoryIdentity(
+                named: "revisions",
+                under: profileDescriptor
+            )
+            let revisionsDescriptor = try openDirectory(
+                named: "revisions",
+                under: profileDescriptor
+            )
+            defer { Darwin.close(revisionsDescriptor) }
+            let chatsIdentity = try directoryIdentity(
+                named: "chats",
+                under: root.rootDescriptor
+            )
+            let chatsDescriptor = try openDirectory(
+                named: "chats",
+                under: root.rootDescriptor
+            )
+            defer { Darwin.close(chatsDescriptor) }
+
+            let chatID: ChatID = switch mode {
+            case let .new(request): request.observedAggregate.chat.id
+            case let .retry(request): request.observedAggregate.chat.id
+            case let .operational(request): request.chatID
+            }
+            let chatName = chatID.rawValue
+            guard try entryExists(named: chatName, under: chatsDescriptor) else {
+                return .ineligible(nil)
+            }
+            let chatIdentity = try directoryIdentity(
+                named: chatName,
+                under: chatsDescriptor
+            )
+            let chatDescriptor = try openDirectory(
+                named: chatName,
+                under: chatsDescriptor
+            )
+            defer { Darwin.close(chatDescriptor) }
+            try acquireExclusiveMutationLock(on: chatDescriptor)
+            defer { releaseMutationLock(on: chatDescriptor) }
+
+            let profileAuthority = ProfileProposalMutationAuthority(
+                root: root,
+                stagingDescriptor: stagingDescriptor,
+                stagingIdentity: stagingIdentity,
+                publicationsDescriptor: publicationsDescriptor,
+                publicationsIdentity: publicationsIdentity,
+                profileDescriptor: profileDescriptor,
+                profileIdentity: profileIdentity,
+                revisionsDescriptor: revisionsDescriptor,
+                revisionsIdentity: revisionsIdentity,
+                chatsDescriptor: chatsDescriptor,
+                chatsIdentity: chatsIdentity,
+                chatName: chatName,
+                chatDescriptor: chatDescriptor,
+                chatIdentity: chatIdentity
+            )
+            let revalidate = {
+                try self.revalidateProfileProposalMutationAuthority(
+                    profileAuthority,
+                    at: libraryRoot,
+                    in: scope
+                )
+                try revalidateNamespace()
+            }
+            try revalidate()
+            let loaded = try loadChat(
+                from: chatDescriptor,
+                expectedID: chatID,
+                reconcileTransients: true,
+                beforeDestructiveMutation: revalidate
+            )
+            guard case let .readWrite(initial) = loaded else {
+                if case let .frozen(frozen) = loaded { return .frozen(frozen) }
+                throw PortableChatPersistenceError.invalidLayout
+            }
+
+            let expectedBasis: ProfileReconsiderationBasis?
+            let expectedReconsideration: ProfileReconsideration
+            let stableRequest: ProfileReconsiderationInvocationRequest
+            switch mode {
+            case let .new(request):
+                guard initial == request.observedAggregate,
+                      initial.profileReconsideration == nil
+                else { return .ineligible(initial) }
+                expectedBasis = request.basis
+                expectedReconsideration = request.reconsideration
+                stableRequest = request.request
+            case let .retry(request):
+                guard initial == request.observedAggregate,
+                      let reconsideration = initial.profileReconsideration,
+                      reconsideration.failure != nil
+                else { return .ineligible(initial) }
+                expectedBasis = request.basis
+                expectedReconsideration = reconsideration
+                stableRequest = request.request
+            case let .operational(request):
+                guard let reconsideration = initial.profileReconsideration,
+                      reconsideration.failure == nil,
+                      reconsideration.sourceEffectIdentity ==
+                        request.sourceEffectIdentity,
+                      reconsideration.resultResponsePositionID ==
+                        request.resultResponsePositionID
+                else { return .ineligible(initial) }
+                expectedBasis = nil
+                expectedReconsideration = reconsideration
+                stableRequest = request
+            }
+            guard initial.pendingUserTurn == nil,
+                  let effect = initial.profileEffect,
+                  effect.identity == expectedReconsideration.sourceEffectIdentity
+            else { return .ineligible(initial) }
+
+            let headData = try boundedData(
+                named: "head.json",
+                under: profileDescriptor
+            )
+            let head = try PortableLibraryPersistence().decodeProfileHead(headData)
+            let selectedRevision = try loadSelectedProfileRevision(
+                head,
+                under: profileDescriptor
+            )
+            let latestProfile = selectedRevision.map(ProfileSnapshot.init) ??
+                ProfileSnapshot(
+                    nullAtStatementGeneration: head.statementGeneration
+                )
+            let sourceProvenance = try profileEffectSourceProvenance(
+                effect,
+                in: initial
+            )
+            let baseProfile = try loadProfileSnapshot(
+                proving: sourceProvenance,
+                under: profileDescriptor
+            )
+            try validateProfileEffect(effect, against: baseProfile)
+            guard effect.requiresReconsideration(against: latestProfile) else {
+                return .ineligible(initial)
+            }
+            let basis = try ProfileReconsiderationBasis(
+                sourceEffect: effect,
+                baseProfile: baseProfile,
+                latestProfile: latestProfile
+            )
+            guard expectedBasis == nil || expectedBasis == basis else {
+                return .ineligible(initial)
+            }
+
+            if case .new = mode {
+                try revalidate()
+                try installProfileReconsideration(
+                    expectedReconsideration,
+                    under: chatDescriptor
+                )
+            }
+            let sidecarLease = try acquireAndValidateProfileReconsiderationFileLease(
+                expectedReconsideration,
+                under: chatDescriptor
+            )
+            var ownsSidecarLease = true
+            defer {
+                if ownsSidecarLease { sidecarLease.release() }
+            }
+            guard case let .readWrite(authoritativeAggregate) = try loadChat(
+                from: chatDescriptor,
+                expectedID: chatID,
+                reconcileTransients: false
+            ), authoritativeAggregate.profileReconsideration ==
+                expectedReconsideration,
+                authoritativeAggregate.profileEffect == effect
+            else { throw PortableChatPersistenceError.invalidLayout }
+            let authority = try InvocationProfileReconsiderationAuthority(
+                request: stableRequest,
+                aggregate: authoritativeAggregate,
+                basis: basis
+            )
+
+            if let invocationName = invocationNames.first {
+                guard case .operational = mode,
+                      let invocationID = try? CoachInvocationID(invocationName)
+                else { throw PortableChatPersistenceError.invalidLayout }
+                let invocationRoot = try openDirectory(
+                    named: invocationName,
+                    under: invocationsDescriptor
+                )
+                defer { Darwin.close(invocationRoot) }
+                let record = try loadInvocationDirectoryRecord(
+                    expectedInvocationID: invocationID,
+                    expectedLibraryID: scope.libraryID,
+                    under: invocationRoot,
+                    beforeRemoving: revalidate
+                )
+                guard record.publicationProof == nil,
+                      record.invocation.terminalFailure == nil,
+                      case let .reconsiderProfileChange(source, result) =
+                        record.invocation.intent,
+                      source == stableRequest.sourceEffectIdentity,
+                      result == stableRequest.resultResponsePositionID,
+                      record.invocation.chatID == stableRequest.chatID
+                else { throw PortableChatPersistenceError.invalidLayout }
+                try removeInvocationDirectoryIfPresent(
+                    record.invocation,
+                    under: invocationsDescriptor,
+                    beforeRemoving: revalidate
+                )
+            }
+            try revalidate()
+            guard try boundedData(
+                named: "head.json",
+                under: profileDescriptor
+            ) == headData else { throw PortableChatPersistenceError.invalidLayout }
+
+            let retainedRootDescriptor = Darwin.dup(root.rootDescriptor)
+            guard retainedRootDescriptor >= 0 else {
+                throw PortableChatPersistenceError.ioFailure
+            }
+            let lease = PortableInvocationLivenessLease(
+                rootDescriptor: retainedRootDescriptor,
+                namespaceLock: namespaceLock,
+                authority: PortableInvocationLivenessAuthority(
+                    libraryID: scope.libraryID,
+                    root: rootIdentity,
+                    invocations: namespaceLock.key,
+                    pendingUserTurn: nil,
+                    profileReconsideration: sidecarLease.key
+                ),
+                profileReconsiderationLease: sidecarLease,
+                reservedRequest: stableRequest,
+                didRelease: invocationLivenessReleased
+            )
+            ownsNamespaceLock = false
+            ownsSidecarLease = false
+            return .opened(authority, lease)
         }
     }
 
@@ -1017,7 +1610,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 libraryID: scope.libraryID,
                 root: rootIdentity,
                 invocations: namespaceLock.key,
-                pendingUserTurn: nil
+                pendingUserTurn: nil,
+                profileReconsideration: nil
             )
         )
     }
@@ -1169,6 +1763,17 @@ public struct PortableChatPersistence: @unchecked Sendable {
             maximumCount: Self.maximumChatCatalogEntries
         )
         var mutations: [ReplacePendingUserTurnMutation] = []
+        var reconsiderationMutations: [(
+            aggregate: ChatAggregate,
+            base: ProfileReconsideration,
+            replacement: ProfileReconsideration,
+            lease: PortableProfileReconsiderationFileLease
+        )] = []
+        defer {
+            for mutation in reconsiderationMutations {
+                mutation.lease.release()
+            }
+        }
         for chatName in chatNames {
             guard let chatID = try? ChatID(chatName) else { continue }
             guard !frozenChatIDs.contains(chatID) else { continue }
@@ -1186,19 +1791,37 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     expectedID: chatID,
                     reconcileTransients: true,
                     beforeDestructiveMutation: revalidateLiveness
-                ), let pending = current.pendingUserTurn,
-                    pending.failure == nil
-                else { continue }
-                mutations.append(
-                    try ReplacePendingUserTurnMutation(
-                        library: scope,
-                        chatID: chatID,
-                        base: pending,
-                        replacement: pending.replacingFailure(
-                            .coachResponseInterrupted
+                ) else { continue }
+                if let pending = current.pendingUserTurn,
+                   pending.failure == nil
+                {
+                    mutations.append(
+                        try ReplacePendingUserTurnMutation(
+                            library: scope,
+                            chatID: chatID,
+                            base: pending,
+                            replacement: pending.replacingFailure(
+                                .coachResponseInterrupted
+                            )
                         )
                     )
-                )
+                } else if let reconsideration = current.profileReconsideration,
+                          reconsideration.failure == nil
+                {
+                    let sidecarLease = try
+                        acquireAndValidateProfileReconsiderationFileLease(
+                            reconsideration,
+                            under: chatDescriptor
+                        )
+                    reconsiderationMutations.append((
+                        aggregate: current,
+                        base: reconsideration,
+                        replacement: reconsideration.replacingFailure(
+                            .coachResponseInterrupted
+                        ),
+                        lease: sidecarLease
+                    ))
+                }
             } catch let error as PortableChatPersistenceError
                 where frozenChatSnapshot(for: error, chatID: chatID) != nil
             {
@@ -1217,6 +1840,20 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 at: libraryRoot,
                 livenessAuthority: livenessAuthority,
                 ownsPendingUserTurnLease: false
+            )
+            if case .committed = outcome {
+                recordRelaunchInterruption(invocation: nil)
+            }
+        }
+        for mutation in reconsiderationMutations {
+            let outcome = try replaceProfileReconsideration(
+                expectedAggregate: mutation.aggregate,
+                expected: mutation.base,
+                replacement: mutation.replacement,
+                at: libraryRoot,
+                in: scope,
+                livenessAuthority: livenessAuthority,
+                lease: nil
             )
             if case .committed = outcome {
                 recordRelaunchInterruption(invocation: nil)
@@ -1265,47 +1902,69 @@ public struct PortableChatPersistence: @unchecked Sendable {
         at libraryRoot: URL,
         in scope: LibraryScope
     ) throws -> [LoadedPortableChat] {
-        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
-        defer { Darwin.close(rootDescriptor) }
-        try reconcileStagedChatCandidatesExclusively(under: rootDescriptor)
-        let publicationProof = try publicationProofLookup(
-            expectedLibraryID: scope.libraryID,
-            under: rootDescriptor
-        )
-        let chatsDescriptor = try openDirectory(named: "chats", under: rootDescriptor)
-        defer { Darwin.close(chatsDescriptor) }
+        try withReconciledProfileWritesBeforeChatExposure(
+            at: libraryRoot,
+            in: scope
+        ) { root, _, _ in
+            let rootDescriptor = root.rootDescriptor
+            let publicationProof = try publicationProofLookup(
+                expectedLibraryID: scope.libraryID,
+                under: rootDescriptor
+            )
+            let chatsDescriptor = try openDirectory(
+                named: "chats",
+                under: rootDescriptor
+            )
+            defer { Darwin.close(chatsDescriptor) }
 
-        return try listEntryNames(
-            under: chatsDescriptor,
-            maximumCount: Self.maximumChatCatalogEntries
-        )
-            .compactMap { name -> (ChatID, String)? in
-                guard let chatID = try? ChatID(name) else { return nil }
-                return (chatID, name)
-            }
-            .sorted { $0.0.rawValue < $1.0.rawValue }
-            .map { chatID, name in
-                if let snapshot = publicationProof.frozenSnapshots[chatID] {
-                    return .frozen(snapshot)
+            return try listEntryNames(
+                under: chatsDescriptor,
+                maximumCount: Self.maximumChatCatalogEntries
+            )
+                .compactMap { name -> (ChatID, String)? in
+                    guard let chatID = try? ChatID(name) else { return nil }
+                    return (chatID, name)
                 }
-                do {
-                    let descriptor = try openDirectory(named: name, under: chatsDescriptor)
-                    defer { Darwin.close(descriptor) }
-                    return try loadChatReconcilingTransients(
-                        from: descriptor,
-                        expectedID: chatID,
-                        publicationProofAuthority:
-                            publicationProof.authority(for: chatID)
-                    )
-                } catch let error as PortableChatPersistenceError {
-                    guard let frozen = frozenChatSnapshot(for: error, chatID: chatID) else {
-                        throw error
+                .sorted { $0.0.rawValue < $1.0.rawValue }
+                .map { chatID, name in
+                    if let snapshot = publicationProof.frozenSnapshots[chatID] {
+                        return .frozen(snapshot)
                     }
-                    return .frozen(frozen)
-                } catch {
-                    return .frozen(FrozenChatSnapshot(chatID: chatID, reason: .corrupt))
+                    do {
+                        let descriptor = try openDirectory(
+                            named: name,
+                            under: chatsDescriptor
+                        )
+                        defer { Darwin.close(descriptor) }
+                        return try loadChatReconcilingTransients(
+                            from: descriptor,
+                            expectedID: chatID,
+                            publicationProofAuthority:
+                                publicationProof.authority(for: chatID)
+                        )
+                    } catch let error as PortableChatPersistenceError {
+                        guard let frozen = frozenChatSnapshot(
+                            for: error,
+                            chatID: chatID
+                        ) else { throw error }
+                        return .frozen(frozen)
+                    } catch {
+                        return .frozen(
+                            FrozenChatSnapshot(chatID: chatID, reason: .corrupt)
+                        )
+                    }
                 }
-            }
+        }
+    }
+
+    func reconcileProfileWritesBeforeInvocationRecovery(
+        at libraryRoot: URL,
+        in scope: LibraryScope
+    ) throws {
+        try withReconciledProfileWritesBeforeChatExposure(
+            at: libraryRoot,
+            in: scope
+        ) { _, _, _ in () }
     }
 
     public func load(
@@ -1313,36 +1972,50 @@ public struct PortableChatPersistence: @unchecked Sendable {
         at libraryRoot: URL,
         in scope: LibraryScope
     ) throws -> LoadedPortableChat {
-        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
-        defer { Darwin.close(rootDescriptor) }
-        try reconcileStagedChatCandidatesExclusively(under: rootDescriptor)
-        let publicationProof = try publicationProofLookup(
-            expectedLibraryID: scope.libraryID,
-            under: rootDescriptor
-        )
-        if let snapshot = publicationProof.frozenSnapshots[chatID] {
-            return .frozen(snapshot)
-        }
-        let chatsDescriptor = try openDirectory(named: "chats", under: rootDescriptor)
-        defer { Darwin.close(chatsDescriptor) }
-        guard try entryExists(named: chatID.rawValue, under: chatsDescriptor) else {
-            throw PortableChatPersistenceError.chatMissing
-        }
-        let descriptor = try openDirectory(named: chatID.rawValue, under: chatsDescriptor)
-        defer { Darwin.close(descriptor) }
-        do {
-            return try loadChatReconcilingTransients(
-                from: descriptor,
-                expectedID: chatID,
-                publicationProofAuthority: publicationProof.authority(for: chatID)
+        try withReconciledProfileWritesBeforeChatExposure(
+            at: libraryRoot,
+            in: scope
+        ) { root, _, _ in
+            let rootDescriptor = root.rootDescriptor
+            let publicationProof = try publicationProofLookup(
+                expectedLibraryID: scope.libraryID,
+                under: rootDescriptor
             )
-        } catch let error as PortableChatPersistenceError {
-            guard let frozen = frozenChatSnapshot(for: error, chatID: chatID) else {
-                throw error
+            if let snapshot = publicationProof.frozenSnapshots[chatID] {
+                return .frozen(snapshot)
             }
-            return .frozen(frozen)
-        } catch {
-            return .frozen(FrozenChatSnapshot(chatID: chatID, reason: .corrupt))
+            let chatsDescriptor = try openDirectory(
+                named: "chats",
+                under: rootDescriptor
+            )
+            defer { Darwin.close(chatsDescriptor) }
+            guard try entryExists(
+                named: chatID.rawValue,
+                under: chatsDescriptor
+            ) else { throw PortableChatPersistenceError.chatMissing }
+            let descriptor = try openDirectory(
+                named: chatID.rawValue,
+                under: chatsDescriptor
+            )
+            defer { Darwin.close(descriptor) }
+            do {
+                return try loadChatReconcilingTransients(
+                    from: descriptor,
+                    expectedID: chatID,
+                    publicationProofAuthority:
+                        publicationProof.authority(for: chatID)
+                )
+            } catch let error as PortableChatPersistenceError {
+                guard let frozen = frozenChatSnapshot(
+                    for: error,
+                    chatID: chatID
+                ) else { throw error }
+                return .frozen(frozen)
+            } catch {
+                return .frozen(
+                    FrozenChatSnapshot(chatID: chatID, reason: .corrupt)
+                )
+            }
         }
     }
 
@@ -2506,7 +3179,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             at: libraryRoot,
             in: scope,
             livenessAuthority: nil,
-            reservedRequest: nil
+            reservedRequest: nil,
+            reservedReconsiderationRequest: nil
         )
     }
 
@@ -2522,7 +3196,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             at: libraryRoot,
             in: scope,
             livenessAuthority: reservation.authority,
-            reservedRequest: reservation.request
+            reservedRequest: reservation.pendingRequest,
+            reservedReconsiderationRequest: reservation.reconsiderationRequest
         )
     }
 
@@ -2538,7 +3213,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             at: libraryRoot,
             in: scope,
             livenessAuthority: authority,
-            reservedRequest: nil
+            reservedRequest: nil,
+            reservedReconsiderationRequest: nil
         )
     }
 
@@ -2546,7 +3222,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
         at libraryRoot: URL,
         in scope: LibraryScope,
         livenessAuthority: PortableInvocationLivenessAuthority?,
-        reservedRequest: PendingCoachInvocationRequest?
+        reservedRequest: PendingCoachInvocationRequest?,
+        reservedReconsiderationRequest:
+            ProfileReconsiderationInvocationRequest? = nil
     ) throws -> Set<ChatID> {
         try fault(.beforeInvocationReconciliation)
         let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
@@ -2620,6 +3298,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     named: name,
                     scope: scope,
                     reservedRequest: reservedRequest,
+                    reservedReconsiderationRequest:
+                        reservedReconsiderationRequest,
                     livenessAuthority: livenessAuthority,
                     invocationsDescriptor: invocationsDescriptor,
                     chatsDescriptor: chatsDescriptor,
@@ -2665,6 +3345,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                         named: name,
                         scope: scope,
                         reservedRequest: reservedRequest,
+                        reservedReconsiderationRequest:
+                            reservedReconsiderationRequest,
                         livenessAuthority: livenessAuthority,
                         invocationsDescriptor: invocationsDescriptor,
                         chatsDescriptor: chatsDescriptor,
@@ -2749,15 +3431,19 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 try acquireExclusiveMutationLock(on: chatDescriptor)
                 defer { releaseMutationLock(on: chatDescriptor) }
                 var recoveryPendingLease: PortablePendingUserTurnFileLease?
-                let invocationRequest = PendingCoachInvocationRequest(
-                    library: scope,
-                    chatID: invocation.chatID,
-                    pendingUserTurnID: invocation.pendingUserTurnID
-                )
-                if try entryExists(
-                    named: "pending-user-turn.json",
-                    under: chatDescriptor
-                ) {
+                var recoveryReconsiderationLease:
+                    PortableProfileReconsiderationFileLease?
+                switch invocation.intent {
+                case let .answerPendingUserTurn(pendingID, _, _, _):
+                    let invocationRequest = PendingCoachInvocationRequest(
+                        library: scope,
+                        chatID: invocation.chatID,
+                        pendingUserTurnID: pendingID
+                    )
+                    guard try entryExists(
+                        named: "pending-user-turn.json",
+                        under: chatDescriptor
+                    ) else { throw PortableChatPersistenceError.invalidLayout }
                     if invocationRequest == reservedRequest,
                        let expectedPending = livenessAuthority?.pendingUserTurn
                     {
@@ -2770,25 +3456,85 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     } else {
                         guard let lease = try acquirePendingUserTurnFileLease(
                             under: chatDescriptor
-                        ) else {
-                            throw PortableChatPersistenceError.ioFailure
-                        }
+                        ) else { throw PortableChatPersistenceError.ioFailure }
                         recoveryPendingLease = lease
                     }
-                } else if invocationRequest == reservedRequest,
-                          livenessAuthority?.pendingUserTurn != nil
-                {
-                    throw PortableChatPersistenceError.invalidLayout
+                case let .reconsiderProfileChange(source, result):
+                    let invocationRequest =
+                        ProfileReconsiderationInvocationRequest(
+                            library: scope,
+                            chatID: invocation.chatID,
+                            sourceEffectIdentity: source,
+                            resultResponsePositionID: result
+                        )
+                    let hasReconsideration = try entryExists(
+                        named: "profile-reconsideration.json",
+                        under: chatDescriptor
+                    )
+                    if !hasReconsideration {
+                        guard record.publicationProof.map({ proof in
+                            if case .reconsiderProfileChange = proof.intent {
+                                return true
+                            }
+                            return false
+                        }) == true else {
+                            throw PortableChatPersistenceError.invalidLayout
+                        }
+                    } else if invocationRequest == reservedReconsiderationRequest,
+                       let expected = livenessAuthority?.profileReconsideration
+                    {
+                        guard try regularFileLivenessIdentity(
+                            named: "profile-reconsideration.json",
+                            under: chatDescriptor
+                        ) == expected else {
+                            throw PortableChatPersistenceError.invalidLayout
+                        }
+                    } else {
+                        guard let lease = try
+                            acquireProfileReconsiderationFileLease(
+                                under: chatDescriptor
+                            )
+                        else { throw PortableChatPersistenceError.ioFailure }
+                        recoveryReconsiderationLease = lease
+                    }
                 }
                 defer { recoveryPendingLease?.release() }
+                defer { recoveryReconsiderationLease?.release() }
                 try revalidateBeforeMutation()
-                guard case let .readWrite(current) = try loadChat(
-                    from: chatDescriptor,
-                    expectedID: invocation.chatID,
-                    reconcileTransients: true,
-                    publicationProofAuthority: publicationAuthority,
-                    beforeDestructiveMutation: revalidateBeforeMutation
-                ) else { throw PortableChatPersistenceError.invalidLayout }
+                let reconciledReconsiderationBase: ChatAggregate?
+                if let proof = record.publicationProof,
+                   case .reconsiderProfileChange = invocation.intent
+                {
+                    switch try reconcileProfileReconsiderationPublication(
+                        invocation: invocation,
+                        proof: proof,
+                        record: record,
+                        invocationRoot: invocationRoot,
+                        invocationsDescriptor: invocationsDescriptor,
+                        chatDescriptor: chatDescriptor,
+                        beforeMutation: revalidateBeforeMutation
+                    ) {
+                    case .published:
+                        continue
+                    case let .base(base):
+                        reconciledReconsiderationBase = base
+                    }
+                } else {
+                    reconciledReconsiderationBase = nil
+                }
+                let current: ChatAggregate
+                if let reconciledReconsiderationBase {
+                    current = reconciledReconsiderationBase
+                } else {
+                    guard case let .readWrite(loaded) = try loadChat(
+                        from: chatDescriptor,
+                        expectedID: invocation.chatID,
+                        reconcileTransients: true,
+                        publicationProofAuthority: publicationAuthority,
+                        beforeDestructiveMutation: revalidateBeforeMutation
+                    ) else { throw PortableChatPersistenceError.invalidLayout }
+                    current = loaded
+                }
 
                 let pendingData = try entryExists(
                     named: "pending-user-turn.json",
@@ -2798,6 +3544,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     under: chatDescriptor
                 ) : nil
                 if let proof = record.publicationProof,
+                   case .answerPendingUserTurn = invocation.intent,
                    try isExactPublishedInvocation(
                        proof,
                        invocation: invocation,
@@ -2814,10 +3561,20 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     continue
                 }
                 guard (try? invocation.validateIntent(against: current)) != nil else {
-                    if record.publicationProof != nil ||
-                        (current.pendingUserTurn == nil &&
-                            !isProvablyPrePublication(invocation, current: current))
-                    {
+                    let isInvalidPublicationState: Bool
+                    switch invocation.intent {
+                    case .answerPendingUserTurn:
+                        isInvalidPublicationState =
+                            record.publicationProof != nil ||
+                            (current.pendingUserTurn == nil &&
+                                !isProvablyPrePublication(
+                                    invocation,
+                                    current: current
+                                ))
+                    case .reconsiderProfileChange:
+                        isInvalidPublicationState = record.publicationProof != nil
+                    }
+                    if isInvalidPublicationState {
                         throw PortableChatPersistenceError.invalidLayout
                     }
                     try removeInvocationDirectoryIfPresent(
@@ -2833,7 +3590,12 @@ public struct PortableChatPersistence: @unchecked Sendable {
                         beforeRemoving: revalidateBeforeMutation
                     )
                 }
-                let createdRetry = current.pendingUserTurn?.failure == nil
+                let createdRetry: Bool = switch invocation.intent {
+                case .answerPendingUserTurn:
+                    current.pendingUserTurn?.failure == nil
+                case .reconsiderProfileChange:
+                    current.profileReconsideration?.failure == nil
+                }
                 _ = try retireInvocation(
                     invocation,
                     current: current,
@@ -2868,6 +3630,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
         named name: String,
         scope: LibraryScope,
         reservedRequest: PendingCoachInvocationRequest?,
+        reservedReconsiderationRequest:
+            ProfileReconsiderationInvocationRequest?,
         livenessAuthority: PortableInvocationLivenessAuthority?,
         invocationsDescriptor: Int32,
         chatsDescriptor: Int32,
@@ -2899,38 +3663,63 @@ public struct PortableChatPersistence: @unchecked Sendable {
         defer { releaseMutationLock(on: chatDescriptor) }
 
         var recoveryPendingLease: PortablePendingUserTurnFileLease?
-        let invocationRequest = PendingCoachInvocationRequest(
-            library: scope,
-            chatID: invocation.chatID,
-            pendingUserTurnID: invocation.pendingUserTurnID
-        )
-        if try entryExists(
-            named: "pending-user-turn.json",
-            under: chatDescriptor
-        ) {
-            if invocationRequest == reservedRequest,
-               let expectedPending = livenessAuthority?.pendingUserTurn
+        var recoveryReconsiderationLease:
+            PortableProfileReconsiderationFileLease?
+        switch invocation.intent {
+        case let .answerPendingUserTurn(pendingID, _, _, _):
+            let request = PendingCoachInvocationRequest(
+                library: scope,
+                chatID: invocation.chatID,
+                pendingUserTurnID: pendingID
+            )
+            guard try entryExists(
+                named: "pending-user-turn.json",
+                under: chatDescriptor
+            ) else { return false }
+            if request == reservedRequest,
+               let expected = livenessAuthority?.pendingUserTurn
             {
                 guard try regularFileLivenessIdentity(
                     named: "pending-user-turn.json",
                     under: chatDescriptor
-                ) == expectedPending else {
+                ) == expected else {
                     throw PortableChatPersistenceError.invalidLayout
                 }
             } else {
                 guard let lease = try acquirePendingUserTurnFileLease(
                     under: chatDescriptor
-                ) else {
-                    throw PortableChatPersistenceError.ioFailure
-                }
+                ) else { throw PortableChatPersistenceError.ioFailure }
                 recoveryPendingLease = lease
             }
-        } else if invocationRequest == reservedRequest,
-                  livenessAuthority?.pendingUserTurn != nil
-        {
-            throw PortableChatPersistenceError.invalidLayout
+        case let .reconsiderProfileChange(source, result):
+            let request = ProfileReconsiderationInvocationRequest(
+                library: scope,
+                chatID: invocation.chatID,
+                sourceEffectIdentity: source,
+                resultResponsePositionID: result
+            )
+            guard try entryExists(
+                named: "profile-reconsideration.json",
+                under: chatDescriptor
+            ) else { return false }
+            if request == reservedReconsiderationRequest,
+               let expected = livenessAuthority?.profileReconsideration
+            {
+                guard try regularFileLivenessIdentity(
+                    named: "profile-reconsideration.json",
+                    under: chatDescriptor
+                ) == expected else {
+                    throw PortableChatPersistenceError.invalidLayout
+                }
+            } else {
+                guard let lease = try acquireProfileReconsiderationFileLease(
+                    under: chatDescriptor
+                ) else { throw PortableChatPersistenceError.ioFailure }
+                recoveryReconsiderationLease = lease
+            }
         }
         defer { recoveryPendingLease?.release() }
+        defer { recoveryReconsiderationLease?.release() }
 
         try beforeCommitting()
         let loaded: LoadedPortableChat
@@ -2947,12 +3736,28 @@ public struct PortableChatPersistence: @unchecked Sendable {
             ) != nil else { throw error }
             return false
         }
-        guard case let .readWrite(current) = loaded,
+        guard case let .readWrite(current) = loaded else { return false }
+        let hasPrePublicationManifest: Bool = switch invocation.intent {
+        case .answerPendingUserTurn:
+            // Answer intent validation deliberately survives title-only
+            // metadata revisions while the exact Pending/Draft stays locked.
+            true
+        case .reconsiderProfileChange:
+            // Reconsider keeps its source and sidecar canonical until C1, so
+            // intent shape alone cannot distinguish C0 from a committed C1.
+            current.chat.manifestRevision == invocation.expectedManifestRevision
+        }
+        guard hasPrePublicationManifest,
               (try? invocation.validateIntent(against: current)) != nil
         else { return false }
 
         if performRetirement {
-            let createdRetry = current.pendingUserTurn?.failure == nil
+            let createdRetry: Bool = switch invocation.intent {
+            case .answerPendingUserTurn:
+                current.pendingUserTurn?.failure == nil
+            case .reconsiderProfileChange:
+                current.profileReconsideration?.failure == nil
+            }
             try discardPrePublicationEvidence(
                 from: invocationRoot,
                 beforeRemoving: beforeCommitting
@@ -3231,6 +4036,162 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 messageIDs: Set(aggregate.chat.messageIDs)
             )
             if let candidateID = publicIDScanner.candidate.collision(in: publicIDs) {
+                recordCollision(candidateID.collision)
+            }
+        }
+        guard let current else { return .stale(nil) }
+        guard current == authority.aggregate else { return .stale(current) }
+        try revalidateLiveness()
+        if let collision { return .collision(collision) }
+        return .available
+    }
+
+    func checkLaunchIdentity(
+        _ identity: InvocationProfileReconsiderationLaunchIdentity,
+        for authority: InvocationProfileReconsiderationAuthority,
+        at libraryRoot: URL,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> InvocationLaunchIdentityAvailabilityOutcome {
+        guard let livenessAuthority = lease.authority(for: authority.request),
+              let expectedSidecar = livenessAuthority.profileReconsideration
+        else { throw PortableChatPersistenceError.ioFailure }
+        let rootDescriptor = try openLibraryRoot(
+            at: libraryRoot,
+            in: authority.request.library
+        )
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidateLiveness = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: authority.request.library,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidateLiveness()
+
+        let publicIDScanner = DurablePublicIDCollisionScanner(
+            persistence: self,
+            candidate: DurablePublicIDCollisionCandidate(identity)
+        )
+        var collision: InvocationLaunchIdentityCollision?
+        func recordCollision(_ candidate: InvocationLaunchIdentityCollision) {
+            if collision == nil { collision = candidate }
+        }
+        if try entryExists(
+            named: identity.invocationID.rawValue,
+            under: invocationsDescriptor
+        ) {
+            recordCollision(.invocationID)
+        }
+        for invocationName in try invocationDirectoryNamesRemovingEmptyResidue(
+            under: invocationsDescriptor,
+            beforeRemoving: revalidateLiveness
+        ) {
+            switch try inspectInvocationDirectory(
+                named: invocationName,
+                expectedLibraryID: authority.request.library.libraryID,
+                under: invocationsDescriptor,
+                reconcileProofPartial: false
+            ) {
+            case let .available(record):
+                for candidateID in publicIDScanner.candidate
+                    .launchOrderedCollisions(in: record.invocation)
+                {
+                    recordCollision(candidateID.collision)
+                }
+                let attempts = record.invocation.attempts
+                if attempts.contains(where: {
+                    $0.transportAuthority?.providerIdempotencyValue ==
+                        identity.idempotencyValue
+                }) {
+                    recordCollision(.providerIdempotencyValue)
+                }
+                if !Set(attempts.compactMap(\.transportAuthority).flatMap(
+                    \.transcriptHandles
+                )).isDisjoint(with: identity.transcriptHandles) {
+                    recordCollision(.transcriptHandle)
+                }
+            case let .frozen(common, _):
+                if let candidateID = publicIDScanner.candidate.collision(
+                    in: common
+                ) {
+                    recordCollision(candidateID.collision)
+                }
+            }
+        }
+
+        let chatsDescriptor = try openDirectory(
+            named: "chats",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(chatsDescriptor) }
+        var current: ChatAggregate?
+        for chatName in try listEntryNames(
+            under: chatsDescriptor,
+            maximumCount: Self.maximumChatCatalogEntries
+        ) {
+            guard let chatID = try? ChatID(chatName) else { continue }
+            if chatID != authority.request.chatID {
+                if let candidateID = try siblingChatPublicIDCollision(
+                    using: publicIDScanner,
+                    chatID: chatID,
+                    named: chatName,
+                    under: chatsDescriptor,
+                    mode: .exhaustive
+                ) {
+                    recordCollision(candidateID.collision)
+                }
+                continue
+            }
+            let chatDescriptor = try openDirectory(
+                named: chatName,
+                under: chatsDescriptor
+            )
+            defer { Darwin.close(chatDescriptor) }
+            try acquireExclusiveMutationLock(on: chatDescriptor)
+            defer { releaseMutationLock(on: chatDescriptor) }
+            guard try regularFileLivenessIdentity(
+                named: "profile-reconsideration.json",
+                under: chatDescriptor
+            ) == expectedSidecar else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            let messagesDescriptor = try openDirectory(
+                named: "messages",
+                under: chatDescriptor
+            )
+            defer { Darwin.close(messagesDescriptor) }
+            if let candidateID = try publicIDScanner.messageFileCollision(
+                under: messagesDescriptor,
+                mode: .exhaustive
+            ) {
+                recordCollision(candidateID.collision)
+            }
+            guard case let .readWrite(aggregate) = try loadChat(
+                from: chatDescriptor,
+                expectedID: chatID,
+                reconcileTransients: true,
+                beforeDestructiveMutation: revalidateLiveness
+            ) else { return .stale(nil) }
+            current = aggregate
+            if let candidateID = publicIDScanner.candidate.collision(
+                in: PortableChatDurablePublicIDs(
+                    draftID: aggregate.chat.draft.draftID,
+                    messageIDs: Set(aggregate.chat.messageIDs)
+                )
+            ) {
                 recordCollision(candidateID.collision)
             }
         }
@@ -3659,6 +4620,316 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return reopened
     }
 
+    func installProfileReconsiderationInvocation(
+        _ mutation: InstallProfileReconsiderationInvocationMutation,
+        at libraryRoot: URL,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> InvocationInstallOutcome {
+        guard let livenessAuthority = lease.authority(
+            for: mutation.authority.request
+        ), livenessAuthority.profileReconsideration != nil else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        let scope = mutation.authority.request.library
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidateLiveness = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: scope,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidateLiveness()
+        try reconcileInvocationPartials(
+            under: invocationsDescriptor,
+            beforeRemoving: revalidateLiveness
+        )
+        if try hasActiveInvocation(
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor,
+            expectedLibraryID: scope.libraryID,
+            beforeDestructiveMutation: revalidateLiveness
+        ) { return .activeExists }
+
+        let chatsDescriptor = try openDirectory(
+            named: "chats",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(chatsDescriptor) }
+        let chatName = mutation.authority.request.chatID.rawValue
+        guard try entryExists(named: chatName, under: chatsDescriptor) else {
+            return .stale(nil)
+        }
+        let chatIdentity = try directoryIdentity(
+            named: chatName,
+            under: chatsDescriptor
+        )
+        let chatDescriptor = try openDirectory(
+            named: chatName,
+            under: chatsDescriptor
+        )
+        defer { Darwin.close(chatDescriptor) }
+        try acquireExclusiveMutationLock(on: chatDescriptor)
+        defer { releaseMutationLock(on: chatDescriptor) }
+        guard try directoryIdentity(of: chatDescriptor) == chatIdentity,
+              case let .readWrite(current) = try loadChat(
+                  from: chatDescriptor,
+                  expectedID: mutation.authority.request.chatID,
+                  reconcileTransients: true,
+                  beforeDestructiveMutation: revalidateLiveness
+              ), current == mutation.authority.aggregate
+        else { return .stale(nil) }
+
+        try fault(.beforeInvocationPartialWrite)
+        let partialName = ".\(mutation.invocation.id.rawValue)." +
+            "\(UUID().uuidString.lowercased()).partial"
+        guard mkdirat(invocationsDescriptor, partialName, 0o700) == 0 else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        var partialExists = true
+        defer {
+            if partialExists {
+                removeInvocationCandidate(
+                    named: partialName,
+                    under: invocationsDescriptor
+                )
+            }
+        }
+        let partialDescriptor = try openDirectory(
+            named: partialName,
+            under: invocationsDescriptor
+        )
+        defer { Darwin.close(partialDescriptor) }
+        let partialIdentity = try directoryIdentity(of: partialDescriptor)
+        try writeExclusive(
+            try encodeInvocation(mutation.invocation),
+            named: "invocation.json",
+            under: partialDescriptor
+        )
+        try fault(.afterInvocationPartialWrite)
+        let invocationDescriptor = try openRegularFile(
+            named: "invocation.json",
+            under: partialDescriptor
+        )
+        defer { Darwin.close(invocationDescriptor) }
+        try flushDescriptor(invocationDescriptor)
+        try fault(.afterInvocationFileFlush)
+        try flushDescriptor(partialDescriptor)
+        try revalidateLiveness()
+        guard try directoryIdentity(
+            named: partialName,
+            under: invocationsDescriptor
+        ) == partialIdentity,
+            case let .readWrite(commitAuthority) = try loadChat(
+                from: chatDescriptor,
+                expectedID: mutation.authority.request.chatID,
+                reconcileTransients: false
+            ), commitAuthority == current
+        else { return .stale(current) }
+        try noReplaceRename(
+            from: partialName,
+            under: invocationsDescriptor,
+            to: mutation.invocation.id.rawValue,
+            under: invocationsDescriptor
+        )
+        partialExists = false
+        try fault(.afterInvocationInstall)
+        try flushDescriptor(invocationsDescriptor)
+        try fault(.afterInvocationDirectoryFlush)
+        let installed = try decodeInvocation(
+            boundedData(named: "invocation.json", under: partialDescriptor)
+        )
+        guard installed.hasSameDurableProjection(as: mutation.invocation) else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        _ = try installProfileReconsiderationProcessingTransition(
+            mutation,
+            current: current,
+            under: chatDescriptor,
+            holding: lease,
+            beforeCommitting: revalidateLiveness
+        )
+        return .installed(mutation.invocation)
+    }
+
+    func reconcileInstalledProfileReconsiderationInvocation(
+        _ mutation: InstallProfileReconsiderationInvocationMutation,
+        at libraryRoot: URL,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> CoachInvocation? {
+        guard let livenessAuthority = lease.authority(
+            for: mutation.authority.request
+        ) else { throw PortableChatPersistenceError.ioFailure }
+        let scope = mutation.authority.request.library
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidate = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: scope,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidate()
+        try reconcileInvocationPartials(
+            under: invocationsDescriptor,
+            beforeRemoving: revalidate
+        )
+        let invocationName = mutation.invocation.id.rawValue
+        guard try entryExists(
+            named: invocationName,
+            under: invocationsDescriptor
+        ) else { return nil }
+        let invocationRoot = try openDirectory(
+            named: invocationName,
+            under: invocationsDescriptor
+        )
+        defer { Darwin.close(invocationRoot) }
+        let chatsDescriptor = try openDirectory(
+            named: "chats",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(chatsDescriptor) }
+        let chatDescriptor = try openDirectory(
+            named: mutation.authority.request.chatID.rawValue,
+            under: chatsDescriptor
+        )
+        defer { Darwin.close(chatDescriptor) }
+        try acquireExclusiveMutationLock(on: chatDescriptor)
+        defer { releaseMutationLock(on: chatDescriptor) }
+        guard case let .readWrite(current) = try loadChat(
+            from: chatDescriptor,
+            expectedID: mutation.authority.request.chatID,
+            reconcileTransients: true,
+            beforeDestructiveMutation: revalidate
+        ), current == mutation.authority.aggregate ||
+            current == mutation.processingAggregate
+        else { return nil }
+        let installed = try loadInvocationDirectoryRecord(
+            expectedInvocationID: mutation.invocation.id,
+            expectedLibraryID: scope.libraryID,
+            under: invocationRoot,
+            beforeRemoving: revalidate
+        ).invocation
+        guard installed.hasSameDurableProjection(as: mutation.invocation) else {
+            return nil
+        }
+        try flushDescriptor(invocationRoot)
+        try flushDescriptor(invocationsDescriptor)
+        _ = try installProfileReconsiderationProcessingTransition(
+            mutation,
+            current: current,
+            under: chatDescriptor,
+            holding: lease,
+            beforeCommitting: revalidate
+        )
+        return mutation.invocation
+    }
+
+    private func installProfileReconsiderationProcessingTransition(
+        _ mutation: InstallProfileReconsiderationInvocationMutation,
+        current: ChatAggregate,
+        under chatDescriptor: Int32,
+        holding lease: PortableInvocationLivenessLease,
+        beforeCommitting: () throws -> Void
+    ) throws -> ChatAggregate {
+        guard current == mutation.authority.aggregate ||
+                current == mutation.processingAggregate,
+              current.profileReconsideration == mutation.authority.reconsideration
+                || current.profileReconsideration ==
+                    mutation.processingAggregate.profileReconsideration,
+              let processing = mutation.processingAggregate.profileReconsideration
+        else { throw PortableChatPersistenceError.invalidLayout }
+        if current != mutation.processingAggregate {
+            let partialName =
+                ".profile-reconsideration.json.\(UUID().uuidString.lowercased()).partial"
+            var partialExists = false
+            defer {
+                if partialExists {
+                    _ = partialName.withCString {
+                        Darwin.unlinkat(chatDescriptor, $0, 0)
+                    }
+                }
+            }
+            try writeExclusive(
+                try encodeProfileReconsideration(processing),
+                named: partialName,
+                under: chatDescriptor
+            )
+            partialExists = true
+            let descriptor = try openRegularFile(
+                named: partialName,
+                under: chatDescriptor
+            )
+            defer { Darwin.close(descriptor) }
+            try flushDescriptor(descriptor)
+            try beforeCommitting()
+            guard case let .readWrite(exact) = try loadChat(
+                from: chatDescriptor,
+                expectedID: mutation.authority.request.chatID,
+                reconcileTransients: false
+            ), exact == mutation.authority.aggregate,
+                renameat(
+                    chatDescriptor,
+                    partialName,
+                    chatDescriptor,
+                    "profile-reconsideration.json"
+                ) == 0
+            else { throw PortableChatPersistenceError.invalidLayout }
+            partialExists = false
+        }
+        try flushDescriptor(chatDescriptor)
+        let installedKey = try regularFileLivenessIdentity(
+            named: "profile-reconsideration.json",
+            under: chatDescriptor
+        )
+        guard let currentAuthority = lease.authority(
+            for: mutation.authority.request
+        ) else { throw PortableChatPersistenceError.ioFailure }
+        if currentAuthority.profileReconsideration != installedKey {
+            let replacementLease = try
+                acquireAndValidateProfileReconsiderationFileLease(
+                    processing,
+                    under: chatDescriptor
+                )
+            try lease.rebindProfileReconsiderationLease(replacementLease)
+        }
+        guard case let .readWrite(reopened) = try loadChat(
+            from: chatDescriptor,
+            expectedID: mutation.authority.request.chatID,
+            reconcileTransients: true,
+            beforeDestructiveMutation: beforeCommitting
+        ), reopened == mutation.processingAggregate else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        return reopened
+    }
+
     func installNextAttempt(
         _ mutation: InstallNextCoachProviderAttemptMutation,
         at libraryRoot: URL,
@@ -3796,6 +5067,204 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return .installed(mutation.replacement)
     }
 
+    func installNextProfileReconsiderationAttempt(
+        _ mutation: InstallNextProfileReconsiderationAttemptMutation,
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> PortableNextAttemptInstallResult {
+        guard case let .reconsiderProfileChange(source, result) =
+            mutation.base.intent
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let request = ProfileReconsiderationInvocationRequest(
+            library: scope,
+            chatID: mutation.base.chatID,
+            sourceEffectIdentity: source,
+            resultResponsePositionID: result
+        )
+        guard mutation.base.libraryID == scope.libraryID,
+              mutation.replacement.libraryID == scope.libraryID,
+              mutation.replacement.id == mutation.base.id,
+              let livenessAuthority = lease.authority(for: request)
+        else { throw PortableChatPersistenceError.ioFailure }
+
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidate = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: scope,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidate()
+        let invocationName = mutation.base.id.rawValue
+        guard try entryExists(
+            named: invocationName,
+            under: invocationsDescriptor
+        ) else { return .stale(nil) }
+        let invocationIdentity = try directoryIdentity(
+            named: invocationName,
+            under: invocationsDescriptor
+        )
+        let invocationRoot = try openDirectory(
+            named: invocationName,
+            under: invocationsDescriptor
+        )
+        defer { Darwin.close(invocationRoot) }
+        let current = try loadInvocationDirectoryRecord(
+            expectedInvocationID: mutation.base.id,
+            expectedLibraryID: scope.libraryID,
+            under: invocationRoot,
+            reconcileProofPartial: true,
+            beforeRemoving: revalidate
+        )
+        guard current.invocation.hasSameDurableProjection(as: mutation.base)
+        else { return .stale(nil) }
+        guard current.publicationProof == nil else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        if let collision = try nextAttemptIdentityCollision(
+            mutation.replacement.attempt,
+            activeChatID: mutation.base.chatID,
+            expectedLibraryID: scope.libraryID,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor,
+            beforeDestructiveMutation: revalidate
+        ) {
+            return .collision(collision)
+        }
+        let partialName =
+            ".invocation.json.\(UUID().uuidString.lowercased()).partial"
+        var partialExists = false
+        defer {
+            if partialExists {
+                _ = partialName.withCString {
+                    Darwin.unlinkat(invocationRoot, $0, 0)
+                }
+            }
+        }
+        try writeExclusive(
+            try encodeInvocation(mutation.replacement),
+            named: partialName,
+            under: invocationRoot
+        )
+        partialExists = true
+        let partialDescriptor = try openRegularFile(
+            named: partialName,
+            under: invocationRoot
+        )
+        defer { Darwin.close(partialDescriptor) }
+        try flushDescriptor(partialDescriptor)
+        try revalidate()
+        guard try directoryIdentity(
+            named: invocationName,
+            under: invocationsDescriptor
+        ) == invocationIdentity,
+            try loadInvocationDirectoryRecord(
+                expectedInvocationID: mutation.base.id,
+                expectedLibraryID: scope.libraryID,
+                under: invocationRoot,
+                reconcileProofPartial: false
+            ).invocation.hasSameDurableProjection(as: mutation.base),
+            renameat(
+                invocationRoot,
+                partialName,
+                invocationRoot,
+                "invocation.json"
+            ) == 0
+        else { throw PortableChatPersistenceError.invalidLayout }
+        partialExists = false
+        try flushDescriptor(invocationRoot)
+        let installed = try decodeInvocation(
+            boundedData(named: "invocation.json", under: invocationRoot)
+        )
+        guard installed.hasSameDurableProjection(as: mutation.replacement) else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        return .installed(mutation.replacement)
+    }
+
+    func reconcileInstalledProfileReconsiderationNextAttempt(
+        _ mutation: InstallNextProfileReconsiderationAttemptMutation,
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> CoachInvocation? {
+        guard case let .reconsiderProfileChange(source, result) =
+            mutation.base.intent
+        else { return nil }
+        let request = ProfileReconsiderationInvocationRequest(
+            library: scope,
+            chatID: mutation.base.chatID,
+            sourceEffectIdentity: source,
+            resultResponsePositionID: result
+        )
+        guard let livenessAuthority = lease.authority(for: request) else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidate = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: scope,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidate()
+        guard try entryExists(
+            named: mutation.base.id.rawValue,
+            under: invocationsDescriptor
+        ) else { return nil }
+        let root = try openDirectory(
+            named: mutation.base.id.rawValue,
+            under: invocationsDescriptor
+        )
+        defer { Darwin.close(root) }
+        let record = try loadInvocationDirectoryRecord(
+            expectedInvocationID: mutation.base.id,
+            expectedLibraryID: scope.libraryID,
+            under: root,
+            reconcileProofPartial: true,
+            beforeRemoving: revalidate
+        )
+        guard record.publicationProof == nil else { return nil }
+        if record.invocation.hasSameDurableProjection(as: mutation.replacement) {
+            try flushDescriptor(root)
+            try flushDescriptor(invocationsDescriptor)
+            return mutation.replacement
+        }
+        guard record.invocation.hasSameDurableProjection(as: mutation.base) else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        return nil
+    }
+
     func reconcileInstalledNextAttempt(
         _ mutation: InstallNextCoachProviderAttemptMutation,
         at libraryRoot: URL,
@@ -3872,12 +5341,13 @@ public struct PortableChatPersistence: @unchecked Sendable {
         guard candidate.transportAuthority != nil else {
             throw PortableChatPersistenceError.invalidLayout
         }
+        let collisionCandidate = DurablePublicIDCollisionCandidate(
+            attemptID: candidate.id,
+            authority: authority
+        )
         let publicIDScanner = DurablePublicIDCollisionScanner(
             persistence: self,
-            candidate: DurablePublicIDCollisionCandidate(
-                attemptID: candidate.id,
-                authority: authority
-            )
+            candidate: collisionCandidate
         )
         for invocationName in try invocationDirectoryNamesRemovingEmptyResidue(
             under: invocationsDescriptor,
@@ -3963,6 +5433,34 @@ public struct PortableChatPersistence: @unchecked Sendable {
             at: libraryRoot,
             in: scope,
             livenessAuthority: nil
+        )
+    }
+
+    func abortInstalledProfileReconsideration(
+        _ invocation: CoachInvocation,
+        failure: PendingUserTurnFailure,
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> PortableChatMutationResult {
+        guard case let .reconsiderProfileChange(source, result) =
+            invocation.intent
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let request = ProfileReconsiderationInvocationRequest(
+            library: scope,
+            chatID: invocation.chatID,
+            sourceEffectIdentity: source,
+            resultResponsePositionID: result
+        )
+        guard let authority = lease.authority(for: request) else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        return try abortInstalledNewSend(
+            invocation,
+            failure: failure,
+            at: libraryRoot,
+            in: scope,
+            livenessAuthority: authority
         )
     }
 
@@ -4068,6 +5566,17 @@ public struct PortableChatPersistence: @unchecked Sendable {
             throw PortableChatPersistenceError.invalidLayout
         }
         guard (try? terminalInvocation.validateIntent(against: current)) != nil else {
+            if case .reconsiderProfileChange = terminalInvocation.intent {
+                guard record.publicationProof == nil else {
+                    throw PortableChatPersistenceError.invalidLayout
+                }
+                try removeInvocationDirectoryIfPresent(
+                    terminalInvocation,
+                    under: invocationsDescriptor,
+                    beforeRemoving: revalidateLiveness
+                )
+                return .stale(current)
+            }
             if current.pendingUserTurn == nil {
                 let pendingData = try entryExists(
                     named: "pending-user-turn.json",
@@ -4455,6 +5964,300 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return .committed(reopened)
     }
 
+    func publishProfileReconsideration(
+        _ mutation: PublishProfileReconsiderationInvocationMutation,
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> PortableChatMutationResult {
+        guard case let .reconsiderProfileChange(source, result) =
+            mutation.invocation.intent
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let request = ProfileReconsiderationInvocationRequest(
+            library: scope,
+            chatID: mutation.invocation.chatID,
+            sourceEffectIdentity: source,
+            resultResponsePositionID: result
+        )
+        guard let authority = lease.authority(for: request) else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        return try publishProfileReconsideration(
+            mutation,
+            at: libraryRoot,
+            in: scope,
+            livenessAuthority: authority
+        )
+    }
+
+    private func publishProfileReconsideration(
+        _ mutation: PublishProfileReconsiderationInvocationMutation,
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        livenessAuthority: PortableInvocationLivenessAuthority
+    ) throws -> PortableChatMutationResult {
+        guard mutation.invocation.libraryID == scope.libraryID,
+              mutation.invocation.chatID == mutation.base.chat.id,
+              mutation.replacement.chat.id == mutation.base.chat.id
+        else { throw PortableChatPersistenceError.libraryScopeMismatch }
+        let artifacts = try publicationArtifacts(for: mutation)
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidate = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: scope,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidate()
+        try reconcileInvocationPartials(
+            under: invocationsDescriptor,
+            beforeRemoving: revalidate
+        )
+        let chatsDescriptor = try openDirectory(
+            named: "chats",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(chatsDescriptor) }
+        let chatName = mutation.invocation.chatID.rawValue
+        guard try entryExists(named: chatName, under: chatsDescriptor) else {
+            throw PortableChatPersistenceError.chatMissing
+        }
+        let chatIdentity = try directoryIdentity(
+            named: chatName,
+            under: chatsDescriptor
+        )
+        let chatDescriptor = try openDirectory(
+            named: chatName,
+            under: chatsDescriptor
+        )
+        defer { Darwin.close(chatDescriptor) }
+        guard try directoryIdentity(of: chatDescriptor) == chatIdentity else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        try acquireExclusiveMutationLock(on: chatDescriptor)
+        defer { releaseMutationLock(on: chatDescriptor) }
+        try revalidate()
+
+        if try entryExists(
+            named: mutation.invocation.id.rawValue,
+            under: invocationsDescriptor
+        ) {
+            let invocationRoot = try openDirectory(
+                named: mutation.invocation.id.rawValue,
+                under: invocationsDescriptor
+            )
+            defer { Darwin.close(invocationRoot) }
+            let record = try loadInvocationDirectoryRecord(
+                expectedInvocationID: mutation.invocation.id,
+                expectedLibraryID: scope.libraryID,
+                under: invocationRoot,
+                beforeRemoving: revalidate
+            )
+            guard record.invocation.hasSameDurableProjection(
+                as: mutation.invocation
+            ) else { throw PortableChatPersistenceError.invalidLayout }
+            if let installedProof = record.publicationProof {
+                guard installedProof == artifacts.proof else {
+                    throw PortableChatPersistenceError.invalidLayout
+                }
+                switch try reconcileProfileReconsiderationPublication(
+                    invocation: mutation.invocation,
+                    proof: installedProof,
+                    record: record,
+                    invocationRoot: invocationRoot,
+                    invocationsDescriptor: invocationsDescriptor,
+                    chatDescriptor: chatDescriptor,
+                    beforeMutation: revalidate
+                ) {
+                case let .published(published):
+                    return .committed(published)
+                case let .base(base):
+                    guard base == mutation.base else { return .stale(base) }
+                }
+            }
+        }
+
+        guard case let .readWrite(current) = try loadChat(
+            from: chatDescriptor,
+            expectedID: mutation.invocation.chatID,
+            reconcileTransients: true,
+            beforeDestructiveMutation: revalidate
+        ) else { throw PortableChatPersistenceError.invalidLayout }
+        if try isExactPublishedProfileReconsideration(
+                artifacts.proof,
+                invocation: mutation.invocation,
+                aggregate: current,
+                under: chatDescriptor
+            )
+        {
+            return .committed(current)
+        }
+        guard current == mutation.base,
+              try entryExists(
+                  named: mutation.invocation.id.rawValue,
+                  under: invocationsDescriptor
+              )
+        else { return .stale(current) }
+        let invocationRoot = try openDirectory(
+            named: mutation.invocation.id.rawValue,
+            under: invocationsDescriptor
+        )
+        defer { Darwin.close(invocationRoot) }
+        let record = try loadInvocationDirectoryRecord(
+            expectedInvocationID: mutation.invocation.id,
+            expectedLibraryID: scope.libraryID,
+            under: invocationRoot,
+            beforeRemoving: revalidate
+        )
+        guard record.invocation.hasSameDurableProjection(
+            as: mutation.invocation
+        ), record.publicationProof == nil,
+            record.reconsiderationSourceEffectData == nil ||
+                record.reconsiderationSourceEffectData ==
+                    artifacts.sourceEffectData,
+            record.reconsiderationReplacementProposalData == nil ||
+                record.reconsiderationReplacementProposalData ==
+                    artifacts.replacementProposalData
+        else { return .stale(current) }
+        let canonicalSourceName: String = switch mutation
+            .reconsideration.sourceEffectIdentity
+        {
+        case .proposal: "proposal.json"
+        case .evidencePublication: "profile-publication.json"
+        }
+        guard try boundedData(
+            named: canonicalSourceName,
+            under: chatDescriptor
+        ) == artifacts.sourceEffectData,
+            try boundedData(
+                named: "profile-reconsideration.json",
+                under: chatDescriptor
+            ) == artifacts.profileReconsiderationData
+        else { return .stale(current) }
+
+        try installInvocationOwnedPublicationArtifact(
+            artifacts.sourceEffectData,
+            named: Self.reconsiderationSourceEffectName,
+            under: invocationRoot,
+            installedFault: .afterReconsiderationSourceEffectBackupInstall
+        )
+        if let replacementProposalData = artifacts.replacementProposalData {
+            try installInvocationOwnedPublicationArtifact(
+                replacementProposalData,
+                named: Self.reconsiderationReplacementProposalName,
+                under: invocationRoot,
+                installedFault: .afterReconsiderationReplacementProposalInstall
+            )
+        }
+        try installPublicationProof(artifacts.proof, under: invocationRoot)
+
+        let memoryDescriptor = try openDirectory(
+            named: "memory",
+            under: chatDescriptor
+        )
+        defer { Darwin.close(memoryDescriptor) }
+        if let replacementMemory = mutation.replacementMemory {
+            try revalidate()
+            try installMemory(replacementMemory, under: memoryDescriptor)
+        }
+        if let coachMessage = mutation.coachMessage {
+            let messagesDescriptor = try openDirectory(
+                named: "messages",
+                under: chatDescriptor
+            )
+            defer { Darwin.close(messagesDescriptor) }
+            try revalidate()
+            try installMessage(
+                coachMessage,
+                under: messagesDescriptor,
+                installedFault: .afterCoachMessageInstall
+            )
+        }
+
+        let partialName = ".chat.json.\(UUID().uuidString.lowercased()).partial"
+        var partialExists = false
+        defer {
+            if partialExists {
+                _ = partialName.withCString {
+                    Darwin.unlinkat(chatDescriptor, $0, 0)
+                }
+            }
+        }
+        try writeExclusive(
+            try encodeChat(mutation.replacement.chat),
+            named: partialName,
+            under: chatDescriptor
+        )
+        partialExists = true
+        let partialDescriptor = try openRegularFile(
+            named: partialName,
+            under: chatDescriptor
+        )
+        defer { Darwin.close(partialDescriptor) }
+        try flushDescriptor(partialDescriptor)
+        try fault(.afterPublicationManifestFileFlush)
+        try revalidate()
+        guard try directoryIdentity(
+            named: chatName,
+            under: chatsDescriptor
+        ) == chatIdentity,
+            try directoryIdentity(of: chatDescriptor) == chatIdentity,
+            case let .readWrite(authority) = try loadChat(
+                from: chatDescriptor,
+                expectedID: mutation.invocation.chatID,
+                reconcileTransients: false,
+                publicationProofAuthority: InvocationPublicationProofAuthority(
+                    invocation: mutation.invocation,
+                    proof: artifacts.proof
+                )
+            ), authority == current,
+            renameat(
+                chatDescriptor,
+                partialName,
+                chatDescriptor,
+                "chat.json"
+            ) == 0
+        else { return .stale(current) }
+        partialExists = false
+        try fault(.afterPublicationManifestInstall)
+        try flushDescriptor(chatDescriptor)
+        try fault(.afterPublicationManifestDirectoryFlush)
+        try fault(.beforePublicationCleanup)
+        try revalidate()
+        let committedRecord = try loadInvocationDirectoryRecord(
+            expectedInvocationID: mutation.invocation.id,
+            expectedLibraryID: scope.libraryID,
+            under: invocationRoot,
+            beforeRemoving: revalidate
+        )
+        guard case let .published(published) = try
+            reconcileProfileReconsiderationPublication(
+                invocation: mutation.invocation,
+                proof: artifacts.proof,
+                record: committedRecord,
+                invocationRoot: invocationRoot,
+                invocationsDescriptor: invocationsDescriptor,
+                chatDescriptor: chatDescriptor,
+                beforeMutation: revalidate
+            ), published == mutation.replacement
+        else { throw PortableChatPersistenceError.invalidLayout }
+        return .committed(published)
+    }
+
     func reconcileCommittedInvocationPublication(
         _ mutation: PublishCoachInvocationMutation,
         at libraryRoot: URL,
@@ -4594,6 +6397,164 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return aggregate
     }
 
+    func reconcileCommittedProfileReconsiderationPublication(
+        _ mutation: PublishProfileReconsiderationInvocationMutation,
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> ChatAggregate? {
+        guard case let .reconsiderProfileChange(source, result) =
+            mutation.invocation.intent
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let request = ProfileReconsiderationInvocationRequest(
+            library: scope,
+            chatID: mutation.invocation.chatID,
+            sourceEffectIdentity: source,
+            resultResponsePositionID: result
+        )
+        guard let authority = lease.authority(for: request) else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        return try reconcileCommittedProfileReconsiderationPublication(
+            mutation,
+            at: libraryRoot,
+            in: scope,
+            livenessAuthority: authority
+        )
+    }
+
+    func reconcileCommittedProfileReconsiderationPublicationIfUnowned(
+        _ mutation: PublishProfileReconsiderationInvocationMutation,
+        at libraryRoot: URL,
+        in scope: LibraryScope
+    ) throws -> PortableInvocationPublicationRecoveryResult {
+        guard let lease = try acquireInvocationRecoveryLease(
+            at: libraryRoot,
+            in: scope
+        ) else { return .owned }
+        defer { lease.release() }
+        guard let authority = lease.authority() else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        if let published = try
+            reconcileCommittedProfileReconsiderationPublication(
+                mutation,
+                at: libraryRoot,
+                in: scope,
+                livenessAuthority: authority
+            )
+        {
+            return .published(published)
+        }
+        return .notPublished
+    }
+
+    private func reconcileCommittedProfileReconsiderationPublication(
+        _ mutation: PublishProfileReconsiderationInvocationMutation,
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        livenessAuthority: PortableInvocationLivenessAuthority?
+    ) throws -> ChatAggregate? {
+        guard mutation.invocation.libraryID == scope.libraryID else {
+            throw PortableChatPersistenceError.libraryScopeMismatch
+        }
+        try fault(.beforePublicationReconciliationRead)
+        let artifacts = try publicationArtifacts(for: mutation)
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidate = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: scope,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidate()
+        try reconcileInvocationPartials(
+            under: invocationsDescriptor,
+            beforeRemoving: revalidate
+        )
+        let chatsDescriptor = try openDirectory(
+            named: "chats",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(chatsDescriptor) }
+        let chatName = mutation.invocation.chatID.rawValue
+        guard try entryExists(named: chatName, under: chatsDescriptor) else {
+            return nil
+        }
+        let chatDescriptor = try openDirectory(
+            named: chatName,
+            under: chatsDescriptor
+        )
+        defer { Darwin.close(chatDescriptor) }
+        try acquireExclusiveMutationLock(on: chatDescriptor)
+        defer { releaseMutationLock(on: chatDescriptor) }
+        try revalidate()
+        if try entryExists(
+            named: mutation.invocation.id.rawValue,
+            under: invocationsDescriptor
+        ) {
+            let invocationRoot = try openDirectory(
+                named: mutation.invocation.id.rawValue,
+                under: invocationsDescriptor
+            )
+            defer { Darwin.close(invocationRoot) }
+            let record = try loadInvocationDirectoryRecord(
+                expectedInvocationID: mutation.invocation.id,
+                expectedLibraryID: scope.libraryID,
+                under: invocationRoot,
+                beforeRemoving: revalidate
+            )
+            guard record.invocation.hasSameDurableProjection(
+                as: mutation.invocation
+            ) else { throw PortableChatPersistenceError.invalidLayout }
+            guard let proof = record.publicationProof else { return nil }
+            guard proof == artifacts.proof else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            switch try reconcileProfileReconsiderationPublication(
+                invocation: mutation.invocation,
+                proof: proof,
+                record: record,
+                invocationRoot: invocationRoot,
+                invocationsDescriptor: invocationsDescriptor,
+                chatDescriptor: chatDescriptor,
+                beforeMutation: revalidate
+            ) {
+            case .base:
+                return nil
+            case let .published(published):
+                return published
+            }
+        }
+        guard case let .readWrite(current) = try loadChat(
+            from: chatDescriptor,
+            expectedID: mutation.invocation.chatID,
+            reconcileTransients: true,
+            beforeDestructiveMutation: revalidate
+        ), try isExactPublishedProfileReconsideration(
+                artifacts.proof,
+                invocation: mutation.invocation,
+                aggregate: current,
+                under: chatDescriptor
+            )
+        else { return nil }
+        return current
+    }
+
     /// One exact publication prover is shared by mutation-owned immediate
     /// recovery and marker-owned relaunch recovery. It permits only ordinary
     /// title and fresh-Draft evolution after the committed manifest revision.
@@ -4604,13 +6565,22 @@ public struct PortableChatPersistence: @unchecked Sendable {
         pendingData: Data?,
         under chatDescriptor: Int32
     ) throws -> Bool {
+        guard case let .answerPendingUserTurn(
+            _,
+            _,
+            userMessageID,
+            _,
+            _,
+            _,
+            _
+        ) = proof.intent else { return false }
         let messagesDescriptor = try openDirectory(
             named: "messages",
             under: chatDescriptor
         )
         defer { Darwin.close(messagesDescriptor) }
         let userData = try boundedData(
-            named: "\(proof.userMessageID.rawValue).json",
+            named: "\(userMessageID.rawValue).json",
             under: messagesDescriptor
         )
         let coachData = try boundedData(
@@ -4659,6 +6629,302 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 profileEvidencePublicationData: profileEvidencePublicationData
             )
         )
+    }
+
+    private func isExactPublishedProfileReconsideration(
+        _ proof: InvocationPublicationProof,
+        invocation: CoachInvocation,
+        aggregate: ChatAggregate,
+        under chatDescriptor: Int32
+    ) throws -> Bool {
+        guard case .reconsiderProfileChange = proof.intent else { return false }
+        let messagesDescriptor = try openDirectory(
+            named: "messages",
+            under: chatDescriptor
+        )
+        defer { Darwin.close(messagesDescriptor) }
+        let coachName = "\(proof.coachMessageID.rawValue).json"
+        let coachData: Data? = if try entryExists(
+            named: coachName,
+            under: messagesDescriptor
+        ) {
+            try boundedData(named: coachName, under: messagesDescriptor)
+        } else {
+            nil
+        }
+        let proposalData: Data? = if try entryExists(
+            named: "proposal.json",
+            under: chatDescriptor
+        ) {
+            try boundedData(named: "proposal.json", under: chatDescriptor)
+        } else {
+            nil
+        }
+        return invocationEvidenceCodec.isExactPublishedProfileReconsideration(
+            proof,
+            invocation: invocation,
+            evidence: PortableProfileReconsiderationPublicationCurrentEvidence(
+                aggregate: aggregate,
+                canonicalChat: try encodeChat(aggregate.chat),
+                stableChat: try encodeStableChat(aggregate.chat),
+                memory: try encodeMemory(aggregate.memory),
+                coachMessageData: coachData,
+                coachMessage: coachData.flatMap { try? decodeMessage($0) },
+                replacementProposalData: proposalData
+            )
+        )
+    }
+
+    private func reconcileProfileReconsiderationPublication(
+        invocation: CoachInvocation,
+        proof: InvocationPublicationProof,
+        record: InvocationDirectoryRecord,
+        invocationRoot: Int32,
+        invocationsDescriptor: Int32,
+        chatDescriptor: Int32,
+        beforeMutation: () throws -> Void
+    ) throws -> PortableProfileReconsiderationPublicationReconciliation {
+        guard case let .reconsiderProfileChange(
+            sourceEffectIdentity,
+            baseManifestRevision,
+            _, _, _, _
+        ) = proof.intent,
+              record.publicationProof == proof,
+              record.invocation.hasSameDurableProjection(as: invocation),
+              let sourceBackup = record.reconsiderationSourceEffectData,
+              invocationEvidenceCodec.proof(
+                  proof,
+                  bindsReconsiderationSourceEffectData: sourceBackup
+              )
+        else { throw PortableChatPersistenceError.invalidLayout }
+
+        func dataIfPresent(_ name: String, under descriptor: Int32) throws -> Data? {
+            guard try entryExists(named: name, under: descriptor) else {
+                return nil
+            }
+            guard isRegularFile(named: name, under: descriptor) else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            return try boundedData(named: name, under: descriptor)
+        }
+
+        let chatData = try boundedData(named: "chat.json", under: chatDescriptor)
+        let persistedChat = try decodeChat(chatData)
+        guard persistedChat.id == invocation.chatID else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let reconsiderationData = try dataIfPresent(
+            "profile-reconsideration.json",
+            under: chatDescriptor
+        )
+        if let reconsiderationData,
+           !invocationEvidenceCodec.proof(
+               proof,
+               bindsProfileReconsiderationData: reconsiderationData
+           )
+        {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let sourceName: String
+        switch sourceEffectIdentity {
+        case .proposal:
+            sourceName = "proposal.json"
+        case .evidencePublication:
+            sourceName = "profile-publication.json"
+        }
+        let canonicalSourceData = try dataIfPresent(
+            sourceName,
+            under: chatDescriptor
+        )
+        let canonicalProposalData = try dataIfPresent(
+            "proposal.json",
+            under: chatDescriptor
+        )
+        let canonicalEvidenceData = try dataIfPresent(
+            "profile-publication.json",
+            under: chatDescriptor
+        )
+        let messagesDescriptor = try openDirectory(
+            named: "messages",
+            under: chatDescriptor
+        )
+        defer { Darwin.close(messagesDescriptor) }
+        let coachName = "\(proof.coachMessageID.rawValue).json"
+        let coachData = try dataIfPresent(coachName, under: messagesDescriptor)
+        if proof.coachMessageSHA256 != nil {
+            if let coachData,
+               !invocationEvidenceCodec.proof(
+                   proof,
+                   bindsCoachMessageData: coachData
+               )
+            {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+        } else if coachData != nil {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+
+        let memoryDescriptor = try openDirectory(
+            named: "memory",
+            under: chatDescriptor
+        )
+        defer { Darwin.close(memoryDescriptor) }
+        let selectedMemoryData = try boundedData(
+            named: "\(persistedChat.currentMemoryID.rawValue).json",
+            under: memoryDescriptor
+        )
+
+        if persistedChat.manifestRevision == baseManifestRevision,
+           invocationEvidenceCodec.proof(
+               proof,
+               bindsReconsiderationBaseChatData: chatData
+           )
+        {
+            guard let reconsiderationData,
+                  canonicalSourceData == sourceBackup,
+                  invocationEvidenceCodec.proof(
+                      proof,
+                      bindsReconsiderationBaseMemoryData: selectedMemoryData
+                  ),
+                  proof.coachMessageSHA256 == nil ||
+                    coachData == nil ||
+                    !persistedChat.messageIDs.contains(proof.coachMessageID)
+            else { throw PortableChatPersistenceError.invalidLayout }
+            if case .proposal = sourceEffectIdentity {
+                guard canonicalEvidenceData == nil else {
+                    throw PortableChatPersistenceError.invalidLayout
+                }
+            } else {
+                guard canonicalProposalData == nil else {
+                    throw PortableChatPersistenceError.invalidLayout
+                }
+            }
+            guard case let .readWrite(base) = try loadChat(
+                from: chatDescriptor,
+                expectedID: invocation.chatID,
+                reconcileTransients: true,
+                publicationProofAuthority: InvocationPublicationProofAuthority(
+                    invocation: invocation,
+                    proof: proof
+                ),
+                beforeDestructiveMutation: beforeMutation
+            ),
+                invocationEvidenceCodec
+                    .isExactProfileReconsiderationPublicationBase(
+                        proof,
+                        invocation: invocation,
+                        aggregate: base,
+                        canonicalChat: chatData,
+                        memory: selectedMemoryData,
+                        sourceEffect: sourceBackup,
+                        profileReconsideration: reconsiderationData
+                    )
+            else { throw PortableChatPersistenceError.invalidLayout }
+            try discardPrePublicationEvidence(
+                from: invocationRoot,
+                beforeRemoving: beforeMutation
+            )
+            return .base(base)
+        }
+
+        let hasExactPublishedManifest =
+            persistedChat.manifestRevision == proof.publishedManifestRevision &&
+            invocationEvidenceCodec.proof(
+                proof,
+                bindsPublishedChatData: chatData
+            )
+        let stablePersistedChatData = try encodeStableChat(persistedChat)
+        let hasAllowedLaterManifest =
+            persistedChat.manifestRevision > proof.publishedManifestRevision &&
+            invocationEvidenceCodec.proof(
+                proof,
+                bindsStableChatData: stablePersistedChatData
+            )
+        guard hasExactPublishedManifest || hasAllowedLaterManifest,
+              persistedChat.messageIDs == proof.messageIDs,
+              invocationEvidenceCodec.proof(
+                  proof,
+                  bindsPublishedMemoryData: selectedMemoryData
+              ),
+              (proof.coachMessageSHA256 == nil) == (coachData == nil),
+              (proof.coachMessageSHA256 != nil ||
+                !persistedChat.messageIDs.contains(proof.coachMessageID))
+        else { throw PortableChatPersistenceError.invalidLayout }
+
+        let replacementData = record.reconsiderationReplacementProposalData
+        guard (replacementData != nil) == (proof.proposalSHA256 != nil) else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        switch sourceEffectIdentity {
+        case .proposal:
+            guard canonicalEvidenceData == nil,
+                  canonicalProposalData == sourceBackup ||
+                    canonicalProposalData == replacementData ||
+                    (replacementData == nil && canonicalProposalData == nil)
+            else { throw PortableChatPersistenceError.invalidLayout }
+        case .evidencePublication:
+            guard canonicalEvidenceData == sourceBackup ||
+                    canonicalEvidenceData == nil,
+                  canonicalProposalData == nil ||
+                    canonicalProposalData == replacementData
+            else { throw PortableChatPersistenceError.invalidLayout }
+        }
+
+        if let replacementData {
+            if canonicalProposalData != replacementData {
+                try beforeMutation()
+                try installCommittedReconsiderationReplacementProposal(
+                    replacementData,
+                    under: chatDescriptor
+                )
+            }
+            if case .evidencePublication = sourceEffectIdentity,
+               canonicalEvidenceData != nil
+            {
+                try beforeMutation()
+                try removeRegularFileIfPresent(
+                    named: "profile-publication.json",
+                    under: chatDescriptor
+                )
+                try flushDescriptor(chatDescriptor)
+            }
+        } else if canonicalSourceData != nil {
+            try beforeMutation()
+            try removeRegularFileIfPresent(
+                named: sourceName,
+                under: chatDescriptor
+            )
+            try flushDescriptor(chatDescriptor)
+        }
+        if reconsiderationData != nil {
+            try beforeMutation()
+            try removeRegularFileIfPresent(
+                named: "profile-reconsideration.json",
+                under: chatDescriptor
+            )
+            try flushDescriptor(chatDescriptor)
+        }
+
+        guard case let .readWrite(published) = try loadChat(
+            from: chatDescriptor,
+            expectedID: invocation.chatID,
+            reconcileTransients: true,
+            beforeDestructiveMutation: beforeMutation
+        ),
+            try isExactPublishedProfileReconsideration(
+                proof,
+                invocation: invocation,
+                aggregate: published,
+                under: chatDescriptor
+            )
+        else { throw PortableChatPersistenceError.invalidLayout }
+        try fault(.beforeReconsiderationPublishedInvocationRetirement)
+        try atomicallyRetirePublishedInvocationDirectory(
+            invocation,
+            under: invocationsDescriptor,
+            beforeMutation: beforeMutation
+        )
+        return .published(published)
     }
 
     fileprivate func reconcileCommittedCreate(
@@ -4843,6 +7109,226 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
+    func replaceProfileReconsideration(
+        authority: InvocationProfileReconsiderationAuthority,
+        failure: PendingUserTurnFailure,
+        at libraryRoot: URL,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> PortableChatMutationResult {
+        let replacement = authority.reconsideration.replacingFailure(failure)
+        return try replaceProfileReconsideration(
+            expectedAggregate: authority.aggregate,
+            expected: authority.reconsideration,
+            replacement: replacement,
+            at: libraryRoot,
+            in: authority.request.library,
+            livenessAuthority: lease.authority(for: authority.request),
+            lease: lease
+        )
+    }
+
+    func discardProvisionalProfileReconsideration(
+        authority: InvocationProfileReconsiderationAuthority,
+        at libraryRoot: URL,
+        holding lease: PortableInvocationLivenessLease
+    ) throws -> PortableChatMutationResult {
+        guard let livenessAuthority = lease.authority(for: authority.request) else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        let rootDescriptor = try openLibraryRoot(
+            at: libraryRoot,
+            in: authority.request.library
+        )
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidate = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: authority.request.library,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidate()
+        let chatsDescriptor = try openDirectory(
+            named: "chats",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(chatsDescriptor) }
+        guard try entryExists(
+            named: authority.request.chatID.rawValue,
+            under: chatsDescriptor
+        ) else { return .stale(authority.aggregate) }
+        let chatDescriptor = try openDirectory(
+            named: authority.request.chatID.rawValue,
+            under: chatsDescriptor
+        )
+        defer { Darwin.close(chatDescriptor) }
+        try acquireExclusiveMutationLock(on: chatDescriptor)
+        defer { releaseMutationLock(on: chatDescriptor) }
+        guard case let .readWrite(current) = try loadChat(
+            from: chatDescriptor,
+            expectedID: authority.request.chatID,
+            reconcileTransients: true,
+            beforeDestructiveMutation: revalidate
+        ) else { return .frozen(FrozenChatSnapshot(
+            chatID: authority.request.chatID,
+            reason: .corrupt
+        )) }
+        let replacement = try ChatAggregate(
+            chat: authority.aggregate.chat,
+            memory: authority.aggregate.memory,
+            messages: authority.aggregate.messages,
+            profileEffect: authority.aggregate.profileEffect
+        )
+        if current == replacement { return .committed(current) }
+        guard current == authority.aggregate,
+              current.profileReconsideration == authority.reconsideration,
+              authority.reconsideration.failure == nil
+        else { return .stale(current) }
+        try revalidate()
+        try removeRegularFileIfPresent(
+            named: "profile-reconsideration.json",
+            under: chatDescriptor
+        )
+        guard case let .readWrite(reopened) = try loadChat(
+            from: chatDescriptor,
+            expectedID: authority.request.chatID,
+            reconcileTransients: true,
+            beforeDestructiveMutation: revalidate
+        ), reopened == replacement else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        return .committed(reopened)
+    }
+
+    private func replaceProfileReconsideration(
+        expectedAggregate: ChatAggregate,
+        expected: ProfileReconsideration,
+        replacement: ProfileReconsideration,
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        livenessAuthority: PortableInvocationLivenessAuthority?,
+        lease: PortableInvocationLivenessLease?
+    ) throws -> PortableChatMutationResult {
+        guard let livenessAuthority else {
+            throw PortableChatPersistenceError.ioFailure
+        }
+        let rootDescriptor = try openLibraryRoot(at: libraryRoot, in: scope)
+        defer { Darwin.close(rootDescriptor) }
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+        let invocationsDescriptor = try openDirectory(
+            named: "invocations",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(invocationsDescriptor) }
+        let revalidate = invocationLivenessRevalidator(
+            livenessAuthority,
+            at: libraryRoot,
+            in: scope,
+            under: rootDescriptor,
+            invocationsDescriptor: invocationsDescriptor
+        )
+        try revalidate()
+        let chatsDescriptor = try openDirectory(
+            named: "chats",
+            under: rootDescriptor
+        )
+        defer { Darwin.close(chatsDescriptor) }
+        guard try entryExists(
+            named: expectedAggregate.chat.id.rawValue,
+            under: chatsDescriptor
+        ) else { return .stale(expectedAggregate) }
+        let chatDescriptor = try openDirectory(
+            named: expectedAggregate.chat.id.rawValue,
+            under: chatsDescriptor
+        )
+        defer { Darwin.close(chatDescriptor) }
+        try acquireExclusiveMutationLock(on: chatDescriptor)
+        defer { releaseMutationLock(on: chatDescriptor) }
+        guard case let .readWrite(current) = try loadChat(
+            from: chatDescriptor,
+            expectedID: expectedAggregate.chat.id,
+            reconcileTransients: true,
+            beforeDestructiveMutation: revalidate
+        ) else { throw PortableChatPersistenceError.invalidLayout }
+        let replacementAggregate = try ChatAggregate(
+            chat: expectedAggregate.chat,
+            memory: expectedAggregate.memory,
+            messages: expectedAggregate.messages,
+            profileEffect: expectedAggregate.profileEffect,
+            profileReconsideration: replacement
+        )
+        if current == replacementAggregate { return .committed(current) }
+        guard current == expectedAggregate,
+              current.profileReconsideration == expected
+        else { return .stale(current) }
+        let partialName =
+            ".profile-reconsideration.json.\(UUID().uuidString.lowercased()).partial"
+        var partialExists = false
+        defer {
+            if partialExists {
+                _ = partialName.withCString {
+                    Darwin.unlinkat(chatDescriptor, $0, 0)
+                }
+            }
+        }
+        try writeExclusive(
+            try encodeProfileReconsideration(replacement),
+            named: partialName,
+            under: chatDescriptor
+        )
+        partialExists = true
+        let descriptor = try openRegularFile(
+            named: partialName,
+            under: chatDescriptor
+        )
+        defer { Darwin.close(descriptor) }
+        try flushDescriptor(descriptor)
+        try revalidate()
+        guard renameat(
+            chatDescriptor,
+            partialName,
+            chatDescriptor,
+            "profile-reconsideration.json"
+        ) == 0 else { throw PortableChatPersistenceError.ioFailure }
+        partialExists = false
+        try flushDescriptor(chatDescriptor)
+        if let lease {
+            let replacementLease = try
+                acquireAndValidateProfileReconsiderationFileLease(
+                    replacement,
+                    under: chatDescriptor
+                )
+            try lease.rebindProfileReconsiderationLease(replacementLease)
+        }
+        guard case let .readWrite(reopened) = try loadChat(
+            from: chatDescriptor,
+            expectedID: expectedAggregate.chat.id,
+            reconcileTransients: true,
+            beforeDestructiveMutation: revalidate
+        ), reopened == replacementAggregate else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        return .committed(reopened)
+    }
+
     private func reconcileCommittedMutation(
         in library: LibraryScope,
         chatID: ChatID,
@@ -4926,6 +7412,180 @@ public struct PortableChatPersistence: @unchecked Sendable {
         return confirmed
     }
 
+    func assessProfileEffect(
+        _ request: AssessProfileEffectRequest,
+        at libraryRoot: URL
+    ) throws -> PortableProfileEffectAssessmentResult {
+        try withReconciledProfileWritesBeforeChatExposure(
+            at: libraryRoot,
+            in: request.library
+        ) { root, stagingDescriptor, stagingIdentity in
+            let rootDescriptor = root.rootDescriptor
+            let profileIdentity = try directoryIdentity(
+                named: "profile",
+                under: rootDescriptor
+            )
+            let profileDescriptor = try openDirectory(
+                named: "profile",
+                under: rootDescriptor
+            )
+            defer { Darwin.close(profileDescriptor) }
+            guard try directoryIdentity(of: profileDescriptor) == profileIdentity
+            else { throw PortableChatPersistenceError.invalidLayout }
+
+            let revisionsIdentity = try directoryIdentity(
+                named: "revisions",
+                under: profileDescriptor
+            )
+            let revisionsDescriptor = try openDirectory(
+                named: "revisions",
+                under: profileDescriptor
+            )
+            defer { Darwin.close(revisionsDescriptor) }
+            guard try directoryIdentity(of: revisionsDescriptor) ==
+                    revisionsIdentity
+            else { throw PortableChatPersistenceError.invalidLayout }
+
+            let chatsIdentity = try directoryIdentity(
+                named: "chats",
+                under: rootDescriptor
+            )
+            let chatsDescriptor = try openDirectory(
+                named: "chats",
+                under: rootDescriptor
+            )
+            defer { Darwin.close(chatsDescriptor) }
+            guard try directoryIdentity(of: chatsDescriptor) == chatsIdentity
+            else { throw PortableChatPersistenceError.invalidLayout }
+
+            let chatName = request.base.chat.id.rawValue
+            guard try entryExists(named: chatName, under: chatsDescriptor) else {
+                throw PortableChatPersistenceError.chatMissing
+            }
+            let chatIdentity = try directoryIdentity(
+                named: chatName,
+                under: chatsDescriptor
+            )
+            let chatDescriptor = try openDirectory(
+                named: chatName,
+                under: chatsDescriptor
+            )
+            defer { Darwin.close(chatDescriptor) }
+            guard try directoryIdentity(of: chatDescriptor) == chatIdentity
+            else { throw PortableChatPersistenceError.invalidLayout }
+            try acquireExclusiveMutationLock(on: chatDescriptor)
+            defer { releaseMutationLock(on: chatDescriptor) }
+
+            let revalidate = {
+                try self.revalidateConfiguredRootAuthority(root)
+                try self.revalidateLibraryAuthority(
+                    libraryID: request.library.libraryID,
+                    under: rootDescriptor
+                )
+                guard try self.directoryIdentity(
+                    named: "staging",
+                    under: rootDescriptor
+                ) == stagingIdentity,
+                    try self.directoryIdentity(of: stagingDescriptor) ==
+                        stagingIdentity,
+                    try self.directoryIdentity(
+                        named: "profile",
+                        under: rootDescriptor
+                    ) == profileIdentity,
+                    try self.directoryIdentity(of: profileDescriptor) ==
+                        profileIdentity,
+                    try self.directoryIdentity(
+                        named: "revisions",
+                        under: profileDescriptor
+                    ) == revisionsIdentity,
+                    try self.directoryIdentity(of: revisionsDescriptor) ==
+                        revisionsIdentity,
+                    try self.directoryIdentity(
+                        named: "chats",
+                        under: rootDescriptor
+                    ) == chatsIdentity,
+                    try self.directoryIdentity(of: chatsDescriptor) ==
+                        chatsIdentity,
+                    try self.directoryIdentity(
+                        named: chatName,
+                        under: chatsDescriptor
+                    ) == chatIdentity,
+                    try self.directoryIdentity(of: chatDescriptor) == chatIdentity
+                else { throw PortableChatPersistenceError.invalidLayout }
+            }
+            try revalidate()
+            guard case let .readWrite(current) = try loadChat(
+                from: chatDescriptor,
+                expectedID: request.base.chat.id,
+                reconcileTransients: true,
+                beforeDestructiveMutation: revalidate
+            ), current == request.base,
+                let effect = current.profileEffect,
+                effect.identity == request.sourceEffectIdentity
+            else { throw PortableChatPersistenceError.invalidLayout }
+
+            let headData = try boundedData(
+                named: "head.json",
+                under: profileDescriptor
+            )
+            let head = try PortableLibraryPersistence().decodeProfileHead(headData)
+            let selectedRevision = try loadSelectedProfileRevision(
+                head,
+                under: profileDescriptor
+            )
+            let latestProfile = selectedRevision.map(ProfileSnapshot.init) ??
+                ProfileSnapshot(
+                    nullAtStatementGeneration: head.statementGeneration
+                )
+            let sourceProvenance = try profileEffectSourceProvenance(
+                effect,
+                in: current
+            )
+            let baseProfile = try loadProfileSnapshot(
+                proving: sourceProvenance,
+                under: profileDescriptor
+            )
+            try validateProfileEffect(effect, against: baseProfile)
+
+            let result: PortableProfileEffectAssessmentResult
+            if effect.requiresReconsideration(against: latestProfile) {
+                result = .stale(
+                    current,
+                    try ProfileReconsiderationBasis(
+                        sourceEffect: effect,
+                        baseProfile: baseProfile,
+                        latestProfile: latestProfile
+                    )
+                )
+            } else {
+                result = .current(current)
+            }
+
+            try revalidate()
+            guard try boundedData(
+                named: "head.json",
+                under: profileDescriptor
+            ) == headData,
+                try PortableLibraryPersistence().decodeProfileHead(headData) == head,
+                try loadSelectedProfileRevision(
+                    head,
+                    under: profileDescriptor
+                ) == selectedRevision,
+                try loadProfileSnapshot(
+                    proving: sourceProvenance,
+                    under: profileDescriptor
+                ) == baseProfile,
+                case let .readWrite(reopened) = try loadChat(
+                    from: chatDescriptor,
+                    expectedID: current.chat.id,
+                    reconcileTransients: false
+                ), reopened == current
+            else { throw PortableChatPersistenceError.invalidLayout }
+            try revalidate()
+            return result
+        }
+    }
+
     func acceptProfileProposal(
         _ mutation: AcceptProfileProposalMutation,
         at libraryRoot: URL
@@ -4962,6 +7622,23 @@ public struct PortableChatPersistence: @unchecked Sendable {
               let proposal = mutation.base.profileProposal,
               proposal.id == mutation.proposalID
         else { return .stale(current) }
+        let hasWriteIntent = try entryExists(
+            named: "profile-write.json",
+            under: chatDescriptor
+        )
+        let proposalData: Data
+        if try entryExists(named: "proposal.json", under: chatDescriptor) {
+            proposalData = try boundedData(
+                named: "proposal.json",
+                under: chatDescriptor
+            )
+        } else if hasWriteIntent {
+            // A committed head may outlive proposal cleanup after a crash. The
+            // durable v2 intent still binds these canonical proposal bytes.
+            proposalData = try encodeProfileProposal(proposal)
+        } else {
+            return .stale(current)
+        }
 
         guard !(try hasForeignProfileWriteIntent(
             excluding: authority.chatName,
@@ -4975,14 +7652,16 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let head = try PortableLibraryPersistence().decodeProfileHead(headData)
 
         let intent: ProfileWriteIntent
-        if try entryExists(named: "profile-write.json", under: chatDescriptor) {
-            let intentData = try boundedData(
+        let intentData: Data
+        if hasWriteIntent {
+            intentData = try boundedData(
                 named: "profile-write.json",
                 under: chatDescriptor
             )
             intent = try decodeProfileWriteIntent(
                 intentData,
-                proposal: proposal
+                proposal: proposal,
+                proposalData: proposalData
             )
             guard intent.id == mutation.writeIntentID,
                   intent.proposalID == mutation.proposalID,
@@ -4999,7 +7678,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
             ) == intentData,
                 try decodeProfileWriteIntent(
                     intentData,
-                    proposal: proposal
+                    proposal: proposal,
+                    proposalData: proposalData
                 ) == intent
             else { throw PortableChatPersistenceError.invalidLayout }
             try revalidate()
@@ -5021,8 +7701,9 @@ public struct PortableChatPersistence: @unchecked Sendable {
             } catch {
                 return .stale(current)
             }
+            let intendedRevision: ProfileRevision
             do {
-                _ = try proposal.applying(
+                intendedRevision = try proposal.applying(
                     to: loadSelectedProfileRevision(
                         head,
                         under: profileDescriptor
@@ -5040,17 +7721,26 @@ public struct PortableChatPersistence: @unchecked Sendable {
             } catch {
                 throw PortableChatPersistenceError.invalidLayout
             }
-            try installProfileWriteIntent(
+            let intendedRevisionData = try encodeProfileRevision(
+                intendedRevision
+            )
+            intentData = try encodeProfileWriteIntent(
                 intent,
+                proposalData: proposalData,
+                intendedRevisionData: intendedRevisionData
+            )
+            try installProfileWriteIntent(
+                intentData,
                 under: chatDescriptor,
                 beforeMutation: revalidate
             )
         }
 
         return try finishProfileProposalAcceptance(
-            mutation: mutation,
             proposal: proposal,
             intent: intent,
+            intentData: intentData,
+            proposalData: proposalData,
             current: current,
             resolvedBase: resolvedBase,
             initialHeadData: headData,
@@ -5112,9 +7802,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     named: "profile-write.json",
                     under: chatDescriptor
                 )
+                let proposalData = try boundedData(
+                    named: "proposal.json",
+                    under: chatDescriptor
+                )
                 let intent = try decodeProfileWriteIntent(
                     intentData,
-                    proposal: proposal
+                    proposal: proposal,
+                    proposalData: proposalData
                 )
                 let acceptance = try AcceptProfileProposalMutation(
                     library: mutation.library,
@@ -5235,12 +7930,25 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     named: "profile-write.json",
                     under: chatDescriptor
                 ) {
-                    let intent = try decodeProfileWriteIntent(
-                        boundedData(
-                            named: "profile-write.json",
+                    let intentData = try boundedData(
+                        named: "profile-write.json",
+                        under: chatDescriptor
+                    )
+                    let proposalData = if try entryExists(
+                        named: "proposal.json",
+                        under: chatDescriptor
+                    ) {
+                        try boundedData(
+                            named: "proposal.json",
                             under: chatDescriptor
-                        ),
-                        proposal: proposal
+                        )
+                    } else {
+                        try encodeProfileProposal(proposal)
+                    }
+                    let intent = try decodeProfileWriteIntent(
+                        intentData,
+                        proposal: proposal,
+                        proposalData: proposalData
                     )
                     guard intent.id == mutation.writeIntentID,
                           intent.proposalID == mutation.proposalID,
@@ -5747,10 +8455,180 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
+    func discardProfileReconsiderationFailure(
+        _ mutation: DiscardProfileReconsiderationFailureMutation,
+        at libraryRoot: URL
+    ) throws -> PortableChatMutationResult {
+        guard let expected = mutation.base.profileReconsideration,
+              expected.failure != nil,
+              expected.sourceEffectIdentity == mutation.sourceEffectIdentity,
+              mutation.base.profileEffect?.identity ==
+                mutation.sourceEffectIdentity
+        else { throw PortableChatPersistenceError.invalidLayout }
+        return try withProfileProposalMutationAuthority(
+            at: libraryRoot,
+            in: mutation.library,
+            chatID: mutation.base.chat.id
+        ) { authority in
+            let revalidate = {
+                try self.revalidateProfileProposalMutationAuthority(
+                    authority,
+                    at: libraryRoot,
+                    in: mutation.library
+                )
+            }
+            guard case let .readWrite(current) = try loadChat(
+                from: authority.chatDescriptor,
+                expectedID: mutation.base.chat.id,
+                reconcileTransients: true,
+                beforeDestructiveMutation: revalidate
+            ) else { throw PortableChatPersistenceError.invalidLayout }
+            let replacement = try mutation.base.discardingReconsiderationFailure(
+                expected: expected,
+                at: mutation.discardedAt
+            )
+            if current == replacement,
+               !(try entryExists(
+                   named: "profile-reconsideration.json",
+                   under: authority.chatDescriptor
+               ))
+            {
+                return .committed(current)
+            }
+            guard current == mutation.base,
+                  current.profileReconsideration == expected
+            else { return .stale(current) }
+
+            let partialName =
+                ".chat.json.\(UUID().uuidString.lowercased()).partial"
+            var partialExists = false
+            defer {
+                if partialExists {
+                    _ = partialName.withCString {
+                        Darwin.unlinkat(authority.chatDescriptor, $0, 0)
+                    }
+                }
+            }
+            try fault(.beforeReconsiderationDiscardPartialWrite)
+            try writeExclusive(
+                try encodeChat(replacement.chat),
+                named: partialName,
+                under: authority.chatDescriptor
+            )
+            partialExists = true
+            try fault(.afterReconsiderationDiscardPartialWrite)
+            let partialDescriptor = try openRegularFile(
+                named: partialName,
+                under: authority.chatDescriptor
+            )
+            defer { Darwin.close(partialDescriptor) }
+            try flushDescriptor(partialDescriptor)
+            try fault(.afterReconsiderationDiscardFileFlush)
+            try revalidate()
+            guard case let .readWrite(commitAuthority) = try loadChat(
+                from: authority.chatDescriptor,
+                expectedID: mutation.base.chat.id,
+                reconcileTransients: false
+            ), commitAuthority == mutation.base else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            guard renameat(
+                authority.chatDescriptor,
+                partialName,
+                authority.chatDescriptor,
+                "chat.json"
+            ) == 0 else { throw PortableChatPersistenceError.ioFailure }
+            partialExists = false
+            try fault(.afterReconsiderationDiscardManifestInstall)
+            try flushDescriptor(authority.chatDescriptor)
+            try fault(.afterReconsiderationDiscardDirectoryFlush)
+            try revalidate()
+            try removeRegularFileIfPresent(
+                named: "profile-reconsideration.json",
+                under: authority.chatDescriptor
+            )
+            try fault(.afterReconsiderationDiscardSidecarRemoval)
+            try flushDescriptor(authority.chatDescriptor)
+            guard case let .readWrite(reopened) = try loadChat(
+                from: authority.chatDescriptor,
+                expectedID: mutation.base.chat.id,
+                reconcileTransients: true,
+                beforeDestructiveMutation: revalidate
+            ), reopened == replacement else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            return .committed(reopened)
+        }
+    }
+
+    func reconcileCommittedProfileReconsiderationFailureDiscard(
+        _ mutation: DiscardProfileReconsiderationFailureMutation,
+        at libraryRoot: URL
+    ) throws -> ChatAggregate? {
+        guard let expected = mutation.base.profileReconsideration else {
+            return nil
+        }
+        return try withProfileProposalMutationAuthority(
+            at: libraryRoot,
+            in: mutation.library,
+            chatID: mutation.base.chat.id
+        ) { authority in
+            let revalidate = {
+                try self.revalidateProfileProposalMutationAuthority(
+                    authority,
+                    at: libraryRoot,
+                    in: mutation.library
+                )
+            }
+            let replacement = try mutation.base.discardingReconsiderationFailure(
+                expected: expected,
+                at: mutation.discardedAt
+            )
+            guard case let .readWrite(current) = try loadChat(
+                from: authority.chatDescriptor,
+                expectedID: mutation.base.chat.id,
+                reconcileTransients: true,
+                beforeDestructiveMutation: revalidate
+            ) else { return nil }
+            if current == replacement,
+               !(try entryExists(
+                   named: "profile-reconsideration.json",
+                   under: authority.chatDescriptor
+               ))
+            {
+                return current
+            }
+            guard current.chat == replacement.chat,
+                  current.memory == replacement.memory,
+                  current.messages == replacement.messages,
+                  current.profileEffect == replacement.profileEffect,
+                  current.profileReconsideration == expected,
+                  try entryExists(
+                      named: "profile-reconsideration.json",
+                      under: authority.chatDescriptor
+                  )
+            else { return nil }
+            try revalidate()
+            try removeRegularFileIfPresent(
+                named: "profile-reconsideration.json",
+                under: authority.chatDescriptor
+            )
+            try flushDescriptor(authority.chatDescriptor)
+            guard case let .readWrite(reopened) = try loadChat(
+                from: authority.chatDescriptor,
+                expectedID: mutation.base.chat.id,
+                reconcileTransients: true,
+                beforeDestructiveMutation: revalidate
+            ), reopened == replacement else { return nil }
+            return reopened
+        }
+    }
+
     private func finishProfileProposalAcceptance(
-        mutation: AcceptProfileProposalMutation,
         proposal: ProfileChangeProposal,
         intent: ProfileWriteIntent,
+        intentData: Data,
+        proposalData: Data,
         current: ChatAggregate,
         resolvedBase: ChatAggregate,
         initialHeadData: Data,
@@ -5761,6 +8639,33 @@ public struct PortableChatPersistence: @unchecked Sendable {
         publicationsDescriptor: Int32,
         beforeMutation: () throws -> Void
     ) throws -> PortableChatMutationResult {
+        let intendedRevision: ProfileRevision
+        do {
+            intendedRevision = try proposal.applying(
+                to: loadProfileRevision(
+                    selectedBy: intent.expectedHead.selection,
+                    under: profileDescriptor
+                ),
+                currentHeadGeneration: intent.expectedHead.generation,
+                intendedRevisionID: intent.intendedRevisionID,
+                createdAt: intent.createdAt
+            )
+        } catch ProfileProposalApplicationError.staleSemanticBase {
+            return .stale(current)
+        } catch ProfileProposalApplicationError.targetNotFound {
+            return .stale(current)
+        } catch ProfileProposalApplicationError.targetMismatch {
+            return .stale(current)
+        } catch {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let revisionData = try encodeProfileRevision(intendedRevision)
+        _ = try requireProfileWriteIntentBindings(
+            intentData,
+            proposalData: proposalData,
+            intendedRevisionData: revisionData,
+            requiresRecoveryBinding: false
+        )
         if try headSelectsIntendedProfileRevision(
             initialHead,
             intent: intent,
@@ -5785,28 +8690,6 @@ public struct PortableChatPersistence: @unchecked Sendable {
               current.profileProposal == proposal
         else { return .stale(current) }
 
-        let baseRevision = try loadSelectedProfileRevision(
-            initialHead,
-            under: profileDescriptor
-        )
-        let intendedRevision: ProfileRevision
-        do {
-            intendedRevision = try proposal.applying(
-                to: baseRevision,
-                currentHeadGeneration: initialHead.generation,
-                intendedRevisionID: intent.intendedRevisionID,
-                createdAt: intent.createdAt
-            )
-        } catch ProfileProposalApplicationError.staleSemanticBase {
-            return .stale(current)
-        } catch ProfileProposalApplicationError.targetNotFound {
-            return .stale(current)
-        } catch ProfileProposalApplicationError.targetMismatch {
-            return .stale(current)
-        } catch {
-            throw PortableChatPersistenceError.invalidLayout
-        }
-        let revisionData = try encodeProfileRevision(intendedRevision)
         let digest = Self.sha256(revisionData)
         try installProfileRevision(
             intendedRevision,
@@ -5866,6 +8749,19 @@ public struct PortableChatPersistence: @unchecked Sendable {
         try beforeMutation()
         try removeRegularFileIfPresent(named: "proposal.json", under: chatDescriptor)
         try fault(.afterProfileProposalRemoval)
+        try beforeMutation()
+        try flushDescriptor(chatDescriptor)
+        try beforeMutation()
+        guard !(try entryExists(named: "proposal.json", under: chatDescriptor)),
+              case let .readWrite(cleanedChat) = try loadChat(
+                  from: chatDescriptor,
+                  expectedID: expected.chat.id,
+                  reconcileTransients: true,
+                  allowsProfileWriteIntent: true,
+                  beforeDestructiveMutation: beforeMutation
+              ),
+              cleanedChat == expected
+        else { throw PortableChatPersistenceError.invalidLayout }
         try beforeMutation()
         try removeRegularFileIfPresent(
             named: "profile-write.json",
@@ -6037,8 +8933,18 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
-    func encodeProfileWriteIntent(_ intent: ProfileWriteIntent) throws -> Data {
-        let data = try deterministicJSON(ProfileWriteIntentDTO(intent))
+    func encodeProfileWriteIntent(
+        _ intent: ProfileWriteIntent,
+        proposalData: Data,
+        intendedRevisionData: Data
+    ) throws -> Data {
+        let data = try deterministicJSON(
+            ProfileWriteIntentDTO(
+                intent,
+                proposalSha256: Self.sha256(proposalData),
+                intendedRevisionSha256: Self.sha256(intendedRevisionData)
+            )
+        )
         guard data.count <= Self.maximumRootBytes else {
             throw PortableChatPersistenceError.rootTooLarge
         }
@@ -6047,16 +8953,41 @@ public struct PortableChatPersistence: @unchecked Sendable {
 
     func decodeProfileWriteIntent(
         _ data: Data,
-        proposal: ProfileChangeProposal
+        proposal: ProfileChangeProposal,
+        proposalData: Data
     ) throws -> ProfileWriteIntent {
+        let persisted = try decodePersistedProfileWriteIntent(data)
+        if let expectedProposalDigest = persisted.proposalSHA256,
+           expectedProposalDigest != Self.sha256(proposalData)
+        {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        return try persisted.domainValue(proposal: proposal)
+    }
+
+    private func decodePersistedProfileWriteIntent(
+        _ data: Data
+    ) throws -> PersistedProfileWriteIntent {
         let dictionary = try jsonDictionary(data)
-        try requireExactKeys(
-            dictionary,
-            [
+        guard let rawSchemaVersion = dictionary["schemaVersion"] as? NSNumber,
+              CFGetTypeID(rawSchemaVersion) != CFBooleanGetTypeID()
+        else { throw PortableChatPersistenceError.invalidJSON }
+        let schemaVersion = rawSchemaVersion.uint32Value
+        switch schemaVersion {
+        case ProfileWriteIntent.schemaVersion:
+            try requireExactKeys(dictionary, [
                 "schemaVersion", "intentId", "proposalId", "chatId",
                 "expectedHead", "intendedRevisionId", "createdAt",
-            ]
-        )
+            ])
+        case Self.profileWriteIntentSchemaVersion:
+            try requireExactKeys(dictionary, [
+                "schemaVersion", "intentId", "proposalId", "chatId",
+                "expectedHead", "intendedRevisionId", "createdAt",
+                "proposalSha256", "intendedRevisionSha256",
+            ])
+        default:
+            throw PortableChatPersistenceError.invalidSchemaVersion
+        }
         guard let expectedHead = dictionary["expectedHead"] as? [String: Any]
         else { throw PortableChatPersistenceError.invalidJSON }
         let common: Set<String> = ["generation", "statementGeneration"]
@@ -6075,22 +9006,87 @@ public struct PortableChatPersistence: @unchecked Sendable {
             ProfileWriteIntentDTO.self,
             data
         )
-        guard dto.schemaVersion == ProfileWriteIntent.schemaVersion else {
+        guard dto.schemaVersion == schemaVersion else {
             throw PortableChatPersistenceError.invalidSchemaVersion
         }
         do {
-            return try dto.domainValue(proposal: proposal)
+            let record = PersistedProfileWriteIntent(
+                schemaVersion: schemaVersion,
+                id: try ProfileWriteIntentID(dto.intentId),
+                proposalID: try ProfileChangeProposalID(dto.proposalId),
+                chatID: try ChatID(dto.chatId),
+                expectedHead: try dto.expectedHead.domainValue,
+                intendedRevisionID: try ProfileRevisionID(
+                    dto.intendedRevisionId
+                ),
+                createdAt: try UTCInstant(dto.createdAt),
+                proposalSHA256: dto.proposalSha256,
+                intendedRevisionSHA256: dto.intendedRevisionSha256
+            )
+            let tail = String(
+                record.proposalID.rawValue.dropFirst("prp-".count)
+            )
+            guard record.id.rawValue == "pwi-\(tail)",
+                  record.intendedRevisionID.rawValue == "prf-\(tail)",
+                  record.expectedHead.statementGeneration <=
+                    record.expectedHead.generation
+            else { throw PortableChatPersistenceError.invalidJSON }
+            if schemaVersion == Self.profileWriteIntentSchemaVersion {
+                guard let proposalSHA256 = record.proposalSHA256,
+                      let intendedRevisionSHA256 =
+                        record.intendedRevisionSHA256,
+                      Self.isSHA256(proposalSHA256),
+                      Self.isSHA256(intendedRevisionSHA256)
+                else { throw PortableChatPersistenceError.invalidJSON }
+            } else {
+                guard record.proposalSHA256 == nil,
+                      record.intendedRevisionSHA256 == nil
+                else { throw PortableChatPersistenceError.invalidJSON }
+            }
+            return record
         } catch {
+            if let error = error as? PortableChatPersistenceError {
+                throw error
+            }
             throw PortableChatPersistenceError.invalidJSON
         }
     }
 
+    private static func isSHA256(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { byte in
+            (48 ... 57).contains(byte) || (97 ... 102).contains(byte)
+        }
+    }
+
+    @discardableResult
+    private func requireProfileWriteIntentBindings(
+        _ data: Data,
+        proposalData: Data,
+        intendedRevisionData: Data,
+        requiresRecoveryBinding: Bool
+    ) throws -> PersistedProfileWriteIntent {
+        let persisted = try decodePersistedProfileWriteIntent(data)
+        if requiresRecoveryBinding, !persisted.hasRecoveryBinding {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        if let proposalSHA256 = persisted.proposalSHA256,
+           proposalSHA256 != Self.sha256(proposalData)
+        {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        if let intendedRevisionSHA256 = persisted.intendedRevisionSHA256,
+           intendedRevisionSHA256 != Self.sha256(intendedRevisionData)
+        {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        return persisted
+    }
+
     private func installProfileWriteIntent(
-        _ intent: ProfileWriteIntent,
+        _ data: Data,
         under chatDescriptor: Int32,
         beforeMutation: () throws -> Void
     ) throws {
-        let data = try encodeProfileWriteIntent(intent)
         if try entryExists(named: "profile-write.json", under: chatDescriptor) {
             guard try boundedData(
                 named: "profile-write.json",
@@ -6157,6 +9153,91 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 head.statementGeneration
         else { throw PortableChatPersistenceError.invalidLayout }
         return revision
+    }
+
+    private func profileEffectSourceProvenance(
+        _ effect: ChatProfileEffect,
+        in aggregate: ChatAggregate
+    ) throws -> CoachProfileProvenance {
+        guard effect.chatID == aggregate.chat.id else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
+        let sourceMessages = aggregate.messages.filter { message in
+            guard message.responsePositionID == effect.responsePositionID,
+                  case .coach = message.content
+            else { return false }
+            return true
+        }
+        guard sourceMessages.count == 1,
+              let provenance = sourceMessages[0].coachProfile
+        else { throw PortableChatPersistenceError.invalidLayout }
+        if case let .proposal(proposal) = effect {
+            guard proposal.baseProfile == provenance else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+        }
+        return provenance
+    }
+
+    private func loadProfileSnapshot(
+        proving provenance: CoachProfileProvenance,
+        under profileDescriptor: Int32
+    ) throws -> ProfileSnapshot {
+        guard let revisionID = provenance.revisionID else {
+            return ProfileSnapshot(
+                nullAtStatementGeneration: provenance.statementGeneration
+            )
+        }
+        let revision = try loadProfileRevision(
+            id: revisionID,
+            under: profileDescriptor
+        )
+        guard revision.statementGeneration == provenance.statementGeneration
+        else { throw PortableChatPersistenceError.invalidLayout }
+        return ProfileSnapshot(revision: revision)
+    }
+
+    private func validateProfileEffect(
+        _ effect: ChatProfileEffect,
+        against baseProfile: ProfileSnapshot
+    ) throws {
+        func requireExact(_ target: ProfileProposalTarget) throws {
+            guard let statement = baseProfile.statement(
+                id: target.statementID
+            ), target.matches(statement) else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+        }
+        func requireAbsent(_ statement: ProfileProposedStatement) throws {
+            guard baseProfile.statement(id: statement.statementID) == nil else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+        }
+
+        switch effect {
+        case let .proposal(proposal):
+            guard proposal.baseProfile == baseProfile.provenance else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            for change in proposal.changes {
+                switch change {
+                case let .add(statement):
+                    try requireAbsent(statement)
+                case let .replace(target, replacement):
+                    try requireExact(target)
+                    try requireAbsent(replacement)
+                case let .retire(target, _):
+                    try requireExact(target)
+                }
+            }
+            for append in proposal.evidenceAppends {
+                try requireExact(append.target)
+            }
+        case let .evidencePublication(publication):
+            for append in publication.evidenceAppends {
+                try requireExact(append.target)
+            }
+        }
     }
 
     private func loadProfileRevision(
@@ -6981,6 +10062,14 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
     }
 
+    func encodeProfileReconsideration(
+        _ reconsideration: ProfileReconsideration
+    ) throws -> Data {
+        try deterministicJSON(
+            ProfileReconsiderationDTO(reconsideration)
+        )
+    }
+
     @_spi(InvocationInfrastructure)
     public func encodeMessage(_ message: ChatMessage) throws -> Data {
         let role: String
@@ -7106,6 +10195,54 @@ public struct PortableChatPersistence: @unchecked Sendable {
             proposalData: proposalData,
             profileEvidencePublicationData: profileEvidencePublicationData
         )
+    }
+
+    private func publicationArtifacts(
+        for mutation: PublishProfileReconsiderationInvocationMutation
+    ) throws -> ProfileReconsiderationPublicationArtifacts {
+        guard let sourceEffect = mutation.base.profileEffect,
+              sourceEffect.identity ==
+                mutation.reconsideration.sourceEffectIdentity,
+              mutation.base.profileReconsideration == mutation.reconsideration
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let sourceEffectData = try encodeProfileEffect(sourceEffect)
+        let reconsiderationData = try encodeProfileReconsideration(
+            mutation.reconsideration
+        )
+        let coachMessageData = try mutation.coachMessage.map(encodeMessage)
+        let replacementProposalData = try mutation.replacementProposal.map(
+            encodeProfileProposal
+        )
+        let proof = try invocationEvidenceCodec.makePublicationProof(
+            for: mutation,
+            evidence: PortableProfileReconsiderationPublicationSourceEvidence(
+                baseChat: try encodeChat(mutation.base.chat),
+                publishedChat: try encodeChat(mutation.replacement.chat),
+                stableChat: try encodeStableChat(mutation.replacement.chat),
+                baseMemory: try encodeMemory(mutation.base.memory),
+                publishedMemory: try encodeMemory(mutation.replacement.memory),
+                sourceEffect: sourceEffectData,
+                profileReconsideration: reconsiderationData,
+                coachMessage: coachMessageData,
+                replacementProposal: replacementProposalData
+            )
+        )
+        return ProfileReconsiderationPublicationArtifacts(
+            proof: proof,
+            sourceEffectData: sourceEffectData,
+            profileReconsiderationData: reconsiderationData,
+            coachMessageData: coachMessageData,
+            replacementProposalData: replacementProposalData
+        )
+    }
+
+    private func encodeProfileEffect(_ effect: ChatProfileEffect) throws -> Data {
+        switch effect {
+        case let .proposal(proposal):
+            try encodeProfileProposal(proposal)
+        case let .evidencePublication(publication):
+            try encodeProfileEvidencePublication(publication)
+        }
     }
 
     private func encodePublicationProof(
@@ -7245,6 +10382,419 @@ public struct PortableChatPersistence: @unchecked Sendable {
             Darwin.close(parentDescriptor)
             throw error
         }
+    }
+
+    private func withReconciledProfileWritesBeforeChatExposure<Result>(
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        _ exposure: (
+            OpenedLibraryRootAuthority,
+            Int32,
+            DirectoryIdentity
+        ) throws -> Result
+    ) throws -> Result {
+        let root = try openLibraryRootAuthority(at: libraryRoot, in: scope)
+        defer { Darwin.close(root.rootDescriptor) }
+        defer { Darwin.close(root.parentDescriptor) }
+
+        let stagingIdentity = try directoryIdentity(
+            named: "staging",
+            under: root.rootDescriptor
+        )
+        let stagingDescriptor = try openDirectory(
+            named: "staging",
+            under: root.rootDescriptor
+        )
+        defer { Darwin.close(stagingDescriptor) }
+        guard try directoryIdentity(of: stagingDescriptor) == stagingIdentity
+        else { throw PortableChatPersistenceError.invalidLayout }
+        try acquireExclusiveMutationLock(on: stagingDescriptor)
+        defer { releaseMutationLock(on: stagingDescriptor) }
+
+        let revalidateRoot = {
+            try self.revalidateConfiguredRootAuthority(root)
+            try self.revalidateLibraryAuthority(
+                libraryID: scope.libraryID,
+                under: root.rootDescriptor
+            )
+            guard try self.directoryIdentity(
+                named: "staging",
+                under: root.rootDescriptor
+            ) == stagingIdentity,
+                try self.directoryIdentity(of: stagingDescriptor) ==
+                    stagingIdentity
+            else { throw PortableChatPersistenceError.invalidLayout }
+        }
+        try revalidateRoot()
+        try reconcileStagedChatCandidates(under: root.rootDescriptor)
+        try reconcileAcceptedProfileWriteIntentBeforeExposure(
+            root: root,
+            stagingDescriptor: stagingDescriptor,
+            stagingIdentity: stagingIdentity,
+            libraryRoot: libraryRoot,
+            scope: scope
+        )
+        try revalidateRoot()
+        let result = try exposure(root, stagingDescriptor, stagingIdentity)
+        try revalidateRoot()
+        return result
+    }
+
+    private func reconcileAcceptedProfileWriteIntentBeforeExposure(
+        root: OpenedLibraryRootAuthority,
+        stagingDescriptor: Int32,
+        stagingIdentity: DirectoryIdentity,
+        libraryRoot: URL,
+        scope: LibraryScope
+    ) throws {
+        let publicationsIdentity = try directoryIdentity(
+            named: "publications",
+            under: stagingDescriptor
+        )
+        let publicationsDescriptor = try openDirectory(
+            named: "publications",
+            under: stagingDescriptor
+        )
+        defer { Darwin.close(publicationsDescriptor) }
+        guard try directoryIdentity(of: publicationsDescriptor) ==
+                publicationsIdentity
+        else { throw PortableChatPersistenceError.invalidLayout }
+
+        let profileIdentity = try directoryIdentity(
+            named: "profile",
+            under: root.rootDescriptor
+        )
+        let profileDescriptor = try openDirectory(
+            named: "profile",
+            under: root.rootDescriptor
+        )
+        defer { Darwin.close(profileDescriptor) }
+        guard try directoryIdentity(of: profileDescriptor) == profileIdentity
+        else { throw PortableChatPersistenceError.invalidLayout }
+
+        let revisionsIdentity = try directoryIdentity(
+            named: "revisions",
+            under: profileDescriptor
+        )
+        let revisionsDescriptor = try openDirectory(
+            named: "revisions",
+            under: profileDescriptor
+        )
+        defer { Darwin.close(revisionsDescriptor) }
+        guard try directoryIdentity(of: revisionsDescriptor) ==
+                revisionsIdentity
+        else { throw PortableChatPersistenceError.invalidLayout }
+
+        let chatsIdentity = try directoryIdentity(
+            named: "chats",
+            under: root.rootDescriptor
+        )
+        let chatsDescriptor = try openDirectory(
+            named: "chats",
+            under: root.rootDescriptor
+        )
+        defer { Darwin.close(chatsDescriptor) }
+        guard try directoryIdentity(of: chatsDescriptor) == chatsIdentity
+        else { throw PortableChatPersistenceError.invalidLayout }
+
+        var outstanding: (
+            chatID: ChatID,
+            name: String,
+            identity: DirectoryIdentity
+        )?
+        for name in try listEntryNames(
+            under: chatsDescriptor,
+            maximumCount: Self.maximumChatCatalogEntries
+        ) {
+            guard let chatID = try? ChatID(name),
+                  !isSymlink(named: name, under: chatsDescriptor)
+            else { continue }
+            let identity = try directoryIdentity(
+                named: name,
+                under: chatsDescriptor
+            )
+            let descriptor = try openDirectory(
+                named: name,
+                under: chatsDescriptor
+            )
+            defer { Darwin.close(descriptor) }
+            guard try directoryIdentity(of: descriptor) == identity,
+                  try directoryIdentity(named: name, under: chatsDescriptor) ==
+                    identity
+            else { throw PortableChatPersistenceError.invalidLayout }
+            guard try entryExists(
+                named: "profile-write.json",
+                under: descriptor
+            ) else { continue }
+            guard outstanding == nil else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            outstanding = (chatID, name, identity)
+        }
+        guard let outstanding else { return }
+
+        let chatDescriptor = try openDirectory(
+            named: outstanding.name,
+            under: chatsDescriptor
+        )
+        defer { Darwin.close(chatDescriptor) }
+        guard try directoryIdentity(of: chatDescriptor) == outstanding.identity
+        else { throw PortableChatPersistenceError.invalidLayout }
+        try acquireExclusiveMutationLock(on: chatDescriptor)
+        defer { releaseMutationLock(on: chatDescriptor) }
+
+        let authority = ProfileProposalMutationAuthority(
+            root: root,
+            stagingDescriptor: stagingDescriptor,
+            stagingIdentity: stagingIdentity,
+            publicationsDescriptor: publicationsDescriptor,
+            publicationsIdentity: publicationsIdentity,
+            profileDescriptor: profileDescriptor,
+            profileIdentity: profileIdentity,
+            revisionsDescriptor: revisionsDescriptor,
+            revisionsIdentity: revisionsIdentity,
+            chatsDescriptor: chatsDescriptor,
+            chatsIdentity: chatsIdentity,
+            chatName: outstanding.name,
+            chatDescriptor: chatDescriptor,
+            chatIdentity: outstanding.identity
+        )
+        let revalidate = {
+            try self.revalidateProfileProposalMutationAuthority(
+                authority,
+                at: libraryRoot,
+                in: scope
+            )
+        }
+        try revalidate()
+        try recoverAcceptedProfileWriteIntent(
+            expectedChatID: outstanding.chatID,
+            authority: authority,
+            beforeMutation: revalidate
+        )
+        try revalidate()
+    }
+
+    private func recoverAcceptedProfileWriteIntent(
+        expectedChatID: ChatID,
+        authority: ProfileProposalMutationAuthority,
+        beforeMutation: () throws -> Void
+    ) throws {
+        let chatDescriptor = authority.chatDescriptor
+        let profileDescriptor = authority.profileDescriptor
+        let intentData = try boundedData(
+            named: "profile-write.json",
+            under: chatDescriptor
+        )
+        let persisted = try decodePersistedProfileWriteIntent(intentData)
+        guard persisted.hasRecoveryBinding,
+              persisted.chatID == expectedChatID
+        else { throw PortableChatPersistenceError.invalidLayout }
+
+        try beforeMutation()
+        try flushDescriptor(chatDescriptor)
+        try beforeMutation()
+        guard try boundedData(
+            named: "profile-write.json",
+            under: chatDescriptor
+        ) == intentData else { throw PortableChatPersistenceError.invalidLayout }
+
+        let proposalData: Data? = if try entryExists(
+            named: "proposal.json",
+            under: chatDescriptor
+        ) {
+            try boundedData(named: "proposal.json", under: chatDescriptor)
+        } else {
+            nil
+        }
+        let headData = try boundedData(
+            named: "head.json",
+            under: profileDescriptor
+        )
+        let head = try PortableLibraryPersistence().decodeProfileHead(headData)
+
+        if try headSelectsBoundProfileWriteIntent(
+            head,
+            persisted: persisted,
+            under: profileDescriptor
+        ) {
+            let current = try requireRecoverableProfileWriteChat(
+                expectedChatID: expectedChatID,
+                proposalData: proposalData,
+                persisted: persisted,
+                intentData: intentData,
+                authority: authority
+            )
+            try makeBoundProfileHeadDurable(
+                head,
+                persisted: persisted,
+                under: profileDescriptor,
+                beforeMutation: beforeMutation
+            )
+            let resolved = if current.profileProposal == nil {
+                current
+            } else {
+                try aggregateResolvingProfileProposal(current)
+            }
+            _ = try finishAcceptedProfileProposal(
+                expected: resolved,
+                chatDescriptor: chatDescriptor,
+                beforeMutation: beforeMutation
+            )
+            return
+        }
+
+        guard head.authority == persisted.expectedHead,
+              let proposalData
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let proposal = try mapPersistedDomainValidation {
+            try decodeProfileProposal(proposalData)
+        }
+        let intent = try decodeProfileWriteIntent(
+            intentData,
+            proposal: proposal,
+            proposalData: proposalData
+        )
+        guard intent.id == persisted.id,
+              intent.intendedRevisionID == persisted.intendedRevisionID,
+              intent.chatID == expectedChatID,
+              case let .readWrite(current) = try loadChat(
+                  from: chatDescriptor,
+                  expectedID: expectedChatID,
+                  reconcileTransients: false,
+                  allowsProfileWriteIntent: true
+              ),
+              current.profileProposal == proposal
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let resolved = try aggregateResolvingProfileProposal(current)
+        guard case .committed = try finishProfileProposalAcceptance(
+            proposal: proposal,
+            intent: intent,
+            intentData: intentData,
+            proposalData: proposalData,
+            current: current,
+            resolvedBase: resolved,
+            initialHeadData: headData,
+            initialHead: head,
+            chatDescriptor: chatDescriptor,
+            profileDescriptor: profileDescriptor,
+            revisionsDescriptor: authority.revisionsDescriptor,
+            publicationsDescriptor: authority.publicationsDescriptor,
+            beforeMutation: beforeMutation
+        ) else { throw PortableChatPersistenceError.invalidLayout }
+    }
+
+    private func requireRecoverableProfileWriteChat(
+        expectedChatID: ChatID,
+        proposalData: Data?,
+        persisted: PersistedProfileWriteIntent,
+        intentData: Data,
+        authority: ProfileProposalMutationAuthority
+    ) throws -> ChatAggregate {
+        guard case let .readWrite(current) = try loadChat(
+            from: authority.chatDescriptor,
+            expectedID: expectedChatID,
+            reconcileTransients: false,
+            allowsProfileWriteIntent: true
+        ) else { throw PortableChatPersistenceError.invalidLayout }
+        guard let proposalData else {
+            guard current.profileProposal == nil else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            return current
+        }
+        let proposal = try mapPersistedDomainValidation {
+            try decodeProfileProposal(proposalData)
+        }
+        let intent = try decodeProfileWriteIntent(
+            intentData,
+            proposal: proposal,
+            proposalData: proposalData
+        )
+        guard intent.id == persisted.id,
+              intent.intendedRevisionID == persisted.intendedRevisionID,
+              current.profileProposal == proposal
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let intendedRevision = try proposal.applying(
+            to: loadProfileRevision(
+                selectedBy: persisted.expectedHead.selection,
+                under: authority.profileDescriptor
+            ),
+            currentHeadGeneration: persisted.expectedHead.generation,
+            intendedRevisionID: persisted.intendedRevisionID,
+            createdAt: persisted.createdAt
+        )
+        _ = try requireProfileWriteIntentBindings(
+            intentData,
+            proposalData: proposalData,
+            intendedRevisionData: encodeProfileRevision(intendedRevision),
+            requiresRecoveryBinding: true
+        )
+        return current
+    }
+
+    private func headSelectsBoundProfileWriteIntent(
+        _ head: ProfileHead,
+        persisted: PersistedProfileWriteIntent,
+        under profileDescriptor: Int32
+    ) throws -> Bool {
+        guard let intendedRevisionSHA256 = persisted.intendedRevisionSHA256
+        else { return false }
+        let (generation, generationOverflow) =
+            persisted.expectedHead.generation.addingReportingOverflow(1)
+        let (statementGeneration, statementOverflow) = persisted.expectedHead
+            .statementGeneration.addingReportingOverflow(1)
+        guard !generationOverflow,
+              !statementOverflow,
+              head.generation == generation,
+              head.statementGeneration == statementGeneration,
+              case let .revision(pointer) = head.selection,
+              pointer.revisionID == persisted.intendedRevisionID,
+              pointer.sha256 == intendedRevisionSHA256,
+              let intended = try loadProfileRevision(
+                  selectedBy: head.selection,
+                  under: profileDescriptor
+              ),
+              intended.revisionID == persisted.intendedRevisionID,
+              intended.parentRevisionID ==
+                persisted.expectedHead.currentRevisionID,
+              intended.generation == generation,
+              intended.statementGeneration == statementGeneration,
+              intended.createdAt == persisted.createdAt,
+              Self.sha256(try encodeProfileRevision(intended)) ==
+                intendedRevisionSHA256
+        else { return false }
+        _ = try loadProfileRevision(
+            selectedBy: persisted.expectedHead.selection,
+            under: profileDescriptor
+        )
+        return true
+    }
+
+    private func makeBoundProfileHeadDurable(
+        _ head: ProfileHead,
+        persisted: PersistedProfileWriteIntent,
+        under profileDescriptor: Int32,
+        beforeMutation: () throws -> Void
+    ) throws {
+        try beforeMutation()
+        guard try headSelectsBoundProfileWriteIntent(
+            head,
+            persisted: persisted,
+            under: profileDescriptor
+        ) else { throw PortableChatPersistenceError.invalidLayout }
+        try flushDescriptor(profileDescriptor)
+        try beforeMutation()
+        let durable = try PortableLibraryPersistence().decodeProfileHead(
+            boundedData(named: "head.json", under: profileDescriptor)
+        )
+        guard durable == head,
+              try headSelectsBoundProfileWriteIntent(
+                  durable,
+                  persisted: persisted,
+                  under: profileDescriptor
+              )
+        else { throw PortableChatPersistenceError.invalidLayout }
     }
 
     private func withProfileProposalMutationAuthority<Result>(
@@ -7643,6 +11193,30 @@ public struct PortableChatPersistence: @unchecked Sendable {
             decodedPendingUserTurn = nil
             decodedPendingData = nil
         }
+        let profileReconsideration: ProfileReconsideration?
+        if try entryExists(
+            named: "profile-reconsideration.json",
+            under: chatDescriptor
+        ) {
+            let data = try boundedData(
+                named: "profile-reconsideration.json",
+                under: chatDescriptor
+            )
+            let version = try schemaVersion(in: data)
+            if version > UInt64(ProfileReconsideration.schemaVersion) {
+                return .frozen(
+                    FrozenChatSnapshot(chatID: expectedID, reason: .newerSchema)
+                )
+            }
+            guard version == UInt64(ProfileReconsideration.schemaVersion) else {
+                throw PortableChatPersistenceError.unsupportedOlderSchema
+            }
+            profileReconsideration = try mapPersistedDomainValidation {
+                try decodeProfileReconsideration(data)
+            }
+        } else {
+            profileReconsideration = nil
+        }
         let messagesDescriptor = try openDirectory(named: "messages", under: chatDescriptor)
         defer { Darwin.close(messagesDescriptor) }
         let memoryDescriptor = try openDirectory(named: "memory", under: chatDescriptor)
@@ -7689,21 +11263,6 @@ public struct PortableChatPersistence: @unchecked Sendable {
             }
             return message
         }
-        guard orderedMessages.count.isMultiple(of: 2) else {
-            throw PortableChatPersistenceError.invalidLayout
-        }
-        for userIndex in stride(from: 0, to: orderedMessages.count, by: 2) {
-            guard case .user = orderedMessages[userIndex].content,
-                  case .coach = orderedMessages[userIndex + 1].content,
-                  orderedMessages[userIndex].persistedSchemaVersion ==
-                  orderedMessages[userIndex + 1].persistedSchemaVersion,
-                  orderedMessages[userIndex].responsePositionID ==
-                  orderedMessages[userIndex + 1].responsePositionID
-            else {
-                throw PortableChatPersistenceError.invalidLayout
-            }
-        }
-
         let profileProposal: ProfileChangeProposal?
         var removesUncommittedProposal = false
         if let persistedProposalData {
@@ -7724,15 +11283,39 @@ public struct PortableChatPersistence: @unchecked Sendable {
                     throw PortableChatPersistenceError.invalidLayout
                 }
                 profileProposal = proposal
-            } else if sourceMessages.isEmpty,
-                      let publicationProofAuthority,
-                      invocationEvidenceCodec.proof(
-                          publicationProofAuthority.proof,
-                          bindsProposalData: persistedProposalData
-                      )
-            {
-                profileProposal = nil
-                removesUncommittedProposal = reconcileTransients
+            } else if sourceMessages.isEmpty {
+                if let publicationProofAuthority,
+                   invocationEvidenceCodec.proof(
+                       publicationProofAuthority.proof,
+                       bindsProposalData: persistedProposalData
+                   )
+                {
+                    switch publicationProofAuthority.proof.intent {
+                    case .answerPendingUserTurn:
+                        profileProposal = nil
+                        removesUncommittedProposal = reconcileTransients
+                    case .reconsiderProfileChange:
+                        guard chat.manifestRevision >=
+                                publicationProofAuthority.proof
+                                    .publishedManifestRevision,
+                              chat.messageIDs ==
+                                publicationProofAuthority.proof.messageIDs,
+                              proposal.responsePositionID ==
+                                publicationProofAuthority.proof
+                                    .responsePositionID,
+                              proposal.baseProfile ==
+                                publicationProofAuthority.invocation
+                                    .preparedProfile
+                        else {
+                            throw PortableChatPersistenceError.invalidLayout
+                        }
+                        profileProposal = proposal
+                    }
+                } else {
+                    // A Reconsider result may intentionally publish a reviewed
+                    // Proposal without fabricating a coach-history message.
+                    profileProposal = proposal
+                }
             } else {
                 throw PortableChatPersistenceError.invalidLayout
             }
@@ -7811,7 +11394,8 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 messages: orderedMessages,
                 pendingUserTurn: pendingUserTurn,
                 profileProposal: profileProposal,
-                profileEvidencePublication: profileEvidencePublication
+                profileEvidencePublication: profileEvidencePublication,
+                profileReconsideration: profileReconsideration
             )
         }
         if removesStalePending {
@@ -8067,23 +11651,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let invocation = try mapPersistedDomainValidation {
             try decodeInvocation(invocationData)
         }
-        guard invocation.chatID == chat.id,
-              invocation.draftID == chat.draft.draftID,
-              invocation.draftVersion == chat.draft.version
-        else {
-            throw PortableChatPersistenceError.invalidLayout
-        }
-        guard try entryExists(named: "pending-user-turn.json", under: chatDescriptor) else {
-            throw PortableChatPersistenceError.invalidLayout
-        }
-        let pending = try decodePendingUserTurn(
-            boundedData(named: "pending-user-turn.json", under: chatDescriptor)
-        )
-        guard pending.id == invocation.pendingUserTurnID,
-              pending.draftID == invocation.draftID,
-              pending.draftVersion == invocation.draftVersion,
-              pending.responsePositionID == invocation.responsePositionID
-        else {
+        guard invocation.chatID == chat.id else {
             throw PortableChatPersistenceError.invalidLayout
         }
         let terminalFailure = invocation.terminalFailure ?? .coachResponseInterrupted
@@ -8096,9 +11664,65 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 attachmentIDs.count
             else { throw PortableChatPersistenceError.invalidLayout }
         }
-        let terminal = pending.replacingFailure(terminalFailure)
-        if terminal != pending {
-            let partialName = ".pending-user-turn.json.\(UUID().uuidString.lowercased()).partial"
+        let sourceName: String
+        let partialName: String
+        let replacementData: Data?
+        switch invocation.intent {
+        case let .answerPendingUserTurn(
+            pendingUserTurnID,
+            draftID,
+            draftVersion,
+            responsePositionID
+        ):
+            guard draftID == chat.draft.draftID,
+                  draftVersion == chat.draft.version,
+                  try entryExists(
+                      named: "pending-user-turn.json",
+                      under: chatDescriptor
+                  )
+            else { throw PortableChatPersistenceError.invalidLayout }
+            let pending = try decodePendingUserTurn(
+                boundedData(
+                    named: "pending-user-turn.json",
+                    under: chatDescriptor
+                )
+            )
+            guard pending.id == pendingUserTurnID,
+                  pending.draftID == draftID,
+                  pending.draftVersion == draftVersion,
+                  pending.responsePositionID == responsePositionID
+            else { throw PortableChatPersistenceError.invalidLayout }
+            sourceName = "pending-user-turn.json"
+            partialName =
+                ".pending-user-turn.json.\(UUID().uuidString.lowercased()).partial"
+            let terminal = pending.replacingFailure(terminalFailure)
+            replacementData = terminal == pending
+                ? nil
+                : try encodePendingUserTurn(terminal)
+
+        case let .reconsiderProfileChange(source, result):
+            guard try entryExists(
+                named: "profile-reconsideration.json",
+                under: chatDescriptor
+            ) else { throw PortableChatPersistenceError.invalidLayout }
+            let reconsideration = try decodeProfileReconsideration(
+                boundedData(
+                    named: "profile-reconsideration.json",
+                    under: chatDescriptor
+                )
+            )
+            guard reconsideration.sourceEffectIdentity == source,
+                  reconsideration.resultResponsePositionID == result
+            else { throw PortableChatPersistenceError.invalidLayout }
+            sourceName = "profile-reconsideration.json"
+            partialName =
+                ".profile-reconsideration.json.\(UUID().uuidString.lowercased()).partial"
+            let terminal = reconsideration.replacingFailure(terminalFailure)
+            replacementData = terminal == reconsideration
+                ? nil
+                : try encodeProfileReconsideration(terminal)
+        }
+        if let replacementData {
             var partialExists = false
             defer {
                 if partialExists {
@@ -8108,7 +11732,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 }
             }
             try writeExclusive(
-                try encodePendingUserTurn(terminal),
+                replacementData,
                 named: partialName,
                 under: chatDescriptor
             )
@@ -8124,7 +11748,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 chatDescriptor,
                 partialName,
                 chatDescriptor,
-                "pending-user-turn.json"
+                sourceName
             ) == 0 else {
                 throw PortableChatPersistenceError.ioFailure
             }
@@ -8145,16 +11769,53 @@ public struct PortableChatPersistence: @unchecked Sendable {
         chatDescriptor: Int32,
         beforeCommitting: () throws -> Void = {}
     ) throws -> ChatAggregate {
-        guard let pending = current.pendingUserTurn else {
-            throw PortableChatPersistenceError.invalidLayout
-        }
         guard (try? invocation.validateIntent(against: current)) != nil else {
             throw PortableChatPersistenceError.invalidLayout
         }
         let terminalFailure = invocation.terminalFailure ?? failure
-        if pending.failure != terminalFailure {
+        let sourceName: String
+        let partialName: String
+        let replacementData: Data?
+        let expectedAggregate: ChatAggregate
+        switch invocation.intent {
+        case .answerPendingUserTurn:
+            guard let pending = current.pendingUserTurn else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
             let replacement = pending.replacingFailure(terminalFailure)
-            let partialName = ".pending-user-turn.json.\(UUID().uuidString.lowercased()).partial"
+            sourceName = "pending-user-turn.json"
+            partialName =
+                ".pending-user-turn.json.\(UUID().uuidString.lowercased()).partial"
+            replacementData = pending == replacement
+                ? nil
+                : try encodePendingUserTurn(replacement)
+            expectedAggregate = try ChatAggregate(
+                chat: current.chat,
+                memory: current.memory,
+                messages: current.messages,
+                pendingUserTurn: replacement,
+                profileEffect: current.profileEffect
+            )
+        case .reconsiderProfileChange:
+            guard let reconsideration = current.profileReconsideration else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            let replacement = reconsideration.replacingFailure(terminalFailure)
+            sourceName = "profile-reconsideration.json"
+            partialName =
+                ".profile-reconsideration.json.\(UUID().uuidString.lowercased()).partial"
+            replacementData = reconsideration == replacement
+                ? nil
+                : try encodeProfileReconsideration(replacement)
+            expectedAggregate = try ChatAggregate(
+                chat: current.chat,
+                memory: current.memory,
+                messages: current.messages,
+                profileEffect: current.profileEffect,
+                profileReconsideration: replacement
+            )
+        }
+        if let replacementData {
             var partialExists = false
             defer {
                 if partialExists {
@@ -8164,7 +11825,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 }
             }
             try writeExclusive(
-                try encodePendingUserTurn(replacement),
+                replacementData,
                 named: partialName,
                 under: chatDescriptor
             )
@@ -8180,7 +11841,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 chatDescriptor,
                 partialName,
                 chatDescriptor,
-                "pending-user-turn.json"
+                sourceName
             ) == 0 else { throw PortableChatPersistenceError.ioFailure }
             partialExists = false
             try flushDescriptor(chatDescriptor)
@@ -8218,15 +11879,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             expectedID: invocation.chatID,
             reconcileTransients: true,
             beforeDestructiveMutation: beforeCommitting
-        ),
-            reopened == (try ChatAggregate(
-                chat: current.chat,
-                memory: current.memory,
-                messages: current.messages,
-                pendingUserTurn: pending.replacingFailure(terminalFailure),
-                profileProposal: current.profileProposal,
-                profileEvidencePublication: current.profileEvidencePublication
-            ))
+        ), reopened == expectedAggregate
         else { throw PortableChatPersistenceError.invalidLayout }
         return reopened
     }
@@ -8247,7 +11900,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             }
             let descriptor = try openDirectory(named: name, under: invocationsDescriptor)
             defer { Darwin.close(descriptor) }
-            let entries = try listEntryNames(under: descriptor, maximumCount: 4)
+            let entries = try listEntryNames(under: descriptor, maximumCount: 8)
             if entries.isEmpty {
                 try beforeRemoving()
                 guard unlinkat(invocationsDescriptor, name, AT_REMOVEDIR) == 0 else {
@@ -8270,18 +11923,31 @@ public struct PortableChatPersistence: @unchecked Sendable {
         reconcileProofPartial: Bool = true,
         beforeRemoving: () throws -> Void = {}
     ) throws -> InvocationDirectoryRecord {
-        var entries = try listEntryNames(under: invocationRoot, maximumCount: 4)
+        var entries = try listEntryNames(under: invocationRoot, maximumCount: 8)
         let proofPartials = entries.filter(Self.isPublicationProofPartialName)
         let attemptPartials = entries.filter(Self.isAttemptReplacementPartialName)
+        let sourceEffectPartials = entries.filter(
+            Self.isReconsiderationSourceEffectPartialName
+        )
+        let replacementProposalPartials = entries.filter(
+            Self.isReconsiderationReplacementProposalPartialName
+        )
         guard proofPartials.count <= 1,
               attemptPartials.count <= 1,
-              entries.count <= 4,
+              sourceEffectPartials.count <= 1,
+              replacementProposalPartials.count <= 1,
+              entries.count <= 8,
               Set(entries).isSubset(of: Set([
                   "invocation.json",
                   "publication-proof.json",
-              ] + proofPartials + attemptPartials))
+                  Self.reconsiderationSourceEffectName,
+                  Self.reconsiderationReplacementProposalName,
+              ] + proofPartials + attemptPartials + sourceEffectPartials +
+                  replacementProposalPartials))
         else { throw PortableChatPersistenceError.invalidLayout }
-        for partial in proofPartials + attemptPartials {
+        for partial in proofPartials + attemptPartials + sourceEffectPartials +
+            replacementProposalPartials
+        {
             guard isRegularFile(named: partial, under: invocationRoot) else {
                 throw PortableChatPersistenceError.invalidLayout
             }
@@ -8324,9 +11990,65 @@ public struct PortableChatPersistence: @unchecked Sendable {
         } else {
             proof = nil
         }
+        let sourceEffectData: Data?
+        if entries.contains(Self.reconsiderationSourceEffectName) {
+            guard isRegularFile(
+                named: Self.reconsiderationSourceEffectName,
+                under: invocationRoot
+            ) else { throw PortableChatPersistenceError.invalidLayout }
+            sourceEffectData = try boundedData(
+                named: Self.reconsiderationSourceEffectName,
+                under: invocationRoot
+            )
+        } else {
+            sourceEffectData = nil
+        }
+        let replacementProposalData: Data?
+        if entries.contains(Self.reconsiderationReplacementProposalName) {
+            guard isRegularFile(
+                named: Self.reconsiderationReplacementProposalName,
+                under: invocationRoot
+            ) else { throw PortableChatPersistenceError.invalidLayout }
+            replacementProposalData = try boundedData(
+                named: Self.reconsiderationReplacementProposalName,
+                under: invocationRoot
+            )
+        } else {
+            replacementProposalData = nil
+        }
+        switch invocation.intent {
+        case .answerPendingUserTurn:
+            guard sourceEffectData == nil,
+                  replacementProposalData == nil
+            else { throw PortableChatPersistenceError.invalidLayout }
+        case .reconsiderProfileChange:
+            if let proof {
+                let replacementMatches = replacementProposalData.map { data in
+                    invocationEvidenceCodec.proof(
+                        proof,
+                        bindsProposalData: data
+                    )
+                } ?? (proof.proposalSHA256 == nil)
+                guard case .reconsiderProfileChange = proof.intent,
+                      let sourceEffectData,
+                      invocationEvidenceCodec.proof(
+                          proof,
+                          bindsReconsiderationSourceEffectData:
+                            sourceEffectData
+                      ),
+                      (replacementProposalData != nil) ==
+                        (proof.proposalSHA256 != nil),
+                      replacementMatches
+                else { throw PortableChatPersistenceError.invalidLayout }
+            } else if replacementProposalData != nil && sourceEffectData == nil {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+        }
         return InvocationDirectoryRecord(
             invocation: invocation,
-            publicationProof: proof
+            publicationProof: proof,
+            reconsiderationSourceEffectData: sourceEffectData,
+            reconsiderationReplacementProposalData: replacementProposalData
         )
     }
 
@@ -8529,19 +12251,33 @@ public struct PortableChatPersistence: @unchecked Sendable {
             }
             let entries = try listEntryNames(
                 under: invocationRoot,
-                maximumCount: 4
+                maximumCount: 8
             )
             let proofPartials = entries.filter(Self.isPublicationProofPartialName)
             let attemptPartials = entries.filter(Self.isAttemptReplacementPartialName)
+            let sourceEffectPartials = entries.filter(
+                Self.isReconsiderationSourceEffectPartialName
+            )
+            let replacementProposalPartials = entries.filter(
+                Self.isReconsiderationReplacementProposalPartialName
+            )
             guard proofPartials.count <= 1,
                   attemptPartials.count <= 1,
-                  entries.count <= 4,
+                  sourceEffectPartials.count <= 1,
+                  replacementProposalPartials.count <= 1,
+                  entries.count <= 8,
                   Set(entries).isSubset(of: Set([
                       "invocation.json",
                       "publication-proof.json",
-                  ] + proofPartials + attemptPartials))
+                      Self.reconsiderationSourceEffectName,
+                      Self.reconsiderationReplacementProposalName,
+                  ] + proofPartials + attemptPartials + sourceEffectPartials +
+                      replacementProposalPartials))
             else { throw PortableChatPersistenceError.invalidLayout }
-            let partials = try (proofPartials + attemptPartials).sorted().map {
+            let partials = try (
+                proofPartials + attemptPartials + sourceEffectPartials +
+                    replacementProposalPartials
+            ).sorted().map {
                 InvocationPartialFileIdentity(
                     name: $0,
                     identity: try regularFileLivenessIdentity(
@@ -8661,7 +12397,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 defer { Darwin.close(invocationRoot) }
                 return try listEntryNames(
                     under: invocationRoot,
-                    maximumCount: 4
+                    maximumCount: 8
                 ).isEmpty
             }()
             if isEmpty { continue }
@@ -8950,13 +12686,11 @@ public struct PortableChatPersistence: @unchecked Sendable {
         named name: String,
         under invocationsDescriptor: Int32
     ) {
-        guard let descriptor = try? openDirectory(
+        try? removeInvocationCandidateDuringReconciliation(
             named: name,
-            under: invocationsDescriptor
-        ) else { return }
-        _ = unlinkat(descriptor, "invocation.json", 0)
-        Darwin.close(descriptor)
-        _ = unlinkat(invocationsDescriptor, name, AT_REMOVEDIR)
+            under: invocationsDescriptor,
+            beforeRemoving: {}
+        )
     }
 
     private func removeInvocationCandidateDuringReconciliation(
@@ -8966,17 +12700,76 @@ public struct PortableChatPersistence: @unchecked Sendable {
     ) throws {
         let descriptor = try openDirectory(named: name, under: invocationsDescriptor)
         defer { Darwin.close(descriptor) }
-        if try entryExists(named: "invocation.json", under: descriptor) {
+        let entries = try listEntryNames(under: descriptor, maximumCount: 8)
+        let proofPartials = entries.filter(Self.isPublicationProofPartialName)
+        let attemptPartials = entries.filter(Self.isAttemptReplacementPartialName)
+        let sourceEffectPartials = entries.filter(
+            Self.isReconsiderationSourceEffectPartialName
+        )
+        let replacementProposalPartials = entries.filter(
+            Self.isReconsiderationReplacementProposalPartialName
+        )
+        guard proofPartials.count <= 1,
+              attemptPartials.count <= 1,
+              sourceEffectPartials.count <= 1,
+              replacementProposalPartials.count <= 1,
+              Set(entries).isSubset(of: Set([
+                  "invocation.json",
+                  "publication-proof.json",
+                  Self.reconsiderationSourceEffectName,
+                  Self.reconsiderationReplacementProposalName,
+              ] + proofPartials + attemptPartials + sourceEffectPartials +
+                replacementProposalPartials))
+        else { throw PortableChatPersistenceError.invalidLayout }
+        for entry in entries.sorted() {
+            guard isRegularFile(named: entry, under: descriptor) else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
             try beforeRemoving()
-            guard unlinkat(descriptor, "invocation.json", 0) == 0 else {
+            guard unlinkat(descriptor, entry, 0) == 0 else {
                 throw PortableChatPersistenceError.ioFailure
             }
-            try flushDescriptor(descriptor)
         }
+        if !entries.isEmpty { try flushDescriptor(descriptor) }
         try beforeRemoving()
         guard unlinkat(invocationsDescriptor, name, AT_REMOVEDIR) == 0 else {
             throw PortableChatPersistenceError.invalidLayout
         }
+    }
+
+    private func atomicallyRetirePublishedInvocationDirectory(
+        _ invocation: CoachInvocation,
+        under invocationsDescriptor: Int32,
+        beforeMutation: () throws -> Void
+    ) throws {
+        let finalName = invocation.id.rawValue
+        guard try entryExists(named: finalName, under: invocationsDescriptor)
+        else { return }
+        let finalIdentity = try directoryIdentity(
+            named: finalName,
+            under: invocationsDescriptor
+        )
+        let partialName =
+            ".\(finalName).\(UUID().uuidString.lowercased()).partial"
+        try beforeMutation()
+        guard try directoryIdentity(
+            named: finalName,
+            under: invocationsDescriptor
+        ) == finalIdentity,
+            renameat(
+                invocationsDescriptor,
+                finalName,
+                invocationsDescriptor,
+                partialName
+            ) == 0
+        else { throw PortableChatPersistenceError.invalidLayout }
+        try flushDescriptor(invocationsDescriptor)
+        try removeInvocationCandidateDuringReconciliation(
+            named: partialName,
+            under: invocationsDescriptor,
+            beforeRemoving: beforeMutation
+        )
+        try flushDescriptor(invocationsDescriptor)
     }
 
     private func removeInvocationDirectoryIfPresent(
@@ -8996,7 +12789,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
         guard record.invocation.hasSameDurableProjection(as: invocation)
         else { throw PortableChatPersistenceError.invalidLayout }
-        try removePublicationProofIfPresent(
+        try discardPrePublicationEvidence(
             from: descriptor,
             beforeRemoving: beforeRemoving
         )
@@ -9018,22 +12811,38 @@ public struct PortableChatPersistence: @unchecked Sendable {
     ) throws {
         let entries = try listEntryNames(
             under: invocationRoot,
-            maximumCount: 4
+            maximumCount: 8
         )
         let proofPartials = entries.filter(Self.isPublicationProofPartialName)
         let attemptPartials = entries.filter(Self.isAttemptReplacementPartialName)
+        let sourceEffectPartials = entries.filter(
+            Self.isReconsiderationSourceEffectPartialName
+        )
+        let replacementProposalPartials = entries.filter(
+            Self.isReconsiderationReplacementProposalPartialName
+        )
         guard proofPartials.count <= 1,
               attemptPartials.count <= 1,
-              entries.count <= 4,
+              sourceEffectPartials.count <= 1,
+              replacementProposalPartials.count <= 1,
+              entries.count <= 8,
               Set(entries).isSubset(of: Set([
                   "invocation.json",
                   "publication-proof.json",
-              ] + proofPartials + attemptPartials)),
+                  Self.reconsiderationSourceEffectName,
+                  Self.reconsiderationReplacementProposalName,
+              ] + proofPartials + attemptPartials + sourceEffectPartials +
+                  replacementProposalPartials)),
               entries.contains("invocation.json")
         else { throw PortableChatPersistenceError.invalidLayout }
 
         var removed = false
-        for name in proofPartials + attemptPartials + ["publication-proof.json"]
+        for name in proofPartials + attemptPartials + sourceEffectPartials +
+            replacementProposalPartials + [
+                "publication-proof.json",
+                Self.reconsiderationSourceEffectName,
+                Self.reconsiderationReplacementProposalName,
+            ]
         where entries.contains(name) {
             guard isRegularFile(named: name, under: invocationRoot) else {
                 throw PortableChatPersistenceError.invalidLayout
@@ -9184,6 +12993,35 @@ public struct PortableChatPersistence: @unchecked Sendable {
         try fault(.afterProfileEvidencePublicationInstall)
     }
 
+    private func installProfileReconsideration(
+        _ reconsideration: ProfileReconsideration,
+        under chatDescriptor: Int32
+    ) throws {
+        let data = try encodeProfileReconsideration(reconsideration)
+        if try entryExists(
+            named: "profile-reconsideration.json",
+            under: chatDescriptor
+        ) {
+            guard try boundedData(
+                named: "profile-reconsideration.json",
+                under: chatDescriptor
+            ) == data else { throw PortableChatPersistenceError.collision }
+            return
+        }
+        try writeNewRoot(
+            data,
+            named: "profile-reconsideration.json",
+            under: chatDescriptor,
+            points: (
+                .beforeProfileReconsiderationPartialWrite,
+                .afterProfileReconsiderationPartialWrite,
+                .afterProfileReconsiderationFileFlush,
+                .afterProfileReconsiderationInstall,
+                .afterProfileReconsiderationDirectoryFlush
+            )
+        )
+    }
+
     private func installMemory(
         _ memory: CoachMemory,
         under memoryDescriptor: Int32
@@ -9237,6 +13075,84 @@ public struct PortableChatPersistence: @unchecked Sendable {
                 .afterPublicationProofDirectoryFlush
             )
         )
+    }
+
+    private func installInvocationOwnedPublicationArtifact(
+        _ data: Data,
+        named finalName: String,
+        under invocationRoot: Int32,
+        installedFault: PortableChatFaultPoint
+    ) throws {
+        if try entryExists(named: finalName, under: invocationRoot) {
+            guard isRegularFile(named: finalName, under: invocationRoot),
+                  try boundedData(named: finalName, under: invocationRoot) ==
+                    data
+            else { throw PortableChatPersistenceError.invalidLayout }
+            return
+        }
+        let partialName = ".\(finalName).\(UUID().uuidString.lowercased()).partial"
+        var partialExists = false
+        defer {
+            if partialExists {
+                _ = partialName.withCString {
+                    Darwin.unlinkat(invocationRoot, $0, 0)
+                }
+            }
+        }
+        try writeExclusive(data, named: partialName, under: invocationRoot)
+        partialExists = true
+        let descriptor = try openRegularFile(
+            named: partialName,
+            under: invocationRoot
+        )
+        defer { Darwin.close(descriptor) }
+        try flushDescriptor(descriptor)
+        try noReplaceRename(
+            from: partialName,
+            under: invocationRoot,
+            to: finalName,
+            under: invocationRoot
+        )
+        partialExists = false
+        try flushDescriptor(invocationRoot)
+        try fault(installedFault)
+    }
+
+    /// Installs the committed replacement without consuming the
+    /// Invocation-owned staged bytes. Those bytes remain the exact recovery
+    /// authority until every source-sidecar cleanup step and Invocation-root
+    /// retirement has completed.
+    private func installCommittedReconsiderationReplacementProposal(
+        _ data: Data,
+        under chatDescriptor: Int32
+    ) throws {
+        let partialName =
+            ".proposal.json.\(UUID().uuidString.lowercased()).partial"
+        var partialExists = false
+        defer {
+            if partialExists {
+                _ = partialName.withCString {
+                    Darwin.unlinkat(chatDescriptor, $0, 0)
+                }
+            }
+        }
+        try writeExclusive(data, named: partialName, under: chatDescriptor)
+        partialExists = true
+        let descriptor = try openRegularFile(
+            named: partialName,
+            under: chatDescriptor
+        )
+        defer { Darwin.close(descriptor) }
+        try flushDescriptor(descriptor)
+        guard renameat(
+            chatDescriptor,
+            partialName,
+            chatDescriptor,
+            "proposal.json"
+        ) == 0 else { throw PortableChatPersistenceError.ioFailure }
+        partialExists = false
+        try flushDescriptor(chatDescriptor)
+        try fault(.afterReconsiderationReplacementProposalCommitInstall)
     }
 
     private func stagedChatCandidateID(_ name: String) -> ChatID? {
@@ -9302,6 +13218,7 @@ public struct PortableChatPersistence: @unchecked Sendable {
             ".proposal.json.",
             ".profile-publication.json.",
             ".profile-write.json.",
+            ".profile-reconsideration.json.",
         ]
         let suffix = ".partial"
         guard let prefix = prefixes.first(where: { name.hasPrefix($0) }),
@@ -9325,6 +13242,37 @@ public struct PortableChatPersistence: @unchecked Sendable {
         let prefix = ".publication-proof.json."
         let suffix = ".partial"
         guard name.hasPrefix(prefix), name.hasSuffix(suffix) else { return false }
+        let uuid = String(name.dropFirst(prefix.count).dropLast(suffix.count))
+        return UUID(uuidString: uuid)?.uuidString.lowercased() == uuid
+    }
+
+    private static func isReconsiderationSourceEffectPartialName(
+        _ name: String
+    ) -> Bool {
+        isInvocationOwnedArtifactPartialName(
+            name,
+            finalName: reconsiderationSourceEffectName
+        )
+    }
+
+    private static func isReconsiderationReplacementProposalPartialName(
+        _ name: String
+    ) -> Bool {
+        isInvocationOwnedArtifactPartialName(
+            name,
+            finalName: reconsiderationReplacementProposalName
+        )
+    }
+
+    private static func isInvocationOwnedArtifactPartialName(
+        _ name: String,
+        finalName: String
+    ) -> Bool {
+        let prefix = ".\(finalName)."
+        let suffix = ".partial"
+        guard name.hasPrefix(prefix), name.hasSuffix(suffix) else {
+            return false
+        }
         let uuid = String(name.dropFirst(prefix.count).dropLast(suffix.count))
         return UUID(uuidString: uuid)?.uuidString.lowercased() == uuid
     }
@@ -9970,6 +13918,84 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
     }
 
+    private func decodeProfileReconsideration(
+        _ data: Data
+    ) throws -> ProfileReconsideration {
+        let dictionary = try jsonDictionary(data)
+        let dto: ProfileReconsiderationDTO = try decode(
+            ProfileReconsiderationDTO.self,
+            data
+        )
+        guard dto.schemaVersion == ProfileReconsideration.schemaVersion else {
+            throw PortableChatPersistenceError.invalidSchemaVersion
+        }
+        let requiredKeys: Set<String> = [
+            "schemaVersion", "sourceEffectIdentity", "resultResponsePositionId",
+        ]
+        let optionalKeys: Set<String> = ["failure", "transcriptReadFailure"]
+        let actualKeys = Set(dictionary.keys)
+        guard actualKeys.isSuperset(of: requiredKeys),
+              actualKeys.subtracting(requiredKeys).isSubset(of: optionalKeys)
+        else { throw PortableChatPersistenceError.unknownKey }
+        for key in optionalKeys where actualKeys.contains(key) &&
+            dictionary[key] is NSNull
+        {
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        guard let source = dictionary["sourceEffectIdentity"] as? [String: Any],
+              let sourceKind = source["kind"] as? String
+        else { throw PortableChatPersistenceError.invalidJSON }
+        switch sourceKind {
+        case "proposal":
+            try requireExactKeys(source, ["kind", "proposalId"])
+        case "evidencePublication":
+            try requireExactKeys(source, ["kind", "responsePositionId"])
+        default:
+            throw PortableChatPersistenceError.invalidJSON
+        }
+        if actualKeys.contains("transcriptReadFailure") {
+            guard let summary = dictionary["transcriptReadFailure"]
+                as? [String: Any]
+            else { throw PortableChatPersistenceError.invalidJSON }
+            try requireExactKeys(summary, ["sessions", "additionalSessionCount"])
+            guard let sessions = summary["sessions"] as? [[String: Any]] else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            for session in sessions {
+                try requireExactKeys(
+                    session,
+                    ["sessionAttachmentId", "displayLabel"]
+                )
+            }
+        }
+        let failure: PendingUserTurnFailure?
+        if dto.failure == "coachTranscriptReadFailed" {
+            guard let summary = try dto.transcriptReadFailure?.domainValue() else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            failure = .coachTranscriptReadFailed(summary)
+        } else {
+            guard dto.transcriptReadFailure == nil else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            if let rawFailure = dto.failure {
+                guard let parsed = PendingUserTurnFailure(rawValue: rawFailure) else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                failure = parsed
+            } else {
+                failure = nil
+            }
+        }
+        return ProfileReconsideration(
+            sourceEffectIdentity: try dto.sourceEffectIdentity.domainValue(),
+            resultResponsePositionID: try ChatResponsePositionID(
+                dto.resultResponsePositionId
+            ),
+            failure: failure
+        )
+    }
+
     private func decodeMessage(_ data: Data) throws -> ChatMessage {
         let dictionary = try jsonDictionary(data)
         guard let role = dictionary["role"] as? String,
@@ -10494,6 +14520,73 @@ public struct PortableChatPersistence: @unchecked Sendable {
         }
     }
 
+    private func acquireProfileReconsiderationFileLease(
+        under chatDescriptor: Int32
+    ) throws -> PortableProfileReconsiderationFileLease? {
+        let descriptor = try openRegularFile(
+            named: "profile-reconsideration.json",
+            under: chatDescriptor
+        )
+        var ownsDescriptor = true
+        defer {
+            if ownsDescriptor { Darwin.close(descriptor) }
+        }
+        let key = try regularFileLivenessIdentity(of: descriptor)
+        guard PortableInvocationLivenessRegistry.claim(key) else { return nil }
+        var ownsRegistryClaim = true
+        defer {
+            if ownsRegistryClaim {
+                PortableInvocationLivenessRegistry.release(key)
+            }
+        }
+        while audoraFlock(descriptor, LOCK_EX | LOCK_NB) != 0 {
+            if errno == EINTR { continue }
+            if errno == EWOULDBLOCK || errno == EAGAIN { return nil }
+            throw PortableChatPersistenceError.ioFailure
+        }
+        var ownsFileLock = true
+        defer {
+            if ownsFileLock { _ = audoraFlock(descriptor, LOCK_UN) }
+        }
+        guard try regularFileLivenessIdentity(
+            named: "profile-reconsideration.json",
+            under: chatDescriptor
+        ) == key else { throw PortableChatPersistenceError.invalidLayout }
+        ownsDescriptor = false
+        ownsRegistryClaim = false
+        ownsFileLock = false
+        return PortableProfileReconsiderationFileLease(
+            descriptor: descriptor,
+            key: key
+        )
+    }
+
+    private func acquireAndValidateProfileReconsiderationFileLease(
+        _ expected: ProfileReconsideration,
+        under chatDescriptor: Int32
+    ) throws -> PortableProfileReconsiderationFileLease {
+        guard let lease = try acquireProfileReconsiderationFileLease(
+            under: chatDescriptor
+        ) else { throw PortableChatPersistenceError.ioFailure }
+        do {
+            guard try regularFileLivenessIdentity(
+                named: "profile-reconsideration.json",
+                under: chatDescriptor
+            ) == lease.key,
+                try decodeProfileReconsideration(
+                    boundedData(
+                        named: "profile-reconsideration.json",
+                        under: chatDescriptor
+                    )
+                ) == expected
+            else { throw PortableChatPersistenceError.invalidLayout }
+            return lease
+        } catch {
+            lease.release()
+            throw error
+        }
+    }
+
     private func directoryIdentity(of descriptor: Int32) throws -> DirectoryIdentity {
         var metadata = stat()
         guard Darwin.fstat(descriptor, &metadata) == 0,
@@ -10774,6 +14867,10 @@ public actor PortableChatStore: ChatStorePort {
         let result: ActiveLibraryOperationResult<ChatCatalogOutcome> =
             await workspace.performActiveReadWriteOperation(in: library) { root in
             do {
+                try persistence.reconcileProfileWritesBeforeInvocationRecovery(
+                    at: root,
+                    in: library
+                )
                 try persistence.reconcileInterruptedInvocationsIfUnowned(
                     at: root,
                     in: library
@@ -11003,6 +15100,10 @@ public actor PortableChatStore: ChatStorePort {
         let result: ActiveLibraryOperationResult<ChatLoadOutcome> =
             await workspace.performActiveReadWriteOperation(in: library) { root in
             do {
+                try persistence.reconcileProfileWritesBeforeInvocationRecovery(
+                    at: root,
+                    in: library
+                )
                 try persistence.reconcileInterruptedInvocationsIfUnowned(
                     at: root,
                     in: library
@@ -11041,6 +15142,34 @@ public actor PortableProfileProposalCoordinator: ProfileProposalCoordinating {
     ) {
         self.persistence = persistence
         self.workspace = workspace
+    }
+
+    public func assess(
+        _ request: AssessProfileEffectRequest
+    ) async -> ProfileEffectAssessmentOutcome {
+        let result: ActiveLibraryOperationResult<ProfileEffectAssessmentOutcome> =
+            await workspace.performActiveReadWriteOperation(
+                in: request.library
+            ) { root in
+                do {
+                    return switch try persistence.assessProfileEffect(
+                        request,
+                        at: root
+                    ) {
+                    case let .current(current): .current(current)
+                    case let .stale(current, basis): .stale(current, basis)
+                    }
+                } catch PortableChatPersistenceError.readOnlyLibrary {
+                    return .readOnlyLibrary
+                } catch {
+                    return .failed
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly: .readOnlyLibrary
+        case .unavailable: .failed
+        }
     }
 
     public func accept(
@@ -11185,6 +15314,41 @@ public actor PortableProfileProposalCoordinator: ProfileProposalCoordinating {
         }
     }
 
+    public func discardReconsiderationFailure(
+        _ mutation: DiscardProfileReconsiderationFailureMutation
+    ) async -> ProfileEffectMutationOutcome {
+        let result: ActiveLibraryOperationResult<ProfileEffectMutationOutcome> =
+            await workspace.performActiveReadWriteOperation(
+                in: mutation.library
+            ) { root in
+                do {
+                    return Self.map(
+                        try persistence.discardProfileReconsiderationFailure(
+                            mutation,
+                            at: root
+                        )
+                    )
+                } catch PortableChatPersistenceError.readOnlyLibrary {
+                    return .readOnlyLibrary
+                } catch {
+                    if let committed = try? persistence
+                        .reconcileCommittedProfileReconsiderationFailureDiscard(
+                            mutation,
+                            at: root
+                        )
+                    {
+                        return .committed(committed)
+                    }
+                    return .failed
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly: .readOnlyLibrary
+        case .unavailable: .failed
+        }
+    }
+
     private nonisolated static func map(
         _ result: PortableChatMutationResult
     ) -> ProfileProposalMutationOutcome {
@@ -11243,6 +15407,64 @@ private struct PendingUserTurnDTO: Codable {
     let responsePositionId: String
     let failure: String?
     let transcriptReadFailure: PortableCoachTranscriptReadFailureSummaryDTO?
+}
+
+private struct ProfileReconsiderationDTO: Codable {
+    let schemaVersion: UInt32
+    let sourceEffectIdentity: ProfileReconsiderationEffectIdentityDTO
+    let resultResponsePositionId: String
+    let failure: String?
+    let transcriptReadFailure: PortableCoachTranscriptReadFailureSummaryDTO?
+
+    init(_ value: ProfileReconsideration) {
+        schemaVersion = ProfileReconsideration.schemaVersion
+        sourceEffectIdentity = ProfileReconsiderationEffectIdentityDTO(
+            value.sourceEffectIdentity
+        )
+        resultResponsePositionId = value.resultResponsePositionID.rawValue
+        failure = value.failure?.rawValue
+        transcriptReadFailure = value.failure?.transcriptReadFailureSummary.map(
+            PortableCoachTranscriptReadFailureSummaryDTO.init
+        )
+    }
+}
+
+private struct ProfileReconsiderationEffectIdentityDTO: Codable {
+    let kind: String
+    let proposalId: String?
+    let responsePositionId: String?
+
+    init(_ value: ChatProfileEffectIdentity) {
+        switch value {
+        case let .proposal(proposalID):
+            kind = "proposal"
+            proposalId = proposalID.rawValue
+            responsePositionId = nil
+        case let .evidencePublication(responsePositionID):
+            kind = "evidencePublication"
+            proposalId = nil
+            responsePositionId = responsePositionID.rawValue
+        }
+    }
+
+    func domainValue() throws -> ChatProfileEffectIdentity {
+        switch kind {
+        case "proposal":
+            guard let proposalId, responsePositionId == nil else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            return .proposal(try ProfileChangeProposalID(proposalId))
+        case "evidencePublication":
+            guard proposalId == nil, let responsePositionId else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            return .evidencePublication(
+                try ChatResponsePositionID(responsePositionId)
+            )
+        default:
+            throw PortableChatPersistenceError.invalidJSON
+        }
+    }
 }
 
 private struct ChatMessageDTO: Codable {
@@ -11467,15 +15689,23 @@ private struct ProfileWriteIntentDTO: Codable {
     let expectedHead: ProfileWriteExpectedHeadDTO
     let intendedRevisionId: String
     let createdAt: String
+    let proposalSha256: String?
+    let intendedRevisionSha256: String?
 
-    init(_ value: ProfileWriteIntent) {
-        schemaVersion = ProfileWriteIntent.schemaVersion
+    init(
+        _ value: ProfileWriteIntent,
+        proposalSha256: String,
+        intendedRevisionSha256: String
+    ) {
+        schemaVersion = 2
         intentId = value.id.rawValue
         proposalId = value.proposalID.rawValue
         chatId = value.chatID.rawValue
         expectedHead = ProfileWriteExpectedHeadDTO(value.expectedHead)
         intendedRevisionId = value.intendedRevisionID.rawValue
         createdAt = value.createdAt.rawValue
+        self.proposalSha256 = proposalSha256
+        self.intendedRevisionSha256 = intendedRevisionSha256
     }
 
     func domainValue(
@@ -11746,6 +15976,8 @@ private struct InvocationPublicationProofLookup {
 private struct InvocationDirectoryRecord {
     let invocation: CoachInvocation
     let publicationProof: InvocationPublicationProof?
+    let reconsiderationSourceEffectData: Data?
+    let reconsiderationReplacementProposalData: Data?
 }
 
 private struct InvocationBodyIdentity {

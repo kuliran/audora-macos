@@ -36,6 +36,28 @@ struct PortableInvocationPublicationCurrentEvidence {
     let profileEvidencePublicationData: Data?
 }
 
+struct PortableProfileReconsiderationPublicationSourceEvidence {
+    let baseChat: Data
+    let publishedChat: Data
+    let stableChat: Data
+    let baseMemory: Data
+    let publishedMemory: Data
+    let sourceEffect: Data
+    let profileReconsideration: Data
+    let coachMessage: Data?
+    let replacementProposal: Data?
+}
+
+struct PortableProfileReconsiderationPublicationCurrentEvidence {
+    let aggregate: ChatAggregate
+    let canonicalChat: Data
+    let stableChat: Data
+    let memory: Data
+    let coachMessageData: Data?
+    let coachMessage: ChatMessage?
+    let replacementProposalData: Data?
+}
+
 /// The schema-stable identity shared by every supported and future Invocation
 /// root. Its bounded bytes and narrowly indexed durable public IDs support
 /// conservative collision checks when the version-specific body cannot decode.
@@ -103,29 +125,44 @@ struct PortableChatDurablePublicIDs {
     }
 }
 
-struct InvocationPublicationProof: Equatable {
-    static let schemaVersion: UInt32 = 3
+enum InvocationPublicationProofIntent: Equatable {
+    case answerPendingUserTurn(
+        pendingUserTurnID: PendingUserTurnID,
+        pendingUserTurnSHA256: String,
+        userMessageID: ChatMessageID,
+        userMessageSHA256: String,
+        freshDraftID: ChatDraftID,
+        freshDraftVersion: UInt64,
+        freshDraftSHA256: String
+    )
+    case reconsiderProfileChange(
+        sourceEffectIdentity: ChatProfileEffectIdentity,
+        baseManifestRevision: UInt64,
+        baseChatSHA256: String,
+        baseMemorySHA256: String,
+        sourceEffectSHA256: String,
+        profileReconsiderationSHA256: String
+    )
+}
 
+struct InvocationPublicationProof: Equatable {
+    static let schemaVersion: UInt32 = 4
+
+    let persistedSchemaVersion: UInt32
     let invocationID: CoachInvocationID
     let libraryID: LibraryID
     let chatID: ChatID
-    let pendingUserTurnID: PendingUserTurnID
     let responsePositionID: ChatResponsePositionID
     let publishedManifestRevision: UInt64
     let publishedChatSHA256: String
     let stableChatSHA256: String
     let memorySHA256: String
-    let pendingUserTurnSHA256: String
     let messageIDs: [ChatMessageID]
-    let userMessageID: ChatMessageID
-    let userMessageSHA256: String
     let coachMessageID: ChatMessageID
-    let coachMessageSHA256: String
-    let freshDraftID: ChatDraftID
-    let freshDraftVersion: UInt64
-    let freshDraftSHA256: String
+    let coachMessageSHA256: String?
     let proposalSHA256: String?
     let profileEvidencePublicationSHA256: String?
+    let intent: InvocationPublicationProofIntent
 }
 
 /// Pure schema and exact-publication policy for durable Coach Invocation
@@ -150,6 +187,27 @@ struct PortableInvocationEvidenceCodec {
     func encodeInvocation(_ invocation: CoachInvocation) throws -> Data {
         let usesAttemptSequence = invocation.persistedSchemaVersion >=
             CoachInvocation.attemptSequenceSchemaVersion
+        let usesSealedIntent = invocation.persistedSchemaVersion >=
+            CoachInvocation.schemaVersion
+        let legacyAnswerIntent: (
+            pendingUserTurnID: PendingUserTurnID,
+            draftID: ChatDraftID,
+            draftVersion: UInt64,
+            responsePositionID: ChatResponsePositionID
+        )? = switch invocation.intent {
+        case let .answerPendingUserTurn(
+            pendingUserTurnID,
+            draftID,
+            draftVersion,
+            responsePositionID
+        ):
+            (pendingUserTurnID, draftID, draftVersion, responsePositionID)
+        case .reconsiderProfileChange:
+            nil
+        }
+        guard usesSealedIntent || legacyAnswerIntent != nil else {
+            throw PortableChatPersistenceError.invalidLayout
+        }
         return try boundedDeterministicJSON(CoachInvocationDTO(
             schemaVersion: invocation.persistedSchemaVersion,
             invocationId: invocation.id.rawValue,
@@ -160,14 +218,28 @@ struct PortableInvocationEvidenceCodec {
                 ? nil
                 : invocation.providerIdempotencyValue?.rawValue,
             attempts: usesAttemptSequence
-                ? invocation.attempts.map(CoachProviderAttemptDTO.init)
+                ? try invocation.attempts.map {
+                    try CoachProviderAttemptDTO(
+                        $0,
+                        usesSealedAuthority: usesSealedIntent
+                    )
+                }
                 : nil,
             libraryId: invocation.libraryID.rawValue,
             chatId: invocation.chatID.rawValue,
-            pendingUserTurnId: invocation.pendingUserTurnID.rawValue,
-            draftId: invocation.draftID.rawValue,
-            draftVersion: invocation.draftVersion,
-            responsePositionId: invocation.responsePositionID.rawValue,
+            pendingUserTurnId: usesSealedIntent
+                ? nil
+                : legacyAnswerIntent?.pendingUserTurnID.rawValue,
+            draftId: usesSealedIntent ? nil : legacyAnswerIntent?.draftID.rawValue,
+            draftVersion: usesSealedIntent
+                ? nil
+                : legacyAnswerIntent?.draftVersion,
+            responsePositionId: usesSealedIntent
+                ? nil
+                : legacyAnswerIntent?.responsePositionID.rawValue,
+            intent: usesSealedIntent
+                ? try CoachInvocationIntentDTO(invocation.intent)
+                : nil,
             expectedManifestRevision: invocation.expectedManifestRevision,
             profileRevisionId: invocation.preparedProfile?.revisionID?.rawValue,
             profileStatementGeneration: invocation.preparedProfile?.statementGeneration,
@@ -256,7 +328,7 @@ struct PortableInvocationEvidenceCodec {
             duplicatePolicy: .allObjects
         )
         let dto = try json.decode(CoachInvocationDTO.self, from: data)
-        let common: Set<String> = [
+        let legacyCommon: Set<String> = [
             "schemaVersion", "invocationId", "libraryId", "chatId",
             "pendingUserTurnId", "draftId", "draftVersion",
             "responsePositionId", "expectedManifestRevision", "admittedAt",
@@ -266,10 +338,10 @@ struct PortableInvocationEvidenceCodec {
         if dto.schemaVersion == 1 {
             try json.requireExactKeys(
                 dictionary,
-                common.union(["attemptId", "providerIdempotencyValue"])
+                legacyCommon.union(["attemptId", "providerIdempotencyValue"])
             )
         } else if dto.schemaVersion == 2 {
-            let v2 = common.union([
+            let v2 = legacyCommon.union([
                 "attemptId", "providerIdempotencyValue",
                 "profileStatementGeneration",
             ])
@@ -282,7 +354,7 @@ struct PortableInvocationEvidenceCodec {
                 throw PortableChatPersistenceError.invalidJSON
             }
         } else if dto.schemaVersion == CoachInvocation.attemptSequenceSchemaVersion {
-            let v3 = common.union(["attempts", "profileStatementGeneration"])
+            let v3 = legacyCommon.union(["attempts", "profileStatementGeneration"])
             let actualKeys = Set(dictionary.keys)
             let allowedOptional: Set<String> = [
                 "profileRevisionId", "terminalFailure",
@@ -310,8 +382,10 @@ struct PortableInvocationEvidenceCodec {
                     "userMessageId", "coachMessageId", "freshDraftId",
                 ])
             }
-        } else {
-            let v4 = common.union(["attempts", "profileStatementGeneration"])
+        } else if dto.schemaVersion ==
+            CoachInvocation.transcriptReadFailureSchemaVersion
+        {
+            let v4 = legacyCommon.union(["attempts", "profileStatementGeneration"])
             let actualKeys = Set(dictionary.keys)
             let allowedOptional: Set<String> = [
                 "profileRevisionId", "terminalFailure", "transcriptReadFailure",
@@ -352,14 +426,126 @@ struct PortableInvocationEvidenceCodec {
                     )
                 }
             }
+        } else {
+            let v5: Set<String> = [
+                "schemaVersion", "invocationId", "attempts", "libraryId",
+                "chatId", "intent", "expectedManifestRevision",
+                "profileStatementGeneration", "admittedAt",
+            ]
+            let actualKeys = Set(dictionary.keys)
+            let allowedOptional: Set<String> = [
+                "profileRevisionId", "terminalFailure", "transcriptReadFailure",
+            ]
+            guard actualKeys.isSuperset(of: v5),
+                  actualKeys.subtracting(v5).isSubset(of: allowedOptional)
+            else { throw PortableChatPersistenceError.unknownKey }
+            for optionalKey in allowedOptional where actualKeys.contains(optionalKey) {
+                if dictionary[optionalKey] is NSNull {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+            }
+            guard let rawAttempts = dictionary["attempts"] as? [[String: Any]],
+                  !rawAttempts.isEmpty,
+                  rawAttempts.count <= Int(CoachProviderAttempt.maximumOrdinal)
+            else { throw PortableChatPersistenceError.invalidJSON }
+            for rawAttempt in rawAttempts {
+                try json.requireExactKeys(rawAttempt, [
+                    "attemptId", "ordinal", "kind", "publicationAuthority",
+                ])
+                guard let authority = rawAttempt["publicationAuthority"]
+                    as? [String: Any],
+                    let kind = authority["kind"] as? String
+                else { throw PortableChatPersistenceError.invalidJSON }
+                switch kind {
+                case "answerPendingUserTurn":
+                    try json.requireExactKeys(authority, [
+                        "kind", "userMessageId", "coachMessageId",
+                        "freshDraftId",
+                    ])
+                case "reconsiderProfileChange":
+                    try json.requireExactKeys(authority, [
+                        "kind", "coachMessageId",
+                    ])
+                default:
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+            }
+            guard let rawIntent = dictionary["intent"] as? [String: Any],
+                  let intentKind = rawIntent["kind"] as? String
+            else { throw PortableChatPersistenceError.invalidJSON }
+            switch intentKind {
+            case "answerPendingUserTurn":
+                try json.requireExactKeys(rawIntent, [
+                    "kind", "pendingUserTurnId", "draftId", "draftVersion",
+                    "responsePositionId",
+                ])
+            case "reconsiderProfileChange":
+                try json.requireExactKeys(rawIntent, [
+                    "kind", "sourceEffectIdentity", "resultResponsePositionId",
+                ])
+                guard let source = rawIntent["sourceEffectIdentity"]
+                    as? [String: Any],
+                    let sourceKind = source["kind"] as? String
+                else { throw PortableChatPersistenceError.invalidJSON }
+                switch sourceKind {
+                case "proposal":
+                    try json.requireExactKeys(source, ["kind", "proposalId"])
+                case "evidencePublication":
+                    try json.requireExactKeys(
+                        source,
+                        ["kind", "responsePositionId"]
+                    )
+                default:
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+            default:
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            if actualKeys.contains("transcriptReadFailure") {
+                guard let summary = dictionary["transcriptReadFailure"]
+                    as? [String: Any]
+                else { throw PortableChatPersistenceError.invalidJSON }
+                try json.requireExactKeys(
+                    summary,
+                    ["sessions", "additionalSessionCount"]
+                )
+                guard let sessions = summary["sessions"] as? [[String: Any]] else {
+                    throw PortableChatPersistenceError.invalidJSON
+                }
+                for session in sessions {
+                    try json.requireExactKeys(
+                        session,
+                        ["sessionAttachmentId", "displayLabel"]
+                    )
+                }
+            }
         }
         return try mapPersistedDomainValidation {
-            let pending = PendingUserTurn(
-                id: try PendingUserTurnID(dto.pendingUserTurnId),
-                draftID: try ChatDraftID(dto.draftId),
-                draftVersion: dto.draftVersion,
-                responsePositionID: try ChatResponsePositionID(dto.responsePositionId)
-            )
+            let intent: CoachInvocationIntent
+            if dto.schemaVersion >= CoachInvocation.schemaVersion {
+                guard dto.pendingUserTurnId == nil,
+                      dto.draftId == nil,
+                      dto.draftVersion == nil,
+                      dto.responsePositionId == nil,
+                      let persistedIntent = dto.intent
+                else { throw PortableChatPersistenceError.invalidJSON }
+                intent = try persistedIntent.domainValue()
+            } else {
+                guard let pendingUserTurnId = dto.pendingUserTurnId,
+                      let draftId = dto.draftId,
+                      let draftVersion = dto.draftVersion,
+                      let responsePositionId = dto.responsePositionId,
+                      dto.intent == nil
+                else { throw PortableChatPersistenceError.invalidJSON }
+                intent = .answerPendingUserTurn(
+                    pendingUserTurnID: try PendingUserTurnID(pendingUserTurnId),
+                    draftID: try ChatDraftID(draftId),
+                    draftVersion: draftVersion,
+                    responsePositionID: try ChatResponsePositionID(
+                        responsePositionId
+                    )
+                )
+            }
             let preparedProfile: CoachProfileProvenance?
             if dto.schemaVersion == 1 {
                 guard dto.profileRevisionId == nil,
@@ -381,7 +567,12 @@ struct PortableInvocationEvidenceCodec {
                       dto.providerIdempotencyValue == nil,
                       let attemptDTOs = dto.attempts
                 else { throw PortableChatPersistenceError.invalidJSON }
-                attempts = try attemptDTOs.map { try $0.domainValue() }
+                attempts = try attemptDTOs.map {
+                    try $0.domainValue(
+                        usesSealedAuthority:
+                            dto.schemaVersion >= CoachInvocation.schemaVersion
+                    )
+                }
             } else {
                 guard let attemptID = dto.attemptId,
                       let idempotencyValue = dto.providerIdempotencyValue,
@@ -396,7 +587,8 @@ struct PortableInvocationEvidenceCodec {
             }
             let terminalFailure: PendingUserTurnFailure?
             if dto.terminalFailure == "coachTranscriptReadFailed" {
-                guard dto.schemaVersion == CoachInvocation.schemaVersion,
+                guard dto.schemaVersion >=
+                        CoachInvocation.transcriptReadFailureSchemaVersion,
                       let summary = try dto.transcriptReadFailure?.domainValue()
                 else { throw PortableChatPersistenceError.invalidJSON }
                 terminalFailure = .coachTranscriptReadFailed(summary)
@@ -417,7 +609,7 @@ struct PortableInvocationEvidenceCodec {
                 attempts: attempts,
                 library: LibraryScope(libraryID: try LibraryID(dto.libraryId)),
                 chatID: ChatID(dto.chatId),
-                pendingUserTurn: pending,
+                intent: intent,
                 preparedProfile: preparedProfile,
                 expectedManifestRevision: dto.expectedManifestRevision,
                 admittedAt: UTCInstant(dto.admittedAt),
@@ -437,55 +629,187 @@ struct PortableInvocationEvidenceCodec {
         }
         let published = mutation.replacement
         return InvocationPublicationProof(
+            persistedSchemaVersion: 3,
             invocationID: mutation.invocation.id,
             libraryID: mutation.invocation.libraryID,
             chatID: mutation.invocation.chatID,
-            pendingUserTurnID: mutation.invocation.pendingUserTurnID,
             responsePositionID: mutation.invocation.responsePositionID,
             publishedManifestRevision: published.chat.manifestRevision,
             publishedChatSHA256: Self.sha256(evidence.publishedChat),
             stableChatSHA256: Self.sha256(evidence.stableChat),
             memorySHA256: Self.sha256(evidence.memory),
-            pendingUserTurnSHA256: Self.sha256(evidence.pendingUserTurn),
             messageIDs: published.chat.messageIDs,
-            userMessageID: mutation.userMessage.id,
-            userMessageSHA256: Self.sha256(evidence.userMessage),
             coachMessageID: mutation.coachMessage.id,
             coachMessageSHA256: Self.sha256(evidence.coachMessage),
-            freshDraftID: mutation.freshDraft.draftID,
-            freshDraftVersion: mutation.freshDraft.version,
-            freshDraftSHA256: Self.sha256(evidence.freshDraft),
             proposalSHA256: evidence.proposal.map(Self.sha256),
             profileEvidencePublicationSHA256: evidence
-                .profileEvidencePublication.map(Self.sha256)
+                .profileEvidencePublication.map(Self.sha256),
+            intent: .answerPendingUserTurn(
+                pendingUserTurnID: mutation.invocation.pendingUserTurnID,
+                pendingUserTurnSHA256: Self.sha256(
+                    evidence.pendingUserTurn
+                ),
+                userMessageID: mutation.userMessage.id,
+                userMessageSHA256: Self.sha256(evidence.userMessage),
+                freshDraftID: mutation.freshDraft.draftID,
+                freshDraftVersion: mutation.freshDraft.version,
+                freshDraftSHA256: Self.sha256(evidence.freshDraft)
+            )
+        )
+    }
+
+    func makePublicationProof(
+        for mutation: PublishProfileReconsiderationInvocationMutation,
+        evidence: PortableProfileReconsiderationPublicationSourceEvidence
+    ) throws -> InvocationPublicationProof {
+        guard case let .reconsiderProfileChange(source, result) =
+            mutation.invocation.intent,
+              source == mutation.reconsideration.sourceEffectIdentity,
+              result == mutation.reconsideration.resultResponsePositionID,
+              mutation.base.profileReconsideration == mutation.reconsideration,
+              mutation.base.profileEffect?.identity == source,
+              mutation.replacement.profileReconsideration == nil,
+              mutation.replacement.profileEffect?.proposal ==
+                mutation.replacementProposal,
+              mutation.isWithdrawal ==
+                (mutation.replacementProposal == nil),
+              case let .reconsiderProfileChange(coachMessageID)? =
+                mutation.invocation.attempt.publicationAuthority,
+              evidence.coachMessage == nil || mutation.coachMessage != nil,
+              evidence.coachMessage != nil || mutation.coachMessage == nil,
+              evidence.replacementProposal == nil ||
+                mutation.replacementProposal != nil,
+              evidence.replacementProposal != nil ||
+                mutation.replacementProposal == nil
+        else { throw PortableChatPersistenceError.invalidLayout }
+        let (publishedRevision, overflow) = mutation.base.chat.manifestRevision
+            .addingReportingOverflow(1)
+        guard !overflow,
+              mutation.replacement.chat.manifestRevision == publishedRevision,
+              mutation.invocation.expectedManifestRevision ==
+                mutation.base.chat.manifestRevision
+        else { throw PortableChatPersistenceError.invalidLayout }
+        return InvocationPublicationProof(
+            persistedSchemaVersion: InvocationPublicationProof.schemaVersion,
+            invocationID: mutation.invocation.id,
+            libraryID: mutation.invocation.libraryID,
+            chatID: mutation.invocation.chatID,
+            responsePositionID: result,
+            publishedManifestRevision: publishedRevision,
+            publishedChatSHA256: Self.sha256(evidence.publishedChat),
+            stableChatSHA256: Self.sha256(evidence.stableChat),
+            memorySHA256: Self.sha256(evidence.publishedMemory),
+            messageIDs: mutation.replacement.chat.messageIDs,
+            coachMessageID: coachMessageID,
+            coachMessageSHA256: evidence.coachMessage.map(Self.sha256),
+            proposalSHA256: evidence.replacementProposal.map(Self.sha256),
+            profileEvidencePublicationSHA256: nil,
+            intent: .reconsiderProfileChange(
+                sourceEffectIdentity: source,
+                baseManifestRevision: mutation.base.chat.manifestRevision,
+                baseChatSHA256: Self.sha256(evidence.baseChat),
+                baseMemorySHA256: Self.sha256(evidence.baseMemory),
+                sourceEffectSHA256: Self.sha256(evidence.sourceEffect),
+                profileReconsiderationSHA256: Self.sha256(
+                    evidence.profileReconsideration
+                )
+            )
         )
     }
 
     func encodePublicationProof(_ proof: InvocationPublicationProof) throws -> Data {
-        try boundedDeterministicJSON(InvocationPublicationProofDTO(
-            schemaVersion: InvocationPublicationProof.schemaVersion,
-            invocationId: proof.invocationID.rawValue,
-            libraryId: proof.libraryID.rawValue,
-            chatId: proof.chatID.rawValue,
-            pendingUserTurnId: proof.pendingUserTurnID.rawValue,
-            responsePositionId: proof.responsePositionID.rawValue,
-            publishedManifestRevision: proof.publishedManifestRevision,
-            publishedChatSha256: proof.publishedChatSHA256,
-            stableChatSha256: proof.stableChatSHA256,
-            memorySha256: proof.memorySHA256,
-            pendingUserTurnSha256: proof.pendingUserTurnSHA256,
-            messageIds: proof.messageIDs.map(\.rawValue),
-            userMessageId: proof.userMessageID.rawValue,
-            userMessageSha256: proof.userMessageSHA256,
-            coachMessageId: proof.coachMessageID.rawValue,
-            coachMessageSha256: proof.coachMessageSHA256,
-            freshDraftId: proof.freshDraftID.rawValue,
-            freshDraftVersion: proof.freshDraftVersion,
-            freshDraftSha256: proof.freshDraftSHA256,
-            proposalSha256: proof.proposalSHA256,
-            profileEvidencePublicationSha256:
-                proof.profileEvidencePublicationSHA256
-        ))
+        let dto: InvocationPublicationProofDTO
+        switch proof.intent {
+        case let .answerPendingUserTurn(
+            pendingUserTurnID,
+            pendingUserTurnSHA256,
+            userMessageID,
+            userMessageSHA256,
+            freshDraftID,
+            freshDraftVersion,
+            freshDraftSHA256
+        ):
+            guard proof.persistedSchemaVersion == 3,
+                  let coachMessageSHA256 = proof.coachMessageSHA256
+            else { throw PortableChatPersistenceError.invalidLayout }
+            dto = InvocationPublicationProofDTO(
+                schemaVersion: 3,
+                kind: nil,
+                invocationId: proof.invocationID.rawValue,
+                libraryId: proof.libraryID.rawValue,
+                chatId: proof.chatID.rawValue,
+                responsePositionId: proof.responsePositionID.rawValue,
+                publishedManifestRevision: proof.publishedManifestRevision,
+                publishedChatSha256: proof.publishedChatSHA256,
+                stableChatSha256: proof.stableChatSHA256,
+                memorySha256: proof.memorySHA256,
+                messageIds: proof.messageIDs.map(\.rawValue),
+                coachMessageId: proof.coachMessageID.rawValue,
+                coachMessageSha256: coachMessageSHA256,
+                proposalSha256: proof.proposalSHA256,
+                profileEvidencePublicationSha256:
+                    proof.profileEvidencePublicationSHA256,
+                pendingUserTurnId: pendingUserTurnID.rawValue,
+                pendingUserTurnSha256: pendingUserTurnSHA256,
+                userMessageId: userMessageID.rawValue,
+                userMessageSha256: userMessageSHA256,
+                freshDraftId: freshDraftID.rawValue,
+                freshDraftVersion: freshDraftVersion,
+                freshDraftSha256: freshDraftSHA256,
+                sourceEffect: nil,
+                baseManifestRevision: nil,
+                baseChatSha256: nil,
+                baseMemorySha256: nil,
+                sourceEffectSha256: nil,
+                profileReconsiderationSha256: nil
+            )
+        case let .reconsiderProfileChange(
+            sourceEffectIdentity,
+            baseManifestRevision,
+            baseChatSHA256,
+            baseMemorySHA256,
+            sourceEffectSHA256,
+            profileReconsiderationSHA256
+        ):
+            guard proof.persistedSchemaVersion ==
+                InvocationPublicationProof.schemaVersion,
+                proof.profileEvidencePublicationSHA256 == nil
+            else { throw PortableChatPersistenceError.invalidLayout }
+            dto = InvocationPublicationProofDTO(
+                schemaVersion: InvocationPublicationProof.schemaVersion,
+                kind: "reconsiderProfileChange",
+                invocationId: proof.invocationID.rawValue,
+                libraryId: proof.libraryID.rawValue,
+                chatId: proof.chatID.rawValue,
+                responsePositionId: proof.responsePositionID.rawValue,
+                publishedManifestRevision: proof.publishedManifestRevision,
+                publishedChatSha256: proof.publishedChatSHA256,
+                stableChatSha256: proof.stableChatSHA256,
+                memorySha256: proof.memorySHA256,
+                messageIds: proof.messageIDs.map(\.rawValue),
+                coachMessageId: proof.coachMessageID.rawValue,
+                coachMessageSha256: proof.coachMessageSHA256,
+                proposalSha256: proof.proposalSHA256,
+                profileEvidencePublicationSha256: nil,
+                pendingUserTurnId: nil,
+                pendingUserTurnSha256: nil,
+                userMessageId: nil,
+                userMessageSha256: nil,
+                freshDraftId: nil,
+                freshDraftVersion: nil,
+                freshDraftSha256: nil,
+                sourceEffect: ChatProfileEffectIdentityDTO(
+                    sourceEffectIdentity
+                ),
+                baseManifestRevision: baseManifestRevision,
+                baseChatSha256: baseChatSHA256,
+                baseMemorySha256: baseMemorySHA256,
+                sourceEffectSha256: sourceEffectSHA256,
+                profileReconsiderationSha256:
+                    profileReconsiderationSHA256
+            )
+        }
+        return try boundedDeterministicJSON(dto)
     }
 
     func decodePublicationProof(_ data: Data) throws -> InvocationPublicationProof {
@@ -503,6 +827,17 @@ struct PortableInvocationEvidenceCodec {
         ]
         let v2Keys = v1Keys.union(["proposalSha256"])
         let v3Keys = v2Keys.union(["profileEvidencePublicationSha256"])
+        let v4RequiredKeys: Set<String> = [
+            "schemaVersion", "kind", "invocationId", "libraryId", "chatId",
+            "responsePositionId", "baseManifestRevision", "baseChatSha256",
+            "baseMemorySha256", "publishedManifestRevision",
+            "publishedChatSha256", "stableChatSha256", "memorySha256",
+            "messageIds", "coachMessageId", "sourceEffect",
+            "sourceEffectSha256", "profileReconsiderationSha256",
+        ]
+        let v4OptionalKeys: Set<String> = [
+            "coachMessageSha256", "proposalSha256",
+        ]
         let dto = try json.decode(InvocationPublicationProofDTO.self, from: data)
         guard (1 ... InvocationPublicationProof.schemaVersion).contains(
             dto.schemaVersion
@@ -527,7 +862,7 @@ struct PortableInvocationEvidenceCodec {
             {
                 throw PortableChatPersistenceError.invalidJSON
             }
-        case InvocationPublicationProof.schemaVersion:
+        case 3:
             let actual = Set(dictionary.keys)
             guard actual.isSubset(of: v3Keys), v1Keys.isSubset(of: actual),
                   dto.proposalSha256 == nil ||
@@ -538,44 +873,133 @@ struct PortableInvocationEvidenceCodec {
             ] where actual.contains(key) && dictionary[key] is NSNull {
                 throw PortableChatPersistenceError.invalidJSON
             }
+        case InvocationPublicationProof.schemaVersion:
+            let actual = Set(dictionary.keys)
+            guard v4RequiredKeys.isSubset(of: actual),
+                  actual.isSubset(of: v4RequiredKeys.union(v4OptionalKeys)),
+                  dto.kind == "reconsiderProfileChange",
+                  dto.pendingUserTurnId == nil,
+                  dto.pendingUserTurnSha256 == nil,
+                  dto.userMessageId == nil,
+                  dto.userMessageSha256 == nil,
+                  dto.freshDraftId == nil,
+                  dto.freshDraftVersion == nil,
+                  dto.freshDraftSha256 == nil,
+                  dto.profileEvidencePublicationSha256 == nil,
+                  let sourceEffectDictionary =
+                    dictionary["sourceEffect"] as? [String: Any]
+            else { throw PortableChatPersistenceError.unknownKey }
+            switch sourceEffectDictionary["kind"] as? String {
+            case "proposal":
+                try json.requireExactKeys(
+                    sourceEffectDictionary,
+                    ["kind", "proposalId"]
+                )
+            case "evidencePublication":
+                try json.requireExactKeys(
+                    sourceEffectDictionary,
+                    ["kind", "responsePositionId"]
+                )
+            default:
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            for key in v4OptionalKeys
+                where actual.contains(key) && dictionary[key] is NSNull
+            {
+                throw PortableChatPersistenceError.invalidJSON
+            }
         default:
             throw PortableChatPersistenceError.invalidSchemaVersion
         }
         guard Self.isSHA256(dto.publishedChatSha256),
               Self.isSHA256(dto.stableChatSha256),
               Self.isSHA256(dto.memorySha256),
-              Self.isSHA256(dto.pendingUserTurnSha256),
-              Self.isSHA256(dto.userMessageSha256),
-              Self.isSHA256(dto.coachMessageSha256),
-              Self.isSHA256(dto.freshDraftSha256),
+              dto.pendingUserTurnSha256.map(Self.isSHA256) ?? true,
+              dto.userMessageSha256.map(Self.isSHA256) ?? true,
+              dto.coachMessageSha256.map(Self.isSHA256) ?? true,
+              dto.freshDraftSha256.map(Self.isSHA256) ?? true,
+              dto.baseChatSha256.map(Self.isSHA256) ?? true,
+              dto.baseMemorySha256.map(Self.isSHA256) ?? true,
+              dto.sourceEffectSha256.map(Self.isSHA256) ?? true,
+              dto.profileReconsiderationSha256.map(Self.isSHA256) ?? true,
               dto.proposalSha256.map(Self.isSHA256) ?? true,
               dto.profileEvidencePublicationSha256.map(Self.isSHA256) ?? true,
               dto.messageIds.count <= maximumMessageCount
         else { throw PortableChatPersistenceError.invalidJSON }
         return try mapPersistedDomainValidation {
-            InvocationPublicationProof(
+            let intent: InvocationPublicationProofIntent
+            switch dto.schemaVersion {
+            case 1 ... 3:
+                guard dto.kind == nil,
+                      let pendingUserTurnID = dto.pendingUserTurnId,
+                      let pendingUserTurnSHA256 = dto.pendingUserTurnSha256,
+                      let userMessageID = dto.userMessageId,
+                      let userMessageSHA256 = dto.userMessageSha256,
+                      let freshDraftID = dto.freshDraftId,
+                      let freshDraftVersion = dto.freshDraftVersion,
+                      let freshDraftSHA256 = dto.freshDraftSha256,
+                      dto.sourceEffect == nil,
+                      dto.baseManifestRevision == nil,
+                      dto.baseChatSha256 == nil,
+                      dto.baseMemorySha256 == nil,
+                      dto.sourceEffectSha256 == nil,
+                      dto.profileReconsiderationSha256 == nil,
+                      dto.coachMessageSha256 != nil
+                else { throw PortableChatPersistenceError.invalidJSON }
+                intent = .answerPendingUserTurn(
+                    pendingUserTurnID: try PendingUserTurnID(
+                        pendingUserTurnID
+                    ),
+                    pendingUserTurnSHA256: pendingUserTurnSHA256,
+                    userMessageID: try ChatMessageID(userMessageID),
+                    userMessageSHA256: userMessageSHA256,
+                    freshDraftID: try ChatDraftID(freshDraftID),
+                    freshDraftVersion: freshDraftVersion,
+                    freshDraftSHA256: freshDraftSHA256
+                )
+            case InvocationPublicationProof.schemaVersion:
+                guard let sourceEffect = dto.sourceEffect,
+                      let baseManifestRevision = dto.baseManifestRevision,
+                      let baseChatSHA256 = dto.baseChatSha256,
+                      let baseMemorySHA256 = dto.baseMemorySha256,
+                      let sourceEffectSHA256 = dto.sourceEffectSha256,
+                      let profileReconsiderationSHA256 =
+                        dto.profileReconsiderationSha256
+                else { throw PortableChatPersistenceError.invalidJSON }
+                intent = .reconsiderProfileChange(
+                    sourceEffectIdentity: try sourceEffect.domainValue(),
+                    baseManifestRevision: baseManifestRevision,
+                    baseChatSHA256: baseChatSHA256,
+                    baseMemorySHA256: baseMemorySHA256,
+                    sourceEffectSHA256: sourceEffectSHA256,
+                    profileReconsiderationSHA256:
+                        profileReconsiderationSHA256
+                )
+            default:
+                throw PortableChatPersistenceError.invalidSchemaVersion
+            }
+            let proof = InvocationPublicationProof(
+                persistedSchemaVersion: dto.schemaVersion,
                 invocationID: try CoachInvocationID(dto.invocationId),
                 libraryID: try LibraryID(dto.libraryId),
                 chatID: try ChatID(dto.chatId),
-                pendingUserTurnID: try PendingUserTurnID(dto.pendingUserTurnId),
                 responsePositionID: try ChatResponsePositionID(dto.responsePositionId),
                 publishedManifestRevision: dto.publishedManifestRevision,
                 publishedChatSHA256: dto.publishedChatSha256,
                 stableChatSHA256: dto.stableChatSha256,
                 memorySHA256: dto.memorySha256,
-                pendingUserTurnSHA256: dto.pendingUserTurnSha256,
                 messageIDs: try dto.messageIds.map(ChatMessageID.init),
-                userMessageID: try ChatMessageID(dto.userMessageId),
-                userMessageSHA256: dto.userMessageSha256,
                 coachMessageID: try ChatMessageID(dto.coachMessageId),
                 coachMessageSHA256: dto.coachMessageSha256,
-                freshDraftID: try ChatDraftID(dto.freshDraftId),
-                freshDraftVersion: dto.freshDraftVersion,
-                freshDraftSHA256: dto.freshDraftSha256,
                 proposalSHA256: dto.proposalSha256,
                 profileEvidencePublicationSHA256:
-                    dto.profileEvidencePublicationSha256
+                    dto.profileEvidencePublicationSha256,
+                intent: intent
             )
+            guard proof.messageIDs.count == Set(proof.messageIDs).count else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            return proof
         }
     }
 
@@ -585,36 +1009,86 @@ struct PortableInvocationEvidenceCodec {
     ) -> Bool {
         let (publishedRevision, overflow) = invocation.expectedManifestRevision
             .addingReportingOverflow(1)
-        let hasVersionSpecificAuthority: Bool
-        switch invocation.persistedSchemaVersion {
-        case 2:
-            // The prior binary's v2 record did not persist Attempt publication
-            // authority. Its proof remains bound by the exact Chat, Pending,
-            // message hashes/order, fresh Draft, and Profile checks below.
-            hasVersionSpecificAuthority = invocation.preparedProfile != nil
-        case CoachInvocation.attemptSequenceSchemaVersion ... CoachInvocation.schemaVersion:
-            hasVersionSpecificAuthority = invocation.preparedProfile != nil &&
-                invocation.attempt.userMessageID == proof.userMessageID &&
-                invocation.attempt.coachMessageID == proof.coachMessageID &&
-                invocation.attempt.freshDraftID == proof.freshDraftID
-        default:
-            hasVersionSpecificAuthority = false
+        guard !overflow,
+              invocation.preparedProfile != nil,
+              proof.invocationID == invocation.id,
+              proof.libraryID == invocation.libraryID,
+              proof.chatID == invocation.chatID,
+              proof.responsePositionID == invocation.responsePositionID,
+              proof.publishedManifestRevision == publishedRevision
+        else { return false }
+        switch proof.intent {
+        case let .answerPendingUserTurn(
+            pendingUserTurnID,
+            _,
+            userMessageID,
+            _,
+            freshDraftID,
+            freshDraftVersion,
+            _
+        ):
+            guard case let .answerPendingUserTurn(
+                invocationPendingID,
+                _,
+                _,
+                _
+            ) = invocation.intent,
+                pendingUserTurnID == invocationPendingID,
+                proof.persistedSchemaVersion <= 3,
+                freshDraftVersion == 0,
+                userMessageID != proof.coachMessageID,
+                proof.coachMessageSHA256 != nil,
+                proof.messageIDs.count >= 2,
+                Array(proof.messageIDs.suffix(2)) == [
+                    userMessageID,
+                    proof.coachMessageID,
+                ]
+            else { return false }
+            switch invocation.persistedSchemaVersion {
+            case 2:
+                return true
+            case CoachInvocation.attemptSequenceSchemaVersion ...
+                CoachInvocation.schemaVersion:
+                guard case let .answerPendingUserTurn(
+                    attemptUserMessageID,
+                    attemptCoachMessageID,
+                    attemptFreshDraftID
+                ) = invocation.attempt.publicationAuthority
+                else { return false }
+                return attemptUserMessageID == userMessageID &&
+                    attemptCoachMessageID == proof.coachMessageID &&
+                    attemptFreshDraftID == freshDraftID
+            default:
+                return false
+            }
+
+        case let .reconsiderProfileChange(
+            sourceEffectIdentity,
+            baseManifestRevision,
+            _,
+            _,
+            _,
+            _
+        ):
+            guard proof.persistedSchemaVersion ==
+                    InvocationPublicationProof.schemaVersion,
+                  invocation.persistedSchemaVersion ==
+                    CoachInvocation.schemaVersion,
+                  baseManifestRevision == invocation.expectedManifestRevision,
+                  proof.profileEvidencePublicationSHA256 == nil,
+                  case let .reconsiderProfileChange(source, result) =
+                    invocation.intent,
+                  source == sourceEffectIdentity,
+                  result == proof.responsePositionID,
+                  case let .reconsiderProfileChange(coachMessageID)? =
+                    invocation.attempt.publicationAuthority,
+                  coachMessageID == proof.coachMessageID
+            else { return false }
+            if proof.coachMessageSHA256 != nil {
+                return proof.messageIDs.last == proof.coachMessageID
+            }
+            return !proof.messageIDs.contains(proof.coachMessageID)
         }
-        return !overflow &&
-            hasVersionSpecificAuthority &&
-            proof.invocationID == invocation.id &&
-            proof.libraryID == invocation.libraryID &&
-            proof.chatID == invocation.chatID &&
-            proof.pendingUserTurnID == invocation.pendingUserTurnID &&
-            proof.responsePositionID == invocation.responsePositionID &&
-            proof.publishedManifestRevision == publishedRevision &&
-            proof.freshDraftVersion == 0 &&
-            proof.userMessageID != proof.coachMessageID &&
-            proof.messageIDs.count >= 2 &&
-            Array(proof.messageIDs.suffix(2)) == [
-                proof.userMessageID,
-                proof.coachMessageID,
-            ]
     }
 
     func isExactPublishedInvocation(
@@ -625,18 +1099,28 @@ struct PortableInvocationEvidenceCodec {
         let current = evidence.aggregate.chat
         let user = evidence.userMessage
         let coach = evidence.coachMessage
-        guard self.proof(proof, isBoundTo: invocation),
+        guard case let .answerPendingUserTurn(
+            pendingUserTurnID,
+            pendingUserTurnSHA256,
+            userMessageID,
+            userMessageSHA256,
+            freshDraftID,
+            freshDraftVersion,
+            freshDraftSHA256
+        ) = proof.intent,
+              let coachMessageSHA256 = proof.coachMessageSHA256,
+              self.proof(proof, isBoundTo: invocation),
               current.id == proof.chatID,
               evidence.aggregate.pendingUserTurn == nil,
               current.manifestRevision >= proof.publishedManifestRevision,
               current.messageIDs == proof.messageIDs,
-              current.draft.draftID == proof.freshDraftID,
-              current.draft.version >= proof.freshDraftVersion,
+              current.draft.draftID == freshDraftID,
+              current.draft.version >= freshDraftVersion,
               Self.sha256(evidence.stableChat) == proof.stableChatSHA256,
               Self.sha256(evidence.memory) == proof.memorySHA256,
-              Self.sha256(evidence.userMessageData) == proof.userMessageSHA256,
-              Self.sha256(evidence.coachMessageData) == proof.coachMessageSHA256,
-              user.id == proof.userMessageID,
+              Self.sha256(evidence.userMessageData) == userMessageSHA256,
+              Self.sha256(evidence.coachMessageData) == coachMessageSHA256,
+              user.id == userMessageID,
               coach.id == proof.coachMessageID,
               user.responsePositionID == invocation.responsePositionID,
               coach.responsePositionID == invocation.responsePositionID,
@@ -669,15 +1153,15 @@ struct PortableInvocationEvidenceCodec {
         {
             return false
         }
-        if current.draft.version == proof.freshDraftVersion,
-           Self.sha256(evidence.freshDraft) != proof.freshDraftSHA256
+        if current.draft.version == freshDraftVersion,
+           Self.sha256(evidence.freshDraft) != freshDraftSHA256
         {
             return false
         }
         if let pendingData = evidence.pendingUserTurnData {
-            guard Self.sha256(pendingData) == proof.pendingUserTurnSHA256,
+            guard Self.sha256(pendingData) == pendingUserTurnSHA256,
                   let pending = evidence.pendingUserTurn,
-                  pending.id == invocation.pendingUserTurnID,
+                  pending.id == pendingUserTurnID,
                   pending.draftID == invocation.draftID,
                   pending.draftVersion == invocation.draftVersion,
                   pending.responsePositionID == invocation.responsePositionID,
@@ -689,6 +1173,159 @@ struct PortableInvocationEvidenceCodec {
             return false
         }
         return true
+    }
+
+    func isExactPublishedProfileReconsideration(
+        _ proof: InvocationPublicationProof,
+        invocation: CoachInvocation,
+        evidence: PortableProfileReconsiderationPublicationCurrentEvidence
+    ) -> Bool {
+        guard case .reconsiderProfileChange = proof.intent,
+              self.proof(proof, isBoundTo: invocation),
+              evidence.aggregate.chat.id == proof.chatID,
+              evidence.aggregate.chat.manifestRevision >=
+                proof.publishedManifestRevision,
+              evidence.aggregate.chat.messageIDs == proof.messageIDs,
+              evidence.aggregate.pendingUserTurn == nil,
+              evidence.aggregate.profileReconsideration == nil,
+              evidence.aggregate.profileEvidencePublication == nil,
+              (evidence.aggregate.profileProposal != nil) ==
+                (proof.proposalSHA256 != nil),
+              Self.sha256(evidence.stableChat) == proof.stableChatSHA256,
+              Self.sha256(evidence.memory) == proof.memorySHA256
+        else { return false }
+        if evidence.aggregate.chat.manifestRevision ==
+            proof.publishedManifestRevision,
+           Self.sha256(evidence.canonicalChat) != proof.publishedChatSHA256
+        {
+            return false
+        }
+        if let expectedMessageSHA256 = proof.coachMessageSHA256 {
+            guard let messageData = evidence.coachMessageData,
+                  let message = evidence.coachMessage,
+                  Self.sha256(messageData) == expectedMessageSHA256,
+                  message.id == proof.coachMessageID,
+                  message.responsePositionID == proof.responsePositionID,
+                  message.coachProfile == invocation.preparedProfile,
+                  case .coach = message.content
+            else { return false }
+        } else if evidence.coachMessageData != nil ||
+                    evidence.coachMessage != nil
+        {
+            return false
+        }
+        if let expectedProposalSHA256 = proof.proposalSHA256 {
+            guard let proposalData = evidence.replacementProposalData,
+                  Self.sha256(proposalData) == expectedProposalSHA256
+            else { return false }
+        } else if evidence.replacementProposalData != nil {
+            return false
+        }
+        return true
+    }
+
+    func isExactProfileReconsiderationPublicationBase(
+        _ proof: InvocationPublicationProof,
+        invocation: CoachInvocation,
+        aggregate: ChatAggregate,
+        canonicalChat: Data,
+        memory: Data,
+        sourceEffect: Data,
+        profileReconsideration: Data
+    ) -> Bool {
+        guard case let .reconsiderProfileChange(
+            sourceEffectIdentity,
+            baseManifestRevision,
+            baseChatSHA256,
+            baseMemorySHA256,
+            sourceEffectSHA256,
+            profileReconsiderationSHA256
+        ) = proof.intent,
+              self.proof(proof, isBoundTo: invocation),
+              aggregate.chat.id == proof.chatID,
+              aggregate.chat.manifestRevision == baseManifestRevision,
+              aggregate.profileEffect?.identity == sourceEffectIdentity,
+              aggregate.profileReconsideration?.sourceEffectIdentity ==
+                sourceEffectIdentity,
+              aggregate.profileReconsideration?.resultResponsePositionID ==
+                proof.responsePositionID,
+              aggregate.profileReconsideration?.failure == nil,
+              Self.sha256(canonicalChat) == baseChatSHA256,
+              Self.sha256(memory) == baseMemorySHA256,
+              Self.sha256(sourceEffect) == sourceEffectSHA256,
+              Self.sha256(profileReconsideration) ==
+                profileReconsiderationSHA256
+        else { return false }
+        return true
+    }
+
+    func proof(
+        _ proof: InvocationPublicationProof,
+        bindsReconsiderationSourceEffectData data: Data
+    ) -> Bool {
+        guard case let .reconsiderProfileChange(_, _, _, _, expected, _) =
+            proof.intent
+        else { return false }
+        return Self.sha256(data) == expected
+    }
+
+    func proof(
+        _ proof: InvocationPublicationProof,
+        bindsProfileReconsiderationData data: Data
+    ) -> Bool {
+        guard case let .reconsiderProfileChange(_, _, _, _, _, expected) =
+            proof.intent
+        else { return false }
+        return Self.sha256(data) == expected
+    }
+
+    func proof(
+        _ proof: InvocationPublicationProof,
+        bindsReconsiderationBaseChatData data: Data
+    ) -> Bool {
+        guard case let .reconsiderProfileChange(_, _, expected, _, _, _) =
+            proof.intent
+        else { return false }
+        return Self.sha256(data) == expected
+    }
+
+    func proof(
+        _ proof: InvocationPublicationProof,
+        bindsReconsiderationBaseMemoryData data: Data
+    ) -> Bool {
+        guard case let .reconsiderProfileChange(_, _, _, expected, _, _) =
+            proof.intent
+        else { return false }
+        return Self.sha256(data) == expected
+    }
+
+    func proof(
+        _ proof: InvocationPublicationProof,
+        bindsPublishedChatData data: Data
+    ) -> Bool {
+        Self.sha256(data) == proof.publishedChatSHA256
+    }
+
+    func proof(
+        _ proof: InvocationPublicationProof,
+        bindsStableChatData data: Data
+    ) -> Bool {
+        Self.sha256(data) == proof.stableChatSHA256
+    }
+
+    func proof(
+        _ proof: InvocationPublicationProof,
+        bindsPublishedMemoryData data: Data
+    ) -> Bool {
+        Self.sha256(data) == proof.memorySHA256
+    }
+
+    func proof(
+        _ proof: InvocationPublicationProof,
+        bindsCoachMessageData data: Data
+    ) -> Bool {
+        guard let expected = proof.coachMessageSHA256 else { return false }
+        return Self.sha256(data) == expected
     }
 
     func proof(
@@ -1353,10 +1990,11 @@ private struct CoachInvocationDTO: Codable {
     let attempts: [CoachProviderAttemptDTO]?
     let libraryId: String
     let chatId: String
-    let pendingUserTurnId: String
-    let draftId: String
-    let draftVersion: UInt64
-    let responsePositionId: String
+    let pendingUserTurnId: String?
+    let draftId: String?
+    let draftVersion: UInt64?
+    let responsePositionId: String?
+    let intent: CoachInvocationIntentDTO?
     let expectedManifestRevision: UInt64
     let profileRevisionId: String?
     let profileStatementGeneration: UInt64?
@@ -1376,58 +2014,265 @@ private struct CoachProviderAttemptDTO: Codable {
     let attemptId: String
     let ordinal: UInt8
     let kind: String
-    let userMessageId: String
-    let coachMessageId: String
-    let freshDraftId: String
+    let userMessageId: String?
+    let coachMessageId: String?
+    let freshDraftId: String?
+    let publicationAuthority: CoachProviderAttemptPublicationAuthorityDTO?
 
-    init(_ attempt: CoachProviderAttempt) {
+    init(
+        _ attempt: CoachProviderAttempt,
+        usesSealedAuthority: Bool
+    ) throws {
         guard let authority = attempt.publicationAuthority else {
-            preconditionFailure("current Coach Attempts require publication authority")
+            throw PortableChatPersistenceError.invalidLayout
         }
         attemptId = attempt.id.rawValue
         ordinal = attempt.ordinal
         kind = attempt.kind.rawValue
-        userMessageId = authority.userMessageID.rawValue
-        coachMessageId = authority.coachMessageID.rawValue
-        freshDraftId = authority.freshDraftID.rawValue
+        if usesSealedAuthority {
+            userMessageId = nil
+            coachMessageId = nil
+            freshDraftId = nil
+            publicationAuthority =
+                CoachProviderAttemptPublicationAuthorityDTO(authority)
+        } else {
+            guard case let .answerPendingUserTurn(
+                userMessageID,
+                coachMessageID,
+                freshDraftID
+            ) = authority else {
+                throw PortableChatPersistenceError.invalidLayout
+            }
+            userMessageId = userMessageID.rawValue
+            coachMessageId = coachMessageID.rawValue
+            freshDraftId = freshDraftID.rawValue
+            publicationAuthority = nil
+        }
     }
 
-    func domainValue() throws -> CoachProviderAttempt {
+    func domainValue(usesSealedAuthority: Bool) throws -> CoachProviderAttempt {
         guard let parsedKind = CoachProviderAttemptKind(rawValue: kind)
         else { throw PortableChatPersistenceError.invalidJSON }
-        return try CoachProviderAttempt(
-            durableID: CoachProviderAttemptID(attemptId),
-            ordinal: ordinal,
-            kind: parsedKind,
-            publicationAuthority: CoachProviderAttemptPublicationAuthority(
+        let authority: CoachProviderAttemptPublicationAuthority
+        if usesSealedAuthority {
+            guard userMessageId == nil,
+                  coachMessageId == nil,
+                  freshDraftId == nil,
+                  let publicationAuthority
+            else { throw PortableChatPersistenceError.invalidJSON }
+            authority = try publicationAuthority.domainValue()
+        } else {
+            guard let userMessageId,
+                  let coachMessageId,
+                  let freshDraftId,
+                  publicationAuthority == nil
+            else { throw PortableChatPersistenceError.invalidJSON }
+            authority = try CoachProviderAttemptPublicationAuthority(
                 userMessageID: ChatMessageID(userMessageId),
                 coachMessageID: ChatMessageID(coachMessageId),
                 freshDraftID: ChatDraftID(freshDraftId)
             )
+        }
+        return try CoachProviderAttempt(
+            durableID: CoachProviderAttemptID(attemptId),
+            ordinal: ordinal,
+            kind: parsedKind,
+            publicationAuthority: authority
         )
+    }
+}
+
+private struct CoachInvocationIntentDTO: Codable, Equatable {
+    let kind: String
+    let pendingUserTurnId: String?
+    let draftId: String?
+    let draftVersion: UInt64?
+    let responsePositionId: String?
+    let sourceEffectIdentity: ChatProfileEffectIdentityDTO?
+    let resultResponsePositionId: String?
+
+    init(_ intent: CoachInvocationIntent) throws {
+        switch intent {
+        case let .answerPendingUserTurn(
+            pendingUserTurnID,
+            draftID,
+            draftVersion,
+            responsePositionID
+        ):
+            kind = "answerPendingUserTurn"
+            pendingUserTurnId = pendingUserTurnID.rawValue
+            draftId = draftID.rawValue
+            self.draftVersion = draftVersion
+            responsePositionId = responsePositionID.rawValue
+            sourceEffectIdentity = nil
+            resultResponsePositionId = nil
+        case let .reconsiderProfileChange(
+            sourceEffectIdentity,
+            resultResponsePositionID
+        ):
+            kind = "reconsiderProfileChange"
+            pendingUserTurnId = nil
+            draftId = nil
+            draftVersion = nil
+            responsePositionId = nil
+            self.sourceEffectIdentity =
+                ChatProfileEffectIdentityDTO(sourceEffectIdentity)
+            resultResponsePositionId = resultResponsePositionID.rawValue
+        }
+    }
+
+    func domainValue() throws -> CoachInvocationIntent {
+        switch kind {
+        case "answerPendingUserTurn":
+            guard let pendingUserTurnId,
+                  let draftId,
+                  let draftVersion,
+                  let responsePositionId,
+                  sourceEffectIdentity == nil,
+                  resultResponsePositionId == nil
+            else { throw PortableChatPersistenceError.invalidJSON }
+            return .answerPendingUserTurn(
+                pendingUserTurnID: try PendingUserTurnID(pendingUserTurnId),
+                draftID: try ChatDraftID(draftId),
+                draftVersion: draftVersion,
+                responsePositionID: try ChatResponsePositionID(
+                    responsePositionId
+                )
+            )
+        case "reconsiderProfileChange":
+            guard pendingUserTurnId == nil,
+                  draftId == nil,
+                  draftVersion == nil,
+                  responsePositionId == nil,
+                  let sourceEffectIdentity,
+                  let resultResponsePositionId
+            else { throw PortableChatPersistenceError.invalidJSON }
+            return .reconsiderProfileChange(
+                sourceEffectIdentity: try sourceEffectIdentity.domainValue(),
+                resultResponsePositionID: try ChatResponsePositionID(
+                    resultResponsePositionId
+                )
+            )
+        default:
+            throw PortableChatPersistenceError.invalidJSON
+        }
+    }
+}
+
+private struct CoachProviderAttemptPublicationAuthorityDTO: Codable, Equatable {
+    let kind: String
+    let userMessageId: String?
+    let coachMessageId: String
+    let freshDraftId: String?
+
+    init(_ authority: CoachProviderAttemptPublicationAuthority) {
+        switch authority {
+        case let .answerPendingUserTurn(
+            userMessageID,
+            coachMessageID,
+            freshDraftID
+        ):
+            kind = "answerPendingUserTurn"
+            userMessageId = userMessageID.rawValue
+            coachMessageId = coachMessageID.rawValue
+            freshDraftId = freshDraftID.rawValue
+        case let .reconsiderProfileChange(coachMessageID):
+            kind = "reconsiderProfileChange"
+            userMessageId = nil
+            coachMessageId = coachMessageID.rawValue
+            freshDraftId = nil
+        }
+    }
+
+    func domainValue() throws -> CoachProviderAttemptPublicationAuthority {
+        switch kind {
+        case "answerPendingUserTurn":
+            guard let userMessageId, let freshDraftId else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            return try CoachProviderAttemptPublicationAuthority(
+                userMessageID: ChatMessageID(userMessageId),
+                coachMessageID: ChatMessageID(coachMessageId),
+                freshDraftID: ChatDraftID(freshDraftId)
+            )
+        case "reconsiderProfileChange":
+            guard userMessageId == nil, freshDraftId == nil else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            return .reconsiderProfileChange(
+                coachMessageID: try ChatMessageID(coachMessageId)
+            )
+        default:
+            throw PortableChatPersistenceError.invalidJSON
+        }
+    }
+}
+
+private struct ChatProfileEffectIdentityDTO: Codable, Equatable {
+    let kind: String
+    let proposalId: String?
+    let responsePositionId: String?
+
+    init(_ identity: ChatProfileEffectIdentity) {
+        switch identity {
+        case let .proposal(proposalID):
+            kind = "proposal"
+            proposalId = proposalID.rawValue
+            responsePositionId = nil
+        case let .evidencePublication(responsePositionID):
+            kind = "evidencePublication"
+            proposalId = nil
+            responsePositionId = responsePositionID.rawValue
+        }
+    }
+
+    func domainValue() throws -> ChatProfileEffectIdentity {
+        switch kind {
+        case "proposal":
+            guard let proposalId, responsePositionId == nil else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            return .proposal(try ProfileChangeProposalID(proposalId))
+        case "evidencePublication":
+            guard proposalId == nil, let responsePositionId else {
+                throw PortableChatPersistenceError.invalidJSON
+            }
+            return .evidencePublication(
+                try ChatResponsePositionID(responsePositionId)
+            )
+        default:
+            throw PortableChatPersistenceError.invalidJSON
+        }
     }
 }
 
 private struct InvocationPublicationProofDTO: Codable {
     let schemaVersion: UInt32
+    let kind: String?
     let invocationId: String
     let libraryId: String
     let chatId: String
-    let pendingUserTurnId: String
     let responsePositionId: String
     let publishedManifestRevision: UInt64
     let publishedChatSha256: String
     let stableChatSha256: String
     let memorySha256: String
-    let pendingUserTurnSha256: String
     let messageIds: [String]
-    let userMessageId: String
-    let userMessageSha256: String
     let coachMessageId: String
-    let coachMessageSha256: String
-    let freshDraftId: String
-    let freshDraftVersion: UInt64
-    let freshDraftSha256: String
+    let coachMessageSha256: String?
     let proposalSha256: String?
     let profileEvidencePublicationSha256: String?
+    let pendingUserTurnId: String?
+    let pendingUserTurnSha256: String?
+    let userMessageId: String?
+    let userMessageSha256: String?
+    let freshDraftId: String?
+    let freshDraftVersion: UInt64?
+    let freshDraftSha256: String?
+    let sourceEffect: ChatProfileEffectIdentityDTO?
+    let baseManifestRevision: UInt64?
+    let baseChatSha256: String?
+    let baseMemorySha256: String?
+    let sourceEffectSha256: String?
+    let profileReconsiderationSha256: String?
 }

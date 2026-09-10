@@ -3537,6 +3537,1268 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertEqual(invocationCount, 0)
     }
 
+    func testOpenAssessesExactProfileEffectBeforeExposingCurrentReviewActions()
+        async throws
+    {
+        let aggregate = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(aggregate.profileProposal)
+        let coordinator = RecordingProfileProposalCoordinator()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        let requests = await coordinator.assessmentRequests
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.library, Self.scope)
+        XCTAssertEqual(requests.first?.base, aggregate)
+        XCTAssertEqual(
+            requests.first?.sourceEffectIdentity,
+            .proposal(proposal.id)
+        )
+        let state = await feature.currentState
+        XCTAssertEqual(
+            state.profileEffectReview,
+            .current(.proposal(proposal.id))
+        )
+        XCTAssertFalse(
+            ChatInteractionPolicy.allowsProfileReconsideration(in: state)
+        )
+    }
+
+    func testStaleProfileEffectOffersReconsiderNotAcceptAndKeepsDiscard()
+        async throws
+    {
+        let aggregate = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(aggregate.profileProposal)
+        let basis = try ProfileReconsiderationBasis(
+            sourceEffect: .proposal(proposal),
+            baseProfile: ProfileSnapshot(nullAtStatementGeneration: 7),
+            latestProfile: ProfileSnapshot(nullAtStatementGeneration: 8)
+        )
+        let resolved = try Self.resolvingProfileProposal(in: aggregate)
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [.stale(aggregate, basis)],
+            discardOutcomes: [.committed(resolved)]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        let stale = await feature.currentState
+        XCTAssertEqual(stale.profileEffectReview, .stale(basis))
+        XCTAssertTrue(
+            ChatInteractionPolicy.allowsProfileReconsideration(in: stale)
+        )
+
+        await feature.send(.acceptProfileProposal(Self.context, proposal.id))
+        let acceptedCount = await coordinator.acceptMutations.count
+        XCTAssertEqual(acceptedCount, 0)
+
+        await feature.send(.discardProfileProposal(Self.context, proposal.id))
+        let discardedCount = await coordinator.discardMutations.count
+        XCTAssertEqual(discardedCount, 1)
+        let discarded = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: discarded), resolved)
+        XCTAssertNil(discarded.profileEffectReview)
+    }
+
+    func testReconsiderStaleProfileEffectPreparesExactIntentAndInstallsReviewedReplacement()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let completedAt = try UTCInstant("2026-09-09T12:10:00.000Z")
+        let replacement = try ProfileChangeProposal.reconsidered(
+            id: ProfileChangeProposalID(
+                "prp-20260909T121000000Z-1ABC"
+            ),
+            basis: basis,
+            responsePositionID: reconsideration.resultResponsePositionID,
+            changes: [
+                .add(
+                    statement: ProfileProposedStatement(
+                        statementID: ProfileStatementID(
+                            "stm-20260909T121000000Z-2DEF"
+                        ),
+                        statementKind: .goal,
+                        wording: "Lead with the main point before adding detail.",
+                        evidence: []
+                    )
+                ),
+            ],
+            createdAt: completedAt
+        )
+        let coachMessage = try ChatMessage(
+            id: ChatMessageID("msg-20260909T121000000Z-3GHJ"),
+            responsePositionID: reconsideration.resultResponsePositionID,
+            content: .coach(markdown: "I reconsidered that suggestion."),
+            coachProfile: basis.latestProfile.provenance,
+            createdAt: completedAt
+        )
+        let published = try processing.publishingReconsideration(
+            expected: reconsideration,
+            basis: basis,
+            preparedProfile: basis.latestProfile.provenance,
+            coachMessage: coachMessage,
+            outcome: .replacement(replacement),
+            at: completedAt
+        )
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: .published(published, try await Self.quote(for: source))
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, .proposal(proposal.id))
+        )
+
+        let requests = await gateway.newRequests
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.library, Self.scope)
+        XCTAssertEqual(requests.first?.observedAggregate, source)
+        XCTAssertEqual(requests.first?.basis, basis)
+        XCTAssertEqual(
+            requests.first?.reconsideration.sourceEffectIdentity,
+            .proposal(proposal.id)
+        )
+        XCTAssertEqual(
+            requests.first?.reconsideration.resultResponsePositionID,
+            reconsideration.resultResponsePositionID
+        )
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), published)
+        XCTAssertNil(Self.openAggregate(in: state)?.profileReconsideration)
+        XCTAssertEqual(
+            state.profileEffectReview,
+            .current(.proposal(replacement.id))
+        )
+        XCTAssertNil(state.activity)
+        XCTAssertNil(state.notice)
+    }
+
+    func testWithdrawnReconsiderationShowsOnlyExactTenSecondTransientNotice()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let completedAt = try UTCInstant("2026-09-09T12:20:00.000Z")
+        let withdrawn = try processing.publishingReconsideration(
+            expected: reconsideration,
+            basis: basis,
+            preparedProfile: basis.latestProfile.provenance,
+            coachMessage: nil,
+            outcome: .withdrawal,
+            at: completedAt
+        )
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: .withdrawn(withdrawn, try await Self.quote(for: source))
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+            ]
+        )
+        let noticeScheduler = ControlledChatTransientNoticeScheduler()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            transientNoticeScheduler: noticeScheduler,
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, .proposal(proposal.id))
+        )
+        await noticeScheduler.waitUntilScheduled()
+
+        let visible = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: visible), withdrawn)
+        XCTAssertNil(Self.openAggregate(in: visible)?.profileEffect)
+        XCTAssertNil(Self.openAggregate(in: visible)?.profileReconsideration)
+        XCTAssertNil(visible.profileEffectReview)
+        XCTAssertEqual(
+            visible.transientNotice,
+            .suggestionNoLongerRelevant
+        )
+        let durations = await noticeScheduler.requestedNanoseconds
+        XCTAssertEqual(durations, [10_000_000_000])
+
+        await noticeScheduler.resume()
+        while await feature.currentState.transientNotice != nil {
+            await Task.yield()
+        }
+        let cleared = await feature.currentState
+        XCTAssertNil(cleared.transientNotice)
+    }
+
+    func testWithdrawnReconsiderationNoticeExpiresAfterMissingNavigation()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let withdrawn = try processing.publishingReconsideration(
+            expected: reconsideration,
+            basis: basis,
+            preparedProfile: basis.latestProfile.provenance,
+            coachMessage: nil,
+            outcome: .withdrawal,
+            at: UTCInstant("2026-09-09T12:20:00.000Z")
+        )
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: .withdrawn(withdrawn, try await Self.quote(for: source))
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+            ]
+        )
+        let noticeScheduler = ControlledChatTransientNoticeScheduler()
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            transientNoticeScheduler: noticeScheduler,
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, .proposal(proposal.id))
+        )
+        await noticeScheduler.waitUntilScheduled()
+
+        let missingID = try ChatID("cht-20260909T122100000Z-1ABC")
+        await feature.send(.open(Self.context, missingID))
+        let navigating = await feature.currentState
+        XCTAssertEqual(
+            navigating.transientNotice,
+            .suggestionNoLongerRelevant
+        )
+
+        await noticeScheduler.resume()
+        for _ in 0 ..< 1_000 {
+            if await feature.currentState.transientNotice == nil { break }
+            await Task.yield()
+        }
+        let cleared = await feature.currentState
+        XCTAssertNil(cleared.transientNotice)
+        XCTAssertEqual(cleared.selection, .none)
+        XCTAssertEqual(cleared.notice, .chatMissing)
+    }
+
+    func testProviderFailureRetainsExactReconsiderationAsRetryable()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let failed = try Self.replacingProfileReconsideration(
+            in: processing,
+            with: reconsideration.replacingFailure(.coachProviderError)
+        )
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: .interrupted(failed, .providerFailed)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+                .stale(failed, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, .proposal(proposal.id))
+        )
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), failed)
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.profileEffect,
+            source.profileEffect
+        )
+        let retained = try XCTUnwrap(
+            Self.openAggregate(in: state)?.profileReconsideration
+        )
+        XCTAssertEqual(retained, failed.profileReconsideration)
+        XCTAssertTrue(state.isProfileReconsiderationRetryableFailure(retained))
+        XCTAssertEqual(state.profileEffectReview, .stale(basis))
+        XCTAssertNil(state.activity)
+    }
+
+    func testFailureFreeOperationalInterruptionRetriesOnlyItsExactLiveRequest()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let sourceIdentity = ChatProfileEffectIdentity.proposal(proposal.id)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let request = ProfileReconsiderationInvocationRequest(
+            library: Self.scope,
+            chatID: source.chat.id,
+            sourceEffectIdentity: sourceIdentity,
+            resultResponsePositionID: reconsideration.resultResponsePositionID
+        )
+        let completedAt = try UTCInstant("2026-09-09T12:25:00.000Z")
+        let withdrawn = try processing.publishingReconsideration(
+            expected: reconsideration,
+            basis: basis,
+            preparedProfile: basis.latestProfile.provenance,
+            coachMessage: nil,
+            outcome: .withdrawal,
+            at: completedAt
+        )
+        let quote = try await Self.quote(for: source)
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: .operationallyInterrupted(
+                processing,
+                request,
+                .persistenceUnavailable
+            ),
+            operationalOutcome: .withdrawn(withdrawn, quote)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+                .stale(processing, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, sourceIdentity)
+        )
+
+        let interrupted = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: interrupted), processing)
+        XCTAssertEqual(
+            interrupted.operationallyInterruptedProfileReconsideration,
+            request
+        )
+        XCTAssertTrue(
+            interrupted.isProfileReconsiderationRetryableFailure(
+                reconsideration
+            )
+        )
+
+        await feature.send(
+            .retryProfileReconsideration(Self.context, sourceIdentity)
+        )
+
+        let operationalRequests = await gateway.operationalRequests
+        XCTAssertEqual(operationalRequests, [request])
+        let newRequests = await gateway.newRequests
+        XCTAssertEqual(newRequests.count, 1)
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), withdrawn)
+        XCTAssertNil(
+            state.operationallyInterruptedProfileReconsideration
+        )
+        XCTAssertNil(Self.openAggregate(in: state)?.profileReconsideration)
+        XCTAssertNil(state.activity)
+    }
+
+    func testOperationalReconsiderationRetrySurvivesNavigationAwayAndBack()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let other = try Self.aggregate(
+            chat: "cht-20260909T122600000Z-1ABC",
+            draft: "drf-20260909T122600000Z-2DEF",
+            memory: "mem-20260909T122600000Z-3GHJ",
+            title: "Other Chat"
+        )
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let sourceIdentity = ChatProfileEffectIdentity.proposal(proposal.id)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let request = ProfileReconsiderationInvocationRequest(
+            library: Self.scope,
+            chatID: source.chat.id,
+            sourceEffectIdentity: sourceIdentity,
+            resultResponsePositionID: reconsideration.resultResponsePositionID
+        )
+        let withdrawn = try processing.publishingReconsideration(
+            expected: reconsideration,
+            basis: basis,
+            preparedProfile: basis.latestProfile.provenance,
+            coachMessage: nil,
+            outcome: .withdrawal,
+            at: UTCInstant("2026-09-09T12:27:00.000Z")
+        )
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: .operationallyInterrupted(
+                processing,
+                request,
+                .persistenceUnavailable
+            ),
+            operationalOutcome: .withdrawn(
+                withdrawn,
+                try await Self.quote(for: source)
+            )
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+                .stale(processing, basis),
+                .stale(processing, basis),
+            ]
+        )
+        let store = RecordingChatStore(
+            catalog: [.available(source), .available(other)],
+            loadOutcomes: [
+                .loaded(source),
+                .loaded(other),
+                .loaded(processing),
+            ]
+        )
+        let feature = makeFeature(
+            store: store,
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, sourceIdentity)
+        )
+
+        await feature.send(.open(Self.context, other.chat.id))
+        let otherState = await feature.currentState
+        XCTAssertNil(
+            otherState.operationallyInterruptedProfileReconsideration
+        )
+        await feature.send(.open(Self.context, source.chat.id))
+
+        let restored = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: restored), processing)
+        XCTAssertEqual(
+            restored.operationallyInterruptedProfileReconsideration,
+            request
+        )
+        XCTAssertTrue(
+            restored.isProfileReconsiderationRetryableFailure(reconsideration)
+        )
+
+        await feature.send(
+            .retryProfileReconsideration(Self.context, sourceIdentity)
+        )
+
+        let operationalRequests = await gateway.operationalRequests
+        let newRequests = await gateway.newRequests
+        let completed = await feature.currentState
+        XCTAssertEqual(operationalRequests, [request])
+        XCTAssertEqual(newRequests.count, 1)
+        XCTAssertEqual(
+            Self.openAggregate(in: completed),
+            withdrawn
+        )
+    }
+
+    func testMultipleOperationalReconsiderationRetriesRestoreByExactChat()
+        async throws
+    {
+        let sourceA = try Self.aggregateWithProfileProposal()
+        let sourceB = try Self.aggregateWithProfileProposal(
+            chat: "cht-20260909T122800000Z-1ABC",
+            draft: "drf-20260909T122800000Z-2DEF",
+            memory: "mem-20260909T122800000Z-3GHJ"
+        )
+        let basisA = try Self.staleReconsiderationBasis(for: sourceA)
+        let basisB = try Self.staleReconsiderationBasis(for: sourceB)
+        let processingA = try Self.installingProfileReconsideration(in: sourceA)
+        let processingB = try Self.installingProfileReconsideration(in: sourceB)
+        let sidecarA = try XCTUnwrap(processingA.profileReconsideration)
+        let sidecarB = try XCTUnwrap(processingB.profileReconsideration)
+        let identityA = try XCTUnwrap(sourceA.profileEffect?.identity)
+        let identityB = try XCTUnwrap(sourceB.profileEffect?.identity)
+        let requestA = ProfileReconsiderationInvocationRequest(
+            library: Self.scope,
+            chatID: sourceA.chat.id,
+            sourceEffectIdentity: identityA,
+            resultResponsePositionID: sidecarA.resultResponsePositionID
+        )
+        let requestB = ProfileReconsiderationInvocationRequest(
+            library: Self.scope,
+            chatID: sourceB.chat.id,
+            sourceEffectIdentity: identityB,
+            resultResponsePositionID: sidecarB.resultResponsePositionID
+        )
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcomes: [
+                .operationallyInterrupted(
+                    processingA,
+                    requestA,
+                    .persistenceUnavailable
+                ),
+                .operationallyInterrupted(
+                    processingB,
+                    requestB,
+                    .persistenceUnavailable
+                ),
+            ]
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(sourceA, basisA),
+                .stale(sourceA, basisA),
+                .stale(sourceB, basisB),
+                .stale(sourceB, basisB),
+                .stale(processingA, basisA),
+                .stale(processingB, basisB),
+            ]
+        )
+        let store = RecordingChatStore(
+            catalog: [.available(sourceA), .available(sourceB)],
+            loadOutcomes: [
+                .loaded(sourceA),
+                .loaded(sourceB),
+                .loaded(processingA),
+                .loaded(processingB),
+            ]
+        )
+        let feature = makeFeature(
+            store: store,
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, sourceA.chat.id))
+        await feature.send(.reconsiderProfileEffect(Self.context, identityA))
+        await feature.send(.open(Self.context, sourceB.chat.id))
+        await feature.send(.reconsiderProfileEffect(Self.context, identityB))
+
+        await feature.send(.open(Self.context, sourceA.chat.id))
+        let restoredA = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: restoredA), processingA)
+        XCTAssertEqual(
+            restoredA.operationallyInterruptedProfileReconsideration,
+            requestA
+        )
+
+        await feature.send(.open(Self.context, sourceB.chat.id))
+        let restoredB = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: restoredB), processingB)
+        XCTAssertEqual(
+            restoredB.operationallyInterruptedProfileReconsideration,
+            requestB
+        )
+    }
+
+    func testBlockedOperationalReconsiderationRetryRetainsItsExactLiveRequest()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let sourceIdentity = ChatProfileEffectIdentity.proposal(proposal.id)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let request = ProfileReconsiderationInvocationRequest(
+            library: Self.scope,
+            chatID: source.chat.id,
+            sourceEffectIdentity: sourceIdentity,
+            resultResponsePositionID: reconsideration.resultResponsePositionID
+        )
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: .operationallyInterrupted(
+                processing,
+                request,
+                .persistenceUnavailable
+            ),
+            operationalOutcome: .rejected(nil, .activeInvocation)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+                .stale(processing, basis),
+                .stale(processing, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, sourceIdentity)
+        )
+
+        await feature.send(
+            .retryProfileReconsideration(Self.context, sourceIdentity)
+        )
+
+        let operationalRequests = await gateway.operationalRequests
+        XCTAssertEqual(operationalRequests, [request])
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), processing)
+        XCTAssertEqual(
+            state.operationallyInterruptedProfileReconsideration,
+            request
+        )
+        XCTAssertTrue(
+            state.isProfileReconsiderationRetryableFailure(reconsideration)
+        )
+        XCTAssertEqual(state.notice, .coachBusy)
+        XCTAssertNil(state.activity)
+    }
+
+    func testOperationalReconsiderationRetryKeepsNewerRenameOverOldFallback()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let sourceIdentity = ChatProfileEffectIdentity.proposal(proposal.id)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let request = ProfileReconsiderationInvocationRequest(
+            library: Self.scope,
+            chatID: source.chat.id,
+            sourceEffectIdentity: sourceIdentity,
+            resultResponsePositionID: reconsideration.resultResponsePositionID
+        )
+        let renamedExpected = try RenameChatMutation(
+            library: Self.scope,
+            base: processing,
+            title: ChatTitle("Renamed during Reconsider Retry"),
+            updatedAt: await FixedChatClock().now()
+        ).replacement
+        let oldFallback = ProfileReconsiderationInvocationTryOutcome
+            .operationallyInterrupted(
+                processing,
+                request,
+                .persistenceUnavailable
+            )
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: oldFallback,
+            operationalOutcome: oldFallback
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+                .stale(renamedExpected, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, sourceIdentity)
+        )
+
+        await feature.send(
+            .rename(
+                Self.context,
+                source.chat.id,
+                title: "Renamed during Reconsider Retry",
+                expectedRevision: processing.chat.manifestRevision
+            )
+        )
+        let renamedState = await feature.currentState
+        let renamed = try XCTUnwrap(Self.openAggregate(in: renamedState))
+        XCTAssertGreaterThan(
+            renamed.chat.manifestRevision,
+            processing.chat.manifestRevision
+        )
+
+        await feature.send(
+            .retryProfileReconsideration(Self.context, sourceIdentity)
+        )
+
+        let state = await feature.currentState
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.chat.title,
+            try ChatTitle("Renamed during Reconsider Retry")
+        )
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.chat.manifestRevision,
+            renamed.chat.manifestRevision
+        )
+        XCTAssertEqual(
+            state.operationallyInterruptedProfileReconsideration,
+            request
+        )
+    }
+
+    func testVanishedOperationalRetryAuthorityReloadsDurableChatState()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let sourceIdentity = ChatProfileEffectIdentity.proposal(proposal.id)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let request = ProfileReconsiderationInvocationRequest(
+            library: Self.scope,
+            chatID: source.chat.id,
+            sourceEffectIdentity: sourceIdentity,
+            resultResponsePositionID: reconsideration.resultResponsePositionID
+        )
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: .operationallyInterrupted(
+                processing,
+                request,
+                .persistenceUnavailable
+            ),
+            operationalOutcome: .rejected(nil, .eligibilityChanged)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+                .stale(processing, basis),
+                .stale(processing, basis),
+                .stale(source, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, sourceIdentity)
+        )
+
+        await feature.send(
+            .retryProfileReconsideration(Self.context, sourceIdentity)
+        )
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), source)
+        XCTAssertNil(
+            state.operationallyInterruptedProfileReconsideration
+        )
+        XCTAssertNil(Self.openAggregate(in: state)?.profileReconsideration)
+        XCTAssertEqual(state.profileEffectReview, .stale(basis))
+        XCTAssertNil(state.activity)
+    }
+
+    func testRevokedOperationalRetryIsNotRestoredByExactLookingSidecar()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let sourceIdentity = ChatProfileEffectIdentity.proposal(proposal.id)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let request = ProfileReconsiderationInvocationRequest(
+            library: Self.scope,
+            chatID: source.chat.id,
+            sourceEffectIdentity: sourceIdentity,
+            resultResponsePositionID: reconsideration.resultResponsePositionID
+        )
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: .operationallyInterrupted(
+                processing,
+                request,
+                .persistenceUnavailable
+            ),
+            operationalOutcome: .rejected(nil, .eligibilityChanged)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+                .stale(processing, basis),
+                .stale(processing, basis),
+                .stale(processing, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(
+                catalog: [.available(source)],
+                loadOutcomes: [.loaded(source), .loaded(processing)]
+            ),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, sourceIdentity)
+        )
+        await feature.send(
+            .retryProfileReconsideration(Self.context, sourceIdentity)
+        )
+
+        let reloaded = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: reloaded), processing)
+        XCTAssertNil(
+            reloaded.operationallyInterruptedProfileReconsideration
+        )
+        XCTAssertFalse(
+            reloaded.isProfileReconsiderationRetryableFailure(reconsideration)
+        )
+
+        await feature.send(
+            .retryProfileReconsideration(Self.context, sourceIdentity)
+        )
+        let operationalRequests = await gateway.operationalRequests
+        XCTAssertEqual(operationalRequests, [request])
+    }
+
+    func testDiscardFailedReconsiderationRestoresStaleReconsiderAndDiscardState()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let reconsideration = try XCTUnwrap(processing.profileReconsideration)
+        let failed = try Self.replacingProfileReconsideration(
+            in: processing,
+            with: reconsideration.replacingFailure(.coachResponseInvalid)
+        )
+        let discardedAt = await FixedChatClock().now()
+        let restored = try failed.discardingReconsiderationFailure(
+            expected: try XCTUnwrap(failed.profileReconsideration),
+            at: discardedAt
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(failed, basis),
+                .stale(restored, basis),
+            ],
+            reconsiderationDiscardOutcomes: [.committed(restored)]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failed)]),
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, failed.chat.id))
+
+        await feature.send(
+            .discardProfileReconsiderationFailure(
+                Self.context,
+                .proposal(proposal.id)
+            )
+        )
+
+        let mutations = await coordinator.reconsiderationDiscardMutations
+        XCTAssertEqual(mutations.count, 1)
+        XCTAssertEqual(mutations.first?.library, Self.scope)
+        XCTAssertEqual(mutations.first?.base, failed)
+        XCTAssertEqual(
+            mutations.first?.sourceEffectIdentity,
+            .proposal(proposal.id)
+        )
+        XCTAssertEqual(mutations.first?.discardedAt, discardedAt)
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), restored)
+        XCTAssertNil(Self.openAggregate(in: state)?.profileReconsideration)
+        XCTAssertEqual(state.profileEffectReview, .stale(basis))
+        XCTAssertTrue(
+            ChatInteractionPolicy.allowsProfileReconsideration(in: state)
+        )
+        XCTAssertNil(state.activity)
+        XCTAssertNil(state.notice)
+    }
+
+    func testReconsiderStopRoutesOnlyTheExactObservedAttemptAuthority()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let interrupted = try Self.replacingProfileReconsideration(
+            in: processing,
+            with: try XCTUnwrap(processing.profileReconsideration)
+                .replacingFailure(.coachResponseInterrupted)
+        )
+        let gateway = StoppableProfileReconsiderationInvocationGateway(
+            interrupted: interrupted
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+                .stale(interrupted, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+
+        async let reconsider: Void = feature.send(
+            .reconsiderProfileEffect(Self.context, .proposal(proposal.id))
+        )
+        let authority = await gateway.waitUntilInvocationIsSuspended()
+        let wrongAuthority = ProfileReconsiderationInvocationStopAuthority(
+            testingRequest: StopProfileReconsiderationInvocationRequest(
+                library: authority.library,
+                chatID: authority.chatID,
+                sourceEffectIdentity: authority.sourceEffectIdentity,
+                resultResponsePositionID: authority.resultResponsePositionID
+            ),
+            invocationID: authority.invocationID,
+            attemptID: authority.attemptID,
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000411"
+            )!
+        )
+
+        await feature.send(
+            .stopProfileReconsideration(Self.context, wrongAuthority)
+        )
+        let callsAfterWrongAuthority = await gateway.stopCalls
+        XCTAssertEqual(callsAfterWrongAuthority.count, 0)
+
+        await feature.send(
+            .stopProfileReconsideration(Self.context, authority)
+        )
+        await reconsider
+
+        let calls = await gateway.stopCalls
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.authority, authority)
+        XCTAssertEqual(
+            calls.first?.request,
+            StopProfileReconsiderationInvocationRequest(
+                library: authority.library,
+                chatID: authority.chatID,
+                sourceEffectIdentity: authority.sourceEffectIdentity,
+                resultResponsePositionID: authority.resultResponsePositionID
+            )
+        )
+        let state = await feature.currentState
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.profileReconsideration?.failure,
+            .coachResponseInterrupted
+        )
+        XCTAssertNil(state.profileReconsiderationStopAuthority)
+        XCTAssertNil(state.activity)
+    }
+
+    func testReconsiderStopInstallsAuthoritativeSourceRemovalWithoutOperationalRetry()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let current = try ChatAggregate(
+            chat: try processing.chat.renamed(
+                to: ChatTitle("Source Removed"),
+                at: await FixedChatClock().now()
+            ),
+            memory: processing.memory,
+            messages: processing.messages
+        )
+        let gateway = StoppableProfileReconsiderationInvocationGateway(
+            stopOutcome: .persistenceUnavailable(current)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+
+        async let reconsider: Void = feature.send(
+            .reconsiderProfileEffect(Self.context, .proposal(proposal.id))
+        )
+        let authority = await gateway.waitUntilInvocationIsSuspended()
+        await feature.send(
+            .stopProfileReconsideration(Self.context, authority)
+        )
+        await reconsider
+
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), current)
+        XCTAssertNil(state.operationallyInterruptedProfileReconsideration)
+        XCTAssertNil(state.profileEffectReview)
+        XCTAssertNil(state.profileReconsiderationStopAuthority)
+        XCTAssertNil(state.activity)
+        XCTAssertEqual(state.notice, .profileReconsiderationUnavailable)
+    }
+
+    func testFailedProposalReconsiderationBlocksDirectSourceDiscardCommand()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let processing = try Self.installingProfileReconsideration(in: source)
+        let failed = try Self.replacingProfileReconsideration(
+            in: processing,
+            with: try XCTUnwrap(processing.profileReconsideration)
+                .replacingFailure(.coachResponseInvalid)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [.stale(failed, basis)]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failed)]),
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, failed.chat.id))
+
+        await feature.send(
+            .discardProfileProposal(Self.context, proposal.id)
+        )
+
+        let discarded = await coordinator.discardMutations
+        let state = await feature.currentState
+        XCTAssertEqual(discarded, [])
+        XCTAssertEqual(Self.openAggregate(in: state), failed)
+    }
+
+    func testFailedEvidenceReconsiderationBlocksDirectSourceDiscardCommand()
+        async throws
+    {
+        let empty = try Self.aggregate(
+            draftText: "Keep this evidence while reconsidering.",
+            attachments: ChatAttachments(validating: [Self.attachment()])
+        )
+        let source = try Self.aggregateWithProfileEvidencePublication(from: empty)
+        let publication = try XCTUnwrap(source.profileEvidencePublication)
+        let append = try XCTUnwrap(publication.evidenceAppends.first)
+        let target = try ProfileStatement(
+            statementID: append.target.statementID,
+            statementKind: append.target.statementKind,
+            wording: append.target.wording,
+            supportingSessionCount: 0,
+            evidence: []
+        )
+        let base = try ProfileRevision(
+            revisionID: ProfileRevisionID(
+                "prf-20260909T123000000Z-1ABC"
+            ),
+            parentRevisionID: nil,
+            generation: 7,
+            statementGeneration: 7,
+            createdAt: source.chat.updatedAt,
+            statements: [target]
+        )
+        let basis = try ProfileReconsiderationBasis(
+            sourceEffect: .evidencePublication(publication),
+            baseProfile: ProfileSnapshot(revision: base),
+            latestProfile: ProfileSnapshot(nullAtStatementGeneration: 8)
+        )
+        let processing = try Self.installingProfileReconsideration(
+            in: source,
+            resultResponsePosition: "rsp-20260909T123100000Z-2DEF"
+        )
+        let failed = try Self.replacingProfileReconsideration(
+            in: processing,
+            with: try XCTUnwrap(processing.profileReconsideration)
+                .replacingFailure(.coachResponseInterrupted)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [.stale(failed, basis)]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(failed)]),
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, failed.chat.id))
+
+        await feature.send(
+            .discardProfileEvidencePublication(
+                Self.context,
+                publication.responsePositionID
+            )
+        )
+
+        let discarded = await coordinator.evidenceDiscardMutations
+        let state = await feature.currentState
+        XCTAssertEqual(discarded, [])
+        XCTAssertEqual(Self.openAggregate(in: state), failed)
+    }
+
+    func testReconsiderAdmissionRejectionLeavesExactSourceEffectUnchanged()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            preparation: .activeInvocation,
+            outcome: .rejected(nil, .activeInvocation)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+
+        await feature.send(
+            .reconsiderProfileEffect(Self.context, .proposal(proposal.id))
+        )
+
+        let newRequests = await gateway.newRequests
+        let invokedPrepared = await gateway.invokedPrepared
+        XCTAssertEqual(newRequests.count, 1)
+        XCTAssertEqual(invokedPrepared.count, 0)
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), source)
+        XCTAssertEqual(Self.openAggregate(in: state)?.profileEffect, source.profileEffect)
+        XCTAssertNil(Self.openAggregate(in: state)?.profileReconsideration)
+        XCTAssertEqual(state.profileEffectReview, .stale(basis))
+        XCTAssertEqual(state.notice, .coachBusy)
+        XCTAssertNil(state.activity)
+    }
+
+    func testPreparedReconsiderRaceRejectionRestoresSourceWithoutSidecar()
+        async throws
+    {
+        let source = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(source.profileProposal)
+        let basis = try Self.staleReconsiderationBasis(for: source)
+        let gateway = RecordingProfileReconsiderationInvocationGateway(
+            outcome: .rejected(nil, .activeInvocation)
+        )
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [
+                .stale(source, basis),
+                .stale(source, basis),
+                .stale(source, basis),
+            ]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(source)]),
+            invocations: gateway,
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, source.chat.id))
+
+        await feature.send(
+            .reconsiderProfileEffect(
+                Self.context,
+                .proposal(proposal.id)
+            )
+        )
+
+        let newRequestCount = await gateway.newRequests.count
+        let invokedPreparedCount = await gateway.invokedPrepared.count
+        XCTAssertEqual(newRequestCount, 1)
+        XCTAssertEqual(invokedPreparedCount, 1)
+        let state = await feature.currentState
+        XCTAssertEqual(Self.openAggregate(in: state), source)
+        XCTAssertNil(Self.openAggregate(in: state)?.profileReconsideration)
+        XCTAssertEqual(state.profileEffectReview, .stale(basis))
+        XCTAssertEqual(state.notice, .coachBusy)
+        XCTAssertNil(state.activity)
+    }
+
+    func testFailedProfileEffectAssessmentFailsClosedWithoutResolutionActions()
+        async throws
+    {
+        let aggregate = try Self.aggregateWithProfileProposal()
+        let proposal = try XCTUnwrap(aggregate.profileProposal)
+        let coordinator = RecordingProfileProposalCoordinator(
+            assessmentOutcomes: [.failed]
+        )
+        let feature = makeFeature(
+            store: RecordingChatStore(catalog: [.available(aggregate)]),
+            profileProposals: coordinator
+        )
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, aggregate.chat.id))
+
+        let state = await feature.currentState
+        XCTAssertEqual(
+            state.profileEffectReview,
+            .unavailable(.proposal(proposal.id))
+        )
+        XCTAssertEqual(state.notice, .profileEffectAssessmentFailed)
+
+        await feature.send(.acceptProfileProposal(Self.context, proposal.id))
+        await feature.send(.discardProfileProposal(Self.context, proposal.id))
+        let acceptedCount = await coordinator.acceptMutations.count
+        let discardedCount = await coordinator.discardMutations.count
+        XCTAssertEqual(acceptedCount, 0)
+        XCTAssertEqual(discardedCount, 0)
+    }
+
     func testPublishedPureEvidenceFailureKeepsExactOperationAndBlocksAnotherSend()
         async throws
     {
@@ -3936,6 +5198,8 @@ final class ChatFeatureTests: XCTestCase {
         memoryIDGenerator: any CoachMemoryIDGenerator = FixedChatIDs(),
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator = FixedChatIDs(),
         autosaveScheduler: any ChatAutosaveScheduling = ImmediateChatAutosaveScheduler(),
+        transientNoticeScheduler: any ChatTransientNoticeScheduling =
+            ImmediateChatTransientNoticeScheduler(),
         admissionRefreshScheduler: any ChatAdmissionRefreshScheduling =
             ImmediateAdmissionRefreshScheduler(),
         invocations: any Invocations = RecordingInterruptedInvocationGateway(),
@@ -3960,6 +5224,7 @@ final class ChatFeatureTests: XCTestCase {
             pendingUserTurnIDGenerator: pendingUserTurnIDGenerator,
             responsePositionIDGenerator: FixedChatIDs(),
             autosaveScheduler: autosaveScheduler,
+            transientNoticeScheduler: transientNoticeScheduler,
             admissionRefreshScheduler: admissionRefreshScheduler,
             coachContext: coachContext,
             invocations: invocations,
@@ -4237,6 +5502,49 @@ final class ChatFeatureTests: XCTestCase {
         )
     }
 
+    private static func staleReconsiderationBasis(
+        for aggregate: ChatAggregate
+    ) throws -> ProfileReconsiderationBasis {
+        try ProfileReconsiderationBasis(
+            sourceEffect: try XCTUnwrap(aggregate.profileEffect),
+            baseProfile: ProfileSnapshot(nullAtStatementGeneration: 7),
+            latestProfile: ProfileSnapshot(nullAtStatementGeneration: 8)
+        )
+    }
+
+    private static func installingProfileReconsideration(
+        in aggregate: ChatAggregate,
+        resultResponsePosition: String =
+            "rsp-20260830T120000000Z-6PQR"
+    ) throws -> ChatAggregate {
+        let effect = try XCTUnwrap(aggregate.profileEffect)
+        return try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            messages: aggregate.messages,
+            profileEffect: effect,
+            profileReconsideration: ProfileReconsideration(
+                sourceEffect: effect,
+                resultResponsePositionID: try ChatResponsePositionID(
+                    resultResponsePosition
+                )
+            )
+        )
+    }
+
+    private static func replacingProfileReconsideration(
+        in aggregate: ChatAggregate,
+        with reconsideration: ProfileReconsideration
+    ) throws -> ChatAggregate {
+        try ChatAggregate(
+            chat: aggregate.chat,
+            memory: aggregate.memory,
+            messages: aggregate.messages,
+            profileEffect: aggregate.profileEffect,
+            profileReconsideration: reconsideration
+        )
+    }
+
     private static func attachment() throws -> ChatSessionAttachment {
         ChatSessionAttachment(
             attachmentID: try ChatSessionAttachmentID("attachment-000001"),
@@ -4282,32 +5590,49 @@ final class ChatFeatureTests: XCTestCase {
 }
 
 private actor RecordingProfileProposalCoordinator: ProfileProposalCoordinating {
+    private var assessmentOutcomes: [ProfileEffectAssessmentOutcome]
     private var acceptOutcomes: [ProfileProposalMutationOutcome]
     private var discardOutcomes: [ProfileProposalMutationOutcome]
     private var evidencePublishOutcomes:
         [ProfileEvidencePublicationMutationOutcome]
     private var evidenceDiscardOutcomes:
         [ProfileEvidencePublicationMutationOutcome]
+    private var reconsiderationDiscardOutcomes: [ProfileEffectMutationOutcome]
     private var suspendFirstAccept: Bool
     private var firstAcceptContinuation: CheckedContinuation<Void, Never>?
     private(set) var acceptMutations: [AcceptProfileProposalMutation] = []
+    private(set) var assessmentRequests: [AssessProfileEffectRequest] = []
     private(set) var discardMutations: [DiscardProfileProposalMutation] = []
     private(set) var evidencePublishMutations: [PublishProfileEvidenceMutation] = []
     private(set) var evidenceDiscardMutations:
         [DiscardProfileEvidencePublicationMutation] = []
+    private(set) var reconsiderationDiscardMutations:
+        [DiscardProfileReconsiderationFailureMutation] = []
 
     init(
+        assessmentOutcomes: [ProfileEffectAssessmentOutcome] = [],
         acceptOutcomes: [ProfileProposalMutationOutcome] = [],
         discardOutcomes: [ProfileProposalMutationOutcome] = [],
         evidencePublishOutcomes: [ProfileEvidencePublicationMutationOutcome] = [],
         evidenceDiscardOutcomes: [ProfileEvidencePublicationMutationOutcome] = [],
+        reconsiderationDiscardOutcomes: [ProfileEffectMutationOutcome] = [],
         suspendFirstAccept: Bool = false
     ) {
+        self.assessmentOutcomes = assessmentOutcomes
         self.acceptOutcomes = acceptOutcomes
         self.discardOutcomes = discardOutcomes
         self.evidencePublishOutcomes = evidencePublishOutcomes
         self.evidenceDiscardOutcomes = evidenceDiscardOutcomes
+        self.reconsiderationDiscardOutcomes = reconsiderationDiscardOutcomes
         self.suspendFirstAccept = suspendFirstAccept
+    }
+
+    func assess(
+        _ request: AssessProfileEffectRequest
+    ) async -> ProfileEffectAssessmentOutcome {
+        assessmentRequests.append(request)
+        guard !assessmentOutcomes.isEmpty else { return .current(request.base) }
+        return assessmentOutcomes.removeFirst()
     }
 
     func accept(
@@ -4346,6 +5671,14 @@ private actor RecordingProfileProposalCoordinator: ProfileProposalCoordinating {
         return evidenceDiscardOutcomes.removeFirst()
     }
 
+    func discardReconsiderationFailure(
+        _ mutation: DiscardProfileReconsiderationFailureMutation
+    ) async -> ProfileEffectMutationOutcome {
+        reconsiderationDiscardMutations.append(mutation)
+        guard !reconsiderationDiscardOutcomes.isEmpty else { return .failed }
+        return reconsiderationDiscardOutcomes.removeFirst()
+    }
+
     func waitUntilFirstAcceptIsSuspended() async {
         while firstAcceptContinuation == nil { await Task.yield() }
     }
@@ -4353,6 +5686,239 @@ private actor RecordingProfileProposalCoordinator: ProfileProposalCoordinating {
     func resumeFirstAccept() {
         firstAcceptContinuation?.resume()
         firstAcceptContinuation = nil
+    }
+}
+
+private actor RecordingProfileReconsiderationInvocationGateway: Invocations {
+    enum Preparation: Sendable {
+        case prepared
+        case activeInvocation
+        case failed
+    }
+
+    private let preparation: Preparation
+    private var outcomes: [ProfileReconsiderationInvocationTryOutcome]
+    private let operationalOutcome: ProfileReconsiderationInvocationTryOutcome?
+    private(set) var newRequests: [NewProfileReconsiderationInvocationRequest] = []
+    private(set) var invokedPrepared: [PreparedProfileReconsiderationInvocation] = []
+    private(set) var operationalRequests:
+        [ProfileReconsiderationInvocationRequest] = []
+    private(set) var abandoned: [PreparedProfileReconsiderationInvocation] = []
+
+    init(
+        preparation: Preparation = .prepared,
+        outcome: ProfileReconsiderationInvocationTryOutcome,
+        operationalOutcome: ProfileReconsiderationInvocationTryOutcome? = nil
+    ) {
+        self.preparation = preparation
+        outcomes = [outcome]
+        self.operationalOutcome = operationalOutcome
+    }
+
+    init(
+        preparation: Preparation = .prepared,
+        outcomes: [ProfileReconsiderationInvocationTryOutcome],
+        operationalOutcome: ProfileReconsiderationInvocationTryOutcome? = nil
+    ) {
+        self.preparation = preparation
+        self.outcomes = outcomes
+        self.operationalOutcome = operationalOutcome
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .failed
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        .rejected(prepared.aggregate, .eligibilityChanged)
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        .rejected(nil, .eligibilityChanged)
+    }
+
+    func prepareNewProfileReconsiderationInvocation(
+        _ request: NewProfileReconsiderationInvocationRequest
+    ) async -> NewProfileReconsiderationInvocationOutcome {
+        newRequests.append(request)
+        switch preparation {
+        case .prepared:
+            return .prepared(
+                try! PreparedProfileReconsiderationInvocation(
+                    preparing: request
+                )
+            )
+        case .activeInvocation:
+            return .activeInvocation
+        case .failed:
+            return .failed
+        }
+    }
+
+    func abandonPreparedProfileReconsiderationInvocation(
+        _ prepared: PreparedProfileReconsiderationInvocation
+    ) async {
+        abandoned.append(prepared)
+    }
+
+    func tryReconsiderProfileChange(
+        _ prepared: PreparedProfileReconsiderationInvocation
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        invokedPrepared.append(prepared)
+        guard outcomes.count > 1 else {
+            return outcomes.first ?? .rejected(nil, .persistenceUnavailable)
+        }
+        return outcomes.removeFirst()
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        operationalRequests.append(request)
+        return operationalOutcome ?? .rejected(nil, .eligibilityChanged)
+    }
+}
+
+private actor StoppableProfileReconsiderationInvocationGateway: Invocations {
+    struct StopCall: Equatable, Sendable {
+        let request: StopProfileReconsiderationInvocationRequest
+        let authority: ProfileReconsiderationInvocationStopAuthority
+    }
+
+    private let stopOutcome: ProfileReconsiderationInvocationStopOutcome
+    private var prepared: PreparedProfileReconsiderationInvocation?
+    private var authority: ProfileReconsiderationInvocationStopAuthority?
+    private var invocationContinuation:
+        CheckedContinuation<ProfileReconsiderationInvocationTryOutcome, Never>?
+    private(set) var stopCalls: [StopCall] = []
+
+    init(interrupted: ChatAggregate) {
+        stopOutcome = .interrupted(interrupted)
+    }
+
+    init(stopOutcome: ProfileReconsiderationInvocationStopOutcome) {
+        self.stopOutcome = stopOutcome
+    }
+
+    func admissionAvailability(
+        in library: LibraryScope
+    ) async -> InvocationAdmissionAvailability {
+        .available
+    }
+
+    func prepareNewInvocation(
+        _ request: NewPendingCoachInvocationRequest
+    ) async -> NewPendingCoachInvocationOutcome {
+        .failed
+    }
+
+    func abandonPreparedInvocation(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async {}
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation
+    ) async -> InvocationTryOutcome {
+        .rejected(prepared.aggregate, .eligibilityChanged)
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest
+    ) async -> InvocationTryOutcome {
+        .rejected(nil, .eligibilityChanged)
+    }
+
+    func prepareNewProfileReconsiderationInvocation(
+        _ request: NewProfileReconsiderationInvocationRequest
+    ) async -> NewProfileReconsiderationInvocationOutcome {
+        .prepared(
+            try! PreparedProfileReconsiderationInvocation(preparing: request)
+        )
+    }
+
+    func tryReconsiderProfileChange(
+        _ prepared: PreparedProfileReconsiderationInvocation
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(
+            prepared,
+            observingStopAuthority: { _ in }
+        )
+    }
+
+    func tryReconsiderProfileChange(
+        _ prepared: PreparedProfileReconsiderationInvocation,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        self.prepared = prepared
+        let authority = ProfileReconsiderationInvocationStopAuthority(
+            testingRequest: StopProfileReconsiderationInvocationRequest(
+                prepared.request
+            ),
+            invocationID: try! CoachInvocationID(
+                "inv-20260909T123000000Z-1ABC"
+            ),
+            attemptID: try! CoachProviderAttemptID(
+                "atm-20260909T123000000Z-2DEF"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000410"
+            )!
+        )
+        self.authority = authority
+        await observer(authority)
+        return await withCheckedContinuation {
+            invocationContinuation = $0
+        }
+    }
+
+    func stopProfileReconsideration(
+        _ request: StopProfileReconsiderationInvocationRequest,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) async -> ProfileReconsiderationInvocationStopOutcome {
+        stopCalls.append(StopCall(request: request, authority: authority))
+        guard self.authority == authority,
+              authority.library == request.library,
+              authority.chatID == request.chatID,
+              authority.sourceEffectIdentity == request.sourceEffectIdentity,
+              authority.resultResponsePositionID ==
+                request.resultResponsePositionID,
+              prepared?.request == ProfileReconsiderationInvocationRequest(
+                library: request.library,
+                chatID: request.chatID,
+                sourceEffectIdentity: request.sourceEffectIdentity,
+                resultResponsePositionID: request.resultResponsePositionID
+              )
+        else { return .staleAuthority }
+        invocationContinuation?.resume(returning: .stopped)
+        invocationContinuation = nil
+        self.authority = nil
+        return stopOutcome
+    }
+
+    func waitUntilInvocationIsSuspended()
+        async -> ProfileReconsiderationInvocationStopAuthority
+    {
+        while authority == nil || invocationContinuation == nil {
+            await Task.yield()
+        }
+        return authority!
     }
 }
 
@@ -6623,6 +8189,12 @@ private struct ImmediateChatAutosaveScheduler: ChatAutosaveScheduling {
     func sleep(forNanoseconds nanoseconds: UInt64) async throws {}
 }
 
+private struct ImmediateChatTransientNoticeScheduler:
+    ChatTransientNoticeScheduling
+{
+    func sleep(forNanoseconds nanoseconds: UInt64) async throws {}
+}
+
 private struct ImmediateAdmissionRefreshScheduler: ChatAdmissionRefreshScheduling {
     func sleep(until deadline: UTCInstant) async throws {}
 }
@@ -6674,6 +8246,36 @@ private actor ControlledChatAutosaveScheduler: ChatAutosaveScheduling {
 
     func waitForScheduleCount(_ count: Int) async {
         while requestedNanoseconds.count < count { await Task.yield() }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    private func cancel() {
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
+}
+
+private actor ControlledChatTransientNoticeScheduler:
+    ChatTransientNoticeScheduling
+{
+    private(set) var requestedNanoseconds: [UInt64] = []
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    func sleep(forNanoseconds nanoseconds: UInt64) async throws {
+        requestedNanoseconds.append(nanoseconds)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation = $0 }
+        } onCancel: {
+            Task { await self.cancel() }
+        }
+    }
+
+    func waitUntilScheduled() async {
+        while requestedNanoseconds.isEmpty { await Task.yield() }
     }
 
     func resume() {

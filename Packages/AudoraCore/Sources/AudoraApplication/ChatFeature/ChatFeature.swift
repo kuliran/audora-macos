@@ -34,6 +34,10 @@ public enum ChatCommand: Equatable, Sendable {
     case refreshContextQuote(ChatCommandContext, ChatID, ChatDraft)
     case sendDraft(ChatCommandContext, ChatID, ChatDraft)
     case stopCoachResponse(ChatCommandContext, InvocationStopAuthority)
+    case stopProfileReconsideration(
+        ChatCommandContext,
+        ProfileReconsiderationInvocationStopAuthority
+    )
     case retryPendingUserTurn(ChatCommandContext, PendingUserTurnID)
     case createNewChatFromCapacityFailure(ChatCommandContext, PendingUserTurnID)
     case discardPendingUserTurn(ChatCommandContext, PendingUserTurnID)
@@ -46,6 +50,18 @@ public enum ChatCommand: Equatable, Sendable {
     case discardProfileEvidencePublication(
         ChatCommandContext,
         ChatResponsePositionID
+    )
+    case reconsiderProfileEffect(
+        ChatCommandContext,
+        ChatProfileEffectIdentity
+    )
+    case retryProfileReconsideration(
+        ChatCommandContext,
+        ChatProfileEffectIdentity
+    )
+    case discardProfileReconsiderationFailure(
+        ChatCommandContext,
+        ChatProfileEffectIdentity
     )
 }
 

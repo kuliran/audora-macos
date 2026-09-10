@@ -572,6 +572,16 @@ final class ChatFeatureScenarioTests: XCTestCase {
         case .discardingPendingUserTurn: "discardingPendingUserTurn"
         case .acceptingProfileProposal: "acceptingProfileProposal"
         case .discardingProfileProposal: "discardingProfileProposal"
+        case .publishingProfileEvidence: "publishingProfileEvidence"
+        case .retryingProfileEvidencePublication:
+            "retryingProfileEvidencePublication"
+        case .discardingProfileEvidencePublication:
+            "discardingProfileEvidencePublication"
+        case .reconsideringProfileEffect: "reconsideringProfileEffect"
+        case .stoppingProfileReconsideration:
+            "stoppingProfileReconsideration"
+        case .discardingProfileReconsiderationFailure:
+            "discardingProfileReconsiderationFailure"
         case .none: nil
         }
     }

@@ -170,10 +170,56 @@ final class CoachResponseValidationTests: XCTestCase {
         )
         XCTAssertTrue(reconsider.messageBlocks.isEmpty)
         XCTAssertNil(reconsider.publicationMarkdown)
+        XCTAssertTrue(reconsider.isSupportedByCurrentPublicationSlice)
 
         assertRejected(
             #"{"messageBlocks":[]}"#,
             as: .schemaMismatch
+        )
+    }
+
+    func testReconsiderMarksEvenPureEvidenceForReviewedPublication() throws {
+        let body = """
+        {
+          "appendProfileEvidence":[
+            {
+              "targetStatementId":"profile-1",
+              "evidence":[
+                {
+                  "sessionAttachmentId":"attachment-1",
+                  "target":{
+                    "kind":"wordRange",
+                    "startWordId":"w1",
+                    "endWordId":"w2"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let reconsidered = try CoachResponseValidator().validate(
+            response(body),
+            in: context(trigger: .reconsiderProfileChange)
+        )
+        let ordinary = try CoachResponseValidator().validate(
+            response(
+                body.replacingOccurrences(
+                    of: "{\n  \"appendProfileEvidence\"",
+                    with: "{\n  \"messageBlocks\":[{\"kind\":\"markdown\",\"markdown\":\"Saved.\"}],\n  \"appendProfileEvidence\""
+                )
+            ),
+            in: context()
+        )
+
+        XCTAssertEqual(
+            reconsidered.profileEffectPublicationMode,
+            CoachResponseProfileEffectPublicationMode.reviewRequired
+        )
+        XCTAssertEqual(
+            ordinary.profileEffectPublicationMode,
+            CoachResponseProfileEffectPublicationMode.ordinaryClassification
         )
     }
 

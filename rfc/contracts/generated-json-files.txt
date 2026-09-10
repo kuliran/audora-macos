@@ -18,6 +18,7 @@ Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/PendingUserTurn.js
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileChangeProposal.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileEvidencePublication.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json
+Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileReconsideration.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileRevision.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileWriteIntent.json
 Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json

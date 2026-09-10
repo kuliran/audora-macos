@@ -4,6 +4,8 @@ import Foundation
 public enum CoachContextRequestError: Error, Equatable, Sendable {
     case pendingDraftMismatch
     case notCapacityFailure
+    case reconsiderationUnavailable
+    case reconsiderationSourceMismatch
 }
 
 public struct CoachContextNewChatQuoteRequest: Equatable, Sendable {
@@ -63,6 +65,42 @@ public struct CoachContextPendingTurnRequest: Equatable, Sendable {
     }
 }
 
+/// Exact Chat/Profile authority used to prepare one Reconsider Invocation.
+/// Memory, history, and attachment evidence are resolved freshly by the snapshot
+/// source; no Pending User Turn or synthetic Draft participates in this path.
+struct CoachContextReconsiderRequest: Equatable, Sendable {
+    let library: LibraryScope
+    let chat: Chat
+    let sourceEffect: ChatProfileEffect
+    let reconsideration: ProfileReconsideration
+    let basis: ProfileReconsiderationBasis
+    let trigger: CoachContextReconsiderTrigger
+
+    init(
+        library: LibraryScope,
+        aggregate: ChatAggregate,
+        basis: ProfileReconsiderationBasis
+    ) throws {
+        guard let sourceEffect = aggregate.profileEffect,
+              let reconsideration = aggregate.profileReconsideration
+        else { throw CoachContextRequestError.reconsiderationUnavailable }
+        guard aggregate.chat.id == basis.sourceChatID,
+              sourceEffect == basis.sourceEffect,
+              reconsideration.sourceEffectIdentity == sourceEffect.identity
+        else { throw CoachContextRequestError.reconsiderationSourceMismatch }
+
+        self.library = library
+        chat = aggregate.chat
+        self.sourceEffect = sourceEffect
+        self.reconsideration = reconsideration
+        self.basis = basis
+        trigger = try CoachContextReconsiderTrigger(
+            basis: basis,
+            attachments: aggregate.chat.attachments
+        )
+    }
+}
+
 /// Typed output consumed by the future attachment picker without mutating a Chat.
 public struct CoachContextCreateNewChatRecoveryIntent: Equatable, Sendable {
     public let sourceChatID: ChatID
@@ -107,6 +145,7 @@ enum CoachContextSnapshotBinding: Equatable, Sendable {
         pendingUserTurnID: PendingUserTurnID,
         responsePositionID: ChatResponsePositionID
     )
+    case reconsider(CoachContextReconsiderRequest)
 }
 
 struct CoachContextSnapshotAuthority: Equatable, Sendable {
@@ -156,6 +195,10 @@ private extension CoachContextPendingTurnRequest {
             responsePositionID: pendingUserTurn.responsePositionID
         )
     }
+}
+
+extension CoachContextReconsiderRequest {
+    var snapshotBinding: CoachContextSnapshotBinding { .reconsider(self) }
 }
 
 /// Internal-adapter value after current Profile, Memory, history, and evidence resolve.
@@ -239,6 +282,10 @@ protocol CoachContextSnapshotPort: Sendable {
         _ request: CoachContextPendingTurnRequest
     ) async -> CoachContextSnapshotOutcome
 
+    func resolveReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextSnapshotOutcome
+
     /// Revalidates the exact external-context and provider-configuration
     /// generations after deterministic measurement completes.
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool
@@ -259,6 +306,12 @@ protocol CoachContextSnapshotPort: Sendable {
 }
 
 extension CoachContextSnapshotPort {
+    func resolveReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextSnapshotOutcome {
+        .sourceUnavailable
+    }
+
     func currentQualifiedConfiguration()
         async -> CoachQualifiedConfigurationOutcome
     {
@@ -376,6 +429,12 @@ enum CoachContextPendingPreparationOutcome: Equatable, Sendable {
     case unavailable(CoachContextUnavailableReason)
 }
 
+enum CoachContextReconsiderPreparationOutcome: Equatable, Sendable {
+    case prepared(PreparedCoachLaunchContext)
+    case cannotFit(CoachContextCapacityFailure)
+    case unavailable(CoachContextUnavailableReason)
+}
+
 enum ConfigurationBoundChatCreationQuoteOutcome: Equatable, Sendable {
     case available(
         ChatCreationQuote,
@@ -440,11 +499,23 @@ protocol CoachContextPendingPreparing: Sendable {
         _ request: CoachContextPendingTurnRequest
     ) async -> CoachContextPendingPreparationOutcome
 
+    func prepareReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextReconsiderPreparationOutcome
+
     /// Final generation fence used after durable admission/Invocation install and
     /// immediately before provider launch.
     func isPreparedContextCurrent(
         _ prepared: PreparedCoachLaunchContext
     ) async -> Bool
+}
+
+extension CoachContextPendingPreparing {
+    func prepareReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextReconsiderPreparationOutcome {
+        .unavailable(.sourceUnavailable)
+    }
 }
 
 typealias CoachContextCoordinating = CoachContextFeature & CoachContextPendingPreparing
@@ -769,6 +840,55 @@ public struct DefaultCoachContextFeature:
                     return .messageTooLong(
                         maximumUTF8Bytes: quote.maximumUserMessageUTF8Bytes
                     )
+                case let .cannotFit(failure):
+                    guard await source.isCurrent(snapshot.authority) else {
+                        return .unavailable(.staleState)
+                    }
+                    return .cannotFit(failure)
+                }
+            } catch {
+                return .unavailable(.invalidContext)
+            }
+        case .providerUnavailable:
+            return .unavailable(.providerUnavailable)
+        case .sourceUnavailable:
+            return .unavailable(.sourceUnavailable)
+        case .staleState:
+            return .unavailable(.staleState)
+        }
+    }
+
+    func prepareReconsider(
+        _ request: CoachContextReconsiderRequest
+    ) async -> CoachContextReconsiderPreparationOutcome {
+        switch await source.resolveReconsider(request) {
+        case let .resolved(snapshot):
+            guard snapshot.authority.binding == request.snapshotBinding,
+                  snapshot.authority.profile ==
+                    request.basis.latestProfile.provenance,
+                  snapshot.input.trigger ==
+                    .reconsiderProfileChange(request.trigger)
+            else {
+                return .unavailable(.staleState)
+            }
+            do {
+                let measured = try capacity.prepareForLaunch(
+                    snapshot.input,
+                    configuration: snapshot.configuration
+                )
+                guard await source.isCurrent(snapshot.authority) else {
+                    return .unavailable(.staleState)
+                }
+                return .prepared(
+                    PreparedCoachLaunchContext(
+                        measured: measured,
+                        authority: snapshot.authority
+                    )
+                )
+            } catch let error as CoachContextPreparationError {
+                switch error {
+                case .messageTooLong:
+                    return .unavailable(.invalidContext)
                 case let .cannotFit(failure):
                     guard await source.isCurrent(snapshot.authority) else {
                         return .unavailable(.staleState)

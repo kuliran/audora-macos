@@ -566,7 +566,7 @@ final class ProfileProposalDomainTests: XCTestCase {
         XCTAssertEqual(replacement.statementKind, replaceTarget.statementKind)
         XCTAssertEqual(
             replacement.evidence,
-            [sessionAFirst, sessionASecond, sessionCFirst]
+            [sessionAFirst, sessionCFirst]
         )
         XCTAssertEqual(replacement.supportingSessionCount, 2)
         let appended = try XCTUnwrap(

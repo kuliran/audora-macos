@@ -17,6 +17,191 @@ public struct PendingCoachInvocationRequest: Equatable, Hashable, Sendable {
     }
 }
 
+public enum ProfileReconsiderationInvocationRequestError:
+    Error,
+    Equatable,
+    Sendable
+{
+    case sourceEffectMismatch
+    case reconsiderationAlreadyExists
+    case reconsiderationMissing
+    case resultPositionMismatch
+    case retryFailureRequired
+    case chatBusy
+}
+
+/// Stable durable identity of one Chat-owned Reconsider intent. Unlike an
+/// answer Invocation it never names a Pending User Turn or Draft.
+public struct ProfileReconsiderationInvocationRequest: Equatable, Sendable {
+    public let library: LibraryScope
+    public let chatID: ChatID
+    public let sourceEffectIdentity: ChatProfileEffectIdentity
+    public let resultResponsePositionID: ChatResponsePositionID
+
+    public init(
+        library: LibraryScope,
+        chatID: ChatID,
+        sourceEffectIdentity: ChatProfileEffectIdentity,
+        resultResponsePositionID: ChatResponsePositionID
+    ) {
+        self.library = library
+        self.chatID = chatID
+        self.sourceEffectIdentity = sourceEffectIdentity
+        self.resultResponsePositionID = resultResponsePositionID
+    }
+}
+
+/// One newly requested Reconsider operation before its sidecar is installed.
+/// Persistence owns the atomic sidecar installation and Library liveness claim.
+public struct NewProfileReconsiderationInvocationRequest: Equatable, Sendable {
+    public let library: LibraryScope
+    public let observedAggregate: ChatAggregate
+    public let reconsideration: ProfileReconsideration
+    public let basis: ProfileReconsiderationBasis
+
+    public init(
+        library: LibraryScope,
+        observedAggregate: ChatAggregate,
+        reconsideration: ProfileReconsideration,
+        basis: ProfileReconsiderationBasis
+    ) throws {
+        guard observedAggregate.profileEffect == basis.sourceEffect,
+              observedAggregate.chat.id == basis.sourceChatID,
+              reconsideration.sourceEffectIdentity == basis.sourceEffect.identity
+        else {
+            throw ProfileReconsiderationInvocationRequestError
+                .sourceEffectMismatch
+        }
+        guard observedAggregate.profileReconsideration == nil else {
+            throw ProfileReconsiderationInvocationRequestError
+                .reconsiderationAlreadyExists
+        }
+        guard observedAggregate.pendingUserTurn == nil else {
+            throw ProfileReconsiderationInvocationRequestError.chatBusy
+        }
+        guard reconsideration.failure == nil else {
+            throw ProfileReconsiderationInvocationRequestError
+                .retryFailureRequired
+        }
+        _ = try ChatAggregate(
+            chat: observedAggregate.chat,
+            memory: observedAggregate.memory,
+            messages: observedAggregate.messages,
+            profileEffect: basis.sourceEffect,
+            profileReconsideration: reconsideration
+        )
+        self.library = library
+        self.observedAggregate = observedAggregate
+        self.reconsideration = reconsideration
+        self.basis = basis
+    }
+
+    public var request: ProfileReconsiderationInvocationRequest {
+        ProfileReconsiderationInvocationRequest(
+            library: library,
+            chatID: observedAggregate.chat.id,
+            sourceEffectIdentity: reconsideration.sourceEffectIdentity,
+            resultResponsePositionID: reconsideration.resultResponsePositionID
+        )
+    }
+}
+
+/// A user Retry over one exact failed sidecar and a freshly assessed stale basis.
+public struct RetryProfileReconsiderationInvocationRequest: Equatable, Sendable {
+    public let library: LibraryScope
+    public let observedAggregate: ChatAggregate
+    public let basis: ProfileReconsiderationBasis
+
+    public init(
+        library: LibraryScope,
+        observedAggregate: ChatAggregate,
+        basis: ProfileReconsiderationBasis
+    ) throws {
+        guard observedAggregate.profileEffect == basis.sourceEffect,
+              observedAggregate.chat.id == basis.sourceChatID
+        else {
+            throw ProfileReconsiderationInvocationRequestError
+                .sourceEffectMismatch
+        }
+        guard let reconsideration = observedAggregate.profileReconsideration else {
+            throw ProfileReconsiderationInvocationRequestError
+                .reconsiderationMissing
+        }
+        guard reconsideration.sourceEffectIdentity == basis.sourceEffect.identity
+        else {
+            throw ProfileReconsiderationInvocationRequestError
+                .sourceEffectMismatch
+        }
+        guard reconsideration.failure != nil else {
+            throw ProfileReconsiderationInvocationRequestError
+                .retryFailureRequired
+        }
+        guard observedAggregate.pendingUserTurn == nil else {
+            throw ProfileReconsiderationInvocationRequestError.chatBusy
+        }
+        self.library = library
+        self.observedAggregate = observedAggregate
+        self.basis = basis
+    }
+
+    public var request: ProfileReconsiderationInvocationRequest {
+        let reconsideration = observedAggregate.profileReconsideration!
+        return ProfileReconsiderationInvocationRequest(
+            library: library,
+            chatID: observedAggregate.chat.id,
+            sourceEffectIdentity: reconsideration.sourceEffectIdentity,
+            resultResponsePositionID: reconsideration.resultResponsePositionID
+        )
+    }
+}
+
+/// Opaque one-shot capability proving that persistence installed the exact new
+/// Reconsider sidecar while retaining its Library-wide liveness lease.
+public struct PreparedProfileReconsiderationInvocation: Equatable, Sendable {
+    public let request: ProfileReconsiderationInvocationRequest
+    public let aggregate: ChatAggregate
+    public let basis: ProfileReconsiderationBasis
+    fileprivate let capabilityID: UUID
+
+    fileprivate init(
+        authority: InvocationProfileReconsiderationAuthority,
+        capabilityID: UUID = UUID()
+    ) {
+        request = authority.request
+        aggregate = authority.aggregate
+        basis = authority.basis
+        self.capabilityID = capabilityID
+    }
+
+    init(preparing newRequest: NewProfileReconsiderationInvocationRequest)
+        throws
+    {
+        let aggregate = try ChatAggregate(
+            chat: newRequest.observedAggregate.chat,
+            memory: newRequest.observedAggregate.memory,
+            messages: newRequest.observedAggregate.messages,
+            profileEffect: newRequest.observedAggregate.profileEffect,
+            profileReconsideration: newRequest.reconsideration
+        )
+        self.init(
+            authority: try InvocationProfileReconsiderationAuthority(
+                request: newRequest.request,
+                aggregate: aggregate,
+                basis: newRequest.basis
+            )
+        )
+    }
+}
+
+public enum NewProfileReconsiderationInvocationOutcome: Equatable, Sendable {
+    case prepared(PreparedProfileReconsiderationInvocation)
+    case stale(ChatAggregate)
+    case frozen(FrozenChatSnapshot)
+    case readOnlyLibrary
+    case activeInvocation
+    case failed
+}
+
 public enum NewPendingCoachInvocationRequestError: Error, Equatable, Sendable {
     case pendingAlreadyExists
     case draftMismatch
@@ -157,6 +342,23 @@ public enum InvocationTryOutcome: Equatable, Sendable {
     case providerReapPending(InvocationStopAuthority)
 }
 
+public enum ProfileReconsiderationInvocationTryOutcome: Equatable, Sendable {
+    case published(ChatAggregate, CoachContextQuote)
+    /// Successful zero-effect replacement. Presentation uses this exact result
+    /// for the transient "Suggestion is no longer relevant" notice.
+    case withdrawn(ChatAggregate, CoachContextQuote)
+    case contextCapacityFailure(ChatAggregate, CoachContextQuote)
+    case rejected(ChatAggregate?, InvocationRejectionReason)
+    case interrupted(ChatAggregate?, InvocationInterruptionReason)
+    case operationallyInterrupted(
+        ChatAggregate?,
+        ProfileReconsiderationInvocationRequest,
+        InvocationInterruptionReason
+    )
+    case stopped
+    case providerReapPending(ProfileReconsiderationInvocationStopAuthority)
+}
+
 public enum InvocationAdmissionAvailability: Equatable, Sendable {
     case available
     case cooldown(reopensAt: UTCInstant)
@@ -233,6 +435,99 @@ public enum InvocationStopOutcome: Equatable, Sendable {
     case persistenceUnavailable(ChatAggregate?)
 }
 
+public struct StopProfileReconsiderationInvocationRequest: Equatable, Sendable {
+    public let library: LibraryScope
+    public let chatID: ChatID
+    public let sourceEffectIdentity: ChatProfileEffectIdentity
+    public let resultResponsePositionID: ChatResponsePositionID
+
+    public init(
+        library: LibraryScope,
+        chatID: ChatID,
+        sourceEffectIdentity: ChatProfileEffectIdentity,
+        resultResponsePositionID: ChatResponsePositionID
+    ) {
+        self.library = library
+        self.chatID = chatID
+        self.sourceEffectIdentity = sourceEffectIdentity
+        self.resultResponsePositionID = resultResponsePositionID
+    }
+
+    public init(_ request: ProfileReconsiderationInvocationRequest) {
+        self.init(
+            library: request.library,
+            chatID: request.chatID,
+            sourceEffectIdentity: request.sourceEffectIdentity,
+            resultResponsePositionID: request.resultResponsePositionID
+        )
+    }
+}
+
+/// Exact process-live authority for stopping one Reconsider provider Attempt.
+/// It cannot be substituted for answer Stop authority or a replacement Attempt.
+public struct ProfileReconsiderationInvocationStopAuthority:
+    Equatable,
+    Sendable
+{
+    public let library: LibraryScope
+    public let chatID: ChatID
+    public let sourceEffectIdentity: ChatProfileEffectIdentity
+    public let resultResponsePositionID: ChatResponsePositionID
+    public let invocationID: CoachInvocationID
+    public let attemptID: CoachProviderAttemptID
+    fileprivate let capabilityID: UUID
+
+    fileprivate init(
+        request: StopProfileReconsiderationInvocationRequest,
+        invocationID: CoachInvocationID,
+        attemptID: CoachProviderAttemptID,
+        capabilityID: UUID = UUID()
+    ) {
+        library = request.library
+        chatID = request.chatID
+        sourceEffectIdentity = request.sourceEffectIdentity
+        resultResponsePositionID = request.resultResponsePositionID
+        self.invocationID = invocationID
+        self.attemptID = attemptID
+        self.capabilityID = capabilityID
+    }
+
+    @_spi(InvocationTesting)
+    public init(
+        testingRequest request: StopProfileReconsiderationInvocationRequest,
+        invocationID: CoachInvocationID,
+        attemptID: CoachProviderAttemptID,
+        capabilityID: UUID
+    ) {
+        self.init(
+            request: request,
+            invocationID: invocationID,
+            attemptID: attemptID,
+            capabilityID: capabilityID
+        )
+    }
+
+    fileprivate func matches(
+        _ request: StopProfileReconsiderationInvocationRequest
+    ) -> Bool {
+        library == request.library &&
+            chatID == request.chatID &&
+            sourceEffectIdentity == request.sourceEffectIdentity &&
+            resultResponsePositionID == request.resultResponsePositionID
+    }
+}
+
+public enum ProfileReconsiderationInvocationStopOutcome: Equatable, Sendable {
+    case interrupted(ChatAggregate)
+    case staleAuthority
+    case noActiveInvocation
+    case unableToReap
+    case persistenceUnavailable(ChatAggregate?)
+}
+
+public typealias ProfileReconsiderationInvocationStopAuthorityObserver =
+    @Sendable (ProfileReconsiderationInvocationStopAuthority) async -> Void
+
 public typealias InvocationStopAuthorityObserver =
     @Sendable (InvocationStopAuthority) async -> Void
 
@@ -269,6 +564,49 @@ public protocol Invocations: Sendable {
         _ request: StopCoachInvocationRequest,
         authority: InvocationStopAuthority
     ) async -> InvocationStopOutcome
+
+    func prepareNewProfileReconsiderationInvocation(
+        _ request: NewProfileReconsiderationInvocationRequest
+    ) async -> NewProfileReconsiderationInvocationOutcome
+
+    func abandonPreparedProfileReconsiderationInvocation(
+        _ prepared: PreparedProfileReconsiderationInvocation
+    ) async
+
+    func tryReconsiderProfileChange(
+        _ prepared: PreparedProfileReconsiderationInvocation
+    ) async -> ProfileReconsiderationInvocationTryOutcome
+
+    func tryReconsiderProfileChange(
+        _ request: RetryProfileReconsiderationInvocationRequest
+    ) async -> ProfileReconsiderationInvocationTryOutcome
+
+    func tryReconsiderProfileChange(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> ProfileReconsiderationInvocationTryOutcome
+
+    func tryReconsiderProfileChange(
+        _ prepared: PreparedProfileReconsiderationInvocation,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome
+
+    func tryReconsiderProfileChange(
+        _ request: RetryProfileReconsiderationInvocationRequest,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome
+
+    func tryReconsiderProfileChange(
+        _ request: ProfileReconsiderationInvocationRequest,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome
+
+    func stopProfileReconsideration(
+        _ request: StopProfileReconsiderationInvocationRequest,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) async -> ProfileReconsiderationInvocationStopOutcome
 }
 
 public extension Invocations {
@@ -296,6 +634,65 @@ public extension Invocations {
         _ request: StopCoachInvocationRequest,
         authority: InvocationStopAuthority
     ) async -> InvocationStopOutcome {
+        .noActiveInvocation
+    }
+
+    func prepareNewProfileReconsiderationInvocation(
+        _ request: NewProfileReconsiderationInvocationRequest
+    ) async -> NewProfileReconsiderationInvocationOutcome {
+        .failed
+    }
+
+    func abandonPreparedProfileReconsiderationInvocation(
+        _ prepared: PreparedProfileReconsiderationInvocation
+    ) async {}
+
+    func tryReconsiderProfileChange(
+        _ prepared: PreparedProfileReconsiderationInvocation
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        .rejected(prepared.aggregate, .persistenceUnavailable)
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: RetryProfileReconsiderationInvocationRequest
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        .rejected(request.observedAggregate, .persistenceUnavailable)
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        .rejected(nil, .eligibilityChanged)
+    }
+
+    func tryReconsiderProfileChange(
+        _ prepared: PreparedProfileReconsiderationInvocation,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(prepared)
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: RetryProfileReconsiderationInvocationRequest,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(request)
+    }
+
+    func tryReconsiderProfileChange(
+        _ request: ProfileReconsiderationInvocationRequest,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(request)
+    }
+
+    func stopProfileReconsideration(
+        _ request: StopProfileReconsiderationInvocationRequest,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) async -> ProfileReconsiderationInvocationStopOutcome {
         .noActiveInvocation
     }
 }
@@ -335,6 +732,104 @@ public struct InvocationPendingAuthority: Equatable, Sendable {
         self.aggregate = aggregate
         pendingUserTurn = pending
     }
+}
+
+@_spi(InvocationInfrastructure)
+public enum InvocationProfileReconsiderationAuthorityError:
+    Error,
+    Equatable,
+    Sendable
+{
+    case requestMismatch
+    case sourceEffectMismatch
+    case missingReconsideration
+    case resultPositionMismatch
+    case pendingUserTurnPresent
+}
+
+/// Exact current aggregate + freshly assessed Profile basis held behind one
+/// persistence liveness lease.
+@_spi(InvocationInfrastructure)
+public struct InvocationProfileReconsiderationAuthority:
+    Equatable,
+    Sendable
+{
+    public let request: ProfileReconsiderationInvocationRequest
+    public let aggregate: ChatAggregate
+    public let reconsideration: ProfileReconsideration
+    public let basis: ProfileReconsiderationBasis
+
+    public init(
+        request: ProfileReconsiderationInvocationRequest,
+        aggregate: ChatAggregate,
+        basis: ProfileReconsiderationBasis
+    ) throws {
+        guard aggregate.chat.id == request.chatID,
+              basis.sourceChatID == request.chatID
+        else {
+            throw InvocationProfileReconsiderationAuthorityError
+                .requestMismatch
+        }
+        guard let sourceEffect = aggregate.profileEffect,
+              sourceEffect == basis.sourceEffect,
+              sourceEffect.identity == request.sourceEffectIdentity
+        else {
+            throw InvocationProfileReconsiderationAuthorityError
+                .sourceEffectMismatch
+        }
+        guard let reconsideration = aggregate.profileReconsideration else {
+            throw InvocationProfileReconsiderationAuthorityError
+                .missingReconsideration
+        }
+        guard reconsideration.sourceEffectIdentity ==
+                request.sourceEffectIdentity,
+              reconsideration.resultResponsePositionID ==
+                request.resultResponsePositionID
+        else {
+            throw InvocationProfileReconsiderationAuthorityError
+                .resultPositionMismatch
+        }
+        guard aggregate.pendingUserTurn == nil else {
+            throw InvocationProfileReconsiderationAuthorityError
+                .pendingUserTurnPresent
+        }
+        self.request = request
+        self.aggregate = aggregate
+        self.reconsideration = reconsideration
+        self.basis = basis
+    }
+}
+
+@_spi(InvocationInfrastructure)
+public enum InvocationProfileReconsiderationResolutionOutcome:
+    Equatable,
+    Sendable
+{
+    case eligible(InvocationProfileReconsiderationAuthority)
+    case ineligible(ChatAggregate?)
+    case unavailable
+}
+
+@_spi(InvocationInfrastructure)
+public enum InvocationProfileReconsiderationSessionPreparationOutcome:
+    Sendable
+{
+    case opened(any InvocationProfileReconsiderationPersistenceSession)
+    case stale(ChatAggregate)
+    case frozen(FrozenChatSnapshot)
+    case readOnlyLibrary
+    case blockedByActiveInvocation
+    case unavailable
+}
+
+@_spi(InvocationInfrastructure)
+public enum InvocationProfileReconsiderationSessionAcquisitionOutcome:
+    Sendable
+{
+    case opened(any InvocationProfileReconsiderationPersistenceSession)
+    case ineligible(ChatAggregate?)
+    case blockedByActiveInvocation
+    case unavailable
 }
 
 @_spi(InvocationInfrastructure)
@@ -406,6 +901,47 @@ public struct InvocationAttemptIdentity: Equatable, Sendable {
     }
 }
 
+/// Fresh Attempt authority for Reconsider. It deliberately has no user-message
+/// or fresh-Draft identity because neither artifact exists on this intent path.
+@_spi(InvocationInfrastructure)
+public struct InvocationProfileReconsiderationAttemptIdentity:
+    Equatable,
+    Sendable
+{
+    public let attemptID: CoachProviderAttemptID
+    public let idempotencyValue: ProviderIdempotencyValue
+    public let coachMessageID: ChatMessageID
+    public let transcriptHandles: [PreparedCoachTranscriptHandle]
+
+    public init(
+        attemptID: CoachProviderAttemptID,
+        idempotencyValue: ProviderIdempotencyValue,
+        coachMessageID: ChatMessageID,
+        transcriptHandles: [PreparedCoachTranscriptHandle] = []
+    ) {
+        self.attemptID = attemptID
+        self.idempotencyValue = idempotencyValue
+        self.coachMessageID = coachMessageID
+        self.transcriptHandles = transcriptHandles
+    }
+
+    func makeAttempt(
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind
+    ) throws -> CoachProviderAttempt {
+        try CoachProviderAttempt(
+            id: attemptID,
+            ordinal: ordinal,
+            kind: kind,
+            providerIdempotencyValue: idempotencyValue,
+            transcriptHandles: transcriptHandles,
+            publicationAuthority: .reconsiderProfileChange(
+                coachMessageID: coachMessageID
+            )
+        )
+    }
+}
+
 @_spi(InvocationInfrastructure)
 public struct InvocationLaunchIdentity: Equatable, Sendable {
     public let invocationID: CoachInvocationID
@@ -450,6 +986,39 @@ public struct InvocationLaunchIdentity: Equatable, Sendable {
 }
 
 @_spi(InvocationInfrastructure)
+public struct InvocationProfileReconsiderationLaunchIdentity:
+    Equatable,
+    Sendable
+{
+    public let invocationID: CoachInvocationID
+    public let attemptIdentity: InvocationProfileReconsiderationAttemptIdentity
+
+    public var attemptID: CoachProviderAttemptID {
+        attemptIdentity.attemptID
+    }
+
+    public var idempotencyValue: ProviderIdempotencyValue {
+        attemptIdentity.idempotencyValue
+    }
+
+    public var coachMessageID: ChatMessageID {
+        attemptIdentity.coachMessageID
+    }
+
+    public var transcriptHandles: [PreparedCoachTranscriptHandle] {
+        attemptIdentity.transcriptHandles
+    }
+
+    public init(
+        invocationID: CoachInvocationID,
+        attemptIdentity: InvocationProfileReconsiderationAttemptIdentity
+    ) {
+        self.invocationID = invocationID
+        self.attemptIdentity = attemptIdentity
+    }
+}
+
+@_spi(InvocationInfrastructure)
 public protocol InvocationIdentityGenerating: Sendable {
     func generateInvocationID(at instant: UTCInstant) async -> CoachInvocationID
 
@@ -459,6 +1028,39 @@ public protocol InvocationIdentityGenerating: Sendable {
         kind: CoachProviderAttemptKind,
         transcriptHandleCount: Int
     ) async -> InvocationAttemptIdentity
+
+    func generateProfileReconsiderationAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationProfileReconsiderationAttemptIdentity
+}
+
+@_spi(InvocationInfrastructure)
+public extension InvocationIdentityGenerating {
+    /// Source-compatible fallback for identity stores that have not yet split
+    /// answer and Reconsider allocation. Only the Reconsider-safe fields cross
+    /// into durable or provider authority.
+    func generateProfileReconsiderationAttemptIdentity(
+        at instant: UTCInstant,
+        ordinal: UInt8,
+        kind: CoachProviderAttemptKind,
+        transcriptHandleCount: Int
+    ) async -> InvocationProfileReconsiderationAttemptIdentity {
+        let legacy = await generateAttemptIdentity(
+            at: instant,
+            ordinal: ordinal,
+            kind: kind,
+            transcriptHandleCount: transcriptHandleCount
+        )
+        return InvocationProfileReconsiderationAttemptIdentity(
+            attemptID: legacy.attemptID,
+            idempotencyValue: legacy.idempotencyValue,
+            coachMessageID: legacy.coachMessageID,
+            transcriptHandles: legacy.transcriptHandles
+        )
+    }
 }
 
 public enum InvocationLaunchIdentityCollision: String, CaseIterable, Equatable, Sendable {
@@ -535,6 +1137,49 @@ public struct InstallCoachInvocationMutation: Equatable, Sendable {
 }
 
 @_spi(InvocationInfrastructure)
+public struct InstallProfileReconsiderationInvocationMutation:
+    Equatable,
+    Sendable
+{
+    public let authority: InvocationProfileReconsiderationAuthority
+    public let invocation: CoachInvocation
+    public let processingAggregate: ChatAggregate
+
+    public init(
+        authority: InvocationProfileReconsiderationAuthority,
+        identity: InvocationProfileReconsiderationLaunchIdentity,
+        preparedProfile: CoachProfileProvenance,
+        admittedAt: UTCInstant
+    ) throws {
+        self.authority = authority
+        let processingReconsideration = authority.reconsideration
+            .replacingFailure(nil)
+        processingAggregate = try ChatAggregate(
+            chat: authority.aggregate.chat,
+            memory: authority.aggregate.memory,
+            messages: authority.aggregate.messages,
+            profileEffect: authority.aggregate.profileEffect,
+            profileReconsideration: processingReconsideration
+        )
+        invocation = try CoachInvocation(
+            id: identity.invocationID,
+            attempt: identity.attemptIdentity.makeAttempt(
+                ordinal: 1,
+                kind: .standard
+            ),
+            library: authority.request.library,
+            chatID: authority.request.chatID,
+            profileReconsideration: processingReconsideration,
+            preparedProfile: preparedProfile,
+            expectedManifestRevision:
+                authority.aggregate.chat.manifestRevision,
+            admittedAt: admittedAt
+        )
+        try invocation.validate(against: processingAggregate)
+    }
+}
+
+@_spi(InvocationInfrastructure)
 public enum InvocationInstallOutcome: Equatable, Sendable {
     case installed(CoachInvocation)
     case activeExists
@@ -581,6 +1226,41 @@ public struct InstallNextCoachProviderAttemptMutation: Equatable, Sendable {
             throw InstallNextCoachProviderAttemptMutationError.identityCollision(
                 collision
             )
+        }
+    }
+}
+
+@_spi(InvocationInfrastructure)
+public struct InstallNextProfileReconsiderationAttemptMutation:
+    Equatable,
+    Sendable
+{
+    public let base: CoachInvocation
+    public let replacement: CoachInvocation
+
+    public init(
+        base: CoachInvocation,
+        identity: InvocationProfileReconsiderationAttemptIdentity,
+        kind: CoachProviderAttemptKind
+    ) throws {
+        self.base = base
+        let next = try identity.makeAttempt(
+            ordinal: base.attempt.ordinal + 1,
+            kind: kind
+        )
+        do {
+            replacement = try base.installingAttempt(next)
+        } catch let error as CoachInvocationAttemptInstallError {
+            let collision: InvocationLaunchIdentityCollision = switch error {
+            case .attemptIDCollision: .attemptID
+            case .providerIdempotencyValueCollision: .providerIdempotencyValue
+            case .userMessageIDCollision: .userMessageID
+            case .coachMessageIDCollision: .coachMessageID
+            case .freshDraftIDCollision: .freshDraftID
+            case .transcriptHandleCollision: .transcriptHandle
+            }
+            throw InstallNextCoachProviderAttemptMutationError
+                .identityCollision(collision)
         }
     }
 }
@@ -642,24 +1322,28 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
     ) throws {
         self.base = base
         self.invocation = invocation
-        guard let authority = invocation.attempt.publicationAuthority else {
+        guard case let .answerPendingUserTurn(
+            userMessageID,
+            coachMessageID,
+            freshDraftID
+        )? = invocation.attempt.publicationAuthority else {
             throw CoachInvocationError.attemptPublicationAuthorityRequired
         }
         userMessage = try ChatMessage(
-            id: authority.userMessageID,
+            id: userMessageID,
             responsePositionID: invocation.responsePositionID,
             content: .user(text: base.chat.draft.text),
             createdAt: completedAt
         )
         coachMessage = try ChatMessage(
-            id: authority.coachMessageID,
+            id: coachMessageID,
             responsePositionID: invocation.responsePositionID,
             content: .coach(blocks: coachBlocks),
             coachProfile: invocation.preparedProfile,
             createdAt: completedAt
         )
         freshDraft = try ChatDraft(
-            draftID: authority.freshDraftID,
+            draftID: freshDraftID,
             version: 0,
             text: "",
             updatedAt: completedAt
@@ -916,6 +1600,254 @@ public struct PublishCoachInvocationMutation: Equatable, Sendable {
 }
 
 @_spi(InvocationInfrastructure)
+public struct PublishProfileReconsiderationInvocationMutation:
+    Equatable,
+    Sendable
+{
+    public let base: ChatAggregate
+    public let invocation: CoachInvocation
+    public let reconsideration: ProfileReconsideration
+    public let basis: ProfileReconsiderationBasis
+    public let coachMessage: ChatMessage?
+    public let replacementMemory: CoachMemory?
+    public let replacementProposal: ProfileChangeProposal?
+    public let isWithdrawal: Bool
+    public let replacement: ChatAggregate
+
+    init(
+        base: ChatAggregate,
+        invocation: CoachInvocation,
+        reconsideration: ProfileReconsideration,
+        basis: ProfileReconsiderationBasis,
+        validatedResponse: ValidatedCoachResponse,
+        replacementMemory: CoachMemory?,
+        completedAt: UTCInstant
+    ) throws {
+        guard validatedResponse.profileEffectPublicationMode == .reviewRequired,
+              validatedResponse.isSupportedByCurrentPublicationSlice,
+              Self.matchesValidatedMemory(
+                  validatedResponse.newMemory,
+                  replacement: replacementMemory,
+                  base: base.memory
+              ),
+              let preparedProfile = invocation.preparedProfile
+        else {
+            throw PublishCoachInvocationMutationError
+                .unsupportedResponseComponent
+        }
+        try invocation.validate(against: base)
+        guard base.profileReconsideration == reconsideration,
+              basis.sourceEffect == base.profileEffect,
+              reconsideration.sourceEffectIdentity == basis.sourceEffect.identity,
+              reconsideration.resultResponsePositionID ==
+                invocation.responsePositionID,
+              case let .reconsiderProfileChange(coachMessageID)? =
+                invocation.attempt.publicationAuthority
+        else {
+            throw PublishCoachInvocationMutationError
+                .unsupportedResponseComponent
+        }
+
+        let coachMessage: ChatMessage? = if validatedResponse.messageBlocks.isEmpty {
+            nil
+        } else {
+            try ChatMessage(
+                id: coachMessageID,
+                responsePositionID: reconsideration.resultResponsePositionID,
+                content: .coach(blocks: validatedResponse.publicationBlocks),
+                coachProfile: preparedProfile,
+                createdAt: completedAt
+            )
+        }
+        let replacementProposal = try Self.materializeReplacementProposal(
+            from: validatedResponse,
+            basis: basis,
+            responsePositionID: reconsideration.resultResponsePositionID,
+            sourceMessageID: coachMessageID,
+            completedAt: completedAt
+        )
+        let outcome: ProfileReconsiderationPublicationOutcome
+        if let replacementProposal {
+            outcome = .replacement(replacementProposal)
+        } else {
+            outcome = .withdrawal
+        }
+
+        self.base = base
+        self.invocation = invocation
+        self.reconsideration = reconsideration
+        self.basis = basis
+        self.coachMessage = coachMessage
+        self.replacementMemory = replacementMemory
+        self.replacementProposal = replacementProposal
+        isWithdrawal = replacementProposal == nil
+        replacement = try base.publishingReconsideration(
+            expected: reconsideration,
+            basis: basis,
+            preparedProfile: preparedProfile,
+            coachMessage: coachMessage,
+            replacementMemory: replacementMemory,
+            outcome: outcome,
+            at: completedAt
+        )
+    }
+
+    private static func materializeReplacementProposal(
+        from response: ValidatedCoachResponse,
+        basis: ProfileReconsiderationBasis,
+        responsePositionID: ChatResponsePositionID,
+        sourceMessageID: ChatMessageID,
+        completedAt: UTCInstant
+    ) throws -> ProfileChangeProposal? {
+        guard !response.proposedProfileEdits.isEmpty ||
+            !response.appendedProfileEvidence.isEmpty ||
+            !basis.retainedActiveEvidenceAppends.isEmpty
+        else { return nil }
+
+        guard let proposalID = try? ProfileChangeProposalID(
+            derivedProfileID(prefix: "prp-", source: sourceMessageID.rawValue)
+        ) else {
+            throw PublishCoachInvocationMutationError
+                .unsupportedResponseComponent
+        }
+        var nextStatementOrdinal = 0
+        func allocateStatementID() throws -> ProfileStatementID {
+            defer { nextStatementOrdinal += 1 }
+            return try ProfileStatementID(
+                derivedProfileID(
+                    prefix: "stm-",
+                    source: sourceMessageID.rawValue,
+                    ordinal: nextStatementOrdinal
+                )
+            )
+        }
+
+        var changes: [ProfileProposalChange] = []
+        var semanticTargetIndexes: [ProfileStatementID: Int] = [:]
+        for proposal in response.proposedProfileEdits {
+            switch proposal.edit {
+            case let .add(kind, wording):
+                if let index = changes.firstIndex(where: { change in
+                    guard case let .add(existing) = change else { return false }
+                    return existing.statementKind == kind &&
+                        existing.wording == wording
+                }), case let .add(existing) = changes[index] {
+                    changes[index] = .add(
+                        statement: try ProfileProposedStatement(
+                            statementID: existing.statementID,
+                            statementKind: existing.statementKind,
+                            wording: existing.wording,
+                            evidence: existing.evidence + proposal.evidence
+                        )
+                    )
+                    continue
+                }
+                changes.append(.add(
+                    statement: try ProfileProposedStatement(
+                        statementID: allocateStatementID(),
+                        statementKind: kind,
+                        wording: wording,
+                        evidence: proposal.evidence
+                    )
+                ))
+            case let .replace(target, wording):
+                if let index = semanticTargetIndexes[target.statementID],
+                   case let .replace(existingTarget, existing) = changes[index],
+                   existingTarget == target,
+                   existing.wording == wording
+                {
+                    changes[index] = .replace(
+                        target: target,
+                        replacement: try ProfileProposedStatement(
+                            statementID: existing.statementID,
+                            statementKind: existing.statementKind,
+                            wording: existing.wording,
+                            evidence: existing.evidence + proposal.evidence
+                        )
+                    )
+                    continue
+                }
+                semanticTargetIndexes[target.statementID] = changes.count
+                changes.append(.replace(
+                    target: target,
+                    replacement: try ProfileProposedStatement(
+                        statementID: allocateStatementID(),
+                        statementKind: target.statementKind,
+                        wording: wording,
+                        evidence: proposal.evidence
+                    )
+                ))
+            case let .retire(target):
+                if let index = semanticTargetIndexes[target.statementID],
+                   case let .retire(existingTarget, existingEvidence) =
+                    changes[index], existingTarget == target
+                {
+                    changes[index] = .retire(
+                        target: target,
+                        evidence: existingEvidence + proposal.evidence
+                    )
+                    continue
+                }
+                semanticTargetIndexes[target.statementID] = changes.count
+                changes.append(.retire(
+                    target: target,
+                    evidence: proposal.evidence
+                ))
+            }
+        }
+        let returnedAppends = try response.appendedProfileEvidence.map {
+            try ProfileEvidenceAppend(target: $0.target, evidence: $0.evidence)
+        }
+        return try ProfileChangeProposal.reconsidered(
+            id: proposalID,
+            basis: basis,
+            responsePositionID: responsePositionID,
+            changes: changes,
+            evidenceAppends: returnedAppends,
+            createdAt: completedAt
+        )
+    }
+
+    private static func derivedProfileID(
+        prefix: String,
+        source: String,
+        ordinal: Int = 0
+    ) -> String {
+        let sourceTail = String(source.dropFirst(4))
+        guard ordinal > 0 else { return prefix + sourceTail }
+        let alphabet = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+        var tail = Array(sourceTail)
+        var carry = ordinal
+        for index in stride(
+            from: tail.count - 1,
+            through: tail.count - 4,
+            by: -1
+        ) {
+            guard let digit = alphabet.firstIndex(of: tail[index]) else {
+                return prefix + sourceTail
+            }
+            let value = digit + carry
+            tail[index] = alphabet[value % alphabet.count]
+            carry = value / alphabet.count
+        }
+        return prefix + String(tail)
+    }
+
+    private static func matchesValidatedMemory(
+        _ validated: ValidatedCoachResponseMemory?,
+        replacement: CoachMemory?,
+        base: CoachMemory
+    ) -> Bool {
+        guard let validated else { return replacement == nil }
+        if validated.hasSameCanonicalContent(as: base) {
+            return replacement == nil
+        }
+        guard let replacement else { return false }
+        return validated.hasSameCanonicalContent(as: replacement)
+    }
+}
+
+@_spi(InvocationInfrastructure)
 public enum InvocationPublicationOutcome: Equatable, Sendable {
     case committed(ChatAggregate)
     case stale(ChatAggregate?)
@@ -1043,6 +1975,96 @@ public extension InvocationActivePersistenceSession {
 }
 
 @_spi(InvocationInfrastructure)
+public enum InvocationProfileReconsiderationTermination: Sendable {
+    /// Releases the lease. A provisional new sidecar is removed atomically;
+    /// an existing failed Retry sidecar is left unchanged.
+    case rejected
+    /// Retires pre-launch work with an exact typed retry failure while keeping
+    /// the stale source effect and sidecar identity installed.
+    case failed(PendingUserTurnFailure)
+}
+
+@_spi(InvocationInfrastructure)
+public enum InvocationProfileReconsiderationTerminalPersistenceOutcome:
+    Equatable,
+    Sendable
+{
+    case committed(ChatAggregate)
+    case stale(ChatAggregate?)
+    case recovered(InvocationProfileReconsiderationResolutionOutcome)
+}
+
+@_spi(InvocationInfrastructure)
+public enum InvocationProfileReconsiderationSessionInstallOutcome: Sendable {
+    case installed(any InvocationProfileReconsiderationActivePersistenceSession)
+    case blockedByActiveInvocation
+    case stale(ChatAggregate?)
+    case failed
+}
+
+@_spi(InvocationInfrastructure)
+public enum InvocationProfileReconsiderationNextAttemptInstallOutcome: Sendable {
+    case installed(any InvocationProfileReconsiderationActivePersistenceSession)
+    case collision(InvocationLaunchIdentityCollision)
+    case stale(ChatAggregate?)
+    case failed
+}
+
+/// One-shot pre-install persistence authority. Infrastructure owns whether the
+/// sidecar was provisionally installed (new) or already durable (Retry), and
+/// applies `rejected` accordingly without ever deleting the source effect.
+@_spi(InvocationInfrastructure)
+public protocol InvocationProfileReconsiderationPersistenceSession: Sendable {
+    var authority: InvocationProfileReconsiderationAuthority { get }
+
+    func revalidate()
+        async -> InvocationProfileReconsiderationResolutionOutcome
+
+    func checkLaunchIdentity(
+        _ identity: InvocationProfileReconsiderationLaunchIdentity
+    ) async -> InvocationLaunchIdentityAvailabilityOutcome
+
+    func install(
+        _ mutation: InstallProfileReconsiderationInvocationMutation
+    ) async -> InvocationProfileReconsiderationSessionInstallOutcome
+
+    func terminate(
+        _ termination: InvocationProfileReconsiderationTermination
+    ) async -> InvocationProfileReconsiderationTerminalPersistenceOutcome
+
+    func abandon() async
+}
+
+/// Active-only persistence authority for one exact installed Reconsider
+/// Invocation. Publication, abort, and Attempt replacement cannot be redirected
+/// to an answer or another sidecar.
+@_spi(InvocationInfrastructure)
+public protocol InvocationProfileReconsiderationActivePersistenceSession:
+    Sendable
+{
+    var invocation: CoachInvocation { get }
+    var processingAggregate: ChatAggregate { get }
+    var reconsideration: ProfileReconsideration { get }
+    var basis: ProfileReconsiderationBasis { get }
+
+    func installNextAttempt(
+        _ mutation: InstallNextProfileReconsiderationAttemptMutation
+    ) async -> InvocationProfileReconsiderationNextAttemptInstallOutcome
+
+    func abort(
+        failure: PendingUserTurnFailure
+    ) async -> InvocationProfileReconsiderationTerminalPersistenceOutcome
+
+    func publish(
+        _ mutation: PublishProfileReconsiderationInvocationMutation
+    ) async -> InvocationPublicationOutcome
+
+    func recoverPublished(
+        _ mutation: PublishProfileReconsiderationInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome
+}
+
+@_spi(InvocationInfrastructure)
 public protocol InvocationPersistencePort: Sendable {
     /// Opens a session after acquiring Library-wide liveness and atomically
     /// installing the exact new Pending.
@@ -1069,6 +2091,33 @@ public protocol InvocationPersistencePort: Sendable {
     func recoverPublishedInvocation(
         _ mutation: PublishCoachInvocationMutation
     ) async -> InvocationPublicationRecoveryOutcome
+
+    /// Acquires Library-wide liveness and atomically installs the provisional
+    /// sidecar without removing the exact stale source effect.
+    func openNewProfileReconsiderationInvocation(
+        _ request: NewProfileReconsiderationInvocationRequest
+    ) async -> InvocationProfileReconsiderationSessionPreparationOutcome
+
+    /// Acquires liveness for an existing failed sidecar and freshly assessed
+    /// basis. The reserved result response position is reused unchanged.
+    func openRetryProfileReconsiderationInvocation(
+        _ request: RetryProfileReconsiderationInvocationRequest
+    ) async -> InvocationProfileReconsiderationSessionAcquisitionOutcome
+
+    /// Reacquires a failure-free sidecar only for a process-live operational
+    /// Retry. The caller owns the transient exact-request capability; persistence
+    /// reconciles any old Invocation and freshly reassesses the Profile basis.
+    func openOperationalProfileReconsiderationInvocation(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> InvocationProfileReconsiderationSessionAcquisitionOutcome
+
+    func recoverProfileReconsiderationAfterTerminalFailure(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> InvocationProfileReconsiderationResolutionOutcome
+
+    func recoverPublishedProfileReconsideration(
+        _ mutation: PublishProfileReconsiderationInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome
 }
 
 @_spi(InvocationInfrastructure)
@@ -1081,6 +2130,36 @@ public extension InvocationPersistencePort {
 
     func recoverPublishedInvocation(
         _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome {
+        .unavailable
+    }
+
+    func openNewProfileReconsiderationInvocation(
+        _ request: NewProfileReconsiderationInvocationRequest
+    ) async -> InvocationProfileReconsiderationSessionPreparationOutcome {
+        .unavailable
+    }
+
+    func openRetryProfileReconsiderationInvocation(
+        _ request: RetryProfileReconsiderationInvocationRequest
+    ) async -> InvocationProfileReconsiderationSessionAcquisitionOutcome {
+        .unavailable
+    }
+
+    func openOperationalProfileReconsiderationInvocation(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> InvocationProfileReconsiderationSessionAcquisitionOutcome {
+        .unavailable
+    }
+
+    func recoverProfileReconsiderationAfterTerminalFailure(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> InvocationProfileReconsiderationResolutionOutcome {
+        .unavailable
+    }
+
+    func recoverPublishedProfileReconsideration(
+        _ mutation: PublishProfileReconsiderationInvocationMutation
     ) async -> InvocationPublicationRecoveryOutcome {
         .unavailable
     }
@@ -1642,6 +2721,23 @@ public actor DefaultInvocations: Invocations {
         }
     }
 
+    private enum ActiveProfileReconsiderationWork {
+        case provider(Task<Void, Never>, ProviderAttemptCompletion)
+        case backoff(Task<Void, Never>, BackoffCompletion)
+        case transition(Task<ProfileReconsiderationNextAttemptResolution, Never>)
+        case reapPending(ProfileReconsiderationInvocationTryOutcome?)
+        case stopping
+
+        func cancel() {
+            switch self {
+            case let .provider(task, _): task.cancel()
+            case let .backoff(task, _): task.cancel()
+            case let .transition(task): task.cancel()
+            case .reapPending, .stopping: break
+            }
+        }
+    }
+
     private struct ActiveInvocationControl {
         let runID: UUID
         let authority: InvocationStopAuthority
@@ -1655,8 +2751,28 @@ public actor DefaultInvocations: Invocations {
         var retainedTranscriptTerminalStatus: AttemptTranscriptAccessTerminalStatus?
     }
 
+    private struct ActiveProfileReconsiderationControl {
+        let runID: UUID
+        let authority: ProfileReconsiderationInvocationStopAuthority
+        var session:
+            any InvocationProfileReconsiderationActivePersistenceSession
+        let fallback: ChatAggregate
+        let diagnosticContext: InvocationRetryDiagnosticContext
+        let startedAtMilliseconds: UInt64
+        let transcriptAccess: ProviderAttemptTranscriptAccess?
+        var work: ActiveProfileReconsiderationWork
+        var isRevoked: Bool
+        var retainedTranscriptTerminalStatus:
+            AttemptTranscriptAccessTerminalStatus?
+    }
+
     private struct PublicationRecoveryIntent: Sendable {
         let mutation: PublishCoachInvocationMutation
+        let quote: CoachContextQuote
+    }
+
+    private struct ProfileReconsiderationPublicationRecoveryIntent: Sendable {
+        let mutation: PublishProfileReconsiderationInvocationMutation
         let quote: CoachContextQuote
     }
 
@@ -1666,11 +2782,31 @@ public actor DefaultInvocations: Invocations {
         case unavailable(PublicationRecoveryIntent)
     }
 
+    private enum ProfileReconsiderationPublicationRecoveryResolution {
+        case published(ProfileReconsiderationInvocationTryOutcome)
+        case notPublished
+        case unavailable(ProfileReconsiderationPublicationRecoveryIntent)
+    }
+
     private enum TerminalRecoveryResolution {
         case published(InvocationTryOutcome)
         case eligible(InvocationPendingAuthority)
         case ineligible(ChatAggregate?, unresolvedPublication: PublicationRecoveryIntent?)
         case unavailable(unresolvedPublication: PublicationRecoveryIntent?)
+    }
+
+    private enum ProfileReconsiderationTerminalRecoveryResolution {
+        case published(ProfileReconsiderationInvocationTryOutcome)
+        case eligible(InvocationProfileReconsiderationAuthority)
+        case ineligible(
+            ChatAggregate?,
+            unresolvedPublication:
+                ProfileReconsiderationPublicationRecoveryIntent?
+        )
+        case unavailable(
+            unresolvedPublication:
+                ProfileReconsiderationPublicationRecoveryIntent?
+        )
     }
 
     private enum NextAttemptResolution {
@@ -1679,9 +2815,25 @@ public actor DefaultInvocations: Invocations {
         case revoked(any InvocationActivePersistenceSession)
     }
 
+    private enum ProfileReconsiderationNextAttemptResolution {
+        case installed(
+            any InvocationProfileReconsiderationActivePersistenceSession
+        )
+        case terminal(ProfileReconsiderationInvocationTryOutcome)
+        case revoked(
+            any InvocationProfileReconsiderationActivePersistenceSession
+        )
+    }
+
     private struct OperationalRetrySnapshot: Sendable {
         let fallback: ChatAggregate
         let publication: PublicationRecoveryIntent?
+    }
+
+    private struct OperationalProfileReconsiderationRetrySnapshot: Sendable {
+        let request: ProfileReconsiderationInvocationRequest
+        let fallback: ChatAggregate
+        let publication: ProfileReconsiderationPublicationRecoveryIntent?
     }
 
     static let maximumLaunchIdentityCandidates = 4
@@ -1728,10 +2880,23 @@ public actor DefaultInvocations: Invocations {
     private var operationalRetrySnapshots: [
         PendingCoachInvocationRequest: OperationalRetrySnapshot
     ] = [:]
+    private var operationalProfileReconsiderationRetrySnapshots:
+        [OperationalProfileReconsiderationRetrySnapshot] = []
     private var activeInvocationControls: [UUID: ActiveInvocationControl] = [:]
+    private var inFlightProfileReconsiderationRequests:
+        [ProfileReconsiderationInvocationRequest] = []
+    private var preparedProfileReconsiderationSessions: [
+        UUID: any InvocationProfileReconsiderationPersistenceSession
+    ] = [:]
+    private var activeProfileReconsiderationControls: [
+        UUID: ActiveProfileReconsiderationControl
+    ] = [:]
 
     private var hasUnreapedProviderAuthority: Bool {
-        activeInvocationControls.values.contains { $0.isRevoked }
+        activeInvocationControls.values.contains { $0.isRevoked } ||
+            activeProfileReconsiderationControls.values.contains {
+                $0.isRevoked
+            }
     }
 
     init(
@@ -1889,6 +3054,1651 @@ public actor DefaultInvocations: Invocations {
         }
 
         return await invoke(session, observingStopAuthority: observer)
+    }
+
+    public func prepareNewProfileReconsiderationInvocation(
+        _ request: NewProfileReconsiderationInvocationRequest
+    ) async -> NewProfileReconsiderationInvocationOutcome {
+        guard !hasUnreapedProviderAuthority else {
+            return .activeInvocation
+        }
+        switch await persistence.openNewProfileReconsiderationInvocation(
+            request
+        ) {
+        case let .opened(session):
+            let authority = session.authority
+            guard authority.request == request.request,
+                  authority.basis == request.basis
+            else {
+                await session.abandon()
+                return .failed
+            }
+            let prepared = PreparedProfileReconsiderationInvocation(
+                authority: authority
+            )
+            preparedProfileReconsiderationSessions[prepared.capabilityID] =
+                session
+            return .prepared(prepared)
+        case let .stale(current):
+            return .stale(current)
+        case let .frozen(frozen):
+            return .frozen(frozen)
+        case .readOnlyLibrary:
+            return .readOnlyLibrary
+        case .blockedByActiveInvocation:
+            return .activeInvocation
+        case .unavailable:
+            return .failed
+        }
+    }
+
+    public func abandonPreparedProfileReconsiderationInvocation(
+        _ prepared: PreparedProfileReconsiderationInvocation
+    ) async {
+        guard let session = preparedProfileReconsiderationSessions[
+            prepared.capabilityID
+        ],
+            session.authority.request == prepared.request,
+            session.authority.aggregate == prepared.aggregate,
+            session.authority.basis == prepared.basis
+        else { return }
+        preparedProfileReconsiderationSessions.removeValue(
+            forKey: prepared.capabilityID
+        )
+        await session.abandon()
+    }
+
+    public func tryReconsiderProfileChange(
+        _ prepared: PreparedProfileReconsiderationInvocation
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(
+            prepared,
+            observingStopAuthority: { _ in }
+        )
+    }
+
+    public func tryReconsiderProfileChange(
+        _ prepared: PreparedProfileReconsiderationInvocation,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        guard let session = preparedProfileReconsiderationSessions[
+            prepared.capabilityID
+        ],
+            session.authority.request == prepared.request,
+            session.authority.aggregate == prepared.aggregate,
+            session.authority.basis == prepared.basis
+        else {
+            return .rejected(nil, .eligibilityChanged)
+        }
+        preparedProfileReconsiderationSessions.removeValue(
+            forKey: prepared.capabilityID
+        )
+        guard beginProfileReconsideration(prepared.request) else {
+            await session.abandon()
+            return .rejected(nil, .activeInvocation)
+        }
+        defer { endProfileReconsideration(prepared.request) }
+        return await invokeProfileReconsideration(
+            session,
+            observingStopAuthority: observer
+        )
+    }
+
+    public func tryReconsiderProfileChange(
+        _ request: RetryProfileReconsiderationInvocationRequest
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(
+            request,
+            observingStopAuthority: { _ in }
+        )
+    }
+
+    public func tryReconsiderProfileChange(
+        _ request: RetryProfileReconsiderationInvocationRequest,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        guard beginProfileReconsideration(request.request) else {
+            return .rejected(nil, .activeInvocation)
+        }
+        defer { endProfileReconsideration(request.request) }
+
+        let session: any InvocationProfileReconsiderationPersistenceSession
+        switch await persistence.openRetryProfileReconsiderationInvocation(
+            request
+        ) {
+        case let .opened(opened):
+            guard opened.authority.request == request.request,
+                  opened.authority.basis == request.basis
+            else {
+                await opened.abandon()
+                return .rejected(nil, .eligibilityChanged)
+            }
+            session = opened
+        case let .ineligible(current):
+            return .rejected(current, .eligibilityChanged)
+        case .blockedByActiveInvocation:
+            return .rejected(nil, .activeInvocation)
+        case .unavailable:
+            return .rejected(nil, .persistenceUnavailable)
+        }
+        return await invokeProfileReconsideration(
+            session,
+            observingStopAuthority: observer
+        )
+    }
+
+    public func tryReconsiderProfileChange(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        await tryReconsiderProfileChange(
+            request,
+            observingStopAuthority: { _ in }
+        )
+    }
+
+    public func tryReconsiderProfileChange(
+        _ request: ProfileReconsiderationInvocationRequest,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        guard var snapshot = operationalProfileReconsiderationRetrySnapshots
+            .first(where: { $0.request == request })
+        else { return .rejected(nil, .eligibilityChanged) }
+        guard beginProfileReconsideration(request) else {
+            return .rejected(nil, .activeInvocation)
+        }
+        defer { endProfileReconsideration(request) }
+
+        if let publication = snapshot.publication {
+            switch await resolveProfileReconsiderationPublicationRecovery(
+                publication
+            ) {
+            case let .published(outcome):
+                return outcome
+            case .notPublished:
+                snapshot = OperationalProfileReconsiderationRetrySnapshot(
+                    request: request,
+                    fallback: snapshot.fallback,
+                    publication: nil
+                )
+                rememberOperationalProfileReconsiderationRetry(
+                    request: request,
+                    fallback: snapshot.fallback,
+                    publication: nil
+                )
+            case let .unavailable(unresolvedPublication):
+                return retainOperationalProfileReconsiderationRetry(
+                    request: request,
+                    fallback: snapshot.fallback,
+                    publication: unresolvedPublication
+                )
+            }
+        }
+
+        let session: any InvocationProfileReconsiderationPersistenceSession
+        switch await persistence
+            .openOperationalProfileReconsiderationInvocation(request)
+        {
+        case let .opened(opened):
+            guard opened.authority.request == request,
+                  opened.authority.reconsideration.failure == nil
+            else {
+                let current = opened.authority.aggregate
+                await opened.abandon()
+                removeOperationalProfileReconsiderationRetry(request)
+                return opened.authority.request == request
+                    ? .interrupted(current, .persistenceUnavailable)
+                    : .rejected(current, .eligibilityChanged)
+            }
+            removeOperationalProfileReconsiderationRetry(request)
+            session = opened
+        case let .ineligible(current):
+            removeOperationalProfileReconsiderationRetry(request)
+            return .rejected(current, .eligibilityChanged)
+        case .blockedByActiveInvocation:
+            return .rejected(nil, .activeInvocation)
+        case .unavailable:
+            return retainOperationalProfileReconsiderationRetry(
+                request: request,
+                fallback: snapshot.fallback,
+                publication: snapshot.publication
+            )
+        }
+        let outcome = await invokeProfileReconsideration(
+            session,
+            observingStopAuthority: observer
+        )
+        if case let .rejected(current?, reason) = outcome,
+           reason != .eligibilityChanged,
+           current.chat.id == request.chatID,
+           current.profileEffect?.identity == request.sourceEffectIdentity,
+           let reconsideration = current.profileReconsideration,
+           reconsideration.sourceEffectIdentity ==
+            request.sourceEffectIdentity,
+           reconsideration.resultResponsePositionID ==
+            request.resultResponsePositionID,
+           reconsideration.failure == nil
+        {
+            rememberOperationalProfileReconsiderationRetry(
+                request: request,
+                fallback: current
+            )
+        }
+        return outcome
+    }
+
+    private func beginProfileReconsideration(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) -> Bool {
+        guard !hasUnreapedProviderAuthority,
+              !inFlightProfileReconsiderationRequests.contains(request)
+        else { return false }
+        inFlightProfileReconsiderationRequests.append(request)
+        return true
+    }
+
+    private func endProfileReconsideration(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) {
+        inFlightProfileReconsiderationRequests.removeAll { $0 == request }
+    }
+
+    private func invokeProfileReconsideration(
+        _ session: any InvocationProfileReconsiderationPersistenceSession,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        let firstAuthority = session.authority
+        let request = firstAuthority.request
+        let contextRequest: CoachContextReconsiderRequest
+        do {
+            contextRequest = try CoachContextReconsiderRequest(
+                library: request.library,
+                aggregate: firstAuthority.aggregate,
+                basis: firstAuthority.basis
+            )
+        } catch {
+            return await rejectProfileReconsideration(
+                session,
+                fallback: firstAuthority.aggregate,
+                reason: .eligibilityChanged
+            )
+        }
+
+        let prepared: PreparedCoachLaunchContext
+        switch await coachContext.prepareReconsider(contextRequest) {
+        case let .prepared(value):
+            prepared = value
+        case let .cannotFit(failure):
+            return await failProfileReconsiderationBeforeInstall(
+                session,
+                fallback: firstAuthority.aggregate,
+                request: request,
+                failure: .coachContextCannotFit,
+                outcome: { current in
+                    .contextCapacityFailure(current, failure.quote)
+                }
+            )
+        case let .unavailable(reason):
+            return await failProfileReconsiderationBeforeInstall(
+                session,
+                fallback: firstAuthority.aggregate,
+                request: request,
+                failure: .coachResponseInterrupted,
+                outcome: { current in
+                    .rejected(current, .contextUnavailable(reason))
+                }
+            )
+        }
+
+        let finalAuthority: InvocationProfileReconsiderationAuthority
+        switch await session.revalidate() {
+        case let .eligible(authority) where authority == firstAuthority:
+            finalAuthority = authority
+        case let .eligible(authority):
+            return await rejectProfileReconsideration(
+                session,
+                fallback: authority.aggregate,
+                reason: .eligibilityChanged
+            )
+        case let .ineligible(current):
+            return .rejected(current, .eligibilityChanged)
+        case .unavailable:
+            return await failProfileReconsiderationBeforeInstall(
+                session,
+                fallback: firstAuthority.aggregate,
+                request: request,
+                failure: .coachResponseInterrupted,
+                outcome: { current in
+                    .interrupted(current, .persistenceUnavailable)
+                }
+            )
+        }
+
+        let identityInstant = await clock.now()
+        var invocationID = await identities.generateInvocationID(
+            at: identityInstant
+        )
+        var selectedIdentity: InvocationProfileReconsiderationLaunchIdentity?
+        var lastCollision: InvocationLaunchIdentityCollision?
+        for _ in 0 ..< Self.maximumLaunchIdentityCandidates {
+            let attemptIdentity = await identities
+                .generateProfileReconsiderationAttemptIdentity(
+                    at: identityInstant,
+                    ordinal: 1,
+                    kind: .standard,
+                    transcriptHandleCount:
+                        prepared.exchange.preparedTranscriptHandles.count
+                )
+            guard attemptIdentity.transcriptHandles.count ==
+                prepared.exchange.preparedTranscriptHandles.count,
+                (try? attemptIdentity.makeAttempt(
+                    ordinal: 1,
+                    kind: .standard
+                )) != nil
+            else {
+                return await rejectProfileReconsideration(
+                    session,
+                    fallback: finalAuthority.aggregate,
+                    reason: .persistenceUnavailable
+                )
+            }
+            let candidate = InvocationProfileReconsiderationLaunchIdentity(
+                invocationID: invocationID,
+                attemptIdentity: attemptIdentity
+            )
+            switch await session.checkLaunchIdentity(candidate) {
+            case .available:
+                selectedIdentity = candidate
+            case let .collision(collision):
+                lastCollision = collision
+                if collision == .invocationID {
+                    invocationID = await identities.generateInvocationID(
+                        at: identityInstant
+                    )
+                }
+                continue
+            case let .stale(current):
+                await session.abandon()
+                return .rejected(current, .eligibilityChanged)
+            case .unavailable:
+                return await failProfileReconsiderationBeforeInstall(
+                    session,
+                    fallback: finalAuthority.aggregate,
+                    request: request,
+                    failure: .coachResponseInterrupted,
+                    outcome: { current in
+                        .interrupted(current, .persistenceUnavailable)
+                    }
+                )
+            }
+            break
+        }
+        guard let identity = selectedIdentity else {
+            return await rejectProfileReconsideration(
+                session,
+                fallback: finalAuthority.aggregate,
+                reason: .identityCollisionExhausted(
+                    lastCollision: lastCollision ?? .invocationID
+                )
+            )
+        }
+
+        do {
+            try AttemptTranscriptAccessGrantIssuer().preflight(
+                exchange: prepared.exchange,
+                freshHandles: identity.transcriptHandles,
+                pinnedInstruction: prepared.exchange.pinnedInstruction
+            )
+        } catch AttemptTranscriptAccessGrantIssueError.contextCannotFit {
+            return await failProfileReconsiderationBeforeInstall(
+                session,
+                fallback: finalAuthority.aggregate,
+                request: request,
+                failure: .coachContextCannotFit,
+                outcome: { current in
+                    .contextCapacityFailure(current, prepared.quote)
+                }
+            )
+        } catch {
+            return await failProfileReconsiderationBeforeInstall(
+                session,
+                fallback: finalAuthority.aggregate,
+                request: request,
+                failure: .coachResponseInterrupted,
+                outcome: { current in
+                    .interrupted(current, .retryInfrastructureFailed)
+                }
+            )
+        }
+
+        let admittedAt = await clock.now()
+        switch await admission.claim(
+            library: request.library,
+            at: admittedAt
+        ) {
+        case .admitted:
+            break
+        case .commitUncertain:
+            return await failProfileReconsiderationBeforeInstall(
+                session,
+                fallback: finalAuthority.aggregate,
+                request: request,
+                failure: .coachResponseInterrupted,
+                outcome: { current in
+                    .interrupted(current, .persistenceUnavailable)
+                }
+            )
+        case .cooldown:
+            return await rejectProfileReconsideration(
+                session,
+                fallback: finalAuthority.aggregate,
+                reason: .admissionCooldown
+            )
+        case .clockRollback:
+            return await rejectProfileReconsideration(
+                session,
+                fallback: finalAuthority.aggregate,
+                reason: .clockRollback
+            )
+        case .ledgerFull:
+            return await rejectProfileReconsideration(
+                session,
+                fallback: finalAuthority.aggregate,
+                reason: .admissionLedgerFull
+            )
+        case .unavailable:
+            return await rejectProfileReconsideration(
+                session,
+                fallback: finalAuthority.aggregate,
+                reason: .admissionUnavailable
+            )
+        }
+
+        let install: InstallProfileReconsiderationInvocationMutation
+        do {
+            install = try InstallProfileReconsiderationInvocationMutation(
+                authority: finalAuthority,
+                identity: identity,
+                preparedProfile: prepared.authority.profile,
+                admittedAt: admittedAt
+            )
+        } catch {
+            return await failProfileReconsiderationBeforeInstall(
+                session,
+                fallback: finalAuthority.aggregate,
+                request: request,
+                failure: .coachResponseInterrupted,
+                outcome: { current in
+                    .interrupted(current, .persistenceUnavailable)
+                }
+            )
+        }
+
+        let activeSession:
+            any InvocationProfileReconsiderationActivePersistenceSession
+        switch await session.install(install) {
+        case let .installed(installed):
+            activeSession = installed
+        case .blockedByActiveInvocation:
+            return await rejectProfileReconsideration(
+                session,
+                fallback: finalAuthority.aggregate,
+                reason: .activeInvocation
+            )
+        case let .stale(current):
+            await session.abandon()
+            return .rejected(current, .eligibilityChanged)
+        case .failed:
+            return await failProfileReconsiderationBeforeInstall(
+                session,
+                fallback: finalAuthority.aggregate,
+                request: request,
+                failure: .coachResponseInterrupted,
+                outcome: { current in
+                    .interrupted(current, .persistenceUnavailable)
+                }
+            )
+        }
+
+        guard await coachContext.isPreparedContextCurrent(prepared) else {
+            let current = await abortProfileReconsideration(
+                activeSession,
+                fallback: activeSession.processingAggregate,
+                request: request,
+                failure: .coachResponseInterrupted,
+                reason: .persistenceUnavailable
+            )
+            if case let .interrupted(aggregate, _) = current {
+                return .rejected(aggregate, .contextChanged)
+            }
+            return current
+        }
+
+        return await runProfileReconsideration(
+            activeSession,
+            prepared: prepared,
+            observingStopAuthority: observer
+        )
+    }
+
+    private func rejectProfileReconsideration(
+        _ session: any InvocationProfileReconsiderationPersistenceSession,
+        fallback: ChatAggregate,
+        reason: InvocationRejectionReason
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        let request = session.authority.request
+        switch await session.terminate(.rejected) {
+        case let .committed(current):
+            return .rejected(current, reason)
+        case let .stale(current):
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: { .rejected($0, .eligibilityChanged) }
+            )
+        case let .recovered(.eligible(authority)):
+            return profileReconsiderationTerminalOutcome(
+                current: authority.aggregate,
+                fallback: fallback,
+                request: request,
+                outcome: { .rejected($0, reason) }
+            )
+        case let .recovered(.ineligible(current)):
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: { .rejected($0, .eligibilityChanged) }
+            )
+        case .recovered(.unavailable):
+            return profileReconsiderationTerminalOutcome(
+                current: nil,
+                fallback: fallback,
+                request: request,
+                outcome: { .rejected($0, .persistenceUnavailable) }
+            )
+        }
+    }
+
+    private func failProfileReconsiderationBeforeInstall(
+        _ session: any InvocationProfileReconsiderationPersistenceSession,
+        fallback: ChatAggregate,
+        request: ProfileReconsiderationInvocationRequest,
+        failure: PendingUserTurnFailure,
+        outcome: (ChatAggregate) -> ProfileReconsiderationInvocationTryOutcome
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        switch await session.terminate(.failed(failure)) {
+        case let .committed(current):
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: outcome
+            )
+        case let .stale(current):
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: outcome
+            )
+        case let .recovered(.eligible(authority)):
+            return profileReconsiderationTerminalOutcome(
+                current: authority.aggregate,
+                fallback: fallback,
+                request: request,
+                outcome: outcome
+            )
+        case let .recovered(.ineligible(current)):
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: outcome
+            )
+        case .recovered(.unavailable):
+            return retainOperationalProfileReconsiderationRetry(
+                request: request,
+                fallback: fallback
+            )
+        }
+    }
+
+    private func abortProfileReconsideration(
+        _ session:
+            any InvocationProfileReconsiderationActivePersistenceSession,
+        fallback: ChatAggregate,
+        request: ProfileReconsiderationInvocationRequest,
+        failure: PendingUserTurnFailure,
+        reason: InvocationInterruptionReason
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        switch await session.abort(failure: failure) {
+        case let .committed(current):
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        case let .stale(current):
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        case let .recovered(.eligible(authority)):
+            return profileReconsiderationTerminalOutcome(
+                current: authority.aggregate,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        case let .recovered(.ineligible(current)):
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        case .recovered(.unavailable):
+            return retainOperationalProfileReconsiderationRetry(
+                request: request,
+                fallback: fallback
+            )
+        }
+    }
+
+    private func interruptProfileReconsiderationPublicationAndAbort(
+        _ session:
+            any InvocationProfileReconsiderationActivePersistenceSession,
+        fallback: ChatAggregate,
+        request: ProfileReconsiderationInvocationRequest,
+        reason: InvocationInterruptionReason,
+        publication: ProfileReconsiderationPublicationRecoveryIntent
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        let priorRecovery = await resolveProfileReconsiderationPublicationRecovery(
+            publication,
+            using: session
+        )
+        if case let .published(outcome) = priorRecovery { return outcome }
+
+        return switch await session.abort(
+            failure: .coachResponseInterrupted
+        ) {
+        case let .committed(current):
+            profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        case let .stale(current):
+            await profileReconsiderationOutcomeAfterStaleAbort(
+                current: current,
+                fallback: fallback,
+                request: request,
+                reason: reason,
+                publication: publication,
+                priorRecovery: priorRecovery
+            )
+        case let .recovered(resolution):
+            await profileReconsiderationOutcomeAfterRecoveredAbort(
+                resolution,
+                fallback: fallback,
+                request: request,
+                reason: reason,
+                publication: publication,
+                priorRecovery: priorRecovery
+            )
+        }
+    }
+
+    private func profileReconsiderationOutcomeAfterStaleAbort(
+        current: ChatAggregate?,
+        fallback: ChatAggregate,
+        request: ProfileReconsiderationInvocationRequest,
+        reason: InvocationInterruptionReason,
+        publication: ProfileReconsiderationPublicationRecoveryIntent,
+        priorRecovery:
+            ProfileReconsiderationPublicationRecoveryResolution
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        if case .notPublished = priorRecovery {
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        }
+        switch await resolveProfileReconsiderationPublicationRecovery(
+            publication
+        ) {
+        case let .published(outcome):
+            return outcome
+        case .notPublished:
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        case .unavailable:
+            return await profileReconsiderationInterruptionAfterTerminalFailure(
+                request: request,
+                fallback: fallback,
+                reason: reason,
+                publication: publication
+            )
+        }
+    }
+
+    private func profileReconsiderationOutcomeAfterRecoveredAbort(
+        _ resolution: InvocationProfileReconsiderationResolutionOutcome,
+        fallback: ChatAggregate,
+        request: ProfileReconsiderationInvocationRequest,
+        reason: InvocationInterruptionReason,
+        publication: ProfileReconsiderationPublicationRecoveryIntent,
+        priorRecovery:
+            ProfileReconsiderationPublicationRecoveryResolution
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        if case .notPublished = priorRecovery {
+            return profileReconsiderationOutcomeAfterTerminalResolution(
+                resolution,
+                fallback: fallback,
+                request: request,
+                reason: reason
+            )
+        }
+        switch await resolveProfileReconsiderationPublicationRecovery(
+            publication
+        ) {
+        case let .published(outcome):
+            return outcome
+        case .notPublished:
+            return profileReconsiderationOutcomeAfterTerminalResolution(
+                resolution,
+                fallback: fallback,
+                request: request,
+                reason: reason
+            )
+        case .unavailable:
+            return retainOperationalProfileReconsiderationRetry(
+                request: request,
+                fallback: fallback,
+                publication: publication
+            )
+        }
+    }
+
+    private func profileReconsiderationOutcomeAfterTerminalResolution(
+        _ resolution: InvocationProfileReconsiderationResolutionOutcome,
+        fallback: ChatAggregate,
+        request: ProfileReconsiderationInvocationRequest,
+        reason: InvocationInterruptionReason
+    ) -> ProfileReconsiderationInvocationTryOutcome {
+        switch resolution {
+        case let .eligible(authority):
+            return profileReconsiderationTerminalOutcome(
+                current: authority.aggregate,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        case let .ineligible(current):
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        case .unavailable:
+            return retainOperationalProfileReconsiderationRetry(
+                request: request,
+                fallback: fallback
+            )
+        }
+    }
+
+    private func profileReconsiderationInterruptionAfterTerminalFailure(
+        request: ProfileReconsiderationInvocationRequest,
+        fallback: ChatAggregate,
+        reason: InvocationInterruptionReason,
+        publication: ProfileReconsiderationPublicationRecoveryIntent?
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        switch await resolveProfileReconsiderationTerminalRecovery(
+            request: request,
+            publication: publication
+        ) {
+        case let .published(outcome):
+            return outcome
+        case let .eligible(authority):
+            return profileReconsiderationTerminalOutcome(
+                current: authority.aggregate,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        case let .ineligible(current, unresolvedPublication):
+            if let unresolvedPublication {
+                return retainOperationalProfileReconsiderationRetry(
+                    request: request,
+                    fallback: fallback,
+                    publication: unresolvedPublication
+                )
+            }
+            return profileReconsiderationTerminalOutcome(
+                current: current,
+                fallback: fallback,
+                request: request,
+                outcome: { .interrupted($0, reason) }
+            )
+        case let .unavailable(unresolvedPublication):
+            return retainOperationalProfileReconsiderationRetry(
+                request: request,
+                fallback: fallback,
+                publication: unresolvedPublication
+            )
+        }
+    }
+
+    private func resolveProfileReconsiderationTerminalRecovery(
+        request: ProfileReconsiderationInvocationRequest,
+        publication: ProfileReconsiderationPublicationRecoveryIntent?
+    ) async -> ProfileReconsiderationTerminalRecoveryResolution {
+        var unresolvedPublication:
+            ProfileReconsiderationPublicationRecoveryIntent?
+        if let publication {
+            switch await resolveProfileReconsiderationPublicationRecovery(
+                publication
+            ) {
+            case let .published(outcome):
+                return .published(outcome)
+            case .notPublished:
+                break
+            case let .unavailable(unresolved):
+                unresolvedPublication = unresolved
+            }
+        }
+
+        return switch await persistence
+            .recoverProfileReconsiderationAfterTerminalFailure(request)
+        {
+        case let .eligible(authority):
+            if let unresolvedPublication {
+                .unavailable(
+                    unresolvedPublication: unresolvedPublication
+                )
+            } else {
+                .eligible(authority)
+            }
+        case let .ineligible(current):
+            .ineligible(
+                current,
+                unresolvedPublication: unresolvedPublication
+            )
+        case .unavailable:
+            .unavailable(unresolvedPublication: unresolvedPublication)
+        }
+    }
+
+    private func resolveProfileReconsiderationPublicationRecovery(
+        _ publication: ProfileReconsiderationPublicationRecoveryIntent,
+        using session:
+            (any InvocationProfileReconsiderationActivePersistenceSession)? = nil
+    ) async -> ProfileReconsiderationPublicationRecoveryResolution {
+        let recovery: InvocationPublicationRecoveryOutcome
+        if let session {
+            recovery = await session.recoverPublished(publication.mutation)
+        } else {
+            recovery = await persistence.recoverPublishedProfileReconsideration(
+                publication.mutation
+            )
+        }
+        switch recovery {
+        case let .published(aggregate):
+            removeOperationalProfileReconsiderationRetry(
+                profileReconsiderationPublicationRequest(
+                    for: publication.mutation
+                )
+            )
+            return .published(
+                publication.mutation.isWithdrawal
+                    ? .withdrawn(aggregate, publication.quote)
+                    : .published(aggregate, publication.quote)
+            )
+        case .notPublished:
+            return .notPublished
+        case .unavailable:
+            return .unavailable(publication)
+        }
+    }
+
+    private func profileReconsiderationPublicationRequest(
+        for mutation: PublishProfileReconsiderationInvocationMutation
+    ) -> ProfileReconsiderationInvocationRequest {
+        ProfileReconsiderationInvocationRequest(
+            library: LibraryScope(libraryID: mutation.invocation.libraryID),
+            chatID: mutation.invocation.chatID,
+            sourceEffectIdentity: mutation.reconsideration.sourceEffectIdentity,
+            resultResponsePositionID:
+                mutation.reconsideration.resultResponsePositionID
+        )
+    }
+
+    private func profileReconsiderationTerminalOutcome(
+        current: ChatAggregate?,
+        fallback: ChatAggregate,
+        request: ProfileReconsiderationInvocationRequest,
+        outcome: (ChatAggregate) -> ProfileReconsiderationInvocationTryOutcome
+    ) -> ProfileReconsiderationInvocationTryOutcome {
+        guard let current else {
+            return retainOperationalProfileReconsiderationRetry(
+                request: request,
+                fallback: fallback
+            )
+        }
+        guard current.chat.id == request.chatID,
+              current.profileEffect?.identity == request.sourceEffectIdentity,
+              let reconsideration = current.profileReconsideration,
+              reconsideration.sourceEffectIdentity ==
+                request.sourceEffectIdentity,
+              reconsideration.resultResponsePositionID ==
+                request.resultResponsePositionID
+        else {
+            removeOperationalProfileReconsiderationRetry(request)
+            return outcome(current)
+        }
+        guard reconsideration.failure != nil else {
+            return retainOperationalProfileReconsiderationRetry(
+                request: request,
+                fallback: current
+            )
+        }
+        removeOperationalProfileReconsiderationRetry(request)
+        return outcome(current)
+    }
+
+    private func retainOperationalProfileReconsiderationRetry(
+        request: ProfileReconsiderationInvocationRequest,
+        fallback: ChatAggregate,
+        publication: ProfileReconsiderationPublicationRecoveryIntent? = nil
+    ) -> ProfileReconsiderationInvocationTryOutcome {
+        rememberOperationalProfileReconsiderationRetry(
+            request: request,
+            fallback: fallback,
+            publication: publication
+        )
+        return .operationallyInterrupted(
+            fallback,
+            request,
+            .persistenceUnavailable
+        )
+    }
+
+    private func rememberOperationalProfileReconsiderationRetry(
+        request: ProfileReconsiderationInvocationRequest,
+        fallback: ChatAggregate,
+        publication: ProfileReconsiderationPublicationRecoveryIntent? = nil
+    ) {
+        removeOperationalProfileReconsiderationRetry(request)
+        operationalProfileReconsiderationRetrySnapshots.append(
+            OperationalProfileReconsiderationRetrySnapshot(
+                request: request,
+                fallback: fallback,
+                publication: publication
+            )
+        )
+    }
+
+    private func removeOperationalProfileReconsiderationRetry(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) {
+        operationalProfileReconsiderationRetrySnapshots.removeAll {
+            $0.request == request
+        }
+    }
+
+    private func runProfileReconsideration(
+        _ installedSession:
+            any InvocationProfileReconsiderationActivePersistenceSession,
+        prepared: PreparedCoachLaunchContext,
+        observingStopAuthority observer:
+            @escaping ProfileReconsiderationInvocationStopAuthorityObserver
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        var activeSession = installedSession
+        let processingAggregate = installedSession.processingAggregate
+        guard let request = profileReconsiderationRequest(
+            for: installedSession.invocation
+        ) else {
+            return await abortProfileReconsideration(
+                installedSession,
+                fallback: processingAggregate,
+                request: installedSessionRequest(installedSession),
+                failure: .coachResponseInterrupted,
+                reason: .retryInfrastructureFailed
+            )
+        }
+        let runID = UUID()
+        defer { clearActiveProfileReconsiderationControl(runID: runID) }
+
+        providerAttempts: while true {
+            let invocation = activeSession.invocation
+            let attempt = invocation.attempt
+            let startedAt = retryTiming.nowMilliseconds()
+            guard let transportAuthority = attempt.transportAuthority else {
+                return await abortProfileReconsideration(
+                    activeSession,
+                    fallback: processingAggregate,
+                    request: request,
+                    failure: .coachResponseInterrupted,
+                    reason: .retryInfrastructureFailed
+                )
+            }
+            let pinnedInstruction = Self.pinnedInstruction(
+                base: prepared.exchange.pinnedInstruction,
+                attemptKind: attempt.kind
+            )
+            let completion = ProviderAttemptCompletion()
+            let attemptExchange: AttemptBoundCoachExchange
+            let transcriptAccess: ProviderAttemptTranscriptAccess?
+            if prepared.exchange.preparedTranscriptHandles.isEmpty,
+               transportAuthority.transcriptHandles.isEmpty
+            {
+                attemptExchange = AttemptBoundCoachExchange(
+                    request: prepared.exchange.request,
+                    transcriptHandles: []
+                )
+                transcriptAccess = nil
+            } else {
+                do {
+                    let grant = try AttemptTranscriptAccessGrantIssuer().issue(
+                        exchange: prepared.exchange,
+                        freshHandles: transportAuthority.transcriptHandles,
+                        pinnedInstruction: pinnedInstruction,
+                        availabilityChecker: transcriptAvailability.checker(
+                            library: request.library,
+                            chatID: request.chatID
+                        )
+                    )
+                    attemptExchange = grant.exchange
+                    transcriptAccess = ProviderAttemptTranscriptAccess(
+                        grant: grant,
+                        completion: completion
+                    )
+                } catch {
+                    return await abortProfileReconsideration(
+                        activeSession,
+                        fallback: processingAggregate,
+                        request: request,
+                        failure: .coachResponseInterrupted,
+                        reason: .retryInfrastructureFailed
+                    )
+                }
+            }
+            guard !hasUnreapedProviderAuthority else {
+                transcriptAccess?.closeReads()
+                return await abortProfileReconsideration(
+                    activeSession,
+                    fallback: processingAggregate,
+                    request: request,
+                    failure: .coachResponseInterrupted,
+                    reason: .retryInfrastructureFailed
+                )
+            }
+            let control: CoachProviderAttemptControl = switch attempt.kind {
+            case .standard:
+                .standard
+            case .shorterRepair:
+                .shorterRepair(instruction: Self.shorterRepairInstruction)
+            }
+            let providerRequest = SyntheticCoachProviderRequest(
+                attemptID: attempt.id,
+                attemptOrdinal: attempt.ordinal,
+                attemptKind: attempt.kind,
+                providerIdempotencyValue:
+                    transportAuthority.providerIdempotencyValue,
+                exchange: attemptExchange,
+                transcriptAccess: transcriptAccess,
+                outputTokenCeiling: prepared.quote.reservedResponseTokens,
+                pinnedInstruction: pinnedInstruction,
+                control: control
+            )
+            let provider = self.provider
+            let providerTask = Task {
+                let result = await provider.run(providerRequest)
+                await completion.complete(.provider(result))
+            }
+            let stopAuthority = ProfileReconsiderationInvocationStopAuthority(
+                request: StopProfileReconsiderationInvocationRequest(request),
+                invocationID: invocation.id,
+                attemptID: attempt.id
+            )
+            activeProfileReconsiderationControls[
+                stopAuthority.capabilityID
+            ] = ActiveProfileReconsiderationControl(
+                runID: runID,
+                authority: stopAuthority,
+                session: activeSession,
+                fallback: processingAggregate,
+                diagnosticContext: diagnosticContext(for: prepared),
+                startedAtMilliseconds: startedAt,
+                transcriptAccess: transcriptAccess,
+                work: .provider(providerTask, completion),
+                isRevoked: false,
+                retainedTranscriptTerminalStatus: nil
+            )
+            await observer(stopAuthority)
+            guard isProfileReconsiderationCompletionAuthorized(
+                runID: runID,
+                authority: stopAuthority
+            ) else { return .stopped }
+
+            let completionResult = await completion.wait()
+            guard isProfileReconsiderationCompletionAuthorized(
+                runID: runID,
+                authority: stopAuthority
+            ) else { return .stopped }
+
+            let providerOutcome: CoachProviderAttemptOutcome?
+            var transcriptStatus: AttemptTranscriptAccessBrokerStatus?
+            var providerReaped = false
+            switch completionResult {
+            case .stopped:
+                return .stopped
+            case let .provider(value):
+                providerOutcome = value
+                if let transcriptAccess {
+                    let reason: AttemptTranscriptAccessRevocationReason =
+                        switch value {
+                        case .complete: .attemptCompleted
+                        case .autoRetryableFailure, .userRetryableFailure:
+                            .providerFailed
+                        case .responseOverflow: .protocolFailure
+                        }
+                    let status = await transcriptAccess.finalize(reason: reason)
+                    transcriptStatus = status == .checking
+                        ? .terminal(.rejected)
+                        : status
+                }
+            case let .transcript(status):
+                providerOutcome = nil
+                transcriptStatus = .terminal(status)
+                recordProfileReconsiderationTranscriptTerminalStatus(
+                    status,
+                    runID: runID,
+                    authority: stopAuthority
+                )
+                transcriptAccess?.closeReads()
+                providerTask.cancel()
+                let cancellation = await provider.cancelAndReap(
+                    attemptID: attempt.id,
+                    graceMilliseconds:
+                        Self.providerCancellationGraceMilliseconds
+                )
+                guard isProfileReconsiderationCompletionAuthorized(
+                    runID: runID,
+                    authority: stopAuthority
+                ) else { return .stopped }
+                guard cancellation == .reaped ||
+                    cancellation == .alreadyAbsent
+                else {
+                    retainUnreapedProfileReconsiderationControl(
+                        runID: runID,
+                        authority: stopAuthority,
+                        transcriptStatus: status
+                    )
+                    return .providerReapPending(stopAuthority)
+                }
+                providerReaped = true
+            }
+
+            if case let .terminal(status)? = transcriptStatus,
+               status != .completed
+            {
+                recordProfileReconsiderationTranscriptTerminalStatus(
+                    status,
+                    runID: runID,
+                    authority: stopAuthority
+                )
+                if !providerReaped {
+                    providerTask.cancel()
+                    let cancellation = await provider.cancelAndReap(
+                        attemptID: attempt.id,
+                        graceMilliseconds:
+                            Self.providerCancellationGraceMilliseconds
+                    )
+                    guard isProfileReconsiderationCompletionAuthorized(
+                        runID: runID,
+                        authority: stopAuthority
+                    ) else { return .stopped }
+                    guard cancellation == .reaped ||
+                        cancellation == .alreadyAbsent
+                    else {
+                        retainUnreapedProfileReconsiderationControl(
+                            runID: runID,
+                            authority: stopAuthority,
+                            transcriptStatus: status
+                        )
+                        return .providerReapPending(stopAuthority)
+                    }
+                }
+                guard claimProfileReconsiderationCompletion(
+                    runID: runID,
+                    authority: stopAuthority
+                ) else { return .stopped }
+                let failure = retainedTerminalFailure(for: status)
+                let reason: InvocationInterruptionReason = switch status {
+                case .sessionUnavailable:
+                    .providerFailed
+                case .contextCannotFit:
+                    .retryInfrastructureFailed
+                case .rejected, .revoked, .completed:
+                    .invalidProviderResponse
+                }
+                let aborted = await abortProfileReconsideration(
+                    activeSession,
+                    fallback: processingAggregate,
+                    request: request,
+                    failure: failure,
+                    reason: reason
+                )
+                if status == .contextCannotFit,
+                   case let .interrupted(current?, _) = aborted
+                {
+                    return .contextCapacityFailure(current, prepared.quote)
+                }
+                return aborted
+            }
+            guard let providerOutcome else {
+                return await abortProfileReconsideration(
+                    activeSession,
+                    fallback: processingAggregate,
+                    request: request,
+                    failure: .coachResponseInvalid,
+                    reason: .invalidProviderResponse
+                )
+            }
+
+            switch providerOutcome {
+            case let .complete(response):
+                let completedAt = await clock.now()
+                let publication: PublishProfileReconsiderationInvocationMutation
+                do {
+                    try invocation.validate(against: processingAggregate)
+                    let validationContext = try CoachResponseValidationContext(
+                        prepared: prepared,
+                        base: processingAggregate
+                    )
+                    let validated = try CoachResponseValidator().validate(
+                        response,
+                        in: validationContext
+                    )
+                    let memory = try await replacementMemory(
+                        from: validated,
+                        base: processingAggregate,
+                        at: completedAt
+                    )
+                    publication = try PublishProfileReconsiderationInvocationMutation(
+                        base: processingAggregate,
+                        invocation: invocation,
+                        reconsideration: activeSession.reconsideration,
+                        basis: activeSession.basis,
+                        validatedResponse: validated,
+                        replacementMemory: memory,
+                        completedAt: completedAt
+                    )
+                } catch {
+                    guard claimProfileReconsiderationCompletion(
+                        runID: runID,
+                        authority: stopAuthority
+                    ) else { return .stopped }
+                    return await abortProfileReconsideration(
+                        activeSession,
+                        fallback: processingAggregate,
+                        request: request,
+                        failure: .coachResponseInvalid,
+                        reason: .invalidProviderResponse
+                    )
+                }
+                guard claimProfileReconsiderationCompletion(
+                    runID: runID,
+                    authority: stopAuthority
+                ) else { return .stopped }
+                switch await activeSession.publish(publication) {
+                case let .committed(current):
+                    return publication.isWithdrawal
+                        ? .withdrawn(current, prepared.quote)
+                        : .published(current, prepared.quote)
+                case let .stale(current):
+                    return await interruptProfileReconsiderationPublicationAndAbort(
+                        activeSession,
+                        fallback: current ?? processingAggregate,
+                        request: request,
+                        reason: .publicationConflict,
+                        publication:
+                            ProfileReconsiderationPublicationRecoveryIntent(
+                                mutation: publication,
+                                quote: prepared.quote
+                            )
+                    )
+                case .failed:
+                    return await interruptProfileReconsiderationPublicationAndAbort(
+                        activeSession,
+                        fallback: processingAggregate,
+                        request: request,
+                        reason: .persistenceUnavailable,
+                        publication:
+                            ProfileReconsiderationPublicationRecoveryIntent(
+                                mutation: publication,
+                                quote: prepared.quote
+                            )
+                    )
+                }
+
+            case .userRetryableFailure:
+                guard claimProfileReconsiderationCompletion(
+                    runID: runID,
+                    authority: stopAuthority
+                ) else { return .stopped }
+                return await abortProfileReconsideration(
+                    activeSession,
+                    fallback: processingAggregate,
+                    request: request,
+                    failure: .coachProviderError,
+                    reason: .providerFailed
+                )
+
+            case .autoRetryableFailure:
+                guard attempt.kind == .standard,
+                      attempt.ordinal < CoachProviderAttempt.maximumOrdinal
+                else {
+                    guard claimProfileReconsiderationCompletion(
+                        runID: runID,
+                        authority: stopAuthority
+                    ) else { return .stopped }
+                    return await abortProfileReconsideration(
+                        activeSession,
+                        fallback: processingAggregate,
+                        request: request,
+                        failure: .coachProviderError,
+                        reason: .providerFailed
+                    )
+                }
+                let index = Int(attempt.ordinal - 1)
+                guard Self.automaticRetryDelaysMilliseconds.indices
+                    .contains(index)
+                else {
+                    guard claimProfileReconsiderationCompletion(
+                        runID: runID,
+                        authority: stopAuthority
+                    ) else { return .stopped }
+                    return await abortProfileReconsideration(
+                        activeSession,
+                        fallback: processingAggregate,
+                        request: request,
+                        failure: .coachResponseInterrupted,
+                        reason: .retryInfrastructureFailed
+                    )
+                }
+                let sleeper = self.retrySleeper
+                let backoff = BackoffCompletion()
+                let backoffTask = Task {
+                    do {
+                        try await sleeper.sleep(
+                            milliseconds:
+                                Self.automaticRetryDelaysMilliseconds[index]
+                        )
+                        await backoff.complete(.elapsed)
+                    } catch {
+                        await backoff.complete(.failed)
+                    }
+                }
+                updateActiveProfileReconsiderationWork(
+                    .backoff(backoffTask, backoff),
+                    runID: runID,
+                    authority: stopAuthority
+                )
+                await observer(stopAuthority)
+                switch await backoff.wait() {
+                case .stopped:
+                    return .stopped
+                case .failed:
+                    guard claimProfileReconsiderationCompletion(
+                        runID: runID,
+                        authority: stopAuthority
+                    ) else { return .stopped }
+                    return await abortProfileReconsideration(
+                        activeSession,
+                        fallback: processingAggregate,
+                        request: request,
+                        failure: .coachResponseInterrupted,
+                        reason: .retryInfrastructureFailed
+                    )
+                case .elapsed:
+                    break
+                }
+                let transition = Task {
+                    await self.installNextProfileReconsiderationAttempt(
+                        after: activeSession,
+                        kind: .standard,
+                        prepared: prepared,
+                        fallback: processingAggregate,
+                        request: request,
+                        runID: runID,
+                        authority: stopAuthority
+                    )
+                }
+                updateActiveProfileReconsiderationWork(
+                    .transition(transition),
+                    runID: runID,
+                    authority: stopAuthority
+                )
+                switch await transition.value {
+                case let .installed(next):
+                    guard claimProfileReconsiderationCompletion(
+                        runID: runID,
+                        authority: stopAuthority
+                    ) else { return .stopped }
+                    activeSession = next
+                case let .terminal(outcome):
+                    return outcome
+                case .revoked:
+                    return .stopped
+                }
+
+            case .responseOverflow:
+                guard attempt.kind == .standard,
+                      attempt.ordinal < CoachProviderAttempt.maximumOrdinal
+                else {
+                    guard claimProfileReconsiderationCompletion(
+                        runID: runID,
+                        authority: stopAuthority
+                    ) else { return .stopped }
+                    return await abortProfileReconsideration(
+                        activeSession,
+                        fallback: processingAggregate,
+                        request: request,
+                        failure: .coachResponseInvalid,
+                        reason: .invalidProviderResponse
+                    )
+                }
+                let transition = Task {
+                    await self.installNextProfileReconsiderationAttempt(
+                        after: activeSession,
+                        kind: .shorterRepair,
+                        prepared: prepared,
+                        fallback: processingAggregate,
+                        request: request,
+                        runID: runID,
+                        authority: stopAuthority
+                    )
+                }
+                updateActiveProfileReconsiderationWork(
+                    .transition(transition),
+                    runID: runID,
+                    authority: stopAuthority
+                )
+                switch await transition.value {
+                case let .installed(next):
+                    guard claimProfileReconsiderationCompletion(
+                        runID: runID,
+                        authority: stopAuthority
+                    ) else { return .stopped }
+                    activeSession = next
+                case let .terminal(outcome):
+                    return outcome
+                case .revoked:
+                    return .stopped
+                }
+            }
+        }
+    }
+
+    private func installNextProfileReconsiderationAttempt(
+        after session:
+            any InvocationProfileReconsiderationActivePersistenceSession,
+        kind: CoachProviderAttemptKind,
+        prepared: PreparedCoachLaunchContext,
+        fallback: ChatAggregate,
+        request: ProfileReconsiderationInvocationRequest,
+        runID: UUID,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) async -> ProfileReconsiderationNextAttemptResolution {
+        let ordinal = session.invocation.attempt.ordinal + 1
+        for _ in 0 ..< Self.maximumLaunchIdentityCandidates {
+            guard isProfileReconsiderationCompletionAuthorized(
+                runID: runID,
+                authority: authority
+            ) else { return .revoked(session) }
+            let identity = await identities
+                .generateProfileReconsiderationAttemptIdentity(
+                    at: await clock.now(),
+                    ordinal: ordinal,
+                    kind: kind,
+                    transcriptHandleCount:
+                        prepared.exchange.preparedTranscriptHandles.count
+                )
+            let mutation: InstallNextProfileReconsiderationAttemptMutation
+            do {
+                mutation = try InstallNextProfileReconsiderationAttemptMutation(
+                    base: session.invocation,
+                    identity: identity,
+                    kind: kind
+                )
+                try AttemptTranscriptAccessGrantIssuer().preflight(
+                    exchange: prepared.exchange,
+                    freshHandles: identity.transcriptHandles,
+                    pinnedInstruction: Self.pinnedInstruction(
+                        base: prepared.exchange.pinnedInstruction,
+                        attemptKind: kind
+                    )
+                )
+            } catch let error as InstallNextCoachProviderAttemptMutationError {
+                if case .identityCollision = error { continue }
+                return .terminal(
+                    await abortProfileReconsideration(
+                        session,
+                        fallback: fallback,
+                        request: request,
+                        failure: .coachResponseInterrupted,
+                        reason: .retryInfrastructureFailed
+                    )
+                )
+            } catch AttemptTranscriptAccessGrantIssueError.contextCannotFit {
+                return .terminal(
+                    await abortProfileReconsideration(
+                        session,
+                        fallback: fallback,
+                        request: request,
+                        failure: .coachContextCannotFit,
+                        reason: .retryInfrastructureFailed
+                    )
+                )
+            } catch {
+                return .terminal(
+                    await abortProfileReconsideration(
+                        session,
+                        fallback: fallback,
+                        request: request,
+                        failure: .coachResponseInterrupted,
+                        reason: .retryInfrastructureFailed
+                    )
+                )
+            }
+            guard isProfileReconsiderationCompletionAuthorized(
+                runID: runID,
+                authority: authority
+            ) else { return .revoked(session) }
+            switch await session.installNextAttempt(mutation) {
+            case let .installed(next):
+                return .installed(next)
+            case .collision:
+                continue
+            case let .stale(current):
+                return .terminal(
+                    await abortProfileReconsideration(
+                        session,
+                        fallback: current ?? fallback,
+                        request: request,
+                        failure: .coachResponseInterrupted,
+                        reason: .persistenceUnavailable
+                    )
+                )
+            case .failed:
+                return .terminal(
+                    await abortProfileReconsideration(
+                        session,
+                        fallback: fallback,
+                        request: request,
+                        failure: .coachResponseInterrupted,
+                        reason: .retryInfrastructureFailed
+                    )
+                )
+            }
+        }
+        return .terminal(
+            await abortProfileReconsideration(
+                session,
+                fallback: fallback,
+                request: request,
+                failure: .coachResponseInterrupted,
+                reason: .retryInfrastructureFailed
+            )
+        )
+    }
+
+    private func profileReconsiderationRequest(
+        for invocation: CoachInvocation
+    ) -> ProfileReconsiderationInvocationRequest? {
+        guard case let .reconsiderProfileChange(
+            sourceEffectIdentity,
+            resultResponsePositionID
+        ) = invocation.intent else { return nil }
+        return ProfileReconsiderationInvocationRequest(
+            library: LibraryScope(libraryID: invocation.libraryID),
+            chatID: invocation.chatID,
+            sourceEffectIdentity: sourceEffectIdentity,
+            resultResponsePositionID: resultResponsePositionID
+        )
+    }
+
+    private func installedSessionRequest(
+        _ session:
+            any InvocationProfileReconsiderationActivePersistenceSession
+    ) -> ProfileReconsiderationInvocationRequest {
+        ProfileReconsiderationInvocationRequest(
+            library: LibraryScope(libraryID: session.invocation.libraryID),
+            chatID: session.invocation.chatID,
+            sourceEffectIdentity:
+                session.reconsideration.sourceEffectIdentity,
+            resultResponsePositionID:
+                session.reconsideration.resultResponsePositionID
+        )
     }
 
     private func invoke(
@@ -3167,6 +5977,313 @@ public actor DefaultInvocations: Invocations {
     ) async -> InvocationAdmissionAvailability {
         let instant = await clock.now()
         return await admission.availability(library: library, at: instant)
+    }
+
+    public func stopProfileReconsideration(
+        _ request: StopProfileReconsiderationInvocationRequest,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) async -> ProfileReconsiderationInvocationStopOutcome {
+        guard var control = activeProfileReconsiderationControls[
+            authority.capabilityID
+        ] else {
+            return activeProfileReconsiderationControls.values.contains {
+                $0.authority.matches(request)
+            } ? .staleAuthority : .noActiveInvocation
+        }
+        let retriesUnreapedProvider: Bool = if control.isRevoked {
+            switch control.work {
+            case .provider, .reapPending: true
+            case .backoff, .transition, .stopping: false
+            }
+        } else {
+            false
+        }
+        guard (!control.isRevoked || retriesUnreapedProvider),
+              control.authority == authority,
+              authority.matches(request)
+        else { return .staleAuthority }
+
+        control.isRevoked = true
+        let work = control.work
+        control.work = .stopping
+        activeProfileReconsiderationControls[authority.capabilityID] = control
+        control.transcriptAccess?.closeReads()
+        if let transcriptAccess = control.transcriptAccess,
+           case let .terminal(status) = await transcriptAccess.finalize(
+               reason: .cancelled
+           ),
+           control.retainedTranscriptTerminalStatus == nil
+        {
+            switch status {
+            case .sessionUnavailable, .contextCannotFit, .rejected:
+                control.retainedTranscriptTerminalStatus = status
+                activeProfileReconsiderationControls[
+                    authority.capabilityID
+                ] = control
+            case .completed, .revoked:
+                break
+            }
+        }
+        switch work {
+        case let .provider(_, completion):
+            await completion.complete(.stopped)
+        case let .backoff(_, completion):
+            await completion.complete(.stopped)
+        case .transition, .reapPending, .stopping:
+            break
+        }
+        work.cancel()
+
+        let cancellation = await provider.cancelAndReap(
+            attemptID: authority.attemptID,
+            graceMilliseconds: Self.providerCancellationGraceMilliseconds
+        )
+        var sessionToAbort = control.session
+        if case let .transition(task) = work {
+            switch await task.value {
+            case let .installed(next), let .revoked(next):
+                sessionToAbort = next
+            case let .terminal(outcome):
+                guard cancellation == .reaped ||
+                    cancellation == .alreadyAbsent
+                else {
+                    control.work = .reapPending(outcome)
+                    activeProfileReconsiderationControls[
+                        authority.capabilityID
+                    ] = control
+                    return .unableToReap
+                }
+                activeProfileReconsiderationControls.removeValue(
+                    forKey: authority.capabilityID
+                )
+                return profileReconsiderationStopOutcome(
+                    from: outcome,
+                    request: request,
+                    fallback: control.fallback
+                )
+            }
+        }
+        guard cancellation == .reaped || cancellation == .alreadyAbsent else {
+            control.session = sessionToAbort
+            control.work = .reapPending(nil)
+            activeProfileReconsiderationControls[authority.capabilityID] = control
+            return .unableToReap
+        }
+        if case let .reapPending(outcome?) = work {
+            activeProfileReconsiderationControls.removeValue(
+                forKey: authority.capabilityID
+            )
+            return profileReconsiderationStopOutcome(
+                from: outcome,
+                request: request,
+                fallback: control.fallback
+            )
+        }
+
+        let terminal = await sessionToAbort.abort(
+            failure: retainedTerminalFailure(
+                for: control.retainedTranscriptTerminalStatus
+            )
+        )
+        let outcome: ProfileReconsiderationInvocationStopOutcome =
+            switch terminal {
+            case let .committed(current):
+                .interrupted(current)
+            case let .stale(current):
+                profileReconsiderationStopPersistenceUnavailable(
+                    current: current,
+                    request: request,
+                    fallback: control.fallback
+                )
+            case let .recovered(.eligible(current)):
+                if current.reconsideration.failure != nil {
+                    .interrupted(current.aggregate)
+                } else {
+                    profileReconsiderationStopPersistenceUnavailable(
+                        current: current.aggregate,
+                        request: request,
+                        fallback: control.fallback
+                    )
+                }
+            case let .recovered(.ineligible(current)):
+                profileReconsiderationStopPersistenceUnavailable(
+                    current: current,
+                    request: request,
+                    fallback: control.fallback
+                )
+            case .recovered(.unavailable):
+                profileReconsiderationStopPersistenceUnavailable(
+                    current: nil,
+                    request: request,
+                    fallback: control.fallback
+                )
+            }
+        activeProfileReconsiderationControls.removeValue(
+            forKey: authority.capabilityID
+        )
+        return outcome
+    }
+
+    private func profileReconsiderationStopOutcome(
+        from outcome: ProfileReconsiderationInvocationTryOutcome,
+        request: StopProfileReconsiderationInvocationRequest,
+        fallback: ChatAggregate
+    ) -> ProfileReconsiderationInvocationStopOutcome {
+        switch outcome {
+        case let .interrupted(current, _):
+            guard let current,
+                  current.chat.id == request.chatID,
+                  current.profileReconsideration?.sourceEffectIdentity ==
+                    request.sourceEffectIdentity,
+                  current.profileReconsideration?.resultResponsePositionID ==
+                    request.resultResponsePositionID
+            else {
+                return profileReconsiderationStopPersistenceUnavailable(
+                    current: current,
+                    request: request,
+                    fallback: fallback
+                )
+            }
+            return .interrupted(current)
+        case let .operationallyInterrupted(current, retry, _)
+            where retry.library == request.library &&
+            retry.chatID == request.chatID &&
+            retry.sourceEffectIdentity == request.sourceEffectIdentity &&
+            retry.resultResponsePositionID == request.resultResponsePositionID:
+            return .persistenceUnavailable(current ?? fallback)
+        case let .rejected(current, _):
+            return profileReconsiderationStopPersistenceUnavailable(
+                current: current,
+                request: request,
+                fallback: fallback
+            )
+        case let .contextCapacityFailure(current, _),
+             let .published(current, _),
+             let .withdrawn(current, _):
+            return .persistenceUnavailable(current)
+        case .providerReapPending:
+            return .unableToReap
+        case .operationallyInterrupted, .stopped:
+            return profileReconsiderationStopPersistenceUnavailable(
+                current: nil,
+                request: request,
+                fallback: fallback
+            )
+        }
+    }
+
+    private func profileReconsiderationStopPersistenceUnavailable(
+        current: ChatAggregate?,
+        request: StopProfileReconsiderationInvocationRequest,
+        fallback: ChatAggregate
+    ) -> ProfileReconsiderationInvocationStopOutcome {
+        let observed = current ?? fallback
+        let retry = ProfileReconsiderationInvocationRequest(
+            library: request.library,
+            chatID: request.chatID,
+            sourceEffectIdentity: request.sourceEffectIdentity,
+            resultResponsePositionID: request.resultResponsePositionID
+        )
+        if observed.chat.id == retry.chatID,
+           observed.profileEffect?.identity == retry.sourceEffectIdentity,
+           let reconsideration = observed.profileReconsideration,
+           reconsideration.sourceEffectIdentity == retry.sourceEffectIdentity,
+           reconsideration.resultResponsePositionID ==
+            retry.resultResponsePositionID,
+           reconsideration.failure == nil
+        {
+            rememberOperationalProfileReconsiderationRetry(
+                request: retry,
+                fallback: observed
+            )
+        }
+        return .persistenceUnavailable(observed)
+    }
+
+    private func isProfileReconsiderationCompletionAuthorized(
+        runID: UUID,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) -> Bool {
+        guard let control = activeProfileReconsiderationControls[
+            authority.capabilityID
+        ] else { return false }
+        return control.runID == runID &&
+            control.authority == authority &&
+            !control.isRevoked
+    }
+
+    private func updateActiveProfileReconsiderationWork(
+        _ work: ActiveProfileReconsiderationWork,
+        runID: UUID,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) {
+        guard var control = activeProfileReconsiderationControls[
+            authority.capabilityID
+        ],
+            control.runID == runID,
+            control.authority == authority,
+            !control.isRevoked
+        else { return }
+        control.work = work
+        activeProfileReconsiderationControls[authority.capabilityID] = control
+    }
+
+    private func claimProfileReconsiderationCompletion(
+        runID: UUID,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) -> Bool {
+        guard isProfileReconsiderationCompletionAuthorized(
+            runID: runID,
+            authority: authority
+        ) else { return false }
+        activeProfileReconsiderationControls.removeValue(
+            forKey: authority.capabilityID
+        )
+        return true
+    }
+
+    private func clearActiveProfileReconsiderationControl(runID: UUID) {
+        guard let control = activeProfileReconsiderationControls.values
+            .first(where: { $0.runID == runID }),
+            !control.isRevoked
+        else { return }
+        activeProfileReconsiderationControls.removeValue(
+            forKey: control.authority.capabilityID
+        )
+    }
+
+    private func recordProfileReconsiderationTranscriptTerminalStatus(
+        _ status: AttemptTranscriptAccessTerminalStatus,
+        runID: UUID,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) {
+        guard var control = activeProfileReconsiderationControls[
+            authority.capabilityID
+        ],
+            control.runID == runID,
+            control.authority == authority,
+            !control.isRevoked
+        else { return }
+        control.retainedTranscriptTerminalStatus = status
+        activeProfileReconsiderationControls[authority.capabilityID] = control
+    }
+
+    private func retainUnreapedProfileReconsiderationControl(
+        runID: UUID,
+        authority: ProfileReconsiderationInvocationStopAuthority,
+        transcriptStatus: AttemptTranscriptAccessTerminalStatus
+    ) {
+        guard var control = activeProfileReconsiderationControls[
+            authority.capabilityID
+        ],
+            control.runID == runID,
+            control.authority == authority,
+            !control.isRevoked
+        else { return }
+        control.isRevoked = true
+        control.retainedTranscriptTerminalStatus = transcriptStatus
+        control.work = .reapPending(nil)
+        activeProfileReconsiderationControls[authority.capabilityID] = control
     }
 
     public func stop(

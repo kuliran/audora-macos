@@ -6,9 +6,12 @@ portable Library document roots in
 [`portable-library.tsp`](portable-library.tsp), and the Library lifecycle
 scenario in [`library-feature-scenario.tsp`](library-feature-scenario.tsp), and
 the portable Chat roots and scenarios in [`chat.tsp`](chat.tsp).
-Immutable Profile snapshots, reviewed semantic-or-mixed Proposals, pure-evidence
-publication operations, and accepted Proposal write intents live in
-[`profile.tsp`](profile.tsp).
+Immutable Profile snapshots, reviewed Proposals, pure-evidence publication
+operations, and accepted Proposal write intents live in [`profile.tsp`](profile.tsp).
+The exact Chat-owned Reconsider source/result authority lives in
+[`profile-reconsideration.tsp`](profile-reconsideration.tsp), and the versioned
+answer/Reconsider Invocation authority lives in
+[`coach-invocation.tsp`](coach-invocation.tsp).
 [`session-audio.tsp`](session-audio.tsp) is the single source of truth for
 shared Session identity and the imported/microphone audio and Session manifest
 variants. Imported-audio normalization and feature behavior live in
@@ -59,6 +62,7 @@ the current terminal reasons and legacy compatibility.
 - [`ProfileChangeProposal.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileChangeProposal.json)
 - [`ProfileEvidencePublication.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileEvidencePublication.json)
 - [`ProfileHead.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileHead.json)
+- [`ProfileReconsideration.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileReconsideration.json)
 - [`ProfileRevision.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileRevision.json)
 - [`ProfileWriteIntent.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ProfileWriteIntent.json)
 - [`ReadSessionTranscriptsRequest.json`](../../Packages/AudoraCore/Sources/AudoraContracts/Resources/Schemas/ReadSessionTranscriptsRequest.json)
@@ -93,6 +97,7 @@ the current terminal reasons and legacy compatibility.
 | `ProfileChangeProposal` | Chat-owned reviewed Profile proposal storage | No |
 | `ProfileEvidencePublication` | Chat-owned pure-evidence publication storage | No |
 | `ProfileHead` | Portable Library storage | No |
+| `ProfileReconsideration` | Chat-owned Reconsider operational storage | No |
 | `ProfileRevision` | Immutable Development Profile snapshot storage | No |
 | `ProfileWriteIntent` | Profile commit-recovery storage | No |
 | `ReadSessionTranscriptsRequest` | Coach tool call -> Application | Yes |
@@ -136,20 +141,33 @@ snapshot. Runtime validation additionally checks that `supportingSessionCount`
 equals the number of distinct evidence Session IDs. A revision contains no Chat,
 Proposal, provider, origin, or accepted-change provenance.
 
-`ProfileChangeProposal` is the owning Chat's one reviewed semantic-or-mixed
-record. It binds the exact Chat and response position, optional base Profile
-Revision, and required semantic generation. Its `changes` array is nonempty and
-closed over Add, Replace, and Retire. Application has already allocated every
-proposed Statement ID; Replace and Retire retain the target's complete ID, kind,
-and wording summary. Evidence remains in accepted provider order. Standalone
-Evidence Appends may accompany those semantic changes, but a wholly evidence-only
-operation uses the separate `ProfileEvidencePublication` root rather than becoming
-a Proposal.
+`ProfileChangeProposal` is the owning Chat's one reviewed record. It binds the
+exact Chat and response position, optional base Profile Revision, and required
+semantic generation. The ordinary semantic-or-mixed variant has a nonempty
+`changes` array closed over Add, Replace, and Retire. Application has already
+allocated every proposed Statement ID; Replace and Retire retain the target's
+complete ID, kind, and wording summary. Evidence remains in accepted provider
+order. An ordinary wholly evidence-only answer uses the separate
+`ProfileEvidencePublication` root. Only a reviewed Reconsider replacement may use
+the second Proposal variant: an explicitly empty `changes` array plus one or more
+Evidence Appends. Empty effects remain invalid.
 
 `ProfileEvidencePublication` binds the owning Chat and response position to one or
 more exact target summaries with nonempty Evidence Appends. It remains beside the
 Chat until the idempotent local union commits or the Speaker discards a retained
 failure; it never appears as Chat history.
+
+`ProfileReconsideration` is the durable sidecar stored as
+`profile-reconsideration.json` beside the exact unresolved source effect. Its
+sealed source identity is either one Proposal ID or one evidence-publication
+response position, and its distinct result response position is reserved for the
+whole Reconsider lifecycle. No failure means preparation or execution is active.
+An ordinary failure stores only its closed reason; transcript-read failure is a
+separate sealed variant requiring the bounded Session summary. Runtime also
+requires the result response position to differ from the source position and all
+existing history. Successful replacement or withdrawal removes the source and
+sidecar atomically. Discarding a Reconsider failure removes only the sidecar and
+restores the unchanged source effect's Reconsider/Discard actions.
 
 `ProfileWriteIntent` binds one accepted Proposal and its Chat to one intended
 Revision ID and creation time. Its sealed expected-head union records both
@@ -366,15 +384,22 @@ bounded app-derived display snapshot; v1/v2 scalar-Markdown messages remain
 reopenable. Runtime additionally requires ordered Word endpoints, `startMs < endMs`,
 an exact encoded envelope no larger than 64 KiB, and a Session/Revision pair owned
 by the Chat. `CoachInvocation.json` is the portable launch authority bound to one
-Library, Chat, Pending User Turn, Draft version, response position, and expected
-manifest revision. Its current v4 record contains one to four durable Provider
-Attempts and may pair transcript-read terminal failure with its required bounded
-Session-link summary. Each nested Attempt retains the layout introduced in v3 and
-carries only a fresh Attempt ID, ordinal/kind, and message/Draft publication
-authority. Provider idempotency values and opaque transcript handles are live
-transport authority and occur in neither this root nor its publication proof.
-Legacy v1/v2 records retain their strict historical flat single-Attempt shape and
-v3 retains the first nested shape, only for safe relaunch retirement.
+Library, Chat, immutable intent, prepared Profile, and expected manifest revision.
+Current v5 seals `answerPendingUserTurn` and `reconsiderProfileChange`: the answer
+intent owns its Pending/Draft/version/response identity, while Reconsider owns the
+exact source-effect identity and reserved result response position from its
+sidecar. Its one to four durable Provider Attempts use a matching sealed
+publication-authority variant. Answer reserves user/coach message IDs and a fresh
+Draft ID; Reconsider reserves only a possible coach-message ID and never fabricates
+user or Draft authority. A message-free withdrawal leaves that reservation unused.
+Runtime rejects a mismatch between intent and Attempt authority. Transcript-read
+terminal failure remains a distinct sealed
+variant with its required bounded Session-link summary. Provider idempotency values
+and opaque transcript handles are live transport authority and occur in neither
+this root nor its publication proof. Legacy v1/v2 records retain their strict flat
+single-Attempt shape and v3/v4 retain their historical answer-only nested shape,
+only for safe relaunch retirement.
+
 `InvocationAdmissionLedger.json` is machine-local rather than
 portable Library content; it permits at most 4,096 Library debits and stores the
 last admitted UTC instant used by the conservative rolling-window policy. The
@@ -550,16 +575,19 @@ values, including their evidence. When targets became inactive, it also supplies
 their `ProfileStatement` snapshots and any pending standalone evidence through
 `inactiveEditTargets` and `inactiveTargetsEvidence`. Application requires at least
 one of the three optional arrays, unique inactive target IDs, and exact resolution
-of every referenced inactive ID. Any resulting effect still requires review.
+of every referenced inactive ID. Standalone appends whose targets remain active
+stay retained in the reviewed transaction. Any resulting effect still requires
+review, including an evidence-only replacement Proposal; ordinary response
+classification continues to route wholly evidence-only answers through local
+publication.
 
 The complete `CoachResponse` is one semantically untrusted batch. Application
 rejects it atomically when schema, Memory, evidence, edit, conflict, or size
 validation fails. For an ordinary user-message trigger, Application additionally
 requires `messageBlocks`. Reconsider may validly return no message and no Profile
 effect, which withdraws the old Proposal without publishing an empty Chat message.
-The executable publisher must also fail closed when a validated component has no
-durable representation in the current slice; it never flattens structured blocks
-or publishes prose while dropping Memory or Profile effects.
+The executable publisher always fails closed rather than flattening structured
+blocks or publishing prose while dropping Memory or Profile effects.
 
 A complete-response validation or publication-support failure receives no
 automatic repair Attempt and maps to the generic user-retryable invalid-response

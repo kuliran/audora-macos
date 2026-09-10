@@ -96,6 +96,7 @@ private enum DraftSaveDisposition: Equatable, Sendable {
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 public actor DefaultChatFeature: ChatFeature {
     public static let draftAutosaveIntervalNanoseconds: UInt64 = 2_000_000_000
+    public static let transientNoticeDurationNanoseconds: UInt64 = 10_000_000_000
 
     private let store: any ChatStorePort
     private let profileReader: any ProfileStatementGenerationReading
@@ -106,6 +107,7 @@ public actor DefaultChatFeature: ChatFeature {
     private let pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator
     private let responsePositionIDGenerator: any ChatResponsePositionIDGenerator
     private let autosaveScheduler: any ChatAutosaveScheduling
+    private let transientNoticeScheduler: any ChatTransientNoticeScheduling
     private let admissionRefreshScheduler: any ChatAdmissionRefreshScheduling
     private let coachContext: any ChatCoachContextCoordinating
     private let invocations: any Invocations
@@ -122,6 +124,17 @@ public actor DefaultChatFeature: ChatFeature {
     private var coachStopsInFlight: [InvocationStopAuthority] = []
     private var coachStopIdleWaiters: [CheckedContinuation<Void, Never>] = []
     private var unreapedCoachInvocationAuthorities: [InvocationStopAuthority] = []
+    private var profileReconsiderationStopsInFlight:
+        [ProfileReconsiderationInvocationStopAuthority] = []
+    private var profileReconsiderationStopIdleWaiters:
+        [CheckedContinuation<Void, Never>] = []
+    private var unreapedProfileReconsiderationAuthorities:
+        [ProfileReconsiderationInvocationStopAuthority] = []
+    /// Process-live capabilities outlive selection changes, but never relaunch.
+    /// Durable failure-free sidecars are only projected as Retry when one of
+    /// these exact requests is still owned by `Invocations` in this process.
+    private var operationalProfileReconsiderationRetryRequests:
+        [ProfileReconsiderationInvocationRequest] = []
     private var state = ChatFeatureState()
     private var operationInFlight = false
     private var operationIdleWaiters: [CheckedContinuation<Void, Never>] = []
@@ -131,7 +144,9 @@ public actor DefaultChatFeature: ChatFeature {
     private var autosaveWrite: (id: UInt64, task: Task<DraftSaveDisposition, Never>)?
     private var autosaveDueAfterWrite: ScheduledAutosave?
     private var admissionRefresh: ScheduledAdmissionRefresh?
+    private var transientNoticeTimer: (id: UInt64, task: Task<Void, Never>)?
     private var nextAutosaveID: UInt64 = 0
+    private var nextTransientNoticeID: UInt64 = 0
     private var suppressAutosaveScheduling = false
     private var continuations: [Int: AsyncStream<ChatFeatureState>.Continuation] = [:]
     private var nextSubscriberID = 0
@@ -146,6 +161,8 @@ public actor DefaultChatFeature: ChatFeature {
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
+        transientNoticeScheduler: any ChatTransientNoticeScheduling =
+            SystemChatTransientNoticeScheduler(),
         admissionRefreshScheduler: any ChatAdmissionRefreshScheduling,
         invocations: any Invocations,
         profileProposals: any ProfileProposalCoordinating =
@@ -160,6 +177,7 @@ public actor DefaultChatFeature: ChatFeature {
         self.pendingUserTurnIDGenerator = pendingUserTurnIDGenerator
         self.responsePositionIDGenerator = responsePositionIDGenerator
         self.autosaveScheduler = autosaveScheduler
+        self.transientNoticeScheduler = transientNoticeScheduler
         self.admissionRefreshScheduler = admissionRefreshScheduler
         let coachContext = DefaultCoachContextFeature()
         self.coachContext = coachContext
@@ -187,6 +205,8 @@ public actor DefaultChatFeature: ChatFeature {
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
+        transientNoticeScheduler: any ChatTransientNoticeScheduling =
+            SystemChatTransientNoticeScheduler(),
         admissionRefreshScheduler: any ChatAdmissionRefreshScheduling,
         invocations: any Invocations,
         attachmentEvidenceSource: any ChatSessionAttachmentEvidenceSource,
@@ -202,6 +222,7 @@ public actor DefaultChatFeature: ChatFeature {
         self.pendingUserTurnIDGenerator = pendingUserTurnIDGenerator
         self.responsePositionIDGenerator = responsePositionIDGenerator
         self.autosaveScheduler = autosaveScheduler
+        self.transientNoticeScheduler = transientNoticeScheduler
         self.admissionRefreshScheduler = admissionRefreshScheduler
         self.invocations = invocations
         self.profileProposals = profileProposals
@@ -230,6 +251,8 @@ public actor DefaultChatFeature: ChatFeature {
         pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
         responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
         autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
+        transientNoticeScheduler: any ChatTransientNoticeScheduling =
+            SystemChatTransientNoticeScheduler(),
         admissionRefreshScheduler: (any ChatAdmissionRefreshScheduling)? = nil,
         coachContext: any ChatCoachContextCoordinating,
         invocations: (any Invocations)? = nil,
@@ -245,6 +268,7 @@ public actor DefaultChatFeature: ChatFeature {
         self.pendingUserTurnIDGenerator = pendingUserTurnIDGenerator
         self.responsePositionIDGenerator = responsePositionIDGenerator
         self.autosaveScheduler = autosaveScheduler
+        self.transientNoticeScheduler = transientNoticeScheduler
         self.admissionRefreshScheduler = admissionRefreshScheduler
             ?? UnavailableChatAdmissionRefreshScheduler()
         self.coachContext = coachContext
@@ -303,6 +327,12 @@ public actor DefaultChatFeature: ChatFeature {
             await stopCoachResponse(authority, context: context)
             return
         }
+        if case let .stopProfileReconsideration(context, authority) = command,
+           isCurrent(context)
+        {
+            await stopProfileReconsideration(authority, context: context)
+            return
+        }
         if contextForImmediateCommand(command) == requestedContext {
             switch command {
             case let .setFilter(_, query):
@@ -322,8 +352,7 @@ public actor DefaultChatFeature: ChatFeature {
                   case let .editable(draft, _) = state.composer,
                   aggregate.chat.id == chatID,
                   aggregate.pendingUserTurn == nil,
-                  aggregate.profileProposal == nil,
-                  aggregate.profileEvidencePublication == nil,
+                  aggregate.profileEffect == nil,
                   aggregate.chat.draft.draftID == draftID,
                   draft.draftID == draftID
             else {
@@ -342,8 +371,7 @@ public actor DefaultChatFeature: ChatFeature {
                   case let .editable(draft, _) = state.composer,
                   aggregate.chat.id == chatID,
                   aggregate.pendingUserTurn == nil,
-                  aggregate.profileProposal == nil,
-                  aggregate.profileEvidencePublication == nil,
+                  aggregate.profileEffect == nil,
                   aggregate.chat.draft.draftID == expectedDraft.draftID,
                   draft == expectedDraft
             else {
@@ -387,8 +415,7 @@ public actor DefaultChatFeature: ChatFeature {
                       case let .open(aggregate) = state.selection,
                       aggregate.chat.id == chatID,
                       aggregate.pendingUserTurn == nil,
-                      aggregate.profileProposal == nil,
-                      aggregate.profileEvidencePublication == nil,
+                      aggregate.profileEffect == nil,
                       case let .editable(draft, _) = state.composer,
                       draft.draftID == draftID
                 else {
@@ -400,8 +427,7 @@ public actor DefaultChatFeature: ChatFeature {
                       case let .open(aggregate) = state.selection,
                       aggregate.chat.id == chatID,
                       aggregate.pendingUserTurn == nil,
-                      aggregate.profileProposal == nil,
-                      aggregate.profileEvidencePublication == nil,
+                      aggregate.profileEffect == nil,
                       case let .editable(draft, _) = state.composer,
                       draft == expectedDraft
                 else {
@@ -447,7 +473,7 @@ public actor DefaultChatFeature: ChatFeature {
                 expectedDraft: expectedDraft,
                 context: context
             )
-        case .stopCoachResponse:
+        case .stopCoachResponse, .stopProfileReconsideration:
             // Stop bypasses the serialized Chat operation queue and is handled
             // directly by `send(_:)` while provider work is suspended.
             break
@@ -469,6 +495,27 @@ public actor DefaultChatFeature: ChatFeature {
         case let .discardProfileEvidencePublication(context, responsePositionID):
             await discardProfileEvidencePublication(
                 responsePositionID,
+                context: context
+            )
+        case let .reconsiderProfileEffect(context, sourceEffectIdentity):
+            await reconsiderProfileEffect(
+                sourceEffectIdentity,
+                context: context
+            )
+        case let .retryProfileReconsideration(
+            context,
+            sourceEffectIdentity
+        ):
+            await retryProfileReconsideration(
+                sourceEffectIdentity,
+                context: context
+            )
+        case let .discardProfileReconsiderationFailure(
+            context,
+            sourceEffectIdentity
+        ):
+            await discardProfileReconsiderationFailure(
+                sourceEffectIdentity,
                 context: context
             )
         case .start, .setFilter, .setNewChatAttachmentFilter,
@@ -1004,6 +1051,8 @@ public actor DefaultChatFeature: ChatFeature {
             activeContext = context
             admissionRefresh?.task.cancel()
             admissionRefresh = nil
+            transientNoticeTimer?.task.cancel()
+            transientNoticeTimer = nil
             state = ChatFeatureState(
                 catalog: .loading,
                 filterQuery: state.filterQuery,
@@ -1331,8 +1380,14 @@ public actor DefaultChatFeature: ChatFeature {
                 createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
                 operationallyInterruptedInvocation:
                     state.operationallyInterruptedInvocation,
+                operationallyInterruptedProfileReconsideration:
+                    state.operationallyInterruptedProfileReconsideration,
                 coachInvocationStopAuthority:
                     state.coachInvocationStopAuthority,
+                profileReconsiderationStopAuthority:
+                    state.profileReconsiderationStopAuthority,
+                profileEffectReview: state.profileEffectReview,
+                transientNotice: state.transientNotice,
                 newChatPicker: state.newChatPicker,
                 openedAttachments: state.openedAttachments,
                 activity: state.activity,
@@ -1356,8 +1411,14 @@ public actor DefaultChatFeature: ChatFeature {
             createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
             operationallyInterruptedInvocation:
                 state.operationallyInterruptedInvocation,
+            operationallyInterruptedProfileReconsideration:
+                state.operationallyInterruptedProfileReconsideration,
             coachInvocationStopAuthority:
                 state.coachInvocationStopAuthority,
+            profileReconsiderationStopAuthority:
+                state.profileReconsiderationStopAuthority,
+            profileEffectReview: state.profileEffectReview,
+            transientNotice: state.transientNotice,
             newChatPicker: state.newChatPicker,
             openedAttachments: state.openedAttachments,
             activity: state.activity,
@@ -1383,11 +1444,21 @@ public actor DefaultChatFeature: ChatFeature {
         guard isActive(context) else { return }
         switch outcome {
         case let .loaded(aggregate):
-            install(aggregate, selection: .open(aggregate), notice: nil)
-            await resolveOpenedAttachments(for: aggregate, context: context)
+            let assessed = await assessProfileEffectIfNeeded(
+                aggregate,
+                context: context
+            )
+            guard isActive(context) else { return }
+            install(
+                assessed.aggregate,
+                selection: .open(assessed.aggregate),
+                notice: assessed.notice,
+                profileEffectReview: assessed.review
+            )
+            await resolveOpenedAttachments(for: assessed.aggregate, context: context)
             await refreshContextAdvisory(
-                for: aggregate,
-                draft: aggregate.chat.draft,
+                for: assessed.aggregate,
+                draft: assessed.aggregate.chat.draft,
                 context: context
             )
         case let .frozen(frozen):
@@ -1430,12 +1501,20 @@ public actor DefaultChatFeature: ChatFeature {
         while !coachStopsInFlight.isEmpty {
             await withCheckedContinuation { coachStopIdleWaiters.append($0) }
         }
+        while !profileReconsiderationStopsInFlight.isEmpty {
+            await withCheckedContinuation {
+                profileReconsiderationStopIdleWaiters.append($0)
+            }
+        }
         // A presented authority was already attempted by
         // beginOrderlyTermination above. Retry only exact authorities whose
         // Chat context was replaced, preserving eventual liveness without
         // making stale cancellation state visible in the replacement Library.
         await retryUnreapedCoachInvocationsWithoutPresentation()
-        guard unreapedCoachInvocationAuthorities.isEmpty else {
+        await retryUnreapedProfileReconsiderationsWithoutPresentation()
+        guard unreapedCoachInvocationAuthorities.isEmpty,
+              unreapedProfileReconsiderationAuthorities.isEmpty
+        else {
             isOrderlyTerminationPending = false
             return false
         }
@@ -1473,8 +1552,47 @@ public actor DefaultChatFeature: ChatFeature {
         }
     }
 
+    private func retryUnreapedProfileReconsiderationsWithoutPresentation()
+        async
+    {
+        let presentedAuthority = state.profileReconsiderationStopAuthority
+        let detachedAuthorities =
+            unreapedProfileReconsiderationAuthorities.filter {
+                $0 != presentedAuthority
+            }
+        for authority in detachedAuthorities {
+            profileReconsiderationStopsInFlight.append(authority)
+            let request = StopProfileReconsiderationInvocationRequest(
+                library: authority.library,
+                chatID: authority.chatID,
+                sourceEffectIdentity: authority.sourceEffectIdentity,
+                resultResponsePositionID: authority.resultResponsePositionID
+            )
+            let outcome = await invocations.stopProfileReconsideration(
+                request,
+                authority: authority
+            )
+            finishProfileReconsiderationStop(authority)
+            if case .unableToReap = outcome { continue }
+            unreapedProfileReconsiderationAuthorities.removeAll {
+                $0 == authority
+            }
+        }
+    }
+
     public func beginOrderlyTermination() async {
         isOrderlyTerminationPending = true
+        transientNoticeTimer?.task.cancel()
+        transientNoticeTimer = nil
+        if state.transientNotice != nil {
+            state = replacing(
+                transientNotice: nil,
+                replacesTransientNotice: true,
+                activity: state.activity,
+                notice: state.notice
+            )
+            publish()
+        }
         queuedActions.removeAll { action in
             guard case let .command(command) = action else { return false }
             return command.isTransientNewChatCommand
@@ -1486,6 +1604,12 @@ public actor DefaultChatFeature: ChatFeature {
            !coachStopsInFlight.contains(authority)
         {
             await stopCoachResponse(authority, context: context)
+        }
+        if let authority = state.profileReconsiderationStopAuthority,
+           let context = activeContext,
+           !profileReconsiderationStopsInFlight.contains(authority)
+        {
+            await stopProfileReconsideration(authority, context: context)
         }
         newChatAttachmentFilterQuery = .empty
         newChatAttachmentConfigurationStamp = nil
@@ -2042,23 +2166,43 @@ public actor DefaultChatFeature: ChatFeature {
             )
             publish()
         case let .published(current, quote):
+            let publishesEvidence = current.profileEvidencePublication != nil
             state = replacing(
                 contextAdvisory: .available(quote),
                 clearsRecoveryIntent: true,
-                activity: current.profileEvidencePublication == nil
-                    ? nil
-                    : .publishingProfileEvidence(current.chat.id),
+                activity: publishesEvidence || current.profileEffect != nil
+                    ? .publishingProfileEvidence(current.chat.id)
+                    : nil,
                 notice: nil
             )
-            install(
-                current,
-                selection: .open(current),
-                notice: nil,
-                activity: current.profileEvidencePublication == nil
-                    ? nil
-                    : .publishingProfileEvidence(current.chat.id)
-            )
-            await publishProfileEvidenceIfNeeded(current, context: context)
+            if publishesEvidence {
+                install(
+                    current,
+                    selection: .open(current),
+                    notice: nil,
+                    activity: .publishingProfileEvidence(current.chat.id)
+                )
+                await publishProfileEvidenceIfNeeded(current, context: context)
+            } else if current.profileEffect != nil {
+                let assessed = await assessProfileEffectIfNeeded(
+                    current,
+                    context: context
+                )
+                guard isActive(context) else { return }
+                install(
+                    assessed.aggregate,
+                    selection: .open(assessed.aggregate),
+                    notice: assessed.notice,
+                    profileEffectReview: assessed.review
+                )
+            } else {
+                install(
+                    current,
+                    selection: .open(current),
+                    notice: nil,
+                    activity: nil
+                )
+            }
         case let .contextCapacityFailure(current, quote):
             state = replacing(
                 contextAdvisory: .available(quote),
@@ -2243,7 +2387,9 @@ public actor DefaultChatFeature: ChatFeature {
         guard isActive(context), state.activity == nil,
               case let .open(aggregate) = state.selection,
               aggregate.pendingUserTurn == nil,
-              aggregate.profileProposal?.id == proposalID
+              aggregate.profileReconsideration == nil,
+              aggregate.profileProposal?.id == proposalID,
+              state.profileEffectReview == .current(.proposal(proposalID))
         else { return }
         state = replacing(
             activity: .acceptingProfileProposal(aggregate.chat.id),
@@ -2259,7 +2405,7 @@ public actor DefaultChatFeature: ChatFeature {
                   acceptedAt: acceptedAt
               )
         else { return }
-        applyProfileProposalOutcome(
+        await applyProfileProposalOutcome(
             await profileProposals.accept(mutation),
             context: context,
             failureNotice: .profileProposalAcceptFailed
@@ -2273,7 +2419,12 @@ public actor DefaultChatFeature: ChatFeature {
         guard isActive(context), state.activity == nil,
               case let .open(aggregate) = state.selection,
               aggregate.pendingUserTurn == nil,
+              aggregate.profileReconsideration == nil,
               aggregate.profileProposal?.id == proposalID,
+              state.profileEffectReview?.sourceEffectIdentity ==
+                .proposal(proposalID),
+              state.profileEffectReview?.reconsiderationBasis != nil ||
+                state.profileEffectReview == .current(.proposal(proposalID)),
               let mutation = try? DiscardProfileProposalMutation(
                   library: context.libraryScope,
                   base: aggregate,
@@ -2285,7 +2436,7 @@ public actor DefaultChatFeature: ChatFeature {
             notice: nil
         )
         publish()
-        applyProfileProposalOutcome(
+        await applyProfileProposalOutcome(
             await profileProposals.discard(mutation),
             context: context,
             failureNotice: .profileProposalDiscardFailed
@@ -2296,16 +2447,22 @@ public actor DefaultChatFeature: ChatFeature {
         _ outcome: ProfileProposalMutationOutcome,
         context: ChatCommandContext,
         failureNotice: ChatNotice
-    ) {
+    ) async {
         guard isActive(context) else { return }
         switch outcome {
         case let .committed(current):
             install(current, selection: .open(current), notice: nil)
         case let .stale(current):
-            install(
+            let assessed = await assessProfileEffectIfNeeded(
                 current,
-                selection: .open(current),
-                notice: .profileProposalStale
+                context: context
+            )
+            guard isActive(context) else { return }
+            install(
+                assessed.aggregate,
+                selection: .open(assessed.aggregate),
+                notice: assessed.notice ?? .profileProposalStale,
+                profileEffectReview: assessed.review
             )
         case .readOnlyLibrary:
             state = replacing(activity: nil, notice: .readOnlyLibrary)
@@ -2334,7 +2491,7 @@ public actor DefaultChatFeature: ChatFeature {
         }
         let outcome = await profileProposals.publishEvidence(mutation)
         guard isActive(context) else { return }
-        applyProfileEvidencePublicationOutcome(outcome)
+        await applyProfileEvidencePublicationOutcome(outcome, context: context)
     }
 
     private func retryProfileEvidencePublication(
@@ -2344,9 +2501,12 @@ public actor DefaultChatFeature: ChatFeature {
         guard isActive(context), state.activity == nil,
               case let .open(aggregate) = state.selection,
               aggregate.pendingUserTurn == nil,
+              aggregate.profileReconsideration == nil,
               aggregate.profileProposal == nil,
               aggregate.profileEvidencePublication?.responsePositionID ==
                 responsePositionID,
+              state.profileEffectReview ==
+                .current(.evidencePublication(responsePositionID)),
               let mutation = try? PublishProfileEvidenceMutation(
                   library: context.libraryScope,
                   base: aggregate,
@@ -2360,7 +2520,7 @@ public actor DefaultChatFeature: ChatFeature {
         publish()
         let outcome = await profileProposals.publishEvidence(mutation)
         guard isActive(context) else { return }
-        applyProfileEvidencePublicationOutcome(outcome)
+        await applyProfileEvidencePublicationOutcome(outcome, context: context)
     }
 
     private func discardProfileEvidencePublication(
@@ -2370,9 +2530,15 @@ public actor DefaultChatFeature: ChatFeature {
         guard isActive(context), state.activity == nil,
               case let .open(aggregate) = state.selection,
               aggregate.pendingUserTurn == nil,
+              aggregate.profileReconsideration == nil,
               aggregate.profileProposal == nil,
               aggregate.profileEvidencePublication?.responsePositionID ==
                 responsePositionID,
+              state.profileEffectReview?.sourceEffectIdentity ==
+                .evidencePublication(responsePositionID),
+              state.profileEffectReview?.reconsiderationBasis != nil ||
+                state.profileEffectReview ==
+                    .current(.evidencePublication(responsePositionID)),
               let mutation = try? DiscardProfileEvidencePublicationMutation(
                   library: context.libraryScope,
                   base: aggregate,
@@ -2386,21 +2552,91 @@ public actor DefaultChatFeature: ChatFeature {
         publish()
         let outcome = await profileProposals.discardEvidence(mutation)
         guard isActive(context) else { return }
-        applyProfileEvidencePublicationOutcome(outcome)
+        await applyProfileEvidencePublicationOutcome(outcome, context: context)
     }
 
     private func applyProfileEvidencePublicationOutcome(
-        _ outcome: ProfileEvidencePublicationMutationOutcome
-    ) {
+        _ outcome: ProfileEvidencePublicationMutationOutcome,
+        context: ChatCommandContext
+    ) async {
         switch outcome {
-        case let .committed(current), let .stale(current):
+        case let .committed(current):
             install(current, selection: .open(current), notice: nil)
+        case let .stale(current):
+            let assessed = await assessProfileEffectIfNeeded(
+                current,
+                context: context
+            )
+            guard isActive(context) else { return }
+            install(
+                assessed.aggregate,
+                selection: .open(assessed.aggregate),
+                notice: assessed.notice,
+                profileEffectReview: assessed.review
+            )
         case .readOnlyLibrary:
             state = replacing(activity: nil, notice: .readOnlyLibrary)
             publish()
         case .failed:
             state = replacing(activity: nil, notice: nil)
             publish()
+        }
+    }
+
+    private func assessProfileEffectIfNeeded(
+        _ aggregate: ChatAggregate,
+        context: ChatCommandContext
+    ) async -> (
+        aggregate: ChatAggregate,
+        review: ProfileEffectReviewState?,
+        notice: ChatNotice?
+    ) {
+        guard let effect = aggregate.profileEffect else {
+            return (aggregate, nil, nil)
+        }
+        guard let request = try? AssessProfileEffectRequest(
+            library: context.libraryScope,
+            base: aggregate,
+            sourceEffectIdentity: effect.identity
+        ) else {
+            return (
+                aggregate,
+                .unavailable(effect.identity),
+                .profileEffectAssessmentFailed
+            )
+        }
+        switch await profileProposals.assess(request) {
+        case let .current(current):
+            guard current.chat.id == aggregate.chat.id,
+                  current.profileEffect == effect
+            else {
+                return (
+                    aggregate,
+                    .unavailable(effect.identity),
+                    .profileEffectAssessmentFailed
+                )
+            }
+            return (current, .current(effect.identity), nil)
+        case let .stale(current, basis):
+            guard current.chat.id == aggregate.chat.id,
+                  current.profileEffect == basis.sourceEffect,
+                  basis.sourceEffect.identity == effect.identity
+            else {
+                return (
+                    aggregate,
+                    .unavailable(effect.identity),
+                    .profileEffectAssessmentFailed
+                )
+            }
+            return (current, .stale(basis), nil)
+        case .readOnlyLibrary:
+            return (aggregate, .unavailable(effect.identity), .readOnlyLibrary)
+        case .failed:
+            return (
+                aggregate,
+                .unavailable(effect.identity),
+                .profileEffectAssessmentFailed
+            )
         }
     }
 
@@ -2568,8 +2804,16 @@ public actor DefaultChatFeature: ChatFeature {
             createNewChatRecoveryIntent: state.createNewChatRecoveryIntent,
             operationallyInterruptedInvocation:
                 state.operationallyInterruptedInvocation,
+            operationallyInterruptedProfileReconsideration:
+                state.operationallyInterruptedProfileReconsideration,
             coachInvocationStopAuthority:
                 state.coachInvocationStopAuthority,
+            profileReconsiderationStopAuthority:
+                state.profileReconsiderationStopAuthority,
+            profileEffectReview: state.profileEffectReview,
+            transientNotice: state.transientNotice,
+            newChatPicker: state.newChatPicker,
+            openedAttachments: state.openedAttachments,
             activity: state.activity,
             notice: state.notice
         )
@@ -2608,6 +2852,71 @@ public actor DefaultChatFeature: ChatFeature {
         }
         admissionRefresh = nil
         await refreshAdmissionAvailability(in: context)
+    }
+
+    private func presentTransientNotice(
+        _ notice: ChatTransientNotice,
+        for chatID: ChatID,
+        context: ChatCommandContext
+    ) {
+        guard isActive(context),
+              case let .open(aggregate) = state.selection,
+              aggregate.chat.id == chatID
+        else { return }
+        transientNoticeTimer?.task.cancel()
+        nextTransientNoticeID &+= 1
+        let id = nextTransientNoticeID
+        state = replacing(
+            transientNotice: notice,
+            replacesTransientNotice: true,
+            activity: state.activity,
+            notice: state.notice
+        )
+        publish()
+        let scheduler = transientNoticeScheduler
+        let task = Task { [weak self] in
+            do {
+                try await scheduler.sleep(
+                    forNanoseconds: Self.transientNoticeDurationNanoseconds
+                )
+                guard !Task.isCancelled else {
+                    await self?.finishTransientNoticeTimer(id: id)
+                    return
+                }
+                await self?.transientNoticeDeadlineReached(
+                    id: id,
+                    notice: notice,
+                    context: context
+                )
+            } catch {
+                await self?.finishTransientNoticeTimer(id: id)
+            }
+        }
+        transientNoticeTimer = (id, task)
+    }
+
+    private func transientNoticeDeadlineReached(
+        id: UInt64,
+        notice: ChatTransientNotice,
+        context: ChatCommandContext
+    ) {
+        guard transientNoticeTimer?.id == id else { return }
+        transientNoticeTimer = nil
+        guard isActive(context),
+              state.transientNotice == notice
+        else { return }
+        state = replacing(
+            transientNotice: nil,
+            replacesTransientNotice: true,
+            activity: state.activity,
+            notice: state.notice
+        )
+        publish()
+    }
+
+    private func finishTransientNoticeTimer(id: UInt64) {
+        guard transientNoticeTimer?.id == id else { return }
+        transientNoticeTimer = nil
     }
 
     private func scheduleAutosave(for context: ChatCommandContext, chatID: ChatID) {
@@ -2912,7 +3221,10 @@ public actor DefaultChatFeature: ChatFeature {
         notice: ChatNotice?,
         composer override: ChatComposerState? = nil,
         activity: ChatFeatureState.Activity? = nil,
-        operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil
+        operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
+        operationallyInterruptedProfileReconsideration:
+            ProfileReconsiderationInvocationRequest? = nil,
+        profileEffectReview: ProfileEffectReviewState? = nil
     ) {
         var rows = currentAllRows.filter { $0.chatID != aggregate.chat.id }
         rows.append(ChatRowSnapshot(aggregate: aggregate))
@@ -2934,13 +3246,52 @@ public actor DefaultChatFeature: ChatFeature {
             else { return nil }
             return request
         }()
+        let installedProfileOperationalInterruption:
+            ProfileReconsiderationInvocationRequest? = {
+                let immediate = [
+                    operationallyInterruptedProfileReconsideration,
+                    state.operationallyInterruptedProfileReconsideration,
+                ].compactMap { $0 }
+                if let request = immediate.first(where: {
+                    activeContext?.libraryScope == $0.library &&
+                        exactFailureFreeProfileReconsiderationAggregate(
+                            aggregate,
+                            request: $0
+                        ) != nil
+                }) {
+                    return request
+                }
+                return cachedOperationalProfileReconsiderationRetry(
+                    for: aggregate,
+                    in: activeContext?.libraryScope
+                )
+            }()
+        synchronizeOperationalProfileReconsiderationRetryCache(
+            for: aggregate,
+            installed: installedProfileOperationalInterruption
+        )
+        let installedProfileEffectReview: ProfileEffectReviewState? = {
+            guard let identity = aggregate.profileEffect?.identity else { return nil }
+            if let profileEffectReview,
+               profileEffectReview.sourceEffectIdentity == identity
+            {
+                return profileEffectReview
+            }
+            guard state.profileEffectReview?.sourceEffectIdentity == identity else {
+                return nil
+            }
+            return state.profileEffectReview
+        }()
         finishInstall(
             rows: rows,
             selection: selection,
             composer: installedComposer,
             activity: activity,
             notice: notice,
-            operationallyInterruptedInvocation: installedOperationalInterruption
+            operationallyInterruptedInvocation: installedOperationalInterruption,
+            operationallyInterruptedProfileReconsideration:
+                installedProfileOperationalInterruption,
+            profileEffectReview: installedProfileEffectReview
         )
     }
 
@@ -2949,6 +3300,11 @@ public actor DefaultChatFeature: ChatFeature {
         selection: ChatFeatureState.Selection,
         notice: ChatNotice?
     ) {
+        if let library = activeContext?.libraryScope {
+            operationalProfileReconsiderationRetryRequests.removeAll {
+                $0.library == library && $0.chatID == frozen.chatID
+            }
+        }
         var rows = currentAllRows.filter { $0.chatID != frozen.chatID }
         rows.append(ChatRowSnapshot(frozen: frozen))
         let composer: ChatComposerState?
@@ -2963,7 +3319,9 @@ public actor DefaultChatFeature: ChatFeature {
             composer: composer,
             activity: nil,
             notice: notice,
-            operationallyInterruptedInvocation: nil
+            operationallyInterruptedInvocation: nil,
+            operationallyInterruptedProfileReconsideration: nil,
+            profileEffectReview: nil
         )
     }
 
@@ -2973,7 +3331,10 @@ public actor DefaultChatFeature: ChatFeature {
         composer: ChatComposerState?,
         activity: ChatFeatureState.Activity?,
         notice: ChatNotice?,
-        operationallyInterruptedInvocation: PendingCoachInvocationRequest?
+        operationallyInterruptedInvocation: PendingCoachInvocationRequest?,
+        operationallyInterruptedProfileReconsideration:
+            ProfileReconsiderationInvocationRequest?,
+        profileEffectReview: ProfileEffectReviewState?
     ) {
         let sorted = sortedRows(rows)
         let preservesSelectedChat: Bool = {
@@ -3002,7 +3363,12 @@ public actor DefaultChatFeature: ChatFeature {
                 ? state.createNewChatRecoveryIntent
                 : nil,
             operationallyInterruptedInvocation: operationallyInterruptedInvocation,
+            operationallyInterruptedProfileReconsideration:
+                operationallyInterruptedProfileReconsideration,
             coachInvocationStopAuthority: nil,
+            profileReconsiderationStopAuthority: nil,
+            profileEffectReview: profileEffectReview,
+            transientNotice: preservesSelectedChat ? state.transientNotice : nil,
             newChatPicker: state.newChatPicker,
             openedAttachments: preservesSelectedChat
                 ? state.openedAttachments
@@ -3104,8 +3470,18 @@ public actor DefaultChatFeature: ChatFeature {
         clearsRecoveryIntent: Bool = false,
         operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
         replacesOperationallyInterruptedInvocation: Bool = false,
+        operationallyInterruptedProfileReconsideration:
+            ProfileReconsiderationInvocationRequest? = nil,
+        replacesOperationallyInterruptedProfileReconsideration: Bool = false,
         coachInvocationStopAuthority: InvocationStopAuthority? = nil,
         replacesCoachInvocationStopAuthority: Bool = false,
+        profileReconsiderationStopAuthority:
+            ProfileReconsiderationInvocationStopAuthority? = nil,
+        replacesProfileReconsiderationStopAuthority: Bool = false,
+        profileEffectReview: ProfileEffectReviewState? = nil,
+        replacesProfileEffectReview: Bool = false,
+        transientNotice: ChatTransientNotice? = nil,
+        replacesTransientNotice: Bool = false,
         newChatPicker: NewChatAttachmentPickerState? = nil,
         openedAttachments: OpenedChatAttachmentsState? = nil,
         activity: ChatFeatureState.Activity?,
@@ -3125,10 +3501,26 @@ public actor DefaultChatFeature: ChatFeature {
                 replacesOperationallyInterruptedInvocation
                 ? operationallyInterruptedInvocation
                 : state.operationallyInterruptedInvocation,
+            operationallyInterruptedProfileReconsideration:
+                replacesOperationallyInterruptedProfileReconsideration
+                ? operationallyInterruptedProfileReconsideration
+                : state.operationallyInterruptedProfileReconsideration,
             coachInvocationStopAuthority:
                 replacesCoachInvocationStopAuthority
                 ? coachInvocationStopAuthority
                 : activity == nil ? nil : state.coachInvocationStopAuthority,
+            profileReconsiderationStopAuthority:
+                replacesProfileReconsiderationStopAuthority
+                ? profileReconsiderationStopAuthority
+                : activity == nil
+                    ? nil
+                    : state.profileReconsiderationStopAuthority,
+            profileEffectReview: replacesProfileEffectReview
+                ? profileEffectReview
+                : state.profileEffectReview,
+            transientNotice: replacesTransientNotice
+                ? transientNotice
+                : state.transientNotice,
             newChatPicker: newChatPicker ?? state.newChatPicker,
             openedAttachments: openedAttachments ?? state.openedAttachments,
             activity: activity,
@@ -3159,6 +3551,854 @@ public actor DefaultChatFeature: ChatFeature {
     }
 }
 
+private extension DefaultChatFeature {
+    func reconsiderProfileEffect(
+        _ sourceEffectIdentity: ChatProfileEffectIdentity,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context),
+              ChatInteractionPolicy.allowsProfileReconsideration(in: state),
+              case let .open(observed) = state.selection,
+              observed.profileEffect?.identity == sourceEffectIdentity,
+              observed.profileReconsideration == nil
+        else { return }
+
+        state = replacing(
+            activity: .reconsideringProfileEffect(observed.chat.id),
+            notice: nil
+        )
+        publish()
+        let assessed = await assessProfileEffectIfNeeded(
+            observed,
+            context: context
+        )
+        guard isActive(context) else { return }
+        guard case let .stale(basis) = assessed.review,
+              basis.sourceEffect.identity == sourceEffectIdentity,
+              assessed.aggregate.profileEffect == basis.sourceEffect,
+              assessed.aggregate.profileReconsideration == nil
+        else {
+            install(
+                assessed.aggregate,
+                selection: .open(assessed.aggregate),
+                notice: assessed.notice,
+                profileEffectReview: assessed.review
+            )
+            return
+        }
+
+        let instant = await clock.now()
+        guard isActive(context) else { return }
+        let resultResponsePositionID = await responsePositionIDGenerator
+            .generateChatResponsePositionID(at: instant)
+        guard isActive(context) else { return }
+        let reconsideration = ProfileReconsideration(
+            sourceEffectIdentity: sourceEffectIdentity,
+            resultResponsePositionID: resultResponsePositionID
+        )
+        let request: NewProfileReconsiderationInvocationRequest
+        do {
+            request = try NewProfileReconsiderationInvocationRequest(
+                library: context.libraryScope,
+                observedAggregate: assessed.aggregate,
+                reconsideration: reconsideration,
+                basis: basis
+            )
+        } catch {
+            install(
+                assessed.aggregate,
+                selection: .open(assessed.aggregate),
+                notice: .profileReconsiderationUnavailable,
+                profileEffectReview: .stale(basis)
+            )
+            return
+        }
+
+        let preparation = await invocations
+            .prepareNewProfileReconsiderationInvocation(request)
+        guard isCurrent(context) else {
+            if case let .prepared(prepared) = preparation {
+                await invocations
+                    .abandonPreparedProfileReconsiderationInvocation(prepared)
+            }
+            return
+        }
+
+        let prepared: PreparedProfileReconsiderationInvocation
+        switch preparation {
+        case let .prepared(value)
+            where value.request == request.request &&
+            value.aggregate.chat.id == assessed.aggregate.chat.id &&
+            value.aggregate.profileEffect == basis.sourceEffect &&
+            value.aggregate.profileReconsideration == reconsideration &&
+            value.basis == basis:
+            prepared = value
+            install(
+                value.aggregate,
+                selection: .open(value.aggregate),
+                notice: nil,
+                activity: .reconsideringProfileEffect(value.aggregate.chat.id),
+                profileEffectReview: .stale(basis)
+            )
+        case let .stale(current):
+            await installAssessedProfileEffect(
+                current,
+                context: context,
+                fallbackNotice: .profileReconsiderationUnavailable
+            )
+            return
+        case let .frozen(frozen):
+            install(frozen, selection: .frozen(frozen), notice: .chatFrozen)
+            return
+        case .readOnlyLibrary:
+            state = replacing(activity: nil, notice: .readOnlyLibrary)
+            publish()
+            return
+        case .activeInvocation:
+            install(
+                assessed.aggregate,
+                selection: .open(assessed.aggregate),
+                notice: .coachBusy,
+                profileEffectReview: .stale(basis)
+            )
+            return
+        case let .prepared(value):
+            await invocations
+                .abandonPreparedProfileReconsiderationInvocation(value)
+            install(
+                assessed.aggregate,
+                selection: .open(assessed.aggregate),
+                notice: .profileReconsiderationUnavailable,
+                profileEffectReview: .stale(basis)
+            )
+            return
+        case .failed:
+            install(
+                assessed.aggregate,
+                selection: .open(assessed.aggregate),
+                notice: .profileReconsiderationUnavailable,
+                profileEffectReview: .stale(basis)
+            )
+            return
+        }
+
+        let outcome = await invocations.tryReconsiderProfileChange(
+            prepared,
+            observingStopAuthority: { [weak self] authority in
+                await self?.observeProfileReconsiderationStopAuthority(
+                    authority,
+                    request: prepared.request,
+                    context: context
+                )
+            }
+        )
+        retainProfileReconsiderationReapAuthority(from: outcome)
+        guard isActive(context) else { return }
+        let presentedOutcome: ProfileReconsiderationInvocationTryOutcome =
+            switch outcome {
+            case let .rejected(nil, reason):
+                .rejected(assessed.aggregate, reason)
+            default:
+                outcome
+            }
+        await applyProfileReconsiderationOutcome(
+            presentedOutcome,
+            context: context,
+            fallbackReview: .stale(basis)
+        )
+        await refreshSelectionIfProfileReconsiderationEligibilityVanished(
+            outcome,
+            request: prepared.request,
+            context: context
+        )
+        await refreshAdmissionAvailability(in: context)
+    }
+}
+
+private extension DefaultChatFeature {
+    func retryProfileReconsideration(
+        _ sourceEffectIdentity: ChatProfileEffectIdentity,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context), state.activity == nil,
+              state.admissionAvailability == .available,
+              case let .open(observed) = state.selection,
+              observed.profileEffect?.identity == sourceEffectIdentity,
+              let reconsideration = observed.profileReconsideration,
+              reconsideration.sourceEffectIdentity == sourceEffectIdentity,
+              state.isProfileReconsiderationRetryableFailure(reconsideration)
+        else { return }
+
+        let retryOperationalInterruption =
+            state.operationallyInterruptedProfileReconsideration
+        state = replacing(
+            activity: .reconsideringProfileEffect(observed.chat.id),
+            notice: nil
+        )
+        publish()
+        let assessed = await assessProfileEffectIfNeeded(
+            observed,
+            context: context
+        )
+        guard isActive(context) else { return }
+        guard case let .stale(basis) = assessed.review,
+              basis.sourceEffect.identity == sourceEffectIdentity,
+              assessed.aggregate.profileReconsideration?.sourceEffectIdentity ==
+                sourceEffectIdentity,
+              assessed.aggregate.profileReconsideration?
+                .resultResponsePositionID ==
+                reconsideration.resultResponsePositionID
+        else {
+            install(
+                assessed.aggregate,
+                selection: .open(assessed.aggregate),
+                notice: assessed.notice ?? .profileReconsiderationUnavailable,
+                profileEffectReview: assessed.review
+            )
+            return
+        }
+        let attemptedRequest = ProfileReconsiderationInvocationRequest(
+            library: context.libraryScope,
+            chatID: assessed.aggregate.chat.id,
+            sourceEffectIdentity: sourceEffectIdentity,
+            resultResponsePositionID:
+                reconsideration.resultResponsePositionID
+        )
+
+        state = replacing(
+            operationallyInterruptedProfileReconsideration: nil,
+            replacesOperationallyInterruptedProfileReconsideration: true,
+            activity: .reconsideringProfileEffect(
+                assessed.aggregate.chat.id
+            ),
+            notice: nil
+        )
+        install(
+            assessed.aggregate,
+            selection: .open(assessed.aggregate),
+            notice: nil,
+            activity: .reconsideringProfileEffect(assessed.aggregate.chat.id),
+            profileEffectReview: .stale(basis)
+        )
+        let outcome: ProfileReconsiderationInvocationTryOutcome
+        if let retryOperationalInterruption {
+            guard retryOperationalInterruption.library == context.libraryScope,
+                  retryOperationalInterruption.chatID ==
+                    assessed.aggregate.chat.id,
+                  retryOperationalInterruption.sourceEffectIdentity ==
+                    sourceEffectIdentity,
+                  retryOperationalInterruption.resultResponsePositionID ==
+                    reconsideration.resultResponsePositionID,
+                  assessed.aggregate.profileReconsideration?.failure == nil
+            else {
+                install(
+                    assessed.aggregate,
+                    selection: .open(assessed.aggregate),
+                    notice: .profileReconsiderationUnavailable,
+                    profileEffectReview: .stale(basis)
+                )
+                return
+            }
+            outcome = await invocations.tryReconsiderProfileChange(
+                retryOperationalInterruption,
+                observingStopAuthority: { [weak self] authority in
+                    await self?.observeProfileReconsiderationStopAuthority(
+                        authority,
+                        request: retryOperationalInterruption,
+                        context: context
+                    )
+                }
+            )
+        } else {
+            guard assessed.aggregate.profileReconsideration?.failure != nil,
+                  let request = try?
+                    RetryProfileReconsiderationInvocationRequest(
+                        library: context.libraryScope,
+                        observedAggregate: assessed.aggregate,
+                        basis: basis
+                    )
+            else {
+                install(
+                    assessed.aggregate,
+                    selection: .open(assessed.aggregate),
+                    notice: .profileReconsiderationUnavailable,
+                    profileEffectReview: .stale(basis)
+                )
+                return
+            }
+            outcome = await invocations.tryReconsiderProfileChange(
+                request,
+                observingStopAuthority: { [weak self] authority in
+                    await self?.observeProfileReconsiderationStopAuthority(
+                        authority,
+                        request: request.request,
+                        context: context
+                    )
+                }
+            )
+        }
+        retainProfileReconsiderationReapAuthority(from: outcome)
+        guard isActive(context) else { return }
+        let presentedOutcome: ProfileReconsiderationInvocationTryOutcome =
+            switch outcome {
+            case let .rejected(nil, reason):
+                .rejected(assessed.aggregate, reason)
+            default:
+                outcome
+            }
+        let rejectedOperationalInterruption:
+            ProfileReconsiderationInvocationRequest? = switch outcome {
+            case .rejected(_, .eligibilityChanged): nil
+            case .rejected: retryOperationalInterruption
+            default: nil
+            }
+        await applyProfileReconsiderationOutcome(
+            presentedOutcome,
+            context: context,
+            fallbackReview: .stale(basis),
+            rejectedOperationalInterruption:
+                rejectedOperationalInterruption
+        )
+        await refreshSelectionIfProfileReconsiderationEligibilityVanished(
+            outcome,
+            request: attemptedRequest,
+            context: context
+        )
+        await refreshAdmissionAvailability(in: context)
+    }
+
+    func discardProfileReconsiderationFailure(
+        _ sourceEffectIdentity: ChatProfileEffectIdentity,
+        context: ChatCommandContext
+    ) async {
+        guard isActive(context), state.activity == nil,
+              case let .open(aggregate) = state.selection,
+              aggregate.profileEffect?.identity == sourceEffectIdentity,
+              let reconsideration = aggregate.profileReconsideration,
+              reconsideration.sourceEffectIdentity == sourceEffectIdentity,
+              reconsideration.failure != nil
+        else { return }
+
+        let discardedAt = await clock.now()
+        guard isActive(context),
+              let mutation = try?
+                DiscardProfileReconsiderationFailureMutation(
+                    library: context.libraryScope,
+                    base: aggregate,
+                    sourceEffectIdentity: sourceEffectIdentity,
+                    discardedAt: discardedAt
+                )
+        else { return }
+        state = replacing(
+            operationallyInterruptedProfileReconsideration: nil,
+            replacesOperationallyInterruptedProfileReconsideration: true,
+            activity: .discardingProfileReconsiderationFailure(
+                aggregate.chat.id
+            ),
+            notice: nil
+        )
+        publish()
+        let outcome = await profileProposals
+            .discardReconsiderationFailure(mutation)
+        guard isActive(context) else { return }
+        switch outcome {
+        case let .committed(current):
+            await installAssessedProfileEffect(
+                current,
+                context: context
+            )
+        case let .stale(current):
+            await installAssessedProfileEffect(
+                current,
+                context: context,
+                fallbackNotice: .profileReconsiderationDiscardFailed
+            )
+        case .readOnlyLibrary:
+            state = replacing(activity: nil, notice: .readOnlyLibrary)
+            publish()
+        case .failed:
+            state = replacing(
+                activity: nil,
+                notice: .profileReconsiderationDiscardFailed
+            )
+            publish()
+        }
+    }
+
+    func installAssessedProfileEffect(
+        _ aggregate: ChatAggregate,
+        context: ChatCommandContext,
+        fallbackNotice: ChatNotice? = nil
+    ) async {
+        let assessed = await assessProfileEffectIfNeeded(
+            aggregate,
+            context: context
+        )
+        guard isActive(context) else { return }
+        install(
+            assessed.aggregate,
+            selection: .open(assessed.aggregate),
+            notice: assessed.notice ?? fallbackNotice,
+            profileEffectReview: assessed.review
+        )
+    }
+
+    func refreshSelectionIfProfileReconsiderationEligibilityVanished(
+        _ outcome: ProfileReconsiderationInvocationTryOutcome,
+        request: ProfileReconsiderationInvocationRequest,
+        context: ChatCommandContext
+    ) async {
+        guard case .rejected(_, .eligibilityChanged) = outcome else { return }
+        forgetOperationalProfileReconsiderationRetry(request)
+        guard isActive(context) else { return }
+        if state.operationallyInterruptedProfileReconsideration == request {
+            state = replacing(
+                operationallyInterruptedProfileReconsideration: nil,
+                replacesOperationallyInterruptedProfileReconsideration: true,
+                activity: state.activity,
+                notice: state.notice
+            )
+            publish()
+        }
+        await open(request.chatID, context: context)
+    }
+}
+
+private extension DefaultChatFeature {
+    func applyProfileReconsiderationOutcome(
+        _ outcome: ProfileReconsiderationInvocationTryOutcome,
+        context: ChatCommandContext,
+        fallbackReview: ProfileEffectReviewState,
+        rejectedOperationalInterruption:
+            ProfileReconsiderationInvocationRequest? = nil
+    ) async {
+        switch outcome {
+        case .stopped:
+            return
+        case let .providerReapPending(authority):
+            guard state.profileReconsiderationStopAuthority == authority else {
+                return
+            }
+            state = replacing(
+                profileReconsiderationStopAuthority: authority,
+                replacesProfileReconsiderationStopAuthority: true,
+                activity: .stoppingProfileReconsideration(authority.chatID),
+                notice: nil
+            )
+            publish()
+        case let .published(current, quote):
+            state = replacing(
+                contextAdvisory: .available(quote),
+                operationallyInterruptedProfileReconsideration: nil,
+                replacesOperationallyInterruptedProfileReconsideration: true,
+                activity: nil,
+                notice: nil
+            )
+            await installAssessedProfileEffect(current, context: context)
+        case let .withdrawn(current, quote):
+            state = replacing(
+                contextAdvisory: .available(quote),
+                operationallyInterruptedProfileReconsideration: nil,
+                replacesOperationallyInterruptedProfileReconsideration: true,
+                activity: nil,
+                notice: nil
+            )
+            install(
+                current,
+                selection: .open(current),
+                notice: nil,
+                profileEffectReview: nil
+            )
+            presentTransientNotice(
+                .suggestionNoLongerRelevant,
+                for: current.chat.id,
+                context: context
+            )
+        case let .contextCapacityFailure(current, quote):
+            state = replacing(
+                contextAdvisory: .available(quote),
+                activity: nil,
+                notice: nil
+            )
+            install(
+                current,
+                selection: .open(current),
+                notice: nil,
+                profileEffectReview: fallbackReview
+            )
+        case let .rejected(current, reason):
+            let rejectionNotice = profileReconsiderationNotice(for: reason)
+            if let current {
+                let assessed = await assessProfileEffectIfNeeded(
+                    current,
+                    context: context
+                )
+                guard isActive(context) else { return }
+                install(
+                    assessed.aggregate,
+                    selection: .open(assessed.aggregate),
+                    notice: assessed.notice ?? rejectionNotice,
+                    operationallyInterruptedProfileReconsideration:
+                        rejectedOperationalInterruption,
+                    profileEffectReview: assessed.review
+                )
+            } else {
+                state = replacing(
+                    profileReconsiderationStopAuthority: nil,
+                    replacesProfileReconsiderationStopAuthority: true,
+                    activity: nil,
+                    notice: rejectionNotice
+                )
+                publish()
+            }
+        case let .interrupted(current, _):
+            if let current {
+                let assessed = await assessProfileEffectIfNeeded(
+                    current,
+                    context: context
+                )
+                guard isActive(context) else { return }
+                install(
+                    assessed.aggregate,
+                    selection: .open(assessed.aggregate),
+                    notice: assessed.notice,
+                    profileEffectReview: assessed.review
+                )
+            } else {
+                state = replacing(
+                    activity: nil,
+                    notice: .profileReconsiderationUnavailable
+                )
+                publish()
+            }
+        case let .operationallyInterrupted(current, request, _):
+            rememberOperationalProfileReconsiderationRetry(request)
+            if let current =
+                preferredOperationalProfileReconsiderationAggregate(
+                    current,
+                    request: request
+                )
+            {
+                install(
+                    current,
+                    selection: .open(current),
+                    notice: .profileReconsiderationUnavailable,
+                    operationallyInterruptedProfileReconsideration: request,
+                    profileEffectReview: fallbackReview
+                )
+            } else if let current {
+                await installAssessedProfileEffect(
+                    current,
+                    context: context,
+                    fallbackNotice: .profileReconsiderationUnavailable
+                )
+            } else {
+                state = replacing(
+                    operationallyInterruptedProfileReconsideration: nil,
+                    replacesOperationallyInterruptedProfileReconsideration:
+                        true,
+                    activity: nil,
+                    notice: .profileReconsiderationUnavailable
+                )
+                publish()
+            }
+        }
+    }
+
+    private func preferredOperationalProfileReconsiderationAggregate(
+        _ observed: ChatAggregate?,
+        request: ProfileReconsiderationInvocationRequest
+    ) -> ChatAggregate? {
+        let selected: ChatAggregate? = {
+            guard case let .open(aggregate) = state.selection else { return nil }
+            return exactFailureFreeProfileReconsiderationAggregate(
+                aggregate,
+                request: request
+            )
+        }()
+        let observed = exactFailureFreeProfileReconsiderationAggregate(
+            observed,
+            request: request
+        )
+        switch (selected, observed) {
+        case let (.some(selected), .some(observed)):
+            return observed.chat.manifestRevision > selected.chat.manifestRevision
+                ? observed
+                : selected
+        case let (.some(selected), .none):
+            return selected
+        case let (.none, .some(observed)):
+            return observed
+        case (.none, .none):
+            return nil
+        }
+    }
+
+    private func exactFailureFreeProfileReconsiderationAggregate(
+        _ aggregate: ChatAggregate?,
+        request: ProfileReconsiderationInvocationRequest
+    ) -> ChatAggregate? {
+        guard let aggregate,
+              aggregate.chat.id == request.chatID,
+              aggregate.profileEffect?.identity ==
+                request.sourceEffectIdentity,
+              let reconsideration = aggregate.profileReconsideration,
+              reconsideration.sourceEffectIdentity ==
+                request.sourceEffectIdentity,
+              reconsideration.resultResponsePositionID ==
+                request.resultResponsePositionID,
+              reconsideration.failure == nil
+        else { return nil }
+        return aggregate
+    }
+
+    private func cachedOperationalProfileReconsiderationRetry(
+        for aggregate: ChatAggregate,
+        in library: LibraryScope?
+    ) -> ProfileReconsiderationInvocationRequest? {
+        guard let library else { return nil }
+        return operationalProfileReconsiderationRetryRequests.first { request in
+            request.library == library &&
+                exactFailureFreeProfileReconsiderationAggregate(
+                    aggregate,
+                    request: request
+                ) != nil
+        }
+    }
+
+    private func rememberOperationalProfileReconsiderationRetry(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) {
+        forgetOperationalProfileReconsiderationRetry(request)
+        operationalProfileReconsiderationRetryRequests.append(request)
+    }
+
+    private func forgetOperationalProfileReconsiderationRetry(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) {
+        operationalProfileReconsiderationRetryRequests.removeAll {
+            $0.library == request.library && $0.chatID == request.chatID
+        }
+    }
+
+    private func synchronizeOperationalProfileReconsiderationRetryCache(
+        for aggregate: ChatAggregate,
+        installed request: ProfileReconsiderationInvocationRequest?
+    ) {
+        guard let library = activeContext?.libraryScope else { return }
+        operationalProfileReconsiderationRetryRequests.removeAll {
+            $0.library == library && $0.chatID == aggregate.chat.id
+        }
+        if let request {
+            operationalProfileReconsiderationRetryRequests.append(request)
+        }
+    }
+
+    func profileReconsiderationNotice(
+        for rejection: InvocationRejectionReason
+    ) -> ChatNotice {
+        switch rejection {
+        case .activeInvocation:
+            .coachBusy
+        case .admissionCooldown, .clockRollback, .admissionLedgerFull:
+            .coachAdmissionLimited
+        case .contextUnavailable:
+            .coachContextUnavailable
+        case .messageMustBeShortened, .eligibilityChanged, .contextChanged,
+             .admissionUnavailable, .persistenceUnavailable,
+             .identityCollisionExhausted:
+            .profileReconsiderationUnavailable
+        }
+    }
+
+    func retainProfileReconsiderationReapAuthority(
+        from outcome: ProfileReconsiderationInvocationTryOutcome
+    ) {
+        guard case let .providerReapPending(authority) = outcome,
+              !unreapedProfileReconsiderationAuthorities.contains(authority)
+        else { return }
+        unreapedProfileReconsiderationAuthorities.append(authority)
+    }
+}
+
+private extension DefaultChatFeature {
+    func observeProfileReconsiderationStopAuthority(
+        _ authority: ProfileReconsiderationInvocationStopAuthority,
+        request: ProfileReconsiderationInvocationRequest,
+        context: ChatCommandContext
+    ) async {
+        let canInstallAuthority =
+            state.activity == .reconsideringProfileEffect(request.chatID) ||
+            (state.activity == .stoppingProfileReconsideration(request.chatID) &&
+                state.profileReconsiderationStopAuthority != authority)
+        guard isCurrent(context),
+              authority.library == request.library,
+              authority.chatID == request.chatID,
+              authority.sourceEffectIdentity == request.sourceEffectIdentity,
+              authority.resultResponsePositionID ==
+                request.resultResponsePositionID,
+              case let .open(aggregate) = state.selection,
+              aggregate.chat.id == request.chatID,
+              aggregate.profileEffect?.identity ==
+                request.sourceEffectIdentity,
+              aggregate.profileReconsideration?.sourceEffectIdentity ==
+                request.sourceEffectIdentity,
+              aggregate.profileReconsideration?.resultResponsePositionID ==
+                request.resultResponsePositionID,
+              canInstallAuthority
+        else { return }
+        state = replacing(
+            profileReconsiderationStopAuthority: authority,
+            replacesProfileReconsiderationStopAuthority: true,
+            activity: .reconsideringProfileEffect(request.chatID),
+            notice: state.notice
+        )
+        publish()
+        if isOrderlyTerminationPending {
+            await stopProfileReconsideration(authority, context: context)
+        }
+    }
+
+    func stopProfileReconsideration(
+        _ authority: ProfileReconsiderationInvocationStopAuthority,
+        context: ChatCommandContext
+    ) async {
+        guard isCurrent(context),
+              !profileReconsiderationStopsInFlight.contains(authority),
+              state.profileReconsiderationStopAuthority == authority,
+              case let .open(aggregate) = state.selection,
+              let reconsideration = aggregate.profileReconsideration,
+              aggregate.chat.id == authority.chatID,
+              aggregate.profileEffect?.identity ==
+                authority.sourceEffectIdentity,
+              reconsideration.sourceEffectIdentity ==
+                authority.sourceEffectIdentity,
+              reconsideration.resultResponsePositionID ==
+                authority.resultResponsePositionID,
+              authority.library == context.libraryScope,
+              state.activity == .reconsideringProfileEffect(aggregate.chat.id) ||
+                state.activity ==
+                    .stoppingProfileReconsideration(aggregate.chat.id)
+        else { return }
+
+        profileReconsiderationStopsInFlight.append(authority)
+        defer { finishProfileReconsiderationStop(authority) }
+        let request = StopProfileReconsiderationInvocationRequest(
+            library: context.libraryScope,
+            chatID: aggregate.chat.id,
+            sourceEffectIdentity: reconsideration.sourceEffectIdentity,
+            resultResponsePositionID:
+                reconsideration.resultResponsePositionID
+        )
+        let fallbackReview = state.profileEffectReview ??
+            .unavailable(reconsideration.sourceEffectIdentity)
+        state = replacing(
+            profileReconsiderationStopAuthority: authority,
+            replacesProfileReconsiderationStopAuthority: true,
+            activity: .stoppingProfileReconsideration(aggregate.chat.id),
+            notice: nil
+        )
+        publish()
+
+        let outcome = await invocations.stopProfileReconsideration(
+            request,
+            authority: authority
+        )
+        if case .unableToReap = outcome {
+            if !unreapedProfileReconsiderationAuthorities.contains(authority) {
+                unreapedProfileReconsiderationAuthorities.append(authority)
+            }
+        } else {
+            unreapedProfileReconsiderationAuthorities.removeAll {
+                $0 == authority
+            }
+        }
+        guard isActive(context) else { return }
+        switch outcome {
+        case let .interrupted(current):
+            guard current.chat.id == request.chatID,
+                  current.profileEffect?.identity ==
+                    request.sourceEffectIdentity,
+                  current.profileReconsideration?.sourceEffectIdentity ==
+                    request.sourceEffectIdentity,
+                  current.profileReconsideration?.resultResponsePositionID ==
+                    request.resultResponsePositionID,
+                  current.profileReconsideration?.failure ==
+                    .coachResponseInterrupted
+            else {
+                await installAssessedProfileEffect(
+                    current,
+                    context: context,
+                    fallbackNotice: .profileReconsiderationUnavailable
+                )
+                return
+            }
+            await installAssessedProfileEffect(current, context: context)
+        case let .persistenceUnavailable(current):
+            let retryRequest = ProfileReconsiderationInvocationRequest(
+                library: request.library,
+                chatID: request.chatID,
+                sourceEffectIdentity: request.sourceEffectIdentity,
+                resultResponsePositionID: request.resultResponsePositionID
+            )
+            if exactFailureFreeProfileReconsiderationAggregate(
+                current,
+                request: retryRequest
+            ) != nil {
+                await applyProfileReconsiderationOutcome(
+                    .operationallyInterrupted(
+                        current,
+                        retryRequest,
+                        .persistenceUnavailable
+                    ),
+                    context: context,
+                    fallbackReview: fallbackReview
+                )
+            } else if let current, current.chat.id == request.chatID {
+                await installAssessedProfileEffect(
+                    current,
+                    context: context,
+                    fallbackNotice: .profileReconsiderationUnavailable
+                )
+            } else {
+                await open(request.chatID, context: context)
+            }
+        case .staleAuthority, .noActiveInvocation:
+            guard state.profileReconsiderationStopAuthority == authority else {
+                return
+            }
+            state = replacing(
+                profileReconsiderationStopAuthority: nil,
+                replacesProfileReconsiderationStopAuthority: true,
+                activity: .reconsideringProfileEffect(aggregate.chat.id),
+                notice: nil
+            )
+            publish()
+        case .unableToReap:
+            guard state.profileReconsiderationStopAuthority == authority else {
+                return
+            }
+            state = replacing(
+                profileReconsiderationStopAuthority: authority,
+                replacesProfileReconsiderationStopAuthority: true,
+                activity: .stoppingProfileReconsideration(aggregate.chat.id),
+                notice: .profileReconsiderationUnavailable
+            )
+            publish()
+        }
+    }
+
+    func finishProfileReconsiderationStop(
+        _ authority: ProfileReconsiderationInvocationStopAuthority
+    ) {
+        profileReconsiderationStopsInFlight.removeAll { $0 == authority }
+        guard profileReconsiderationStopsInFlight.isEmpty else { return }
+        let waiters = profileReconsiderationStopIdleWaiters
+        profileReconsiderationStopIdleWaiters.removeAll(keepingCapacity: true)
+        for waiter in waiters { waiter.resume() }
+    }
+}
+
 private extension ChatCommand {
     var isTransientNewChatCommand: Bool {
         switch self {
@@ -3167,10 +4407,13 @@ private extension ChatCommand {
             true
         case .start, .rename, .setFilter, .open, .editDraft,
              .refreshContextQuote, .sendDraft, .retryPendingUserTurn,
-             .stopCoachResponse, .createNewChatFromCapacityFailure,
+             .stopCoachResponse, .stopProfileReconsideration,
+             .createNewChatFromCapacityFailure,
              .discardPendingUserTurn, .acceptProfileProposal,
              .discardProfileProposal, .retryProfileEvidencePublication,
-             .discardProfileEvidencePublication:
+             .discardProfileEvidencePublication, .reconsiderProfileEffect,
+             .retryProfileReconsideration,
+             .discardProfileReconsiderationFailure:
             false
         }
     }
@@ -3188,13 +4431,17 @@ private extension ChatCommand {
              let .refreshContextQuote(context, _, _),
              let .sendDraft(context, _, _),
              let .stopCoachResponse(context, _),
+             let .stopProfileReconsideration(context, _),
              let .retryPendingUserTurn(context, _),
              let .createNewChatFromCapacityFailure(context, _),
              let .discardPendingUserTurn(context, _),
              let .acceptProfileProposal(context, _),
              let .discardProfileProposal(context, _),
              let .retryProfileEvidencePublication(context, _),
-             let .discardProfileEvidencePublication(context, _):
+             let .discardProfileEvidencePublication(context, _),
+             let .reconsiderProfileEffect(context, _),
+             let .retryProfileReconsideration(context, _),
+             let .discardProfileReconsiderationFailure(context, _):
             context
         }
     }

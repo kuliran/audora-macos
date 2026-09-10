@@ -6,6 +6,574 @@ import Foundation
 import XCTest
 
 final class PortableProfileProposalCoordinatorTests: XCTestCase {
+    func testAssessmentKeepsProposalCurrentAcrossEvidenceOnlyRevision()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedTargetProposalFixture(in: parent)
+            let evidenceOnly = try makeConcurrentEvidenceRevision(
+                in: fixture.source
+            )
+            try installProfileRevision(evidenceOnly, in: fixture.source)
+            let request = try AssessProfileEffectRequest(
+                library: fixture.source.scope,
+                base: fixture.published,
+                sourceEffectIdentity: .proposal(fixture.proposal.id)
+            )
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: fixture.source.persistence,
+                workspace: fixture.source.workspace
+            )
+
+            guard case let .current(current) = await coordinator.assess(request)
+            else {
+                return XCTFail("Evidence-only revision made Proposal stale")
+            }
+            XCTAssertEqual(current, fixture.published)
+        }
+    }
+
+    func testAssessmentBuildsExactBasisForStaleProposal() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedTargetProposalFixture(in: parent)
+            let latestTarget = try ProfileStatement(
+                statementID: fixture.source.target.statementID,
+                statementKind: fixture.source.target.statementKind,
+                wording: "Pause after every complete thought.",
+                supportingSessionCount: fixture.source.target
+                    .supportingSessionCount,
+                evidence: fixture.source.target.evidence
+            )
+            let latest = try ProfileRevision(
+                revisionID: ProfileRevisionID(
+                    "prf-20260910T130000000Z-8ABC"
+                ),
+                parentRevisionID: fixture.source.baseRevision.revisionID,
+                generation: 2,
+                statementGeneration: 2,
+                createdAt: UTCInstant("2026-09-10T13:00:00.000Z"),
+                statements: [latestTarget]
+            )
+            try installProfileRevision(latest, in: fixture.source)
+            let request = try AssessProfileEffectRequest(
+                library: fixture.source.scope,
+                base: fixture.published,
+                sourceEffectIdentity: .proposal(fixture.proposal.id)
+            )
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: fixture.source.persistence,
+                workspace: fixture.source.workspace
+            )
+
+            guard case let .stale(current, basis) = await coordinator.assess(
+                request
+            ) else { return XCTFail("Semantic revision did not stale Proposal") }
+            XCTAssertEqual(current, fixture.published)
+            XCTAssertEqual(basis.sourceEffect, .proposal(fixture.proposal))
+            XCTAssertEqual(
+                basis.baseProfile,
+                ProfileSnapshot(revision: fixture.source.baseRevision)
+            )
+            XCTAssertEqual(basis.latestProfile, ProfileSnapshot(revision: latest))
+            XCTAssertEqual(basis.previousChanges, fixture.proposal.changes)
+            XCTAssertEqual(
+                basis.inactiveEditTargets,
+                [fixture.source.target]
+            )
+            XCTAssertEqual(basis.inactiveTargetsEvidence, [])
+            XCTAssertEqual(basis.retainedActiveEvidenceAppends, [])
+        }
+    }
+
+    func testPortableReconsiderPublishesMessageFreeReviewedReplacementAndReloads()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePortableReconsiderationFixture(
+                in: parent
+            )
+            let store = PortableInvocationStore(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+            guard case let .opened(pending) = await store
+                .openNewProfileReconsiderationInvocation(fixture.request)
+            else { return XCTFail("Reconsider reservation did not open") }
+            let install = try makeReconsiderationInstall(
+                authority: pending.authority,
+                basis: fixture.basis
+            )
+            guard case let .installed(active) = await pending.install(install)
+            else { return XCTFail("Reconsider Invocation did not install") }
+            let response = ValidatedCoachResponse(
+                messageBlocks: [],
+                newMemory: nil,
+                proposedProfileEdits: [
+                    ValidatedCoachProfileEditProposal(
+                        edit: .add(
+                            statementKind: .goal,
+                            wording: "Use one deliberate pause between ideas."
+                        ),
+                        evidence: []
+                    ),
+                ],
+                appendedProfileEvidence: [],
+                profileEffectPublicationMode: .reviewRequired
+            )
+            let mutation = try PublishProfileReconsiderationInvocationMutation(
+                base: active.processingAggregate,
+                invocation: active.invocation,
+                reconsideration: active.reconsideration,
+                basis: active.basis,
+                validatedResponse: response,
+                replacementMemory: nil,
+                completedAt: UTCInstant("2026-09-10T14:00:03.000Z")
+            )
+
+            guard case let .committed(published) = await active.publish(mutation)
+            else { return XCTFail("Message-free replacement did not commit") }
+            XCTAssertEqual(
+                published.chat.messageIDs,
+                fixture.observed.chat.messageIDs
+            )
+            XCTAssertNotNil(published.profileProposal)
+            XCTAssertNil(published.profileReconsideration)
+            guard case let .readWrite(reloaded) = try fixture.persistence.load(
+                published.chat.id,
+                at: fixture.root,
+                in: fixture.scope
+            ) else { return XCTFail("Message-free Proposal did not reload") }
+            XCTAssertEqual(reloaded, published)
+        }
+    }
+
+    func testRelaunchFinishesCommittedMessageFreeReconsiderWithdrawal()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePortableReconsiderationFixture(
+                in: parent
+            )
+            let manifestFault = OneShot()
+            let persistence = PortableChatPersistence { point in
+                if point == .afterPublicationManifestInstall,
+                   manifestFault.take()
+                {
+                    throw PortableChatPersistenceError.injectedFault(point)
+                }
+            }
+            guard case let .prepared(authority, lease) = try persistence
+                .prepareNewProfileReconsiderationInvocation(
+                    fixture.request,
+                    at: fixture.root,
+                    in: fixture.scope
+                )
+            else { return XCTFail("Reconsider reservation did not open") }
+            let install = try makeReconsiderationInstall(
+                authority: authority,
+                basis: fixture.basis
+            )
+            guard case .installed = try persistence
+                .installProfileReconsiderationInvocation(
+                    install,
+                    at: fixture.root,
+                    holding: lease
+                )
+            else { return XCTFail("Reconsider Invocation did not install") }
+            let mutation = try PublishProfileReconsiderationInvocationMutation(
+                    base: install.processingAggregate,
+                    invocation: install.invocation,
+                    reconsideration: authority.reconsideration,
+                    basis: authority.basis,
+                    validatedResponse: ValidatedCoachResponse(
+                        messageBlocks: [],
+                        newMemory: nil,
+                        proposedProfileEdits: [],
+                        appendedProfileEvidence: [],
+                        profileEffectPublicationMode: .reviewRequired
+                    ),
+                    replacementMemory: nil,
+                    completedAt: UTCInstant("2026-09-10T14:00:03.000Z")
+                )
+            XCTAssertThrowsError(
+                try persistence.publishProfileReconsideration(
+                    mutation,
+                    at: fixture.root,
+                    in: fixture.scope,
+                    holding: lease
+                )
+            )
+            lease.release() // Simulates kernel liveness loss at process death.
+            XCTAssertTrue(manifestFault.wasTaken)
+
+            let relaunched = try await relaunchedWorkspace(
+                root: fixture.root
+            )
+            do {
+                try persistence.reconcileInterruptedInvocations(
+                    at: fixture.root,
+                    in: fixture.scope
+                )
+            } catch {
+                return XCTFail("Reconsider relaunch recovery failed: \(error)")
+            }
+            let chatStore = PortableChatStore(workspace: relaunched)
+            guard case let .loaded(recovered) = await chatStore.load(
+                fixture.observed.chat.id,
+                in: fixture.scope
+            ) else { return XCTFail("Relaunch did not finish withdrawal") }
+            XCTAssertNil(recovered.profileEffect)
+            XCTAssertNil(recovered.profileReconsideration)
+            XCTAssertEqual(
+                recovered.chat.messageIDs,
+                fixture.observed.chat.messageIDs
+            )
+            XCTAssertFalse(FileManager.default.fileExists(
+                atPath: fixture.root.appendingPathComponent(
+                    "invocations/inv-20260910T140002000Z-1ABC"
+                ).path
+            ))
+        }
+    }
+
+    func testRelaunchFinishesProposalSourceReplacementAfterCanonicalInstall()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            try assertRelaunchFinishesReplacementAfterCanonicalInstall(
+                try await makePortableReconsiderationFixture(in: parent)
+            )
+        }
+    }
+
+    func testRelaunchFinishesEvidenceSourceReplacementAfterCanonicalInstall()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            try assertRelaunchFinishesReplacementAfterCanonicalInstall(
+                try await makePortableEvidenceReconsiderationFixture(in: parent)
+            )
+        }
+    }
+
+    func testCommittedReconsiderProofSurvivesLaterRenameAndFreshDraft()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePortableReconsiderationFixture(
+                in: parent
+            )
+            let retirementFault = OneShot()
+            let persistence = PortableChatPersistence { point in
+                if point == .beforeReconsiderationPublishedInvocationRetirement,
+                   retirementFault.take()
+                {
+                    throw PortableChatPersistenceError.injectedFault(point)
+                }
+            }
+            guard case let .prepared(authority, lease) = try persistence
+                .prepareNewProfileReconsiderationInvocation(
+                    fixture.request,
+                    at: fixture.root,
+                    in: fixture.scope
+                )
+            else { return XCTFail("Reconsider reservation did not open") }
+            let install = try makeReconsiderationInstall(
+                authority: authority,
+                basis: fixture.basis
+            )
+            guard case .installed = try persistence
+                .installProfileReconsiderationInvocation(
+                    install,
+                    at: fixture.root,
+                    holding: lease
+                )
+            else { return XCTFail("Reconsider Invocation did not install") }
+            let mutation = try PublishProfileReconsiderationInvocationMutation(
+                base: install.processingAggregate,
+                invocation: install.invocation,
+                reconsideration: authority.reconsideration,
+                basis: authority.basis,
+                validatedResponse: replacementReconsiderationResponse(),
+                replacementMemory: nil,
+                completedAt: UTCInstant("2026-09-10T14:00:03.000Z")
+            )
+            XCTAssertThrowsError(
+                try persistence.publishProfileReconsideration(
+                    mutation,
+                    at: fixture.root,
+                    in: fixture.scope,
+                    holding: lease
+                )
+            )
+            XCTAssertTrue(retirementFault.wasTaken)
+
+            guard case let .renamed(renamed) = try persistence.rename(
+                RenameChatMutation(
+                    library: fixture.scope,
+                    base: mutation.replacement,
+                    title: ChatTitle("Later reconsidered title"),
+                    updatedAt: UTCInstant("2026-09-10T14:00:04.000Z")
+                ),
+                at: fixture.root
+            ) else { return XCTFail("Later title did not commit") }
+            let freshDraft = try renamed.chat.draft.edited(
+                text: "A fresh Draft after committed reconsideration.",
+                at: UTCInstant("2026-09-10T14:00:05.000Z")
+            )
+            guard case let .committed(evolved) = try persistence.saveDraft(
+                SaveChatDraftMutation(
+                    library: fixture.scope,
+                    chatID: renamed.chat.id,
+                    replacement: freshDraft
+                ),
+                at: fixture.root
+            ) else { return XCTFail("Later Draft did not commit") }
+
+            let recovered = try XCTUnwrap(
+                persistence.reconcileCommittedProfileReconsiderationPublication(
+                    mutation,
+                    at: fixture.root,
+                    in: fixture.scope,
+                    holding: lease
+                )
+            )
+            XCTAssertEqual(recovered, evolved)
+            XCTAssertFalse(FileManager.default.fileExists(
+                atPath: fixture.root.appendingPathComponent(
+                    "invocations/\(install.invocation.id.rawValue)"
+                ).path
+            ))
+            lease.release()
+        }
+    }
+
+    func testRelaunchRepairsUninstalledFailureFreeReconsiderSidecar()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePortableReconsiderationFixture(
+                in: parent
+            )
+            let chatRoot = fixture.root.appendingPathComponent(
+                "chats/\(fixture.observed.chat.id.rawValue)",
+                isDirectory: true
+            )
+            try fixture.persistence.encodeProfileReconsideration(
+                fixture.reconsideration
+            ).write(
+                to: chatRoot.appendingPathComponent(
+                    "profile-reconsideration.json"
+                )
+            )
+            let relaunched = try await relaunchedWorkspace(root: fixture.root)
+            let store = PortableChatStore(workspace: relaunched)
+
+            guard case let .loaded(recovered) = await store.load(
+                fixture.observed.chat.id,
+                in: fixture.scope
+            ) else { return XCTFail("Orphan Reconsider sidecar was not repaired") }
+            XCTAssertEqual(recovered.profileEffect, fixture.observed.profileEffect)
+            XCTAssertEqual(
+                recovered.profileReconsideration,
+                fixture.reconsideration.replacingFailure(
+                    .coachResponseInterrupted
+                )
+            )
+        }
+    }
+
+    func testAssessmentKeepsEvidencePublicationCurrentWhileExactTargetIsActive()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(in: parent)
+            let evidenceOnly = try makeConcurrentEvidenceRevision(in: fixture)
+            try installProfileRevision(evidenceOnly, in: fixture)
+            let request = try AssessProfileEffectRequest(
+                library: fixture.scope,
+                base: fixture.published,
+                sourceEffectIdentity: .evidencePublication(
+                    fixture.profilePublication.responsePositionID
+                )
+            )
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+
+            guard case let .current(current) = await coordinator.assess(request)
+            else { return XCTFail("Active exact evidence target was stale") }
+            XCTAssertEqual(current, fixture.published)
+        }
+    }
+
+    func testAssessmentBuildsExactBasisWhenEvidenceTargetIsNoLongerActive()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedEvidenceFixture(in: parent)
+            let latest = try ProfileRevision(
+                revisionID: ProfileRevisionID(
+                    "prf-20260910T130100000Z-9DEF"
+                ),
+                parentRevisionID: fixture.baseRevision.revisionID,
+                generation: 2,
+                statementGeneration: 2,
+                createdAt: UTCInstant("2026-09-10T13:01:00.000Z"),
+                statements: []
+            )
+            try installProfileRevision(latest, in: fixture)
+            let request = try AssessProfileEffectRequest(
+                library: fixture.scope,
+                base: fixture.published,
+                sourceEffectIdentity: .evidencePublication(
+                    fixture.profilePublication.responsePositionID
+                )
+            )
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+
+            guard case let .stale(current, basis) = await coordinator.assess(
+                request
+            ) else {
+                return XCTFail("Inactive evidence target was not stale")
+            }
+            XCTAssertEqual(current, fixture.published)
+            XCTAssertEqual(
+                basis.sourceEffect,
+                .evidencePublication(fixture.profilePublication)
+            )
+            XCTAssertEqual(
+                basis.baseProfile,
+                ProfileSnapshot(revision: fixture.baseRevision)
+            )
+            XCTAssertEqual(basis.latestProfile, ProfileSnapshot(revision: latest))
+            XCTAssertEqual(basis.previousChanges, [])
+            XCTAssertEqual(basis.inactiveEditTargets, [fixture.target])
+            XCTAssertEqual(
+                basis.inactiveTargetsEvidence,
+                fixture.profilePublication.evidenceAppends
+            )
+            XCTAssertEqual(basis.retainedActiveEvidenceAppends, [])
+        }
+    }
+
+    func testAssessmentReconcilesAcceptedWriteBeforeClassifying() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedProposalFixture(in: parent)
+            let request = try AssessProfileEffectRequest(
+                library: fixture.scope,
+                base: fixture.published,
+                sourceEffectIdentity: .proposal(fixture.proposal.id)
+            )
+            let mutation = try AcceptProfileProposalMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                proposalID: fixture.proposal.id,
+                acceptedAt: UTCInstant("2026-09-09T12:05:00.000Z")
+            )
+            let injected = OneShot()
+            let interrupted = PortableChatPersistence { point in
+                guard point == .afterProfileWriteIntentDirectoryFlush,
+                      injected.take()
+                else { return }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+            let interruptedCoordinator = PortableProfileProposalCoordinator(
+                persistence: interrupted,
+                workspace: fixture.workspace
+            )
+            let interruptedOutcome = await interruptedCoordinator.accept(mutation)
+            XCTAssertEqual(interruptedOutcome, .failed)
+
+            let coordinator = PortableProfileProposalCoordinator(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+            let assessment = await coordinator.assess(request)
+            XCTAssertEqual(assessment, .failed)
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: chatRoot(fixture).appendingPathComponent(
+                        "proposal.json"
+                    ).path
+                )
+            )
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: chatRoot(fixture).appendingPathComponent(
+                        "profile-write.json"
+                    ).path
+                )
+            )
+            XCTAssertEqual(try loadProfileHead(in: fixture).generation, 1)
+        }
+    }
+
+    func testAssessmentFailsClosedForUnprovedOrMismatchedAuthority()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let unproved = try await makePublishedEvidenceFixture(in: parent)
+            try Data(repeating: 48, count: 64).write(
+                to: unproved.root.appendingPathComponent(
+                    "profile/revisions/\(unproved.baseRevision.revisionID.rawValue)/revision.sha256"
+                ),
+                options: .atomic
+            )
+            let unprovedRequest = try AssessProfileEffectRequest(
+                library: unproved.scope,
+                base: unproved.published,
+                sourceEffectIdentity: .evidencePublication(
+                    unproved.profilePublication.responsePositionID
+                )
+            )
+            let unprovedCoordinator = PortableProfileProposalCoordinator(
+                persistence: unproved.persistence,
+                workspace: unproved.workspace
+            )
+            let unprovedAssessment = await unprovedCoordinator.assess(
+                unprovedRequest
+            )
+            XCTAssertEqual(unprovedAssessment, .failed)
+
+            let mismatched = try await makePublishedProposalFixture(
+                in: parent,
+                ordinal: 1
+            )
+            let mismatchedRequest = try AssessProfileEffectRequest(
+                library: mismatched.scope,
+                base: mismatched.published,
+                sourceEffectIdentity: .proposal(mismatched.proposal.id)
+            )
+            let replacement = try ProfileChangeProposal(
+                id: ProfileChangeProposalID(
+                    "prp-20260909T130100000Z-7VWX"
+                ),
+                chatID: mismatched.published.chat.id,
+                responsePositionID: mismatched.proposal.responsePositionID,
+                baseProfile: mismatched.proposal.baseProfile,
+                changes: mismatched.proposal.changes,
+                createdAt: mismatched.proposal.createdAt
+            )
+            try mismatched.persistence.encodeProfileProposal(replacement).write(
+                to: chatRoot(mismatched).appendingPathComponent("proposal.json"),
+                options: .atomic
+            )
+            let mismatchedCoordinator = PortableProfileProposalCoordinator(
+                persistence: mismatched.persistence,
+                workspace: mismatched.workspace
+            )
+            let mismatchedAssessment = await mismatchedCoordinator.assess(
+                mismatchedRequest
+            )
+            XCTAssertEqual(mismatchedAssessment, .failed)
+        }
+    }
+
     func testEvidencePublicationStagesWithTurnThenSilentlyRebasesProfile()
         async throws
     {
@@ -1144,6 +1712,431 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
         }
     }
 
+    func testRelaunchResumesAcceptedProposalBeforeExposingChat() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedProposalFixture(in: parent)
+            let mutation = try AcceptProfileProposalMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                proposalID: fixture.proposal.id,
+                acceptedAt: UTCInstant("2026-09-09T12:05:00.000Z")
+            )
+            let interrupted = PortableChatPersistence { point in
+                guard point == .afterProfileWriteIntentInstall else { return }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+
+            XCTAssertThrowsError(
+                try interrupted.acceptProfileProposal(
+                    mutation,
+                    at: fixture.root
+                )
+            )
+            XCTAssertTrue(fileExists(chatRoot(fixture), "proposal.json"))
+            XCTAssertTrue(fileExists(chatRoot(fixture), "profile-write.json"))
+
+            let catalog = try fixture.persistence.loadCatalog(
+                at: fixture.root,
+                in: fixture.scope
+            )
+            guard catalog.count == 1,
+                  case let .readWrite(reopened) = catalog[0]
+            else {
+                return XCTFail("Relaunch did not finish the accepted proposal")
+            }
+
+            XCTAssertNil(reopened.profileProposal)
+            XCTAssertFalse(fileExists(chatRoot(fixture), "proposal.json"))
+            XCTAssertFalse(fileExists(chatRoot(fixture), "profile-write.json"))
+            let head = try loadProfileHead(in: fixture)
+            guard case let .revision(pointer) = head.selection else {
+                return XCTFail("Relaunch did not select the intended revision")
+            }
+            XCTAssertEqual(pointer.revisionID, mutation.intendedRevisionID)
+        }
+    }
+
+    func testStoreCatalogReconcilesAcceptedProfileWriteBeforeInvocationRecovery()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedProposalFixture(in: parent)
+            let mutation = try AcceptProfileProposalMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                proposalID: fixture.proposal.id,
+                acceptedAt: UTCInstant("2026-09-09T12:05:00.000Z")
+            )
+            let interrupted = PortableChatPersistence { point in
+                guard point == .afterProfileWriteIntentDirectoryFlush else {
+                    return
+                }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+
+            XCTAssertThrowsError(
+                try interrupted.acceptProfileProposal(
+                    mutation,
+                    at: fixture.root
+                )
+            )
+            XCTAssertTrue(fileExists(chatRoot(fixture), "profile-write.json"))
+
+            let store = PortableChatStore(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+            guard case let .loaded(entries) = await store.loadCatalog(
+                in: fixture.scope
+            ), entries.count == 1,
+                case let .available(reopened) = entries[0]
+            else {
+                return XCTFail(
+                    "Store catalog failed before reconciling the accepted Profile write"
+                )
+            }
+
+            XCTAssertNil(reopened.profileProposal)
+            XCTAssertFalse(fileExists(chatRoot(fixture), "proposal.json"))
+            XCTAssertFalse(fileExists(chatRoot(fixture), "profile-write.json"))
+            guard case let .revision(pointer) = try loadProfileHead(
+                in: fixture
+            ).selection else {
+                return XCTFail("Store catalog did not select the intended revision")
+            }
+            XCTAssertEqual(pointer.revisionID, mutation.intendedRevisionID)
+        }
+    }
+
+    func testStoreOpenReconcilesAcceptedProfileWriteBeforeInvocationRecovery()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedProposalFixture(in: parent)
+            let mutation = try AcceptProfileProposalMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                proposalID: fixture.proposal.id,
+                acceptedAt: UTCInstant("2026-09-09T12:05:00.000Z")
+            )
+            let interrupted = PortableChatPersistence { point in
+                guard point == .afterProfileWriteIntentDirectoryFlush else {
+                    return
+                }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+
+            XCTAssertThrowsError(
+                try interrupted.acceptProfileProposal(
+                    mutation,
+                    at: fixture.root
+                )
+            )
+            XCTAssertTrue(fileExists(chatRoot(fixture), "profile-write.json"))
+
+            let store = PortableChatStore(
+                persistence: fixture.persistence,
+                workspace: fixture.workspace
+            )
+            guard case let .loaded(reopened) = await store.load(
+                fixture.published.chat.id,
+                in: fixture.scope
+            ) else {
+                return XCTFail(
+                    "Store open failed before reconciling the accepted Profile write"
+                )
+            }
+
+            XCTAssertNil(reopened.profileProposal)
+            XCTAssertFalse(fileExists(chatRoot(fixture), "proposal.json"))
+            XCTAssertFalse(fileExists(chatRoot(fixture), "profile-write.json"))
+            guard case let .revision(pointer) = try loadProfileHead(
+                in: fixture
+            ).selection else {
+                return XCTFail("Store open did not select the intended revision")
+            }
+            XCTAssertEqual(pointer.revisionID, mutation.intendedRevisionID)
+        }
+    }
+
+    func testRelaunchRecoversEveryDurableAcceptCrashPhase() async throws {
+        let points: [PortableChatFaultPoint] = [
+            .afterProfileWriteIntentDirectoryFlush,
+            .afterProfileRevisionInstall,
+            .beforeProfileHeadPartialWrite,
+            .afterProfileHeadPartialWrite,
+            .afterProfileHeadFileFlush,
+            .beforeProfileHeadInstall,
+            .afterProfileHeadInstall,
+            .afterProfileHeadDirectoryFlush,
+            .afterProfileProposalRemoval,
+            .afterProfileWriteIntentRemoval,
+        ]
+        try await withTemporaryParent { parent in
+            for (ordinal, point) in points.enumerated() {
+                let fixture = try await makePublishedProposalFixture(
+                    in: parent,
+                    ordinal: ordinal + 10
+                )
+                let mutation = try AcceptProfileProposalMutation(
+                    library: fixture.scope,
+                    base: fixture.published,
+                    proposalID: fixture.proposal.id,
+                    acceptedAt: UTCInstant("2026-09-09T14:05:00.000Z")
+                )
+                let interrupted = PortableChatPersistence { reached in
+                    guard reached == point else { return }
+                    throw PortableChatPersistenceError.injectedFault(reached)
+                }
+
+                XCTAssertThrowsError(
+                    try interrupted.acceptProfileProposal(
+                        mutation,
+                        at: fixture.root
+                    ),
+                    String(describing: point)
+                )
+                guard case let .readWrite(reopened) = try fixture.persistence
+                    .load(
+                        fixture.published.chat.id,
+                        at: fixture.root,
+                        in: fixture.scope
+                    )
+                else {
+                    return XCTFail(
+                        "Relaunch did not recover \(point)"
+                    )
+                }
+                XCTAssertNil(
+                    reopened.profileProposal,
+                    String(describing: point)
+                )
+                XCTAssertFalse(
+                    fileExists(chatRoot(fixture), "proposal.json"),
+                    String(describing: point)
+                )
+                XCTAssertFalse(
+                    fileExists(chatRoot(fixture), "profile-write.json"),
+                    String(describing: point)
+                )
+                XCTAssertEqual(
+                    try profileRevisionDirectoryNames(in: fixture),
+                    [mutation.intendedRevisionID.rawValue],
+                    String(describing: point)
+                )
+                guard case let .revision(pointer) = try loadProfileHead(
+                    in: fixture
+                ).selection else {
+                    return XCTFail("Relaunch lost the Profile head at \(point)")
+                }
+                XCTAssertEqual(
+                    pointer.revisionID,
+                    mutation.intendedRevisionID,
+                    String(describing: point)
+                )
+            }
+        }
+    }
+
+    func testRelaunchFailsClosedForUnboundLegacyWriteIntent() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedProposalFixture(in: parent)
+            let mutation = try AcceptProfileProposalMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                proposalID: fixture.proposal.id,
+                acceptedAt: UTCInstant("2026-09-09T12:05:00.000Z")
+            )
+            let interrupted = PortableChatPersistence { point in
+                guard point == .afterProfileWriteIntentInstall else { return }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+            XCTAssertThrowsError(
+                try interrupted.acceptProfileProposal(
+                    mutation,
+                    at: fixture.root
+                )
+            )
+            let intentURL = chatRoot(fixture).appendingPathComponent(
+                "profile-write.json"
+            )
+            var legacy = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: Data(contentsOf: intentURL)
+                ) as? [String: Any]
+            )
+            legacy["schemaVersion"] = 1
+            legacy.removeValue(forKey: "proposalSha256")
+            legacy.removeValue(forKey: "intendedRevisionSha256")
+            try JSONSerialization.data(
+                withJSONObject: legacy,
+                options: [.sortedKeys]
+            ).write(to: intentURL)
+
+            XCTAssertThrowsError(try fixture.persistence.loadCatalog(
+                at: fixture.root,
+                in: fixture.scope
+            )) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .invalidLayout
+                )
+            }
+            XCTAssertTrue(fileExists(chatRoot(fixture), "proposal.json"))
+            XCTAssertTrue(fileExists(chatRoot(fixture), "profile-write.json"))
+            XCTAssertEqual(try loadProfileHead(in: fixture).selection, .null)
+        }
+    }
+
+    func testRelaunchFailsClosedForTamperedIntentBinding() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedProposalFixture(in: parent)
+            let mutation = try AcceptProfileProposalMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                proposalID: fixture.proposal.id,
+                acceptedAt: UTCInstant("2026-09-09T12:05:00.000Z")
+            )
+            let interrupted = PortableChatPersistence { point in
+                guard point == .afterProfileWriteIntentInstall else { return }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+            XCTAssertThrowsError(
+                try interrupted.acceptProfileProposal(
+                    mutation,
+                    at: fixture.root
+                )
+            )
+            let intentURL = chatRoot(fixture).appendingPathComponent(
+                "profile-write.json"
+            )
+            var intent = try XCTUnwrap(
+                JSONSerialization.jsonObject(
+                    with: Data(contentsOf: intentURL)
+                ) as? [String: Any]
+            )
+            intent["proposalSha256"] = String(repeating: "0", count: 64)
+            try JSONSerialization.data(
+                withJSONObject: intent,
+                options: [.sortedKeys]
+            ).write(to: intentURL)
+
+            XCTAssertThrowsError(try fixture.persistence.load(
+                fixture.published.chat.id,
+                at: fixture.root,
+                in: fixture.scope
+            )) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .invalidLayout
+                )
+            }
+            XCTAssertTrue(fileExists(chatRoot(fixture), "proposal.json"))
+            XCTAssertTrue(fileExists(chatRoot(fixture), "profile-write.json"))
+            XCTAssertEqual(try profileRevisionDirectoryNames(in: fixture), [])
+            XCTAssertEqual(try loadProfileHead(in: fixture).selection, .null)
+        }
+    }
+
+    func testRelaunchFailsClosedForDivergentProfileHead() async throws {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedProposalFixture(in: parent)
+            let mutation = try AcceptProfileProposalMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                proposalID: fixture.proposal.id,
+                acceptedAt: UTCInstant("2026-09-09T12:05:00.000Z")
+            )
+            let interrupted = PortableChatPersistence { point in
+                guard point == .afterProfileWriteIntentInstall else { return }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+            XCTAssertThrowsError(
+                try interrupted.acceptProfileProposal(
+                    mutation,
+                    at: fixture.root
+                )
+            )
+            let divergent = ProfileHead(
+                generation: 1,
+                statementGeneration: 0,
+                selection: .null,
+                updatedAt: try UTCInstant("2026-09-09T12:04:00.000Z")
+            )
+            let library = PortableLibraryPersistence()
+            try library.atomicallyReplaceRootForTesting(
+                library.encodeProfileHead(divergent),
+                relativePath: LibraryRelativePath("profile/head.json"),
+                under: fixture.root
+            )
+
+            XCTAssertThrowsError(try fixture.persistence.load(
+                fixture.published.chat.id,
+                at: fixture.root,
+                in: fixture.scope
+            )) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .invalidLayout
+                )
+            }
+            XCTAssertTrue(fileExists(chatRoot(fixture), "proposal.json"))
+            XCTAssertTrue(fileExists(chatRoot(fixture), "profile-write.json"))
+            XCTAssertEqual(try profileRevisionDirectoryNames(in: fixture), [])
+            XCTAssertEqual(try loadProfileHead(in: fixture), divergent)
+        }
+    }
+
+    func testRelaunchFailsClosedWhenLibraryContainsMultipleWriteIntents()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let fixture = try await makePublishedProposalFixture(in: parent)
+            let mutation = try AcceptProfileProposalMutation(
+                library: fixture.scope,
+                base: fixture.published,
+                proposalID: fixture.proposal.id,
+                acceptedAt: UTCInstant("2026-09-09T12:05:00.000Z")
+            )
+            let interrupted = PortableChatPersistence { point in
+                guard point == .afterProfileWriteIntentInstall else { return }
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+            XCTAssertThrowsError(
+                try interrupted.acceptProfileProposal(
+                    mutation,
+                    at: fixture.root
+                )
+            )
+            let second = fixture.root.appendingPathComponent(
+                "chats/cht-20260909T150000000Z-1ABC",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: second,
+                withIntermediateDirectories: false
+            )
+            try Data(
+                contentsOf: chatRoot(fixture).appendingPathComponent(
+                    "profile-write.json"
+                )
+            ).write(to: second.appendingPathComponent("profile-write.json"))
+
+            XCTAssertThrowsError(try fixture.persistence.loadCatalog(
+                at: fixture.root,
+                in: fixture.scope
+            )) { error in
+                XCTAssertEqual(
+                    error as? PortableChatPersistenceError,
+                    .invalidLayout
+                )
+            }
+            XCTAssertTrue(fileExists(chatRoot(fixture), "proposal.json"))
+            XCTAssertTrue(fileExists(chatRoot(fixture), "profile-write.json"))
+            XCTAssertEqual(try loadProfileHead(in: fixture).selection, .null)
+        }
+    }
+
     func testAcceptRejectsCanonicalChatDirectoryReplacementBeforeHeadCommit()
         async throws
     {
@@ -1746,6 +2739,315 @@ final class PortableProfileProposalCoordinatorTests: XCTestCase {
             }
             XCTAssertNil(afterDiscard.profileProposal)
         }
+    }
+
+    private struct PortableReconsiderationFixture {
+        let root: URL
+        let scope: LibraryScope
+        let workspace: PortableLibraryWorkspace
+        let persistence: PortableChatPersistence
+        let observed: ChatAggregate
+        let basis: ProfileReconsiderationBasis
+        let reconsideration: ProfileReconsideration
+        let request: NewProfileReconsiderationInvocationRequest
+    }
+
+    private func makePortableReconsiderationFixture(
+        in parent: URL
+    ) async throws -> PortableReconsiderationFixture {
+        let source = try await makePublishedTargetProposalFixture(in: parent)
+        let latestTarget = try ProfileStatement(
+            statementID: source.source.target.statementID,
+            statementKind: source.source.target.statementKind,
+            wording: "Pause after each complete thought.",
+            supportingSessionCount:
+                source.source.target.supportingSessionCount,
+            evidence: source.source.target.evidence
+        )
+        let latest = try ProfileRevision(
+            revisionID: ProfileRevisionID(
+                "prf-20260910T140000000Z-9ABC"
+            ),
+            parentRevisionID: source.source.baseRevision.revisionID,
+            generation: source.source.baseRevision.generation + 1,
+            statementGeneration:
+                source.source.baseRevision.statementGeneration + 1,
+            createdAt: UTCInstant("2026-09-10T14:00:00.000Z"),
+            statements: [latestTarget]
+        )
+        try installProfileRevision(latest, in: source.source)
+        let assessment = await PortableProfileProposalCoordinator(
+            persistence: source.source.persistence,
+            workspace: source.source.workspace
+        ).assess(
+            try AssessProfileEffectRequest(
+                library: source.source.scope,
+                base: source.published,
+                sourceEffectIdentity: .proposal(source.proposal.id)
+            )
+        )
+        guard case let .stale(observed, basis) = assessment else {
+            throw FixtureError.chatMutationDidNotCommit
+        }
+        let reconsideration = ProfileReconsideration(
+            sourceEffect: try XCTUnwrap(observed.profileEffect),
+            resultResponsePositionID: try ChatResponsePositionID(
+                "rsp-20260910T140001000Z-0DEF"
+            )
+        )
+        let request = try NewProfileReconsiderationInvocationRequest(
+            library: source.source.scope,
+            observedAggregate: observed,
+            reconsideration: reconsideration,
+            basis: basis
+        )
+        return PortableReconsiderationFixture(
+            root: source.source.root,
+            scope: source.source.scope,
+            workspace: source.source.workspace,
+            persistence: source.source.persistence,
+            observed: observed,
+            basis: basis,
+            reconsideration: reconsideration,
+            request: request
+        )
+    }
+
+    private func makePortableEvidenceReconsiderationFixture(
+        in parent: URL
+    ) async throws -> PortableReconsiderationFixture {
+        let source = try await makePublishedEvidenceFixture(in: parent)
+        let latest = try ProfileRevision(
+            revisionID: ProfileRevisionID(
+                "prf-20260910T140000000Z-9ABC"
+            ),
+            parentRevisionID: source.baseRevision.revisionID,
+            generation: source.baseRevision.generation + 1,
+            statementGeneration: source.baseRevision.statementGeneration + 1,
+            createdAt: UTCInstant("2026-09-10T14:00:00.000Z"),
+            statements: []
+        )
+        try installProfileRevision(latest, in: source)
+        let assessment = await PortableProfileProposalCoordinator(
+            persistence: source.persistence,
+            workspace: source.workspace
+        ).assess(
+            try AssessProfileEffectRequest(
+                library: source.scope,
+                base: source.published,
+                sourceEffectIdentity: .evidencePublication(
+                    source.profilePublication.responsePositionID
+                )
+            )
+        )
+        guard case let .stale(observed, basis) = assessment else {
+            throw FixtureError.chatMutationDidNotCommit
+        }
+        let reconsideration = ProfileReconsideration(
+            sourceEffect: try XCTUnwrap(observed.profileEffect),
+            resultResponsePositionID: try ChatResponsePositionID(
+                "rsp-20260910T140001000Z-0DEF"
+            )
+        )
+        let request = try NewProfileReconsiderationInvocationRequest(
+            library: source.scope,
+            observedAggregate: observed,
+            reconsideration: reconsideration,
+            basis: basis
+        )
+        return PortableReconsiderationFixture(
+            root: source.root,
+            scope: source.scope,
+            workspace: source.workspace,
+            persistence: source.persistence,
+            observed: observed,
+            basis: basis,
+            reconsideration: reconsideration,
+            request: request
+        )
+    }
+
+    private func assertRelaunchFinishesReplacementAfterCanonicalInstall(
+        _ fixture: PortableReconsiderationFixture
+    ) throws {
+        let installFault = OneShot()
+        let persistence = PortableChatPersistence { point in
+            if point == .afterReconsiderationReplacementProposalCommitInstall,
+               installFault.take()
+            {
+                throw PortableChatPersistenceError.injectedFault(point)
+            }
+        }
+        guard case let .prepared(authority, lease) = try persistence
+            .prepareNewProfileReconsiderationInvocation(
+                fixture.request,
+                at: fixture.root,
+                in: fixture.scope
+            )
+        else { return XCTFail("Reconsider reservation did not open") }
+        let install = try makeReconsiderationInstall(
+            authority: authority,
+            basis: fixture.basis
+        )
+        guard case .installed = try persistence
+            .installProfileReconsiderationInvocation(
+                install,
+                at: fixture.root,
+                holding: lease
+            )
+        else { return XCTFail("Reconsider Invocation did not install") }
+        let response = replacementReconsiderationResponse()
+        let mutation = try PublishProfileReconsiderationInvocationMutation(
+            base: install.processingAggregate,
+            invocation: install.invocation,
+            reconsideration: authority.reconsideration,
+            basis: authority.basis,
+            validatedResponse: response,
+            replacementMemory: nil,
+            completedAt: UTCInstant("2026-09-10T14:00:03.000Z")
+        )
+        XCTAssertThrowsError(
+            try persistence.publishProfileReconsideration(
+                mutation,
+                at: fixture.root,
+                in: fixture.scope,
+                holding: lease
+            )
+        )
+        lease.release() // Simulates kernel liveness loss at process death.
+        XCTAssertTrue(installFault.wasTaken)
+
+        try persistence.reconcileInterruptedInvocations(
+            at: fixture.root,
+            in: fixture.scope
+        )
+        guard case let .readWrite(recovered) = try persistence.load(
+            fixture.observed.chat.id,
+            at: fixture.root,
+            in: fixture.scope
+        ) else { return XCTFail("Committed replacement did not reload") }
+        XCTAssertEqual(recovered, mutation.replacement)
+        XCTAssertNil(recovered.profileEvidencePublication)
+        XCTAssertNil(recovered.profileReconsideration)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: fixture.root.appendingPathComponent(
+                "invocations/\(install.invocation.id.rawValue)"
+            ).path
+        ))
+    }
+
+    private func replacementReconsiderationResponse() -> ValidatedCoachResponse {
+        ValidatedCoachResponse(
+            messageBlocks: [],
+            newMemory: nil,
+            proposedProfileEdits: [
+                ValidatedCoachProfileEditProposal(
+                    edit: .add(
+                        statementKind: .goal,
+                        wording: "Use one deliberate pause between ideas."
+                    ),
+                    evidence: []
+                ),
+            ],
+            appendedProfileEvidence: [],
+            profileEffectPublicationMode: .reviewRequired
+        )
+    }
+
+    private func makeReconsiderationInstall(
+        authority: InvocationProfileReconsiderationAuthority,
+        basis: ProfileReconsiderationBasis
+    ) throws -> InstallProfileReconsiderationInvocationMutation {
+        try InstallProfileReconsiderationInvocationMutation(
+            authority: authority,
+            identity: InvocationProfileReconsiderationLaunchIdentity(
+                invocationID: try CoachInvocationID(
+                    "inv-20260910T140002000Z-1ABC"
+                ),
+                attemptIdentity: InvocationProfileReconsiderationAttemptIdentity(
+                    attemptID: try CoachProviderAttemptID(
+                        "atm-20260910T140002000Z-2DEF"
+                    ),
+                    idempotencyValue: try ProviderIdempotencyValue(
+                        "portable-reconsider-attempt"
+                    ),
+                    coachMessageID: try ChatMessageID(
+                        "msg-20260910T140002000Z-3GHJ"
+                    )
+                )
+            ),
+            preparedProfile: basis.latestProfile.provenance,
+            admittedAt: UTCInstant("2026-09-10T14:00:02.000Z")
+        )
+    }
+
+    private func relaunchedWorkspace(
+        root: URL
+    ) async throws -> PortableLibraryWorkspace {
+        let workspace = PortableLibraryWorkspace(
+            locations: QueueLocations(existing: [root]),
+            bookmarks: SyntheticBookmarks(),
+            access: RecordingAccessGrantor(),
+            locatorStore: MemoryLocatorStore(),
+            revealer: RecordingRevealer()
+        )
+        guard case .opened = await workspace.chooseLibrary() else {
+            throw FixtureError.workspaceDidNotOpen
+        }
+        return workspace
+    }
+
+    private struct PublishedTargetProposalFixture {
+        let source: PublishedEvidenceFixture
+        let proposal: ProfileChangeProposal
+        let published: ChatAggregate
+    }
+
+    private func makePublishedTargetProposalFixture(
+        in parent: URL
+    ) async throws -> PublishedTargetProposalFixture {
+        let source = try await makePublishedEvidenceFixture(in: parent)
+        let replacement = try ProfileProposedStatement(
+            statementID: ProfileStatementID(
+                "stm-20260910T120004000Z-5VWX"
+            ),
+            statementKind: source.target.statementKind,
+            wording: "Pause after every complete idea.",
+            evidence: source.target.evidence
+        )
+        let proposal = try ProfileChangeProposal(
+            id: ProfileChangeProposalID("prp-20260910T120004000Z-6XYZ"),
+            chatID: source.published.chat.id,
+            responsePositionID: source.profilePublication.responsePositionID,
+            baseProfile: ProfileSnapshot(
+                revision: source.baseRevision
+            ).provenance,
+            changes: [
+                .replace(
+                    target: ProfileProposalTarget(statement: source.target),
+                    replacement: replacement
+                ),
+            ],
+            createdAt: source.profilePublication.createdAt
+        )
+        let root = chatRoot(source)
+        try FileManager.default.removeItem(
+            at: root.appendingPathComponent("profile-publication.json")
+        )
+        try source.persistence.encodeProfileProposal(proposal).write(
+            to: root.appendingPathComponent("proposal.json"),
+            options: .atomic
+        )
+        guard case let .readWrite(published) = try source.persistence.load(
+            source.published.chat.id,
+            at: source.root,
+            in: source.scope
+        ) else { throw FixtureError.chatMutationDidNotCommit }
+        return PublishedTargetProposalFixture(
+            source: source,
+            proposal: proposal,
+            published: published
+        )
     }
 
     private struct PublishedEvidenceFixture {

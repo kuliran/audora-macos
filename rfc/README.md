@@ -114,7 +114,7 @@ Retry/Discard publication failure when the local write fails.
 | Annotation | Local Textual Events and Audio Events; broader reformulation interpretation belongs to coaching |
 | Coach | Required user-triggered capability behind a replaceable provider port; Codex is the only version-one provider, receives small attached transcripts inline and can retrieve large ones through a capability-scoped batch read, and runs only when Engine-use Policy permits external processing |
 | Development Profile | One compact, revisioned structured statement set included in every coaching request; it records goals, preferences, accepted speaking observations, and growth directions without becoming a chronological log or character inference |
-| Chat | Persisted but disposable, finite-capacity reflection over the Development Profile and zero or more immutable Chat Session Attachments; it owns current bounded structured Coach Memory, one recoverable Chat Draft, at most one Pending User Turn, successful ordered Markdown/Evidence Observation message blocks, and at most one unresolved Profile Change Proposal or Profile-publication failure |
+| Chat | Persisted but disposable, finite-capacity reflection over the Development Profile and zero or more immutable Chat Session Attachments; it owns current bounded structured Coach Memory, one recoverable Chat Draft, at most one Pending User Turn, successful ordered Markdown/Evidence Observation message blocks, and at most one unresolved Profile effect with its exact Reconsider sidecar when active or failed |
 | Storage | One active portable Library, isolated from every other Library, containing its preferences, Development Profile, Sessions with owned audio, and chats |
 | Recovery | Explicit missing/corrupt/in-trash states; moving a Session to Trash never cascades to Chats or changes accepted Development Profile statements; version one never empties Trash |
 
@@ -178,21 +178,36 @@ complete provider response remains opaque until Application validates its closed
 schema, collector and token limits, passive Markdown, response-position authority,
 Memory bounds, evidence pointers, active Profile targets, and effect conflicts as
 one indivisible batch.
-Ordinary answers require at least one message block; the future Reconsider trigger may
-return none. The current publisher accepts the ordered supported message blocks
-with an optional bounded Memory replacement and, for semantic or mixed Profile
-effects, one reviewable Proposal. Omission or canonical equality retains the existing
-snapshot identity; a changed value is staged and selected by the same Chat-manifest
-compare-and-swap as the message pair, after which pointer-led recovery removes the
-superseded snapshot. A staged evidence-only operation unions the first provider-order
+Ordinary answers require at least one message block; Reconsider may return none. The
+publisher accepts ordered supported message blocks with an optional bounded Memory
+replacement and one mutually exclusive Profile effect. Omission or canonical
+equality retains the existing Memory identity; a changed value is staged and selected
+by the same Chat-manifest compare-and-swap, after which pointer-led recovery removes
+the superseded snapshot. A staged evidence-only answer unions the first provider-order
 occurrence for each `(statementId, Session)` into the current exact active target,
 preserves `statementGeneration`, and creates no approval card, toast, or divider on
 success. A local write failure retains the exact operation for local Retry or Discard
-without rolling back messages or Memory. Invalid or unsupported batches publish no
-message or state effect, receive
-no automatic repair Attempt, and retain only
-closed metadata diagnostics behind the bounded Pending-turn **Retry** and
-**Discard** card.
+without rolling back messages or Memory. Semantic `statementGeneration` changes
+stale reviewed effects; evidence-only physical generations do not. If an exact
+evidence-publication target is retired or replaced before its union, that operation
+becomes stale and uses Reconsider.
+
+Reconsider is a full schema-v5 Invocation, not a Pending User Turn. Its durable
+`profile-reconsideration.json` sidecar binds the exact source Proposal ID or evidence
+response position and one distinct result response position. Its context includes
+the complete previous edits with evidence, unique full snapshots for inactive edit
+targets, standalone evidence only for vanished targets, and retained standalone
+appends for targets still active; every inactive reference resolves exactly once.
+Any replacement effect is reviewed, including evidence-only replacement. Successful
+publication may contain a coach-only message, replacement Memory, both, or neither;
+it advances the Chat manifest and removes the sidecar/source atomically. A withdrawal
+with no retained/new effect invents no message and shows the nonpersisted accessible
+ten-second **Suggestion is no longer relevant.** toast. Relaunch converts an active
+Reconsider to interruption, preserves its exact source and result identity, and
+resumes no provider, timer, or staged output; Retry creates a fresh Invocation and
+Discard of the failure removes only the sidecar. Invalid batches publish no message
+or state effect, receive no automatic repair Attempt, and retain only closed metadata
+diagnostics behind the bounded **Retry** and **Discard** card.
 If the machine-local ledger rename succeeds but its parent-directory flush cannot
 prove durability, Audora treats the debit as possibly committed and preserves the
 exact Pending User Turn as interrupted and user-retryable; it never unlocks that

@@ -1,4 +1,5 @@
 import "./chat.tsp";
+import "./profile-reconsideration.tsp";
 import "./transcript-revision.tsp";
 import "@typespec/json-schema";
 
@@ -173,8 +174,10 @@ namespace Audora.Contracts {
     legacyV1: CoachInvocationV1,
     legacyV2: CoachInvocationV2,
     legacyV3: CoachInvocationV3,
-    current: CoachInvocationV4,
-    currentTranscriptReadFailure: CoachInvocationTranscriptReadFailureV4,
+    legacyV4: CoachInvocationV4,
+    legacyTranscriptReadFailureV4: CoachInvocationTranscriptReadFailureV4,
+    current: CoachInvocationV5,
+    currentTranscriptReadFailure: CoachInvocationTranscriptReadFailureV5,
   }
 
   model CoachInvocationV1 {
@@ -210,6 +213,83 @@ namespace Audora.Contracts {
     ...CoachInvocationV4Fields;
     terminalFailure: "coachTranscriptReadFailed";
     transcriptReadFailure: CoachTranscriptReadFailureSummary;
+  }
+
+  model CoachInvocationV5 {
+    ...CoachInvocationV5Fields;
+    terminalFailure?: CoachInvocationTerminalFailureV4;
+  }
+
+  model CoachInvocationTranscriptReadFailureV5 {
+    ...CoachInvocationV5Fields;
+    terminalFailure: "coachTranscriptReadFailed";
+    transcriptReadFailure: CoachTranscriptReadFailureSummary;
+  }
+
+  model CoachInvocationV5Fields {
+    schemaVersion: 5;
+    invocationId: CoachInvocationId;
+
+    @minItems(1)
+    @maxItems(4)
+    attempts: CoachProviderAttemptV5[];
+
+    libraryId: LibraryId;
+    chatId: ChatId;
+    intent: CoachInvocationIntent;
+    profileRevisionId?: ProfileRevisionId;
+    profileStatementGeneration: NonnegativeWholeNumber;
+    expectedManifestRevision: NonnegativeWholeNumber;
+    admittedAt: UTCInstant;
+  }
+
+  @oneOf
+  union CoachInvocationIntent {
+    answerPendingUserTurn: AnswerPendingUserTurnInvocationIntent,
+    reconsiderProfileChange: ReconsiderProfileChangeInvocationIntent,
+  }
+
+  model AnswerPendingUserTurnInvocationIntent {
+    kind: "answerPendingUserTurn";
+    pendingUserTurnId: PendingUserTurnId;
+    draftId: ChatDraftId;
+    draftVersion: NonnegativeWholeNumber;
+    responsePositionId: ChatResponsePositionId;
+  }
+
+  model ReconsiderProfileChangeInvocationIntent {
+    kind: "reconsiderProfileChange";
+    sourceEffectIdentity: ChatProfileEffectIdentity;
+    resultResponsePositionId: ChatResponsePositionId;
+  }
+
+  model CoachProviderAttemptV5 {
+    attemptId: CoachProviderAttemptId;
+
+    @minValue(1)
+    @maxValue(4)
+    ordinal: integer;
+
+    kind: CoachProviderAttemptKind;
+    publicationAuthority: CoachProviderAttemptPublicationAuthorityV5;
+  }
+
+  @oneOf
+  union CoachProviderAttemptPublicationAuthorityV5 {
+    answerPendingUserTurn: AnswerPendingUserTurnPublicationAuthority,
+    reconsiderProfileChange: ReconsiderProfileChangePublicationAuthority,
+  }
+
+  model AnswerPendingUserTurnPublicationAuthority {
+    kind: "answerPendingUserTurn";
+    userMessageId: ChatMessageId;
+    coachMessageId: ChatMessageId;
+    freshDraftId: ChatDraftId;
+  }
+
+  model ReconsiderProfileChangePublicationAuthority {
+    kind: "reconsiderProfileChange";
+    coachMessageId: ChatMessageId;
   }
 
   model CoachInvocationV4Fields {

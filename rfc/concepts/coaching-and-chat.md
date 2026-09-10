@@ -55,7 +55,7 @@ all-or-none on-demand read through fresh opaque handles and a hidden capability.
 It treats the complete provider result as opaque bytes until one whole-response
 trust gate has checked encoding, duplicate keys, closed schema, exact admitted
 byte/token limits, Markdown, Memory, evidence, Profile targets, and effect
-conflicts. The #29 evidence slice expands the current publisher to durably preserve
+conflicts. The #29 evidence slice durably preserves
 ordered plain Markdown and Evidence Observation blocks plus an optional complete
 Memory replacement. Before publication, Application resolves each provider pointer
 only through its Chat attachment and the exact immutable Transcript Revision named
@@ -64,9 +64,11 @@ Audio Event anchors and a bounded, locally derived display snapshot; a dangling 
 cross-attachment target invalidates the whole response. Omitted or canonically
 equal Memory retains the selected snapshot; a changed value switches with the
 successful turn and pointer-led recovery deletes staged or superseded snapshots.
-Any otherwise-valid Profile effect still fails closed as one batch until its later
-persistence slice exists. Real provider adapters and Reconsider remain owned by
-their later slices.
+The Profile publication slices classify exactly one mutually exclusive Chat-owned
+effect, silently union evidence-only answers, and keep semantic or mixed effects
+behind review. Reconsider now owns semantic staleness, its complete typed basis,
+durable intent/recovery authority, and atomic replacement or withdrawal. Real
+provider adapters remain qualification-gated.
 
 ```text
 InvocationIntent
@@ -107,7 +109,7 @@ Only one Invocation may process at a time across the active Library. At most one
 new Invocation is admitted in a rolling 60-second window. The ledger is stored in
 machine-local application state keyed by Library ID, survives relaunch, and is not
 portable Library content. Every top-level Invocation consumes one unit, including
-Retry, Reconsider, and future Memory compaction. Automatic Provider Attempts inside
+Retry, Reconsider, and the Memory-compaction backlog. Automatic Provider Attempts inside
 an already-admitted Invocation do not.
 
 Admission cooldown is not another Chat state and does not queue work. Send,
@@ -130,13 +132,15 @@ Attempt.
 
 Those provider idempotency values, transcript handles, and bearer capabilities
 exist only in the live Attempt transport authority and are never persisted or
-logged. Portable Invocation schema v4 embeds an ordered bounded Attempt history
-containing only Attempt ID, ordinal/kind, and message/fresh-Draft publication
-authority, plus a privacy-bounded transcript-read terminal summary when needed.
-Nested Attempts retain the layout introduced in v3 and have no `schemaVersion`.
-Legacy Invocation v1/v2 keeps its strict historical flat Attempt fields, while v3
-keeps the first nested layout, for read-only retirement compatibility. Relaunch
-never reconstructs live transport authority or resumes provider work.
+logged. Portable Invocation schema v5 embeds a sealed answer-or-Reconsider intent
+and an ordered bounded Attempt history. Each Attempt carries only its ID,
+ordinal/kind, and a matching sealed publication authority: answer reserves the
+user/coach messages and fresh Draft, while Reconsider reserves only a possible
+coach message. A privacy-bounded transcript-read terminal summary is present when
+needed. Legacy Invocation v1/v2 keeps its strict historical flat Attempt fields,
+while v3/v4 keep their answer-only nested layouts, for read-only retirement
+compatibility. Relaunch never reconstructs live transport authority or resumes
+provider work.
 
 One Invocation may make at most four Attempts. Transient provider failures use
 5-, 10-, and 15-second delays before the remaining Attempts. Automatic retry keeps
@@ -845,6 +849,18 @@ When a semantic Profile update makes a Proposal stale, its card replaces Accept
 with **Reconsider** and keeps **Discard**. Reconsider is enabled only while the Chat
 is otherwise idle and admission is open. The user cannot send a message while the
 coach is processing, and cannot invoke Reconsider during another Invocation.
+Staleness compares only `statementGeneration`. A higher physical `generation` from
+evidence-only union does not stale an effect. A pending evidence publication becomes
+stale only when its exact target snapshot is no longer active, never merely because
+another revision appended evidence.
+
+Admission installs `profile-reconsideration.json` beside that exact source effect.
+The sidecar records the source Proposal ID or evidence-publication response position,
+one distinct result response position reserved across Retry, and an optional typed
+failure. No failure means preparation or execution is active. The v5 Invocation
+repeats that exact identity in its sealed `reconsiderProfileChange` intent; each
+Attempt reserves only a possible coach-message ID, not a user message or fresh
+Draft. The source effect remains installed throughout the attempt.
 
 The trigger gives the coach the latest Profile and the earlier proposal's complete
 semantic and evidence basis:
@@ -884,6 +900,15 @@ shows an accessible ten-second toast, **Suggestion is no longer relevant.** The
 toast is neither persisted nor added to history. A retained active-target append or
 new returned effect instead forms the one replacement Proposal and suppresses the
 toast.
+
+Success advances the Chat manifest and removes the sidecar and old source as one
+publication, whether it publishes a coach-only message, `newMemory`, a reviewed
+replacement, or a message-free withdrawal. Relaunch never resumes preparation,
+backoff, a provider, or staged output. An active sidecar becomes
+`coachResponseInterrupted`; a committed typed Invocation failure is reconciled
+without downgrading it. Retry creates a new Invocation for the same exact source and
+reserved result position. Discarding the failure removes only the sidecar and
+restores the unchanged source card's **Reconsider**/**Discard** actions.
 
 ## Profile transactions and timeline dividers
 

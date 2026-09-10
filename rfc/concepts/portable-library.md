@@ -35,10 +35,11 @@ Audora Library.audoralibrary/
 │       │   └── <memory-id>.json      # current structured Memory only
 │       ├── proposal.json             # present only while unresolved
 │       ├── profile-publication.json  # pure-evidence write until resolved
+│       ├── profile-reconsideration.json # active or failed Reconsider authority
 │       └── profile-write.json        # present only while unresolved
 ├── invocations/
 │   └── <invocation-id>/              # the one active Library Invocation
-│       └── invocation.json            # v4 includes bounded Attempt history
+│       └── invocation.json            # v5 seals answer/Reconsider intent
 ├── jobs/
 │   ├── .attempts.json                # per-Session sequence/current pointer
 │   └── job-20260822T160300000Z-1ABC/
@@ -54,8 +55,9 @@ Audora Library.audoralibrary/
 ```
 
 The tree shows ownership, not a requirement to retain resolved operational
-records. A Chat has at most one unresolved Proposal or Profile-publication failure.
-Resolved failures, Invocations, Provider Attempts, Proposals, and Profile-write
+records. A Chat has at most one unresolved Proposal or Profile-publication failure
+and at most one Reconsider sidecar beside that exact source effect. Resolved
+failures, sidecars, Invocations, Provider Attempts, Proposals, and Profile-write
 intents are deleted. A transient second Memory file may exist between installation
 and cleanup; `chat.json` selects the only current Memory, and relaunch deletes any
 unreferenced snapshot.
@@ -446,17 +448,29 @@ Automatic retry stays under the Chat's single `processing` state and
 uses delays of 5, 10, then 15 seconds. A user-triggered Retry creates a new
 Invocation and therefore fresh Attempt and transcript-read values.
 
-`invocation.json` schema v4 contains the ordered one-to-four Attempt history and,
-for transcript-read failure only, the same bounded Session-link terminal summary as
-Pending. Nested Attempts carry no `schemaVersion`; they retain the layout introduced
-in v3 and persist only Attempt ID, ordinal/kind, and message/fresh-Draft publication
-authority. Provider idempotency values, transcript handles, and bearer access are
-process-live transport authority: they are independently generated, never written
-to the Library or proof, and never reconstructed after relaunch. Strict legacy
-Invocation v1/v2 records keep their historical flat Attempt ID/idempotency fields;
-v3 keeps the first nested layout. All remain read-only recovery inputs, the next
-valid legacy rewrite is v4, and a root newer than v4 freezes without provider
-resumption.
+`invocation.json` schema v5 contains one sealed immutable intent and the ordered
+one-to-four Attempt history. Answer binds the Pending User Turn, Draft version, and
+response position; Reconsider binds the sidecar's exact source-effect identity and
+reserved result response position. Each v5 Attempt has a matching sealed
+publication authority: answer reserves user/coach message IDs and a fresh Draft,
+while Reconsider reserves only a coach-message ID. Transcript-read failure uses the
+same bounded Session-link terminal summary as Pending. Provider idempotency values,
+transcript handles, and bearer access are process-live transport authority: they
+are independently generated, never written to the Library or proof, and never
+reconstructed after relaunch. Strict legacy Invocation v1/v2 records keep their
+historical flat Attempt fields; v3/v4 keep the answer-only nested layout. All remain
+read-only recovery inputs, the next valid legacy rewrite is v5, and a root newer
+than v5 freezes without provider resumption.
+
+`profile-reconsideration.json` remains beside its exact `proposal.json` or
+`profile-publication.json` source. It carries only that source identity, one fresh
+result response position reserved across Retry, and an optional typed failure.
+Relaunch never resumes its provider or timers: a v5 Invocation without a committed
+terminal reason becomes `coachResponseInterrupted`, while a committed typed reason
+is reconciled exactly into the sidecar. Retry creates a fresh Invocation around the
+same sidecar identity; Discard of the failure removes only the sidecar. Successful
+replacement or withdrawal removes the sidecar and source together under the Chat
+manifest commit.
 
 Retry admission first installs and directory-flushes the Invocation as its
 generation marker. While holding the Chat mutation lock, it then replaces the

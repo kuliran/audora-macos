@@ -168,12 +168,33 @@ final class ContractResourcesTests: XCTestCase {
         let proposalDefinitions = try XCTUnwrap(
             proposalSchema["$defs"] as? [String: Any]
         )
-        let proposalProperties = try XCTUnwrap(
-            proposalSchema["properties"] as? [String: Any]
-        )
-        XCTAssertNotNil(proposalSchema["unevaluatedProperties"])
         XCTAssertEqual(
-            (proposalProperties["changes"] as? [String: Any])?["minItems"] as? Int,
+            try rootUnionReferences(in: proposalSchema),
+            [
+                "SemanticOrMixedProfileChangeProposal",
+                "ReconsideredEvidenceOnlyProfileChangeProposal",
+            ]
+        )
+        let semanticProposal = try schemaProperties(
+            "SemanticOrMixedProfileChangeProposal",
+            in: proposalDefinitions
+        )
+        XCTAssertEqual(
+            (semanticProposal["changes"] as? [String: Any])?["minItems"] as? Int,
+            1
+        )
+        let reviewedEvidenceOnlyProposal = try schemaProperties(
+            "ReconsideredEvidenceOnlyProfileChangeProposal",
+            in: proposalDefinitions
+        )
+        XCTAssertEqual(
+            (reviewedEvidenceOnlyProposal["changes"] as? [String: Any])?["maxItems"]
+                as? Int,
+            0
+        )
+        XCTAssertEqual(
+            (reviewedEvidenceOnlyProposal["evidenceAppends"] as? [String: Any])?["minItems"]
+                as? Int,
             1
         )
         XCTAssertEqual(
@@ -316,6 +337,128 @@ final class ContractResourcesTests: XCTestCase {
                 TranscriptRevisionLimits.maximumSessionRevisionCount
             )
         }
+    }
+
+    func testReconsiderationContractsSealSourceFailureAndInvocationIntent() throws {
+        let sidecarSchema = try jsonObject(.profileReconsiderationSchema)
+        let sidecarDefinitions = try XCTUnwrap(
+            sidecarSchema["$defs"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            try rootUnionReferences(in: sidecarSchema),
+            [
+                "ActiveProfileReconsideration",
+                "FailedProfileReconsideration",
+                "TranscriptReadFailedProfileReconsideration",
+            ]
+        )
+        XCTAssertEqual(
+            try unionReferences(
+                "ChatProfileEffectIdentity",
+                in: sidecarDefinitions
+            ),
+            [
+                "ChatProfileProposalEffectIdentity",
+                "ChatProfileEvidencePublicationEffectIdentity",
+            ]
+        )
+        XCTAssertEqual(
+            Set(try schemaProperties(
+                "ChatProfileProposalEffectIdentity",
+                in: sidecarDefinitions
+            ).keys),
+            ["kind", "proposalId"]
+        )
+        XCTAssertEqual(
+            Set(try schemaProperties(
+                "ChatProfileEvidencePublicationEffectIdentity",
+                in: sidecarDefinitions
+            ).keys),
+            ["kind", "responsePositionId"]
+        )
+
+        let activeSidecar = try jsonObject(.profileReconsiderationExample)
+        let interruptedSidecar = try jsonObject(
+            .profileReconsiderationInterruptedExample
+        )
+        let transcriptSidecar = try jsonObject(
+            .profileReconsiderationTranscriptReadFailureExample
+        )
+        XCTAssertNil(activeSidecar["failure"])
+        XCTAssertEqual(
+            interruptedSidecar["failure"] as? String,
+            "coachResponseInterrupted"
+        )
+        XCTAssertEqual(
+            transcriptSidecar["failure"] as? String,
+            "coachTranscriptReadFailed"
+        )
+        XCTAssertNotNil(transcriptSidecar["transcriptReadFailure"])
+
+        let invocationSchema = try jsonObject(.coachInvocationSchema)
+        let invocationDefinitions = try XCTUnwrap(
+            invocationSchema["$defs"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            try rootUnionReferences(in: invocationSchema),
+            [
+                "CoachInvocationV1", "CoachInvocationV2", "CoachInvocationV3",
+                "CoachInvocationV4", "CoachInvocationTranscriptReadFailureV4",
+                "CoachInvocationV5", "CoachInvocationTranscriptReadFailureV5",
+            ]
+        )
+        XCTAssertEqual(
+            try unionReferences("CoachInvocationIntent", in: invocationDefinitions),
+            [
+                "AnswerPendingUserTurnInvocationIntent",
+                "ReconsiderProfileChangeInvocationIntent",
+            ]
+        )
+        XCTAssertEqual(
+            try unionReferences(
+                "CoachProviderAttemptPublicationAuthorityV5",
+                in: invocationDefinitions
+            ),
+            [
+                "AnswerPendingUserTurnPublicationAuthority",
+                "ReconsiderProfileChangePublicationAuthority",
+            ]
+        )
+        let v5 = try schemaProperties("CoachInvocationV5", in: invocationDefinitions)
+        XCTAssertNotNil(v5["intent"])
+        XCTAssertNil(v5["pendingUserTurnId"])
+        XCTAssertNil(v5["draftId"])
+        XCTAssertNil(v5["responsePositionId"])
+
+        let answer = try jsonObject(.developmentChatCoachInvocationExample)
+        let answerIntent = try XCTUnwrap(answer["intent"] as? [String: Any])
+        XCTAssertEqual(answerIntent["kind"] as? String, "answerPendingUserTurn")
+        let reconsider = try jsonObject(.coachInvocationReconsiderExample)
+        let reconsiderIntent = try XCTUnwrap(
+            reconsider["intent"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            reconsiderIntent["sourceEffectIdentity"] as? NSDictionary,
+            activeSidecar["sourceEffectIdentity"] as? NSDictionary
+        )
+        XCTAssertEqual(
+            reconsiderIntent["resultResponsePositionId"] as? String,
+            activeSidecar["resultResponsePositionId"] as? String
+        )
+        let attempts = try XCTUnwrap(reconsider["attempts"] as? [[String: Any]])
+        let authority = try XCTUnwrap(
+            attempts.first?["publicationAuthority"] as? [String: Any]
+        )
+        XCTAssertEqual(Set(authority.keys), ["kind", "coachMessageId"])
+        XCTAssertEqual(authority["kind"] as? String, "reconsiderProfileChange")
+        let failedReconsider = try jsonObject(
+            .coachInvocationReconsiderTranscriptReadFailureExample
+        )
+        XCTAssertEqual(
+            failedReconsider["terminalFailure"] as? String,
+            "coachTranscriptReadFailed"
+        )
+        XCTAssertNotNil(failedReconsider["transcriptReadFailure"])
     }
 
     func testTranscriptRevisionSchemaAndGoldenPreserveDisplayAndEvidenceSyntax() throws {
@@ -1215,7 +1358,9 @@ final class ContractResourcesTests: XCTestCase {
     private func rootUnionReferences(
         in root: [String: Any]
     ) throws -> [String] {
-        let variants = try XCTUnwrap(root["anyOf"] as? [[String: Any]])
+        let variants = try XCTUnwrap(
+            (root["oneOf"] ?? root["anyOf"]) as? [[String: Any]]
+        )
         return try variants.map { variant in
             try definitionName(from: variant)
         }
@@ -1490,10 +1635,13 @@ final class ContractResourcesTests: XCTestCase {
             coach["responsePositionId"] as? String
         )
         XCTAssertEqual(
-            invocation["responsePositionId"] as? String,
+            (invocation["intent"] as? [String: Any])?["responsePositionId"] as? String,
             user["responsePositionId"] as? String
         )
-        XCTAssertEqual(invocation["draftVersion"] as? Int, 1)
+        XCTAssertEqual(
+            (invocation["intent"] as? [String: Any])?["draftVersion"] as? Int,
+            1
+        )
         XCTAssertEqual(invocation["expectedManifestRevision"] as? Int, 1)
         XCTAssertEqual(user["schemaVersion"] as? Int, 3)
         XCTAssertEqual(coach["schemaVersion"] as? Int, 3)
@@ -1510,31 +1658,41 @@ final class ContractResourcesTests: XCTestCase {
             },
             ["wordRange", "audioEvent"]
         )
-        XCTAssertEqual(invocation["schemaVersion"] as? Int, 4)
+        XCTAssertEqual(invocation["schemaVersion"] as? Int, 5)
         let attempts = try XCTUnwrap(invocation["attempts"] as? [[String: Any]])
         XCTAssertEqual(attempts.map { $0["ordinal"] as? Int }, [1, 2])
         XCTAssertEqual(attempts.map { $0["kind"] as? String }, [
             "standard", "shorterRepair",
         ])
         XCTAssertEqual(
-            attempts.last?["userMessageId"] as? String,
+            (attempts.last?["publicationAuthority"] as? [String: Any])?["userMessageId"]
+                as? String,
             user["messageId"] as? String
         )
         XCTAssertEqual(
-            attempts.last?["coachMessageId"] as? String,
+            (attempts.last?["publicationAuthority"] as? [String: Any])?["coachMessageId"]
+                as? String,
             coach["messageId"] as? String
         )
         for attempt in attempts {
             XCTAssertEqual(Set(attempt.keys), [
-                "attemptId", "ordinal", "kind", "userMessageId",
-                "coachMessageId", "freshDraftId",
+                "attemptId", "ordinal", "kind", "publicationAuthority",
             ])
+            let authority = try XCTUnwrap(
+                attempt["publicationAuthority"] as? [String: Any]
+            )
+            XCTAssertEqual(Set(authority.keys), [
+                "kind", "userMessageId", "coachMessageId", "freshDraftId",
+            ])
+            XCTAssertEqual(authority["kind"] as? String, "answerPendingUserTurn")
             XCTAssertNil(attempt["providerIdempotencyValue"])
             XCTAssertNil(attempt["transcriptHandles"])
             XCTAssertNil(attempt["schemaVersion"])
         }
         let legacyInvocation = try jsonObject(.coachInvocationLegacyV3Example)
         XCTAssertEqual(legacyInvocation["schemaVersion"] as? Int, 3)
+        let legacyV4Invocation = try jsonObject(.coachInvocationLegacyV4Example)
+        XCTAssertEqual(legacyV4Invocation["schemaVersion"] as? Int, 4)
         let failedInvocation = try jsonObject(
             .coachInvocationTranscriptReadFailureExample
         )

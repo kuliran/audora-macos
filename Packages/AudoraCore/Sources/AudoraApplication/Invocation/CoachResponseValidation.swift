@@ -266,6 +266,13 @@ struct ValidatedCoachProfileEvidenceAppend: Equatable, Sendable {
     let evidence: [EvidenceReference]
 }
 
+enum CoachResponseProfileEffectPublicationMode: Equatable, Sendable {
+    /// Ordinary answers keep the semantic-proposal / silent-evidence split.
+    case ordinaryClassification
+    /// Reconsideration always returns effects to the Speaker for review.
+    case reviewRequired
+}
+
 /// The indivisible result of schema and semantic validation. Callers cannot
 /// obtain messages, Memory, or Profile effects from a failed batch.
 struct ValidatedCoachResponse: Equatable, Sendable {
@@ -273,6 +280,7 @@ struct ValidatedCoachResponse: Equatable, Sendable {
     let newMemory: ValidatedCoachResponseMemory?
     let proposedProfileEdits: [ValidatedCoachProfileEditProposal]
     let appendedProfileEvidence: [ValidatedCoachProfileEvidenceAppend]
+    let profileEffectPublicationMode: CoachResponseProfileEffectPublicationMode
 
     var publicationMarkdown: String? {
         guard !messageBlocks.isEmpty else { return nil }
@@ -284,7 +292,12 @@ struct ValidatedCoachResponse: Equatable, Sendable {
     }
 
     var isSupportedByCurrentPublicationSlice: Bool {
-        !messageBlocks.isEmpty
+        switch profileEffectPublicationMode {
+        case .ordinaryClassification:
+            !messageBlocks.isEmpty
+        case .reviewRequired:
+            true
+        }
     }
 }
 
@@ -466,7 +479,22 @@ struct CoachResponseValidationContext: Equatable, Sendable {
 
         switch triggerKind {
         case "userMessage": triggerPosition = .userMessage
-        case "reconsiderProfileChange": triggerPosition = .reconsiderProfileChange
+        case "reconsiderProfileChange":
+            guard case let .reconsider(request) = prepared.authority.binding,
+                  request.chat.id == base.chat.id,
+                  request.sourceEffect == base.profileEffect,
+                  base.profileReconsideration?.sourceEffectIdentity ==
+                    request.reconsideration.sourceEffectIdentity,
+                  base.profileReconsideration?.resultResponsePositionID ==
+                    request.reconsideration.resultResponsePositionID,
+                  prepared.authority.profile ==
+                    request.basis.latestProfile.provenance,
+                  CanonicalJSONValue.object(trigger) ==
+                    request.trigger.canonicalValue()
+            else {
+                throw CoachResponseValidationError.invalidPreparedContext
+            }
+            triggerPosition = .reconsiderProfileChange
         default: throw CoachResponseValidationError.invalidPreparedContext
         }
 
@@ -732,7 +760,9 @@ struct CoachResponseValidator: Sendable {
             messageBlocks: resolvedMessageBlocks,
             newMemory: decoded.newMemory,
             proposedProfileEdits: resolvedProfileEdits,
-            appendedProfileEvidence: resolvedEvidenceAppends
+            appendedProfileEvidence: resolvedEvidenceAppends,
+            profileEffectPublicationMode: context.triggerPosition ==
+                .reconsiderProfileChange ? .reviewRequired : .ordinaryClassification
         )
     }
 

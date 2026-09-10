@@ -110,21 +110,100 @@ public struct DiscardProfileEvidencePublicationMutation: Equatable, Sendable {
     }
 }
 
-public enum ProfileProposalMutationOutcome: Equatable, Sendable {
+public enum ProfileReconsiderationFailureMutationError:
+    Error,
+    Equatable,
+    Sendable
+{
+    case effectMismatch
+    case failureRequired
+}
+
+public struct DiscardProfileReconsiderationFailureMutation:
+    Equatable,
+    Sendable
+{
+    public let library: LibraryScope
+    public let base: ChatAggregate
+    public let sourceEffectIdentity: ChatProfileEffectIdentity
+    public let discardedAt: UTCInstant
+
+    public init(
+        library: LibraryScope,
+        base: ChatAggregate,
+        sourceEffectIdentity: ChatProfileEffectIdentity,
+        discardedAt: UTCInstant
+    ) throws {
+        guard base.profileEffect?.identity == sourceEffectIdentity,
+              base.profileReconsideration?.sourceEffectIdentity ==
+                sourceEffectIdentity
+        else {
+            throw ProfileReconsiderationFailureMutationError.effectMismatch
+        }
+        guard base.profileReconsideration?.failure != nil else {
+            throw ProfileReconsiderationFailureMutationError.failureRequired
+        }
+        self.library = library
+        self.base = base
+        self.sourceEffectIdentity = sourceEffectIdentity
+        self.discardedAt = discardedAt
+    }
+}
+
+/// The common result of every local Chat/Profile effect transaction. Keeping one
+/// result vocabulary makes it impossible for semantic proposals and evidence
+/// publications to drift into subtly different failure handling.
+public enum ProfileEffectMutationOutcome: Equatable, Sendable {
     case committed(ChatAggregate)
     case stale(ChatAggregate)
     case readOnlyLibrary
     case failed
 }
 
-public enum ProfileEvidencePublicationMutationOutcome: Equatable, Sendable {
-    case committed(ChatAggregate)
-    case stale(ChatAggregate)
+public typealias ProfileProposalMutationOutcome = ProfileEffectMutationOutcome
+public typealias ProfileEvidencePublicationMutationOutcome =
+    ProfileEffectMutationOutcome
+
+public enum ProfileEffectAssessmentError: Error, Equatable, Sendable {
+    case effectMismatch
+}
+
+/// Requests an authoritative comparison between one exact Chat-owned effect and
+/// the current Profile. The coordinator may reconcile local Profile transaction
+/// recovery before it returns, so callers always install the returned aggregate.
+public struct AssessProfileEffectRequest: Equatable, Sendable {
+    public let library: LibraryScope
+    public let base: ChatAggregate
+    public let sourceEffectIdentity: ChatProfileEffectIdentity
+
+    public init(
+        library: LibraryScope,
+        base: ChatAggregate,
+        sourceEffectIdentity: ChatProfileEffectIdentity
+    ) throws {
+        guard base.profileEffect?.identity == sourceEffectIdentity else {
+            throw ProfileEffectAssessmentError.effectMismatch
+        }
+        self.library = library
+        self.base = base
+        self.sourceEffectIdentity = sourceEffectIdentity
+    }
+}
+
+public enum ProfileEffectAssessmentOutcome: Equatable, Sendable {
+    /// The effect can still use its ordinary local Accept/publication path.
+    case current(ChatAggregate)
+    /// The exact effect must be reconsidered against this complete derived basis.
+    case stale(ChatAggregate, ProfileReconsiderationBasis)
     case readOnlyLibrary
     case failed
 }
 
-public protocol ProfileProposalCoordinating: Sendable {
+public protocol ProfileEffectCoordinating: Sendable {
+    func assess(
+        _ request: AssessProfileEffectRequest
+    ) async -> ProfileEffectAssessmentOutcome
+
     func accept(
         _ mutation: AcceptProfileProposalMutation
     ) async -> ProfileProposalMutationOutcome
@@ -140,12 +219,26 @@ public protocol ProfileProposalCoordinating: Sendable {
     func discardEvidence(
         _ mutation: DiscardProfileEvidencePublicationMutation
     ) async -> ProfileEvidencePublicationMutationOutcome
+
+    func discardReconsiderationFailure(
+        _ mutation: DiscardProfileReconsiderationFailureMutation
+    ) async -> ProfileEffectMutationOutcome
 }
 
-public struct UnavailableProfileProposalCoordinator:
-    ProfileProposalCoordinating
+/// Source-compatible name retained for callers compiled against the proposal-only
+/// slice. New code should use `ProfileEffectCoordinating`.
+public typealias ProfileProposalCoordinating = ProfileEffectCoordinating
+
+public struct UnavailableProfileEffectCoordinator:
+    ProfileEffectCoordinating
 {
     public init() {}
+
+    public func assess(
+        _ request: AssessProfileEffectRequest
+    ) async -> ProfileEffectAssessmentOutcome {
+        .failed
+    }
 
     public func accept(
         _ mutation: AcceptProfileProposalMutation
@@ -170,18 +263,13 @@ public struct UnavailableProfileProposalCoordinator:
     ) async -> ProfileEvidencePublicationMutationOutcome {
         .failed
     }
-}
 
-public extension ProfileProposalCoordinating {
-    func publishEvidence(
-        _ mutation: PublishProfileEvidenceMutation
-    ) async -> ProfileEvidencePublicationMutationOutcome {
-        .failed
-    }
-
-    func discardEvidence(
-        _ mutation: DiscardProfileEvidencePublicationMutation
-    ) async -> ProfileEvidencePublicationMutationOutcome {
+    public func discardReconsiderationFailure(
+        _ mutation: DiscardProfileReconsiderationFailureMutation
+    ) async -> ProfileEffectMutationOutcome {
         .failed
     }
 }
+
+public typealias UnavailableProfileProposalCoordinator =
+    UnavailableProfileEffectCoordinator

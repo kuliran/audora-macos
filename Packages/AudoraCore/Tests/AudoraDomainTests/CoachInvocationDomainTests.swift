@@ -473,6 +473,168 @@ final class CoachInvocationDomainTests: XCTestCase {
         }
     }
 
+    func testAnswerIntentSurvivesAttemptInstallProjectionAndTerminalFailure() throws {
+        let fixture = try Fixture()
+        let original = try fixture.invocation()
+        let next = try CoachProviderAttempt(
+            id: CoachProviderAttemptID("atm-20260830T120001000Z-7RST"),
+            ordinal: 2,
+            kind: .standard,
+            providerIdempotencyValue: ProviderIdempotencyValue(
+                "synthetic-next-7RST"
+            ),
+            transcriptHandles: [],
+            publicationAuthority: CoachProviderAttemptPublicationAuthority(
+                userMessageID: ChatMessageID(
+                    "msg-20260830T120001000Z-8VWX"
+                ),
+                coachMessageID: ChatMessageID(
+                    "msg-20260830T120001000Z-9YZ0"
+                ),
+                freshDraftID: ChatDraftID(
+                    "drf-20260830T120001000Z-0ABC"
+                )
+            )
+        )
+
+        let installed = try original.installingAttempt(next)
+        XCTAssertEqual(installed.intent, original.intent)
+        XCTAssertEqual(installed.attempt.id, next.id)
+        XCTAssertNoThrow(try installed.validate(against: fixture.aggregate))
+
+        let durable = try installed.durableProjection()
+        XCTAssertEqual(durable.intent, original.intent)
+        XCTAssertTrue(durable.attempts.allSatisfy {
+            $0.transportAuthority == nil
+        })
+        XCTAssertNoThrow(try durable.validate(against: fixture.aggregate))
+
+        let terminal = try durable.recordingTerminalFailure(
+            .coachProviderError
+        )
+        XCTAssertEqual(terminal.intent, original.intent)
+        XCTAssertEqual(terminal.terminalFailure, .coachProviderError)
+        XCTAssertNoThrow(try terminal.validateIntent(against: fixture.aggregate))
+    }
+
+    func testLegacyInvocationSchemasOneThroughFourRemainAnswerRecoveryInputs() throws {
+        let fixture = try Fixture()
+        let legacyAttempt = try CoachProviderAttempt(
+            legacyID: fixture.attemptID,
+            providerIdempotencyValue: fixture.idempotency
+        )
+        let answerIntent = CoachInvocationIntent.answerPendingUserTurn(
+            pendingUserTurnID: fixture.pending.id,
+            draftID: fixture.pending.draftID,
+            draftVersion: fixture.pending.draftVersion,
+            responsePositionID: fixture.pending.responsePositionID
+        )
+        let v1 = try CoachInvocation(
+            schemaVersion: 1,
+            id: fixture.invocationID,
+            attempts: [legacyAttempt],
+            library: fixture.library,
+            chatID: fixture.aggregate.chat.id,
+            pendingUserTurn: fixture.pending,
+            preparedProfile: nil,
+            expectedManifestRevision: fixture.aggregate.chat.manifestRevision,
+            admittedAt: fixture.instant
+        )
+        let v2 = try CoachInvocation(
+            schemaVersion: 2,
+            id: fixture.invocationID,
+            attempts: [legacyAttempt],
+            library: fixture.library,
+            chatID: fixture.aggregate.chat.id,
+            pendingUserTurn: fixture.pending,
+            preparedProfile: fixture.profile,
+            expectedManifestRevision: fixture.aggregate.chat.manifestRevision,
+            admittedAt: fixture.instant
+        )
+        let v3 = try CoachInvocation(
+            schemaVersion: 3,
+            id: fixture.invocationID,
+            attempts: [fixture.attempt()],
+            library: fixture.library,
+            chatID: fixture.aggregate.chat.id,
+            pendingUserTurn: fixture.pending,
+            preparedProfile: fixture.profile,
+            expectedManifestRevision: fixture.aggregate.chat.manifestRevision,
+            admittedAt: fixture.instant,
+            terminalFailure: .coachResponseInterrupted
+        )
+        let v4 = try CoachInvocation(
+            schemaVersion: 4,
+            id: fixture.invocationID,
+            attempts: [fixture.attempt()],
+            library: fixture.library,
+            chatID: fixture.aggregate.chat.id,
+            pendingUserTurn: fixture.pending,
+            preparedProfile: fixture.profile,
+            expectedManifestRevision: fixture.aggregate.chat.manifestRevision,
+            admittedAt: fixture.instant,
+            terminalFailure: .coachContextCannotFit
+        )
+
+        for (schemaVersion, invocation) in [(1, v1), (2, v2), (3, v3), (4, v4)] {
+            XCTAssertEqual(invocation.persistedSchemaVersion, UInt32(schemaVersion))
+            XCTAssertEqual(invocation.intent, answerIntent)
+            XCTAssertEqual(invocation.pendingUserTurnID, fixture.pending.id)
+            XCTAssertEqual(invocation.draftID, fixture.pending.draftID)
+            XCTAssertEqual(invocation.draftVersion, fixture.pending.draftVersion)
+            XCTAssertEqual(
+                invocation.responsePositionID,
+                fixture.pending.responsePositionID
+            )
+            XCTAssertNoThrow(try invocation.validate(against: fixture.aggregate))
+        }
+
+        XCTAssertNotNil(try v1.durableProjection().attempt.transportAuthority)
+        XCTAssertNotNil(try v2.durableProjection().attempt.transportAuthority)
+        XCTAssertNil(try v3.durableProjection().attempt.transportAuthority)
+        XCTAssertNil(try v4.durableProjection().attempt.transportAuthority)
+    }
+
+    func testLegacyInvocationSchemaRejectsReconsiderIntent() throws {
+        let fixture = try Fixture()
+        let reconsiderAttempt = try CoachProviderAttempt(
+            id: fixture.attemptID,
+            ordinal: 1,
+            kind: .standard,
+            providerIdempotencyValue: fixture.idempotency,
+            transcriptHandles: [],
+            publicationAuthority: .reconsiderProfileChange(
+                coachMessageID: fixture.coachMessageID
+            )
+        )
+
+        XCTAssertThrowsError(
+            try CoachInvocation(
+                schemaVersion: 4,
+                id: fixture.invocationID,
+                attempts: [reconsiderAttempt],
+                library: fixture.library,
+                chatID: fixture.aggregate.chat.id,
+                intent: .reconsiderProfileChange(
+                    sourceEffectIdentity: .proposal(
+                        ProfileChangeProposalID(
+                            "prp-20260830T120000000Z-6NPQ"
+                        )
+                    ),
+                    resultResponsePositionID: ChatResponsePositionID(
+                        "rsp-20260830T120001000Z-7RST"
+                    )
+                ),
+                preparedProfile: fixture.profile,
+                expectedManifestRevision:
+                    fixture.aggregate.chat.manifestRevision,
+                admittedAt: fixture.instant
+            )
+        ) { error in
+            XCTAssertEqual(error as? CoachInvocationError, .invalidSchemaVersion)
+        }
+    }
+
     func testLegacyV3InvocationRejectsTranscriptReadTerminalIntent() throws {
         let fixture = try Fixture()
         let summary = try CoachTranscriptReadFailureSummary(

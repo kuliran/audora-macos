@@ -18,6 +18,22 @@ enum PortablePendingAcquisitionTransactionResult: Sendable {
     case rejected(InvocationPendingAcquisitionOutcome)
 }
 
+enum PortableProfileReconsiderationPreparationTransactionResult: Sendable {
+    case prepared(
+        authority: InvocationProfileReconsiderationAuthority,
+        lease: PortableInvocationLivenessLease
+    )
+    case rejected(InvocationProfileReconsiderationSessionPreparationOutcome)
+}
+
+enum PortableProfileReconsiderationAcquisitionTransactionResult: Sendable {
+    case acquired(
+        authority: InvocationProfileReconsiderationAuthority,
+        lease: PortableInvocationLivenessLease
+    )
+    case rejected(InvocationProfileReconsiderationSessionAcquisitionOutcome)
+}
+
 enum PortableNextAttemptInstallResult: Equatable, Sendable {
     case installed(CoachInvocation)
     case collision(InvocationLaunchIdentityCollision)
@@ -160,6 +176,105 @@ struct PortableInvocationTransactions: Sendable {
         }
     }
 
+    func prepareNewProfileReconsiderationInvocation(
+        _ request: NewProfileReconsiderationInvocationRequest
+    ) async -> PortableProfileReconsiderationPreparationTransactionResult {
+        let result: ActiveLibraryOperationResult<
+            PortableProfileReconsiderationPreparationTransactionResult
+        > = await workspace.performActiveReadWriteOperation(
+            in: request.library
+        ) { root in
+            do {
+                switch try persistence.prepareNewProfileReconsiderationInvocation(
+                    request,
+                    at: root,
+                    in: request.library
+                ) {
+                case let .prepared(authority, lease):
+                    return .prepared(authority: authority, lease: lease)
+                case let .stale(current):
+                    return .rejected(.stale(current))
+                case let .frozen(frozen):
+                    return .rejected(.frozen(frozen))
+                case .activeExists:
+                    return .rejected(.blockedByActiveInvocation)
+                }
+            } catch PortableChatPersistenceError.readOnlyLibrary {
+                return .rejected(.readOnlyLibrary)
+            } catch {
+                return .rejected(.unavailable)
+            }
+        }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly: .rejected(.readOnlyLibrary)
+        case .unavailable: .rejected(.unavailable)
+        }
+    }
+
+    func acquireRetryProfileReconsiderationInvocation(
+        _ request: RetryProfileReconsiderationInvocationRequest
+    ) async -> PortableProfileReconsiderationAcquisitionTransactionResult {
+        let result: ActiveLibraryOperationResult<
+            PortableProfileReconsiderationAcquisitionTransactionResult
+        > = await workspace.performActiveReadWriteOperation(
+            in: request.library
+        ) { root in
+            do {
+                switch try persistence.acquireRetryProfileReconsiderationInvocation(
+                    request,
+                    at: root,
+                    in: request.library
+                ) {
+                case let .acquired(authority, lease):
+                    return .acquired(authority: authority, lease: lease)
+                case let .ineligible(current):
+                    return .rejected(.ineligible(current))
+                case .activeExists:
+                    return .rejected(.blockedByActiveInvocation)
+                }
+            } catch {
+                return .rejected(.unavailable)
+            }
+        }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .rejected(.unavailable)
+        }
+    }
+
+    func acquireOperationalProfileReconsiderationInvocation(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> PortableProfileReconsiderationAcquisitionTransactionResult {
+        let result: ActiveLibraryOperationResult<
+            PortableProfileReconsiderationAcquisitionTransactionResult
+        > = await workspace.performActiveReadWriteOperation(
+            in: request.library
+        ) { root in
+            do {
+                switch try persistence
+                    .acquireOperationalProfileReconsiderationInvocation(
+                        request,
+                        at: root,
+                        in: request.library
+                    ) {
+                case let .acquired(authority, lease):
+                    return .acquired(authority: authority, lease: lease)
+                case let .ineligible(current):
+                    return .rejected(.ineligible(current))
+                case .activeExists:
+                    return .rejected(.blockedByActiveInvocation)
+                }
+            } catch {
+                return .rejected(.unavailable)
+            }
+        }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .rejected(.unavailable)
+        }
+    }
+
     func revalidatePendingInvocation(
         _ authority: InvocationPendingAuthority
     ) async -> InvocationPendingResolutionOutcome {
@@ -199,6 +314,63 @@ struct PortableInvocationTransactions: Sendable {
         }
     }
 
+    func revalidateProfileReconsiderationInvocation(
+        _ authority: InvocationProfileReconsiderationAuthority,
+        holding lease: PortableInvocationLivenessLease
+    ) async -> InvocationProfileReconsiderationResolutionOutcome {
+        let request = authority.request
+        let result: ActiveLibraryOperationResult<
+            InvocationProfileReconsiderationResolutionOutcome
+        > = await workspace.performActiveReadWriteOperation(
+            in: request.library
+        ) { root in
+            do {
+                return try resolveProfileReconsideration(
+                    request,
+                    at: root,
+                    expectedAggregate: authority.aggregate
+                )
+            } catch {
+                return .unavailable
+            }
+        }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly: .ineligible(nil)
+        case .unavailable: .unavailable
+        }
+    }
+
+    func recoverProfileReconsiderationAfterTerminalFailure(
+        _ request: ProfileReconsiderationInvocationRequest
+    ) async -> InvocationProfileReconsiderationResolutionOutcome {
+        let result: ActiveLibraryOperationResult<
+            InvocationProfileReconsiderationResolutionOutcome
+        > = await workspace.performActiveReadWriteOperation(
+            in: request.library
+        ) { root in
+            do {
+                try persistence.reconcileProfileWritesBeforeInvocationRecovery(
+                    at: root,
+                    in: request.library
+                )
+                try persistence.reconcileInterruptedInvocationsIfUnowned(
+                    at: root,
+                    in: request.library
+                )
+                return try resolveProfileReconsideration(request, at: root)
+            } catch PortableChatPersistenceError.chatMissing {
+                return .ineligible(nil)
+            } catch {
+                return .unavailable
+            }
+        }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .unavailable
+        }
+    }
+
     func installInvocation(
         _ mutation: InstallCoachInvocationMutation,
         holding lease: PortableInvocationLivenessLease
@@ -219,6 +391,38 @@ struct PortableInvocationTransactions: Sendable {
                         at: root,
                         holding: lease
                     ) {
+                        return .installed(installed)
+                    }
+                    return .failed
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .failed
+        }
+    }
+
+    func installProfileReconsiderationInvocation(
+        _ mutation: InstallProfileReconsiderationInvocationMutation,
+        holding lease: PortableInvocationLivenessLease
+    ) async -> InvocationInstallOutcome {
+        let result: ActiveLibraryOperationResult<InvocationInstallOutcome> =
+            await workspace.performActiveReadWriteOperation(
+                in: mutation.authority.request.library
+            ) { root in
+                do {
+                    return try persistence.installProfileReconsiderationInvocation(
+                        mutation,
+                        at: root,
+                        holding: lease
+                    )
+                } catch {
+                    if let installed = try? persistence
+                        .reconcileInstalledProfileReconsiderationInvocation(
+                            mutation,
+                            at: root,
+                            holding: lease
+                        ) {
                         return .installed(installed)
                     }
                     return .failed
@@ -262,9 +466,70 @@ struct PortableInvocationTransactions: Sendable {
         }
     }
 
+    func installNextProfileReconsiderationAttempt(
+        _ mutation: InstallNextProfileReconsiderationAttemptMutation,
+        holding lease: PortableInvocationLivenessLease
+    ) async -> PortableNextAttemptInstallResult {
+        let scope = LibraryScope(libraryID: mutation.base.libraryID)
+        let result: ActiveLibraryOperationResult<PortableNextAttemptInstallResult> =
+            await workspace.performActiveReadWriteOperation(in: scope) { root in
+                do {
+                    return try persistence
+                        .installNextProfileReconsiderationAttempt(
+                            mutation,
+                            at: root,
+                            in: scope,
+                            holding: lease
+                        )
+                } catch {
+                    if let installed = try? persistence
+                        .reconcileInstalledProfileReconsiderationNextAttempt(
+                            mutation,
+                            at: root,
+                            in: scope,
+                            holding: lease
+                        ) {
+                        return .installed(installed)
+                    }
+                    return .failed
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .failed
+        }
+    }
+
     func checkLaunchIdentity(
         _ identity: InvocationLaunchIdentity,
         for authority: InvocationPendingAuthority,
+        holding lease: PortableInvocationLivenessLease
+    ) async -> InvocationLaunchIdentityAvailabilityOutcome {
+        let result: ActiveLibraryOperationResult<
+            InvocationLaunchIdentityAvailabilityOutcome
+        > = await workspace.performActiveReadWriteOperation(
+            in: authority.request.library
+        ) { root in
+            do {
+                return try persistence.checkLaunchIdentity(
+                    identity,
+                    for: authority,
+                    at: root,
+                    holding: lease
+                )
+            } catch {
+                return .unavailable
+            }
+        }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .unavailable
+        }
+    }
+
+    func checkProfileReconsiderationLaunchIdentity(
+        _ identity: InvocationProfileReconsiderationLaunchIdentity,
+        for authority: InvocationProfileReconsiderationAuthority,
         holding lease: PortableInvocationLivenessLease
     ) async -> InvocationLaunchIdentityAvailabilityOutcome {
         let result: ActiveLibraryOperationResult<
@@ -399,6 +664,38 @@ struct PortableInvocationTransactions: Sendable {
         return invocationMutationOutcome(await chats.discardPendingUserTurn(mutation))
     }
 
+    func markProfileReconsiderationFailure(
+        _ authority: InvocationProfileReconsiderationAuthority,
+        failure: PendingUserTurnFailure,
+        holding lease: PortableInvocationLivenessLease
+    ) async -> InvocationPendingMutationOutcome {
+        await performProfileReconsiderationMutation(
+            in: authority.request.library
+        ) { root in
+            try persistence.replaceProfileReconsideration(
+                authority: authority,
+                failure: failure,
+                at: root,
+                holding: lease
+            )
+        }
+    }
+
+    func discardProvisionalProfileReconsideration(
+        _ authority: InvocationProfileReconsiderationAuthority,
+        holding lease: PortableInvocationLivenessLease
+    ) async -> InvocationPendingMutationOutcome {
+        await performProfileReconsiderationMutation(
+            in: authority.request.library
+        ) { root in
+            try persistence.discardProvisionalProfileReconsideration(
+                authority: authority,
+                at: root,
+                holding: lease
+            )
+        }
+    }
+
     func abortInstalledNewSend(
         _ invocation: CoachInvocation,
         failure: PendingUserTurnFailure = .coachResponseInterrupted,
@@ -409,6 +706,36 @@ struct PortableInvocationTransactions: Sendable {
             await workspace.performActiveReadWriteOperation(in: scope) { root in
                 do {
                     switch try persistence.abortInstalledNewSend(
+                        invocation,
+                        failure: failure,
+                        at: root,
+                        in: scope,
+                        holding: lease
+                    ) {
+                    case let .committed(aggregate): return .committed(aggregate)
+                    case let .stale(aggregate): return .stale(aggregate)
+                    case .frozen: return .failed
+                    }
+                } catch {
+                    return .failed
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .failed
+        }
+    }
+
+    func abortInstalledProfileReconsideration(
+        _ invocation: CoachInvocation,
+        failure: PendingUserTurnFailure,
+        holding lease: PortableInvocationLivenessLease
+    ) async -> InvocationPendingMutationOutcome {
+        let scope = LibraryScope(libraryID: invocation.libraryID)
+        let result: ActiveLibraryOperationResult<InvocationPendingMutationOutcome> =
+            await workspace.performActiveReadWriteOperation(in: scope) { root in
+                do {
+                    switch try persistence.abortInstalledProfileReconsideration(
                         invocation,
                         failure: failure,
                         at: root,
@@ -467,6 +794,44 @@ struct PortableInvocationTransactions: Sendable {
         }
     }
 
+    func publishProfileReconsideration(
+        _ mutation: PublishProfileReconsiderationInvocationMutation,
+        holding lease: PortableInvocationLivenessLease
+    ) async -> InvocationPublicationOutcome {
+        let scope = LibraryScope(libraryID: mutation.invocation.libraryID)
+        let result: ActiveLibraryOperationResult<InvocationPublicationOutcome> =
+            await workspace.performActiveReadWriteOperation(in: scope) { root in
+                do {
+                    switch try persistence.publishProfileReconsideration(
+                        mutation,
+                        at: root,
+                        in: scope,
+                        holding: lease
+                    ) {
+                    case let .committed(aggregate): return .committed(aggregate)
+                    case let .stale(aggregate): return .stale(aggregate)
+                    case .frozen: return .failed
+                    }
+                } catch {
+                    if let committed = try? persistence
+                        .reconcileCommittedProfileReconsiderationPublication(
+                            mutation,
+                            at: root,
+                            in: scope,
+                            holding: lease
+                        )
+                    {
+                        return .committed(committed)
+                    }
+                    return .failed
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .failed
+        }
+    }
+
     func recoverPublishedInvocation(
         _ mutation: PublishCoachInvocationMutation,
         holding lease: PortableInvocationLivenessLease?
@@ -508,6 +873,98 @@ struct PortableInvocationTransactions: Sendable {
         }
     }
 
+    func recoverPublishedProfileReconsideration(
+        _ mutation: PublishProfileReconsiderationInvocationMutation,
+        holding lease: PortableInvocationLivenessLease?
+    ) async -> InvocationPublicationRecoveryOutcome {
+        let scope = LibraryScope(libraryID: mutation.invocation.libraryID)
+        let result:
+            ActiveLibraryOperationResult<InvocationPublicationRecoveryOutcome> =
+            await workspace.performActiveReadWriteOperation(in: scope) { root in
+                do {
+                    if let lease {
+                        if let published = try persistence
+                            .reconcileCommittedProfileReconsiderationPublication(
+                                mutation,
+                                at: root,
+                                in: scope,
+                                holding: lease
+                            )
+                        {
+                            return .published(published)
+                        }
+                        return .notPublished
+                    }
+                    return switch try persistence
+                        .reconcileCommittedProfileReconsiderationPublicationIfUnowned(
+                            mutation,
+                            at: root,
+                            in: scope
+                        ) {
+                    case let .published(aggregate): .published(aggregate)
+                    case .notPublished: .notPublished
+                    case .owned: .unavailable
+                    }
+                } catch {
+                    return .unavailable
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .unavailable
+        }
+    }
+
+    private func resolveProfileReconsideration(
+        _ request: ProfileReconsiderationInvocationRequest,
+        at root: URL,
+        expectedAggregate: ChatAggregate? = nil
+    ) throws -> InvocationProfileReconsiderationResolutionOutcome {
+        let aggregate: ChatAggregate
+        switch try persistence.load(
+            request.chatID,
+            at: root,
+            in: request.library
+        ) {
+        case let .readWrite(current):
+            aggregate = current
+        case .frozen:
+            return .ineligible(nil)
+        }
+        if let expectedAggregate, aggregate != expectedAggregate {
+            return .ineligible(aggregate)
+        }
+        guard let reconsideration = aggregate.profileReconsideration,
+              reconsideration.sourceEffectIdentity ==
+                request.sourceEffectIdentity,
+              reconsideration.resultResponsePositionID ==
+                request.resultResponsePositionID,
+              aggregate.profileEffect?.identity == request.sourceEffectIdentity
+        else { return .ineligible(aggregate) }
+        let assessment = try persistence.assessProfileEffect(
+            try AssessProfileEffectRequest(
+                library: request.library,
+                base: aggregate,
+                sourceEffectIdentity: request.sourceEffectIdentity
+            ),
+            at: root
+        )
+        guard case let .stale(current, basis) = assessment,
+              current == aggregate
+        else { return .ineligible(aggregate) }
+        do {
+            return .eligible(
+                try InvocationProfileReconsiderationAuthority(
+                    request: request,
+                    aggregate: current,
+                    basis: basis
+                )
+            )
+        } catch {
+            return .ineligible(current)
+        }
+    }
+
     private func invocationMutationOutcome(
         _ outcome: ChatMutationOutcome
     ) -> InvocationPendingMutationOutcome {
@@ -537,6 +994,28 @@ struct PortableInvocationTransactions: Sendable {
                     if let committed = try? reconcile(root) {
                         return .committed(committed)
                     }
+                    return .failed
+                }
+            }
+        return switch result {
+        case let .performed(outcome): outcome
+        case .readOnly, .unavailable: .failed
+        }
+    }
+
+    private func performProfileReconsiderationMutation(
+        in library: LibraryScope,
+        operation: @Sendable (URL) throws -> PortableChatMutationResult
+    ) async -> InvocationPendingMutationOutcome {
+        let result: ActiveLibraryOperationResult<InvocationPendingMutationOutcome> =
+            await workspace.performActiveReadWriteOperation(in: library) { root in
+                do {
+                    switch try operation(root) {
+                    case let .committed(aggregate): return .committed(aggregate)
+                    case let .stale(aggregate): return .stale(aggregate)
+                    case .frozen: return .failed
+                    }
+                } catch {
                     return .failed
                 }
             }

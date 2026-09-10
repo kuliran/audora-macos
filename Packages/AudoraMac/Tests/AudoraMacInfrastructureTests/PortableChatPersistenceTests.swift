@@ -2569,7 +2569,20 @@ final class PortableChatPersistenceTests: XCTestCase {
             object["providerIdempotencyValue"] = try XCTUnwrap(
                 fixture.install.invocation.providerIdempotencyValue
             ).rawValue
+            guard case let .answerPendingUserTurn(
+                pendingUserTurnID,
+                draftID,
+                draftVersion,
+                responsePositionID
+            ) = fixture.install.invocation.intent else {
+                return XCTFail("Fixture Invocation was not an Answer")
+            }
+            object["pendingUserTurnId"] = pendingUserTurnID.rawValue
+            object["draftId"] = draftID.rawValue
+            object["draftVersion"] = draftVersion
+            object["responsePositionId"] = responsePositionID.rawValue
             object.removeValue(forKey: "attempts")
+            object.removeValue(forKey: "intent")
             object.removeValue(forKey: "profileRevisionId")
             object.removeValue(forKey: "profileStatementGeneration")
             try JSONSerialization.data(
@@ -2619,7 +2632,20 @@ final class PortableChatPersistenceTests: XCTestCase {
             object["providerIdempotencyValue"] = try XCTUnwrap(
                 fixture.install.invocation.providerIdempotencyValue
             ).rawValue
+            guard case let .answerPendingUserTurn(
+                pendingUserTurnID,
+                draftID,
+                draftVersion,
+                responsePositionID
+            ) = fixture.install.invocation.intent else {
+                return XCTFail("Fixture Invocation was not an Answer")
+            }
+            object["pendingUserTurnId"] = pendingUserTurnID.rawValue
+            object["draftId"] = draftID.rawValue
+            object["draftVersion"] = draftVersion
+            object["responsePositionId"] = responsePositionID.rawValue
             object.removeValue(forKey: "attempts")
+            object.removeValue(forKey: "intent")
             try JSONSerialization.data(
                 withJSONObject: object,
                 options: [.sortedKeys]

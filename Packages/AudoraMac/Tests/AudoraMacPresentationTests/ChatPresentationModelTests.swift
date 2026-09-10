@@ -822,6 +822,134 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    func testProfileEffectActionsReplaceAcceptAndLocalRetryWhenStale()
+        throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260909T121000000Z-1ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260909T121100000Z-2DEF",
+            draftID: "drf-20260909T121100000Z-3GHJ",
+            memoryID: "mem-20260909T121100000Z-4KMN",
+            title: "Profile action projection",
+            attachments: try profileProposalAttachments()
+        )
+        let proposal = try profileProposal(for: base.chat.id)
+        let sourceIdentity = ChatProfileEffectIdentity.proposal(proposal.id)
+        let proposed = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            profileEffect: .proposal(proposal)
+        )
+        let basis = try staleBasis(for: proposal)
+
+        let current = ChatFeatureState(
+            catalog: .ready(
+                ChatCatalogSnapshot(allRows: [], visibleRows: [])
+            ),
+            selection: .open(proposed),
+            profileEffectReview: .current(sourceIdentity)
+        )
+        XCTAssertEqual(
+            ProfileEffectRecoveryPresentation.actions(
+                for: sourceIdentity,
+                in: current
+            ),
+            [.acceptProposal, .discardEffect]
+        )
+
+        let stale = ChatFeatureState(
+            catalog: current.catalog,
+            selection: .open(proposed),
+            admissionAvailability: .available,
+            profileEffectReview: .stale(basis)
+        )
+        let staleActions = ProfileEffectRecoveryPresentation.actions(
+            for: sourceIdentity,
+            in: stale
+        )
+        XCTAssertEqual(staleActions, [.reconsider, .discardEffect])
+        XCTAssertFalse(staleActions.contains(.acceptProposal))
+        XCTAssertFalse(staleActions.contains(.retryEvidencePublication))
+
+        let failedReconsideration = ProfileReconsideration(
+            sourceEffect: .proposal(proposal),
+            resultResponsePositionID: try ChatResponsePositionID(
+                "rsp-20260909T121200000Z-5PQR"
+            ),
+            failure: .coachResponseInterrupted
+        )
+        let failed = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            profileEffect: .proposal(proposal),
+            profileReconsideration: failedReconsideration
+        )
+        let retryable = ChatFeatureState(
+            catalog: current.catalog,
+            selection: .open(failed),
+            admissionAvailability: .available,
+            profileEffectReview: .stale(basis)
+        )
+        XCTAssertEqual(
+            ProfileEffectRecoveryPresentation.actions(
+                for: sourceIdentity,
+                in: retryable
+            ),
+            [.retryReconsideration, .discardReconsiderationFailure]
+        )
+
+        let activeReconsideration = failedReconsideration.replacingFailure(nil)
+        let processing = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            profileEffect: .proposal(proposal),
+            profileReconsideration: activeReconsideration
+        )
+        let stopRequest = StopProfileReconsiderationInvocationRequest(
+            library: scope,
+            chatID: base.chat.id,
+            sourceEffectIdentity: sourceIdentity,
+            resultResponsePositionID:
+                activeReconsideration.resultResponsePositionID
+        )
+        let stopAuthority = ProfileReconsiderationInvocationStopAuthority(
+            testingRequest: stopRequest,
+            invocationID: try CoachInvocationID(
+                "inv-20260909T121300000Z-6RST"
+            ),
+            attemptID: try CoachProviderAttemptID(
+                "atm-20260909T121300000Z-7VWX"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000327"
+            )!
+        )
+        let stopping = ChatFeatureState(
+            catalog: current.catalog,
+            selection: .open(processing),
+            admissionAvailability: .available,
+            profileReconsiderationStopAuthority: stopAuthority,
+            profileEffectReview: .stale(basis),
+            activity: .reconsideringProfileEffect(base.chat.id)
+        )
+        XCTAssertEqual(
+            ProfileEffectRecoveryPresentation.actions(
+                for: sourceIdentity,
+                in: stopping
+            ),
+            [.stopReconsideration]
+        )
+        XCTAssertTrue(
+            ProfileReconsiderationStopInteractionPresentation(
+                admissionState: .idle,
+                chatState: stopping
+            ).isEnabled
+        )
+    }
+
     func testProfileProposalActionsCaptureCurrentContextAndExactProposalID()
         async throws
     {
@@ -849,7 +977,8 @@ final class ChatPresentationModelTests: XCTestCase {
             ),
             selection: .open(proposed),
             composer: .editable(proposed.chat.draft, isDirty: false),
-            admissionAvailability: .available
+            admissionAvailability: .available,
+            profileEffectReview: .current(.proposal(proposal.id))
         )
         let feature = RecordingPresentationChatFeature(initial: state)
         let model = makeChatPresentationModel(feature: feature)
@@ -871,6 +1000,262 @@ final class ChatPresentationModelTests: XCTestCase {
                 .start(context),
                 .acceptProfileProposal(context, proposal.id),
                 .discardProfileProposal(context, proposal.id),
+            ]
+        )
+    }
+
+    func testStaleProfileEffectActionsCaptureExactIdentityAndFailureLifecycle()
+        async throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260909T123000000Z-1ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260909T123100000Z-2DEF",
+            draftID: "drf-20260909T123100000Z-3GHJ",
+            memoryID: "mem-20260909T123100000Z-4KMN",
+            title: "Reconsider Profile",
+            attachments: try profileProposalAttachments()
+        )
+        let proposal = try profileProposal(for: base.chat.id)
+        let basis = try staleBasis(for: proposal)
+        let reconsideration = ProfileReconsideration(
+            sourceEffect: .proposal(proposal),
+            resultResponsePositionID: try ChatResponsePositionID(
+                "rsp-20260909T123200000Z-5PQR"
+            ),
+            failure: .coachResponseInterrupted
+        )
+        let failed = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            profileEffect: .proposal(proposal),
+            profileReconsideration: reconsideration
+        )
+        let row = ChatRowSnapshot(aggregate: failed)
+        let state = ChatFeatureState(
+            catalog: .ready(
+                ChatCatalogSnapshot(allRows: [row], visibleRows: [row])
+            ),
+            selection: .open(failed),
+            composer: .editable(failed.chat.draft, isDirty: false),
+            admissionAvailability: .available,
+            profileEffectReview: .stale(basis)
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let model = makeChatPresentationModel(feature: feature)
+        await model.start(in: scope)
+        let startCommands = await feature.commands
+        let context = try XCTUnwrap(
+            startContexts(in: startCommands).first
+        )
+
+        let sourceIdentity = ChatProfileEffectIdentity.proposal(proposal.id)
+        model.retryProfileReconsideration(sourceIdentity)
+        await waitForCommandCount(2, in: feature)
+        model.discardProfileReconsiderationFailure(sourceIdentity)
+        await waitForCommandCount(3, in: feature)
+
+        let commands = await feature.commands
+        XCTAssertEqual(
+            commands,
+            [
+                .start(context),
+                .retryProfileReconsideration(context, sourceIdentity),
+                .discardProfileReconsiderationFailure(
+                    context,
+                    sourceIdentity
+                ),
+            ]
+        )
+
+        let operationalReconsideration = reconsideration.replacingFailure(nil)
+        let operationalAggregate = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            profileEffect: .proposal(proposal),
+            profileReconsideration: operationalReconsideration
+        )
+        let operationalRequest = ProfileReconsiderationInvocationRequest(
+            library: scope,
+            chatID: base.chat.id,
+            sourceEffectIdentity: sourceIdentity,
+            resultResponsePositionID:
+                operationalReconsideration.resultResponsePositionID
+        )
+        let operationalState = ChatFeatureState(
+            catalog: state.catalog,
+            selection: .open(operationalAggregate),
+            composer: .editable(
+                operationalAggregate.chat.draft,
+                isDirty: false
+            ),
+            admissionAvailability: .available,
+            operationallyInterruptedProfileReconsideration:
+                operationalRequest,
+            profileEffectReview: .stale(basis)
+        )
+        XCTAssertEqual(
+            ProfileEffectRecoveryPresentation.actions(
+                for: sourceIdentity,
+                in: operationalState
+            ),
+            [.retryReconsideration]
+        )
+        let operationalFeature = RecordingPresentationChatFeature(
+            initial: operationalState
+        )
+        let operationalModel = makeChatPresentationModel(
+            feature: operationalFeature
+        )
+        await operationalModel.start(in: scope)
+        let operationalStartCommands = await operationalFeature.commands
+        let operationalContext = try XCTUnwrap(
+            startContexts(in: operationalStartCommands).first
+        )
+
+        operationalModel.retryProfileReconsideration(sourceIdentity)
+        await waitForCommandCount(2, in: operationalFeature)
+
+        let operationalCommands = await operationalFeature.commands
+        XCTAssertEqual(
+            operationalCommands,
+            [
+                .start(operationalContext),
+                .retryProfileReconsideration(
+                    operationalContext,
+                    sourceIdentity
+                ),
+            ]
+        )
+    }
+
+    func testStopProfileReconsiderationRoutesExactSnapshotAuthority()
+        async throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260909T123500000Z-1ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260909T123600000Z-2DEF",
+            draftID: "drf-20260909T123600000Z-3GHJ",
+            memoryID: "mem-20260909T123600000Z-4KMN",
+            title: "Stop Reconsider",
+            attachments: try profileProposalAttachments()
+        )
+        let proposal = try profileProposal(for: base.chat.id)
+        let sourceIdentity = ChatProfileEffectIdentity.proposal(proposal.id)
+        let reconsideration = ProfileReconsideration(
+            sourceEffectIdentity: sourceIdentity,
+            resultResponsePositionID: try ChatResponsePositionID(
+                "rsp-20260909T123700000Z-5PQR"
+            )
+        )
+        let processing = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            profileEffect: .proposal(proposal),
+            profileReconsideration: reconsideration
+        )
+        let request = StopProfileReconsiderationInvocationRequest(
+            library: scope,
+            chatID: base.chat.id,
+            sourceEffectIdentity: sourceIdentity,
+            resultResponsePositionID:
+                reconsideration.resultResponsePositionID
+        )
+        let authority = ProfileReconsiderationInvocationStopAuthority(
+            testingRequest: request,
+            invocationID: try CoachInvocationID(
+                "inv-20260909T123700000Z-6RST"
+            ),
+            attemptID: try CoachProviderAttemptID(
+                "atm-20260909T123700000Z-7VWX"
+            ),
+            capabilityID: UUID(
+                uuidString: "00000000-0000-0000-0000-000000000328"
+            )!
+        )
+        let state = ChatFeatureState(
+            catalog: .ready(
+                ChatCatalogSnapshot(allRows: [], visibleRows: [])
+            ),
+            selection: .open(processing),
+            admissionAvailability: .available,
+            profileReconsiderationStopAuthority: authority,
+            profileEffectReview: .stale(try staleBasis(for: proposal)),
+            activity: .reconsideringProfileEffect(base.chat.id)
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let model = makeChatPresentationModel(feature: feature)
+        await model.start(in: scope)
+        let startCommands = await feature.commands
+        let context = try XCTUnwrap(startContexts(in: startCommands).first)
+
+        model.stopProfileReconsideration()
+        await waitForCommandCount(2, in: feature)
+
+        let commands = await feature.commands
+        XCTAssertEqual(
+            commands,
+            [
+                .start(context),
+                .stopProfileReconsideration(context, authority),
+            ]
+        )
+    }
+
+    func testStaleProfileEffectReconsiderActionRequiresNoFailureSidecar()
+        async throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260909T124000000Z-1ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260909T124100000Z-2DEF",
+            draftID: "drf-20260909T124100000Z-3GHJ",
+            memoryID: "mem-20260909T124100000Z-4KMN",
+            title: "Stale Profile",
+            attachments: try profileProposalAttachments()
+        )
+        let proposal = try profileProposal(for: base.chat.id)
+        let basis = try staleBasis(for: proposal)
+        let stale = try ChatAggregate(
+            chat: base.chat,
+            memory: base.memory,
+            profileEffect: .proposal(proposal)
+        )
+        let row = ChatRowSnapshot(aggregate: stale)
+        let state = ChatFeatureState(
+            catalog: .ready(
+                ChatCatalogSnapshot(allRows: [row], visibleRows: [row])
+            ),
+            selection: .open(stale),
+            composer: .editable(stale.chat.draft, isDirty: false),
+            admissionAvailability: .available,
+            profileEffectReview: .stale(basis)
+        )
+        let feature = RecordingPresentationChatFeature(initial: state)
+        let model = makeChatPresentationModel(feature: feature)
+        await model.start(in: scope)
+        let startCommands = await feature.commands
+        let context = try XCTUnwrap(
+            startContexts(in: startCommands).first
+        )
+
+        let sourceIdentity = ChatProfileEffectIdentity.proposal(proposal.id)
+        model.reconsiderProfileEffect(sourceIdentity)
+        await waitForCommandCount(2, in: feature)
+
+        let commands = await feature.commands
+        XCTAssertEqual(
+            commands,
+            [
+                .start(context),
+                .reconsiderProfileEffect(context, sourceIdentity),
             ]
         )
     }
@@ -946,7 +1331,13 @@ final class ChatPresentationModelTests: XCTestCase {
         )
         XCTAssertEqual(
             ChatNoticePresentation.recoveryText(for: .profileProposalStale),
-            "The Profile changed elsewhere, so this proposal can no longer be accepted. Discard it and continue chatting with the coach."
+            "The Profile changed elsewhere, so this suggestion must be reconsidered before it can be accepted."
+        )
+        XCTAssertEqual(
+            ChatNoticePresentation.recoveryText(
+                for: .profileEffectAssessmentFailed
+            ),
+            "The current Profile could not be compared with this suggestion. Reopen the Chat and try again."
         )
     }
 
@@ -1072,6 +1463,9 @@ final class ChatPresentationModelTests: XCTestCase {
             composer: .editable(failed.chat.draft, isDirty: false),
             admissionAvailability: .cooldown(
                 reopensAt: try UTCInstant("2026-09-09T17:01:00.000Z")
+            ),
+            profileEffectReview: .current(
+                .evidencePublication(publication.responsePositionID)
             )
         )
         let feature = RecordingPresentationChatFeature(initial: state)
@@ -1197,6 +1591,9 @@ final class ChatPresentationModelTests: XCTestCase {
             .profileProposalAcceptFailed,
             .profileProposalDiscardFailed,
             .profileProposalStale,
+            .profileEffectAssessmentFailed,
+            .profileReconsiderationUnavailable,
+            .profileReconsiderationDiscardFailed,
         ]
 
         for notice in notices {
@@ -1342,6 +1739,48 @@ final class ChatPresentationModelTests: XCTestCase {
         XCTAssertEqual(
             announcements.values,
             ["Evidence unavailable. The supporting Session is in Trash."]
+        )
+    }
+
+    func testWithdrawnSuggestionNoticeUsesExactAccessibleCopyAndReannounces()
+        async throws
+    {
+        let notice = ChatTransientNotice.suggestionNoLongerRelevant
+        XCTAssertEqual(
+            ChatTransientNoticePresentation.text(for: notice),
+            "Suggestion is no longer relevant."
+        )
+        XCTAssertEqual(
+            ChatTransientNoticePresentation.accessibilityLabel(for: notice),
+            "Suggestion is no longer relevant."
+        )
+        let feature = PickerLifecyclePresentationChatFeature(
+            states: [
+                ChatFeatureState(transientNotice: notice),
+                ChatFeatureState(),
+                ChatFeatureState(transientNotice: notice),
+            ]
+        )
+        let announcements = ChatAnnouncementRecorder()
+        let model = makeChatPresentationModel(
+            feature: feature,
+            announcements: announcements
+        )
+
+        await model.start(
+            in: LibraryScope(
+                libraryID: try LibraryID(
+                    "lib-20260909T165900000Z-1ABC"
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            announcements.values,
+            [
+                "Suggestion is no longer relevant.",
+                "Suggestion is no longer relevant.",
+            ]
         )
     }
 
@@ -1668,6 +2107,63 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    private func staleBasis(
+        for proposal: ProfileChangeProposal
+    ) throws -> ProfileReconsiderationBasis {
+        let sourceStatements = try [
+            ProfileStatement(
+                statementID: try ProfileStatementID(
+                    "stm-20260909T110000000Z-1ABC"
+                ),
+                statementKind: .speakingObservation,
+                wording: "I rush transitions between ideas.",
+                supportingSessionCount: 0,
+                evidence: []
+            ),
+            ProfileStatement(
+                statementID: try ProfileStatementID(
+                    "stm-20260909T110000000Z-2DEF"
+                ),
+                statementKind: .coachingPreference,
+                wording: "Give me a long written debrief.",
+                supportingSessionCount: 0,
+                evidence: []
+            ),
+            ProfileStatement(
+                statementID: try ProfileStatementID(
+                    "stm-20260909T110000000Z-3GHJ"
+                ),
+                statementKind: .selfAssessment,
+                wording: "I speak clearly when I slow down.",
+                supportingSessionCount: 0,
+                evidence: []
+            ),
+        ]
+        let base = try ProfileRevision(
+            revisionID: try XCTUnwrap(proposal.baseProfile.revisionID),
+            parentRevisionID: nil,
+            generation: 7,
+            statementGeneration: proposal.baseProfile.statementGeneration,
+            createdAt: UTCInstant("2026-09-09T11:00:00.000Z"),
+            statements: sourceStatements
+        )
+        let latest = try ProfileRevision(
+            revisionID: try ProfileRevisionID(
+                "prf-20260909T123000000Z-9ABC"
+            ),
+            parentRevisionID: base.revisionID,
+            generation: 8,
+            statementGeneration: 8,
+            createdAt: UTCInstant("2026-09-09T12:30:00.000Z"),
+            statements: sourceStatements
+        )
+        return try ProfileReconsiderationBasis(
+            sourceEffect: .proposal(proposal),
+            baseProfile: ProfileSnapshot(revision: base),
+            latestProfile: ProfileSnapshot(revision: latest)
+        )
+    }
+
     private func profileEvidencePublication(
         for chatID: ChatID
     ) throws -> ProfileEvidencePublication {
@@ -1912,11 +2408,13 @@ private actor SuspendedOldActionPresentationChatFeature: ChatFeature {
              .cancelNewChat, .confirmNewChat,
              .rename, .open, .editDraft,
              .refreshContextQuote, .sendDraft,
-             .stopCoachResponse,
+             .stopCoachResponse, .stopProfileReconsideration,
              .retryPendingUserTurn, .createNewChatFromCapacityFailure,
              .discardPendingUserTurn, .acceptProfileProposal,
              .discardProfileProposal, .retryProfileEvidencePublication,
-             .discardProfileEvidencePublication:
+             .discardProfileEvidencePublication, .reconsiderProfileEffect,
+             .retryProfileReconsideration,
+             .discardProfileReconsiderationFailure:
             break
         }
     }

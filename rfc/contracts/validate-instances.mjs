@@ -218,8 +218,16 @@ emptyProfileChanges.changes = [];
 assertValidation(
   profileChangeProposal,
   emptyProfileChanges,
+  true,
+  "profile/reconsidered-evidence-only-proposal",
+);
+const emptyProfileEffect = structuredClone(emptyProfileChanges);
+emptyProfileEffect.evidenceAppends = [];
+assertValidation(
+  profileChangeProposal,
+  emptyProfileEffect,
   false,
-  "profile/proposal-empty-changes",
+  "profile/proposal-empty-effect",
 );
 const pureEvidenceProposal = structuredClone(profileProposalFixture);
 delete pureEvidenceProposal.changes;

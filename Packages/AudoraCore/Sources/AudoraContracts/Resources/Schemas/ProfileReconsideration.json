@@ -1,0 +1,267 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://audora.local/contracts/ProfileReconsideration.json",
+    "oneOf": [
+        {
+            "$ref": "#/$defs/ActiveProfileReconsideration"
+        },
+        {
+            "$ref": "#/$defs/FailedProfileReconsideration"
+        },
+        {
+            "$ref": "#/$defs/TranscriptReadFailedProfileReconsideration"
+        }
+    ],
+    "description": "Durable Chat-owned authority for one Reconsider Invocation.",
+    "$defs": {
+        "ActiveProfileReconsideration": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "sourceEffectIdentity": {
+                    "$ref": "#/$defs/ChatProfileEffectIdentity"
+                },
+                "resultResponsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "sourceEffectIdentity",
+                "resultResponsePositionId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "FailedProfileReconsideration": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "sourceEffectIdentity": {
+                    "$ref": "#/$defs/ChatProfileEffectIdentity"
+                },
+                "resultResponsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "failure": {
+                    "$ref": "#/$defs/ProfileReconsiderationFailure"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "sourceEffectIdentity",
+                "resultResponsePositionId",
+                "failure"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TranscriptReadFailedProfileReconsideration": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "sourceEffectIdentity": {
+                    "$ref": "#/$defs/ChatProfileEffectIdentity"
+                },
+                "resultResponsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                },
+                "failure": {
+                    "type": "string",
+                    "const": "coachTranscriptReadFailed"
+                },
+                "transcriptReadFailure": {
+                    "$ref": "#/$defs/CoachTranscriptReadFailureSummary"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "sourceEffectIdentity",
+                "resultResponsePositionId",
+                "failure",
+                "transcriptReadFailure"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatProfileEffectIdentity": {
+            "oneOf": [
+                {
+                    "$ref": "#/$defs/ChatProfileProposalEffectIdentity"
+                },
+                {
+                    "$ref": "#/$defs/ChatProfileEvidencePublicationEffectIdentity"
+                }
+            ]
+        },
+        "ChatResponsePositionId": {
+            "type": "string",
+            "pattern": "^rsp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "ProfileReconsiderationFailure": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "const": "coachContextCannotFit"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInterrupted"
+                },
+                {
+                    "type": "string",
+                    "const": "coachProviderError"
+                },
+                {
+                    "type": "string",
+                    "const": "coachResponseInvalid"
+                }
+            ]
+        },
+        "CoachTranscriptReadFailureSummary": {
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/CompleteCoachTranscriptReadFailureSummary"
+                },
+                {
+                    "$ref": "#/$defs/TruncatedCoachTranscriptReadFailureSummary"
+                }
+            ]
+        },
+        "ChatProfileProposalEffectIdentity": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "proposal"
+                },
+                "proposalId": {
+                    "$ref": "#/$defs/ProfileChangeProposalId"
+                }
+            },
+            "required": [
+                "kind",
+                "proposalId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatProfileEvidencePublicationEffectIdentity": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "const": "evidencePublication"
+                },
+                "responsePositionId": {
+                    "$ref": "#/$defs/ChatResponsePositionId"
+                }
+            },
+            "required": [
+                "kind",
+                "responsePositionId"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "CompleteCoachTranscriptReadFailureSummary": {
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachTranscriptReadFailureSession"
+                    },
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "uniqueItems": true
+                },
+                "additionalSessionCount": {
+                    "type": "number",
+                    "const": 0
+                }
+            },
+            "required": [
+                "sessions",
+                "additionalSessionCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "TruncatedCoachTranscriptReadFailureSummary": {
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/CoachTranscriptReadFailureSession"
+                    },
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "uniqueItems": true
+                },
+                "additionalSessionCount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 125
+                }
+            },
+            "required": [
+                "sessions",
+                "additionalSessionCount"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ProfileChangeProposalId": {
+            "type": "string",
+            "pattern": "^prp-[0-9]{8}T[0-9]{9}Z-[0-9A-HJKMNP-TV-Z]{4}$"
+        },
+        "CoachTranscriptReadFailureSession": {
+            "type": "object",
+            "properties": {
+                "sessionAttachmentId": {
+                    "$ref": "#/$defs/ChatSessionAttachmentId"
+                },
+                "displayLabel": {
+                    "$ref": "#/$defs/CoachTranscriptReadFailureDisplayLabel"
+                }
+            },
+            "required": [
+                "sessionAttachmentId",
+                "displayLabel"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "ChatSessionAttachmentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[0-9A-Za-z_-]+$"
+        },
+        "CoachTranscriptReadFailureDisplayLabel": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
+        }
+    }
+}

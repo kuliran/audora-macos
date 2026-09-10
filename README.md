@@ -46,7 +46,11 @@ one Chat-owned Profile effect. Semantic or mixed Profile effects remain behind a
 explicit Accept/Discard proposal. Pure evidence appends use an idempotent local
 Profile union: success is silent, while a failed local write retains the exact
 operation for Retry or Discard without rolling back the published turn. Real
-provider adapters and stale-Proposal Reconsider remain later vertical slices.
+provider adapters remain qualification-gated. Stale Profile effects now use a
+durable Reconsider sidecar and a full answer-or-Reconsider Invocation. Evidence-only
+Profile revisions do not stale reviewed work; successful Reconsider atomically
+replaces or withdraws the old effect, and relaunch preserves it as interrupted for
+Retry or Discard.
 
 ## Requirements
 

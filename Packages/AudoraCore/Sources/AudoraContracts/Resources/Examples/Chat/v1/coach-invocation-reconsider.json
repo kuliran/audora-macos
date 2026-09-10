@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 5,
+  "invocationId": "inv-20260909T120201000Z-9XYZ",
+  "attempts": [
+    {
+      "attemptId": "atm-20260909T120201000Z-2ABC",
+      "ordinal": 1,
+      "kind": "standard",
+      "publicationAuthority": {
+        "kind": "reconsiderProfileChange",
+        "coachMessageId": "msg-20260909T120201000Z-3DEF"
+      }
+    }
+  ],
+  "libraryId": "lib-20260830T115900000Z-2ABC",
+  "chatId": "cht-20260909T115500000Z-6PQR",
+  "intent": {
+    "kind": "reconsiderProfileChange",
+    "sourceEffectIdentity": {
+      "kind": "proposal",
+      "proposalId": "prp-20260909T120100000Z-5KMN"
+    },
+    "resultResponsePositionId": "rsp-20260909T120200000Z-8VWX"
+  },
+  "expectedManifestRevision": 9,
+  "profileRevisionId": "prf-20260909T120150000Z-7RST",
+  "profileStatementGeneration": 9,
+  "admittedAt": "2026-09-09T12:02:01.000Z"
+}

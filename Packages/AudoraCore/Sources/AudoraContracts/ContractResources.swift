@@ -20,6 +20,7 @@ public enum ContractResource: CaseIterable, Sendable {
     case libraryPreferencesSchema
     case profileChangeProposalSchema
     case profileHeadSchema
+    case profileReconsiderationSchema
     case profileRevisionSchema
     case profileWriteIntentSchema
     case readSessionTranscriptsRequestSchema
@@ -136,7 +137,13 @@ public enum ContractResource: CaseIterable, Sendable {
     case developmentChatCoachMessageExample
     case developmentChatCoachInvocationExample
     case coachInvocationLegacyV3Example
+    case coachInvocationLegacyV4Example
+    case coachInvocationReconsiderExample
+    case coachInvocationReconsiderTranscriptReadFailureExample
     case coachInvocationTranscriptReadFailureExample
+    case profileReconsiderationExample
+    case profileReconsiderationInterruptedExample
+    case profileReconsiderationTranscriptReadFailureExample
     case invocationAdmissionLedgerExample
     case pendingUserTurnExample
     case pendingUserTurnCapacityFailureExample
@@ -241,6 +248,8 @@ public enum ContractResource: CaseIterable, Sendable {
             "ProfileChangeProposal.json"
         case .profileHeadSchema:
             "ProfileHead.json"
+        case .profileReconsiderationSchema:
+            "ProfileReconsideration.json"
         case .profileRevisionSchema:
             "ProfileRevision.json"
         case .profileWriteIntentSchema:
@@ -463,8 +472,20 @@ public enum ContractResource: CaseIterable, Sendable {
             "coach-invocation.json"
         case .coachInvocationLegacyV3Example:
             "coach-invocation-legacy-v3.json"
+        case .coachInvocationLegacyV4Example:
+            "coach-invocation-legacy-v4.json"
+        case .coachInvocationReconsiderExample:
+            "coach-invocation-reconsider.json"
+        case .coachInvocationReconsiderTranscriptReadFailureExample:
+            "coach-invocation-reconsider-transcript-read-failure.json"
         case .coachInvocationTranscriptReadFailureExample:
             "coach-invocation-transcript-read-failure.json"
+        case .profileReconsiderationExample:
+            "profile-reconsideration.json"
+        case .profileReconsiderationInterruptedExample:
+            "profile-reconsideration-interrupted.json"
+        case .profileReconsiderationTranscriptReadFailureExample:
+            "profile-reconsideration-transcript-read-failure.json"
         case .invocationAdmissionLedgerExample:
             "admission-ledger.json"
         case .pendingUserTurnExample:
@@ -594,7 +615,8 @@ public enum ContractResource: CaseIterable, Sendable {
              .libraryFeatureScenarioSchema,
              .libraryManifestSchema, .libraryPreferencesSchema,
              .profileChangeProposalSchema, .profileHeadSchema,
-             .profileRevisionSchema, .profileWriteIntentSchema,
+             .profileReconsiderationSchema, .profileRevisionSchema,
+             .profileWriteIntentSchema,
              .readSessionTranscriptsRequestSchema, .readSessionTranscriptsResponseSchema,
              .recordingFeatureScenarioSchema, .recordingStagingIdentityManifestSchema,
              .recordingStagingManifestSchema, .sessionManifestSchema,
@@ -680,7 +702,13 @@ public enum ContractResource: CaseIterable, Sendable {
              .developmentChatUserMessageExample, .developmentChatCoachMessageExample,
              .developmentChatCoachInvocationExample,
              .coachInvocationLegacyV3Example,
+             .coachInvocationLegacyV4Example,
+             .coachInvocationReconsiderExample,
+             .coachInvocationReconsiderTranscriptReadFailureExample,
              .coachInvocationTranscriptReadFailureExample,
+             .profileReconsiderationExample,
+             .profileReconsiderationInterruptedExample,
+             .profileReconsiderationTranscriptReadFailureExample,
              .pendingUserTurnExample, .pendingUserTurnCapacityFailureExample,
              .pendingUserTurnInterruptedExample,
              .pendingUserTurnProviderFailureExample,

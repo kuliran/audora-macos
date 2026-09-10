@@ -292,9 +292,11 @@ execution profile.
   handles, one-time transcript access, and publication authority. User Retry creates
   a new Invocation and fresh first Attempt values. Idempotency values, handles,
   and bearer access are process-live only and never persisted or logged. Invocation
-  v4 embeds only the bounded ordered safe Attempt projection (ID, ordinal/kind,
-  and publication authority) plus a bounded transcript-read terminal summary when
-  needed; nested Attempts retain the layout introduced in v3.
+  v5 seals answer versus Reconsider intent and embeds only the bounded ordered safe
+  Attempt projection (ID, ordinal/kind, and matching publication authority) plus a
+  bounded transcript-read terminal summary when needed. Answer authority reserves
+  two messages and a fresh Draft; Reconsider authority reserves only a possible
+  coach message. Legacy v3/v4 Attempts retain their answer-only layout.
 - Retry installs and flushes the Invocation generation marker, durably clears the
   old Pending failure, and rebinds its exact inode lease before provider authority
   returns. Typed terminal intent is itself CASed and flushed before Pending changes,
@@ -330,8 +332,9 @@ execution profile.
   Discard unlocks an answer Draft or restores the stale Proposal actions; it does
   not silently discard the Proposal itself.
 - Relaunch converts every active Invocation into interruption, preserves its locked
-  Draft or Reconsider intent, and resumes no timers or provider requests. No staged
-  complete response is validated or published after relaunch.
+  Draft or exact Reconsider sidecar/source identity, and resumes no timers, provider
+  requests, or staged output. A typed terminal reason already committed in the
+  Invocation is reconciled without being downgraded to interruption.
 - Resolved Invocations and Attempts are deleted.
 
 ## Coach response publication
@@ -361,12 +364,15 @@ execution profile.
   Chat input.
 - Every Reconsider is a full Invocation and response. The trigger includes complete
   previous edit proposals, inactive targets, and pending evidence for inactive
-  targets. Any resulting Profile effect requires another explicit review,
-  including an evidence-only result.
+  targets, while standalone appends for still-active targets remain retained in the
+  transaction. Every inactive reference resolves exactly once. Any resulting
+  Profile effect requires another explicit review, including an evidence-only
+  result; ordinary evidence-only answers remain on the silent local-union path.
 - If Reconsider withdraws every effect and no retained active append remains, the
   old Proposal is deleted, optional `newMemory` and any response message publish
   normally, and a 10-second accessible **Suggestion is no longer relevant** toast
-  appears without entering history.
+  appears without entering history or persistence. A retained or newly returned
+  effect suppresses that toast.
 - Pure evidence union keeps the first provider-order occurrence of each
   `(statementId, sessionId)` key. Success is silent. Failure retains the exact
   app-generated wording and effect as one UserRetryable publication failure. Retry
@@ -377,8 +383,9 @@ execution profile.
   reuses the intended revision; Discard is allowed only after reconciliation proves
   it never committed.
 - Evidence-only revisions neither stale pending Proposals nor create a divider.
-  Semantic or recovery `statementGeneration` changes stale them. Reconsider is
-  available once the Chat is idle.
+  Semantic or recovery `statementGeneration` changes stale them. A pending
+  evidence-only publication becomes stale only when its exact target is retired or
+  replaced. Reconsider is available once the Chat is idle.
 - Each affected Chat derives **Profile was updated** from its last observed
   `statementGeneration`. A pending action delays it until success, interruption,
   Discard, or replacement by Retry; a retried action that uses the new Profile is

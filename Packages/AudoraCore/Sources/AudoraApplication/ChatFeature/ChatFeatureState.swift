@@ -82,6 +82,9 @@ public enum ChatNotice: String, Equatable, Sendable {
     case profileProposalAcceptFailed
     case profileProposalDiscardFailed
     case profileProposalStale
+    case profileEffectAssessmentFailed
+    case profileReconsiderationUnavailable
+    case profileReconsiderationDiscardFailed
 }
 
 public enum CoachContextAdvisoryState: Equatable, Sendable {
@@ -101,6 +104,35 @@ public enum ChatComposerState: Equatable, Sendable {
         case let .editable(draft, _), let .locked(draft, _): draft
         }
     }
+}
+
+/// Application's authoritative review projection for the one Chat-owned Profile
+/// effect. The effect remains durable on `ChatAggregate`; this value records only
+/// the current Profile comparison and is rebuilt whenever the Chat is opened.
+public enum ProfileEffectReviewState: Equatable, Sendable {
+    case current(ChatProfileEffectIdentity)
+    case stale(ProfileReconsiderationBasis)
+    case unavailable(ChatProfileEffectIdentity)
+
+    public var sourceEffectIdentity: ChatProfileEffectIdentity {
+        switch self {
+        case let .current(identity), let .unavailable(identity):
+            identity
+        case let .stale(basis):
+            basis.sourceEffect.identity
+        }
+    }
+
+    public var reconsiderationBasis: ProfileReconsiderationBasis? {
+        guard case let .stale(basis) = self else { return nil }
+        return basis
+    }
+}
+
+/// A process-local accessibility announcement. It is intentionally absent from
+/// Chat persistence and history.
+public enum ChatTransientNotice: String, Equatable, Sendable {
+    case suggestionNoLongerRelevant
 }
 
 public struct ChatFeatureState: Equatable, Sendable {
@@ -131,6 +163,9 @@ public struct ChatFeatureState: Equatable, Sendable {
         case publishingProfileEvidence(ChatID)
         case retryingProfileEvidencePublication(ChatID)
         case discardingProfileEvidencePublication(ChatID)
+        case reconsideringProfileEffect(ChatID)
+        case stoppingProfileReconsideration(ChatID)
+        case discardingProfileReconsiderationFailure(ChatID)
     }
 
     public let catalog: Catalog
@@ -143,9 +178,20 @@ public struct ChatFeatureState: Equatable, Sendable {
     /// An exact retry authority held only in Application memory when
     /// persistence could not prove its terminal interruption write.
     public let operationallyInterruptedInvocation: PendingCoachInvocationRequest?
+    /// Exact process-local retry projection used only when persistence could
+    /// not prove a Reconsider terminal write. It never authorizes provider
+    /// resumption after relaunch.
+    public let operationallyInterruptedProfileReconsideration:
+        ProfileReconsiderationInvocationRequest?
     /// Process-live, Attempt-scoped capability presented only while the exact
     /// active Coach response can still be stopped.
     public let coachInvocationStopAuthority: InvocationStopAuthority?
+    /// Process-live, Attempt-scoped Stop authority for the exact active
+    /// Reconsider Invocation. A replacement Attempt receives a new authority.
+    public let profileReconsiderationStopAuthority:
+        ProfileReconsiderationInvocationStopAuthority?
+    public let profileEffectReview: ProfileEffectReviewState?
+    public let transientNotice: ChatTransientNotice?
     public let newChatPicker: NewChatAttachmentPickerState
     public let openedAttachments: OpenedChatAttachmentsState
     public let activity: Activity?
@@ -160,7 +206,13 @@ public struct ChatFeatureState: Equatable, Sendable {
         admissionAvailability: InvocationAdmissionAvailability? = nil,
         createNewChatRecoveryIntent: CoachContextCreateNewChatRecoveryIntent? = nil,
         operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
+        operationallyInterruptedProfileReconsideration:
+            ProfileReconsiderationInvocationRequest? = nil,
         coachInvocationStopAuthority: InvocationStopAuthority? = nil,
+        profileReconsiderationStopAuthority:
+            ProfileReconsiderationInvocationStopAuthority? = nil,
+        profileEffectReview: ProfileEffectReviewState? = nil,
+        transientNotice: ChatTransientNotice? = nil,
         newChatPicker: NewChatAttachmentPickerState = .closed,
         openedAttachments: OpenedChatAttachmentsState = .notRequested,
         activity: Activity? = nil,
@@ -174,7 +226,13 @@ public struct ChatFeatureState: Equatable, Sendable {
         self.admissionAvailability = admissionAvailability
         self.createNewChatRecoveryIntent = createNewChatRecoveryIntent
         self.operationallyInterruptedInvocation = operationallyInterruptedInvocation
+        self.operationallyInterruptedProfileReconsideration =
+            operationallyInterruptedProfileReconsideration
         self.coachInvocationStopAuthority = coachInvocationStopAuthority
+        self.profileReconsiderationStopAuthority =
+            profileReconsiderationStopAuthority
+        self.profileEffectReview = profileEffectReview
+        self.transientNotice = transientNotice
         self.newChatPicker = newChatPicker
         self.openedAttachments = openedAttachments
         self.activity = activity
@@ -198,6 +256,24 @@ public struct ChatFeatureState: Equatable, Sendable {
               aggregate.chat.id == request.chatID,
               aggregate.pendingUserTurn == pending,
               pending.id == request.pendingUserTurnID
+        else { return false }
+        return true
+    }
+
+    public func isProfileReconsiderationRetryableFailure(
+        _ reconsideration: ProfileReconsideration
+    ) -> Bool {
+        if reconsideration.failure != nil { return true }
+        guard let request = operationallyInterruptedProfileReconsideration,
+              case let .open(aggregate) = selection,
+              aggregate.chat.id == request.chatID,
+              aggregate.profileEffect?.identity ==
+                request.sourceEffectIdentity,
+              aggregate.profileReconsideration == reconsideration,
+              reconsideration.sourceEffectIdentity ==
+                request.sourceEffectIdentity,
+              reconsideration.resultResponsePositionID ==
+                request.resultResponsePositionID
         else { return false }
         return true
     }

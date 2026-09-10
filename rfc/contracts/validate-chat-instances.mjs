@@ -40,6 +40,9 @@ const positiveInventory = [
   "chat.json",
   "coach-invocation.json",
   "coach-invocation-legacy-v3.json",
+  "coach-invocation-legacy-v4.json",
+  "coach-invocation-reconsider-transcript-read-failure.json",
+  "coach-invocation-reconsider.json",
   "coach-invocation-transcript-read-failure.json",
   "coach-message.json",
   "memory.json",
@@ -51,6 +54,9 @@ const positiveInventory = [
   "pending-user-turn-provider-failure.json",
   "pending-user-turn-transcript-read-failure.json",
   "pending-user-turn.json",
+  "profile-reconsideration.json",
+  "profile-reconsideration-interrupted.json",
+  "profile-reconsideration-transcript-read-failure.json",
   "rejected",
   "renamed-chat.json",
   "session-analysis-chat.json",
@@ -150,6 +156,40 @@ function assertTranscriptFailureLinkIdentityValidation(
   }
 }
 
+function assertInvocationIntentValidation(validate, instance, expected, label) {
+  const schemaValid = validate(instance);
+  const intentKind = instance.intent?.kind;
+  const authorities = instance.attempts?.map(
+    (attempt) => attempt.publicationAuthority?.kind,
+  ) ?? [];
+  const valid =
+    schemaValid &&
+    (instance.schemaVersion < 5 ||
+      (authorities.length > 0 &&
+        authorities.every((kind) => kind === intentKind)));
+  if (valid !== expected) {
+    throw new Error(`${label}: expected valid=${expected}`);
+  }
+}
+
+function assertProfileReconsiderationIdentityValidation(
+  validate,
+  instance,
+  expected,
+  label,
+) {
+  const schemaValid = validate(instance);
+  const sourceResponsePosition =
+    instance.sourceEffectIdentity?.kind === "evidencePublication"
+      ? instance.sourceEffectIdentity.responsePositionId
+      : undefined;
+  const valid =
+    schemaValid && instance.resultResponsePositionId !== sourceResponsePosition;
+  if (valid !== expected) {
+    throw new Error(`${label}: expected valid=${expected}`);
+  }
+}
+
 await assertExactInventory(examplesDirectory, positiveInventory, "positive Chat fixture");
 await assertExactInventory(scenariosDirectory, scenarioInventory, "Chat scenario");
 await assertExactInventory(rejectedDirectory, rejectedInventory, "rejected Chat fixture");
@@ -157,6 +197,7 @@ await assertExactInventory(rejectedDirectory, rejectedInventory, "rejected Chat 
 const chatManifest = await validator("ChatManifest.json");
 const coachMemory = await validator("CoachMemoryEnvelope.json");
 const pendingUserTurn = await validator("PendingUserTurn.json");
+const profileReconsideration = await validator("ProfileReconsideration.json");
 const chatMessage = await validator("ChatMessage.json");
 const coachInvocation = await validator("CoachInvocation.json");
 const invocationAdmissionLedger = await validator("InvocationAdmissionLedger.json");
@@ -238,15 +279,66 @@ for (const name of ["user-message.json", "coach-message.json"]) {
 for (const name of [
   "coach-invocation.json",
   "coach-invocation-legacy-v3.json",
+  "coach-invocation-legacy-v4.json",
+  "coach-invocation-reconsider-transcript-read-failure.json",
+  "coach-invocation-reconsider.json",
   "coach-invocation-transcript-read-failure.json",
 ]) {
-  assertValidation(
+  assertInvocationIntentValidation(
     coachInvocation,
     await loadJSON(path.join(examplesDirectory, name)),
     true,
     name,
   );
 }
+const legacyV3Invocation = await loadJSON(
+  path.join(examplesDirectory, "coach-invocation-legacy-v3.json"),
+);
+const legacyInvocationFields = {
+  invocationId: legacyV3Invocation.invocationId,
+  libraryId: legacyV3Invocation.libraryId,
+  chatId: legacyV3Invocation.chatId,
+  pendingUserTurnId: legacyV3Invocation.pendingUserTurnId,
+  draftId: legacyV3Invocation.draftId,
+  draftVersion: legacyV3Invocation.draftVersion,
+  responsePositionId: legacyV3Invocation.responsePositionId,
+  expectedManifestRevision: legacyV3Invocation.expectedManifestRevision,
+  admittedAt: legacyV3Invocation.admittedAt,
+  attemptId: legacyV3Invocation.attempts[0].attemptId,
+  providerIdempotencyValue: "legacy-recovery-only",
+};
+const legacyV1Invocation = {
+  schemaVersion: 1,
+  ...legacyInvocationFields,
+};
+const legacyV2Invocation = {
+  schemaVersion: 2,
+  ...legacyInvocationFields,
+  profileRevisionId: legacyV3Invocation.profileRevisionId,
+  profileStatementGeneration: legacyV3Invocation.profileStatementGeneration,
+};
+for (const [name, instance] of [
+  ["synthetic legacy-v1 Invocation", legacyV1Invocation],
+  ["synthetic legacy-v2 Invocation", legacyV2Invocation],
+]) {
+  assertInvocationIntentValidation(coachInvocation, instance, true, name);
+}
+const legacyV1WithNestedAttempt = structuredClone(legacyV1Invocation);
+legacyV1WithNestedAttempt.attempts = legacyV3Invocation.attempts;
+assertValidation(
+  coachInvocation,
+  legacyV1WithNestedAttempt,
+  false,
+  "synthetic mixed flat/nested legacy-v1 Invocation",
+);
+const legacyV2WithoutProfileGeneration = structuredClone(legacyV2Invocation);
+delete legacyV2WithoutProfileGeneration.profileStatementGeneration;
+assertValidation(
+  coachInvocation,
+  legacyV2WithoutProfileGeneration,
+  false,
+  "synthetic legacy-v2 Invocation without Profile generation",
+);
 for (const name of [
   "pending-user-turn.json",
   "pending-user-turn-capacity-failure.json",
@@ -264,6 +356,99 @@ for (const name of [
     name,
   );
 }
+for (const name of [
+  "profile-reconsideration.json",
+  "profile-reconsideration-interrupted.json",
+  "profile-reconsideration-transcript-read-failure.json",
+]) {
+  assertProfileReconsiderationIdentityValidation(
+    profileReconsideration,
+    await loadJSON(path.join(examplesDirectory, name)),
+    true,
+    name,
+  );
+}
+const activeReconsideration = await loadJSON(
+  path.join(examplesDirectory, "profile-reconsideration.json"),
+);
+const missingReconsiderationSource = structuredClone(activeReconsideration);
+delete missingReconsiderationSource.sourceEffectIdentity;
+assertValidation(
+  profileReconsideration,
+  missingReconsiderationSource,
+  false,
+  "synthetic Reconsider sidecar without source identity",
+);
+const mixedReconsiderationSource = structuredClone(activeReconsideration);
+mixedReconsiderationSource.sourceEffectIdentity.responsePositionId =
+  "rsp-20260909T120030000Z-7RST";
+assertValidation(
+  profileReconsideration,
+  mixedReconsiderationSource,
+  false,
+  "synthetic Reconsider sidecar with mixed source identity",
+);
+const malformedReconsiderationSource = structuredClone(activeReconsideration);
+malformedReconsiderationSource.sourceEffectIdentity.proposalId = "proposal/unsafe";
+assertValidation(
+  profileReconsideration,
+  malformedReconsiderationSource,
+  false,
+  "synthetic Reconsider sidecar with malformed source identity",
+);
+const unknownReconsiderationField = structuredClone(activeReconsideration);
+unknownReconsiderationField.resumeProvider = true;
+assertValidation(
+  profileReconsideration,
+  unknownReconsiderationField,
+  false,
+  "synthetic Reconsider sidecar with unknown field",
+);
+const newerReconsideration = structuredClone(activeReconsideration);
+newerReconsideration.schemaVersion = 2;
+assertValidation(
+  profileReconsideration,
+  newerReconsideration,
+  false,
+  "synthetic newer Reconsider sidecar",
+);
+const transcriptReadReconsideration = await loadJSON(
+  path.join(
+    examplesDirectory,
+    "profile-reconsideration-transcript-read-failure.json",
+  ),
+);
+const missingReconsiderationTranscriptSummary = structuredClone(
+  transcriptReadReconsideration,
+);
+delete missingReconsiderationTranscriptSummary.transcriptReadFailure;
+assertValidation(
+  profileReconsideration,
+  missingReconsiderationTranscriptSummary,
+  false,
+  "synthetic Reconsider transcript failure without summary",
+);
+const unrelatedReconsiderationTranscriptSummary = structuredClone(
+  transcriptReadReconsideration,
+);
+unrelatedReconsiderationTranscriptSummary.failure = "coachProviderError";
+assertValidation(
+  profileReconsideration,
+  unrelatedReconsiderationTranscriptSummary,
+  false,
+  "synthetic Reconsider ordinary failure with transcript summary",
+);
+const reusedReconsiderationResponsePosition = structuredClone(
+  transcriptReadReconsideration,
+);
+reusedReconsiderationResponsePosition.resultResponsePositionId =
+  reusedReconsiderationResponsePosition.sourceEffectIdentity.responsePositionId;
+assertProfileReconsiderationIdentityValidation(
+  profileReconsideration,
+  reusedReconsiderationResponsePosition,
+  false,
+  "synthetic Reconsider sidecar with reused response position",
+);
 const legacyInterruptedPending = await loadJSON(
   path.join(examplesDirectory, "pending-user-turn-legacy-v1.json"),
 );
@@ -407,6 +592,102 @@ assertValidation(
   incompleteInvocationTranscriptReadOverflow,
   false,
   "synthetic Invocation positive additional count with fewer than three links",
+);
+
+const answerInvocation = await loadJSON(
+  path.join(examplesDirectory, "coach-invocation.json"),
+);
+const answerWithoutIntent = structuredClone(answerInvocation);
+delete answerWithoutIntent.intent;
+assertValidation(
+  coachInvocation,
+  answerWithoutIntent,
+  false,
+  "synthetic v5 answer Invocation without intent",
+);
+const answerWithLegacyIntentFields = structuredClone(answerInvocation);
+answerWithLegacyIntentFields.pendingUserTurnId =
+  answerInvocation.intent.pendingUserTurnId;
+assertValidation(
+  coachInvocation,
+  answerWithLegacyIntentFields,
+  false,
+  "synthetic v5 answer Invocation with legacy top-level intent",
+);
+const answerWithReconsiderAuthority = structuredClone(answerInvocation);
+answerWithReconsiderAuthority.attempts[0].publicationAuthority = {
+  kind: "reconsiderProfileChange",
+  coachMessageId: "msg-20260909T120201000Z-3DEF",
+};
+assertInvocationIntentValidation(
+  coachInvocation,
+  answerWithReconsiderAuthority,
+  false,
+  "synthetic answer Invocation with Reconsider publication authority",
+);
+
+const reconsiderInvocation = await loadJSON(
+  path.join(examplesDirectory, "coach-invocation-reconsider.json"),
+);
+const reconsiderWithAnswerAuthority = structuredClone(reconsiderInvocation);
+reconsiderWithAnswerAuthority.attempts[0].publicationAuthority =
+  structuredClone(answerInvocation.attempts[0].publicationAuthority);
+assertInvocationIntentValidation(
+  coachInvocation,
+  reconsiderWithAnswerAuthority,
+  false,
+  "synthetic Reconsider Invocation with answer publication authority",
+);
+const reconsiderWithFabricatedUserAuthority = structuredClone(reconsiderInvocation);
+reconsiderWithFabricatedUserAuthority.attempts[0].publicationAuthority.userMessageId =
+  "msg-20260909T120202000Z-4GHJ";
+assertValidation(
+  coachInvocation,
+  reconsiderWithFabricatedUserAuthority,
+  false,
+  "synthetic Reconsider Invocation with fabricated user authority",
+);
+const reconsiderWithoutSourceIdentity = structuredClone(reconsiderInvocation);
+delete reconsiderWithoutSourceIdentity.intent.sourceEffectIdentity;
+assertValidation(
+  coachInvocation,
+  reconsiderWithoutSourceIdentity,
+  false,
+  "synthetic Reconsider Invocation without source identity",
+);
+const newerInvocation = structuredClone(answerInvocation);
+newerInvocation.schemaVersion = 6;
+assertValidation(
+  coachInvocation,
+  newerInvocation,
+  false,
+  "synthetic unknown-newer Invocation",
+);
+const reconsiderTranscriptReadInvocation = await loadJSON(
+  path.join(
+    examplesDirectory,
+    "coach-invocation-reconsider-transcript-read-failure.json",
+  ),
+);
+const missingV5InvocationTranscriptSummary = structuredClone(
+  reconsiderTranscriptReadInvocation,
+);
+delete missingV5InvocationTranscriptSummary.transcriptReadFailure;
+assertValidation(
+  coachInvocation,
+  missingV5InvocationTranscriptSummary,
+  false,
+  "synthetic v5 Invocation transcript failure without summary",
+);
+const unrelatedV5InvocationTranscriptSummary = structuredClone(
+  reconsiderTranscriptReadInvocation,
+);
+unrelatedV5InvocationTranscriptSummary.terminalFailure = "coachProviderError";
+assertValidation(
+  coachInvocation,
+  unrelatedV5InvocationTranscriptSummary,
+  false,
+  "synthetic v5 ordinary Invocation failure with transcript summary",
 );
 
 for (const name of scenarioInventory) {

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "sourceEffectIdentity": {
+    "kind": "evidencePublication",
+    "responsePositionId": "rsp-20260909T120030000Z-7RST"
+  },
+  "resultResponsePositionId": "rsp-20260909T120200000Z-8VWX",
+  "failure": "coachTranscriptReadFailed",
+  "transcriptReadFailure": {
+    "sessions": [
+      {
+        "sessionAttachmentId": "attachment_1",
+        "displayLabel": "Opening practice"
+      }
+    ],
+    "additionalSessionCount": 0
+  }
+}

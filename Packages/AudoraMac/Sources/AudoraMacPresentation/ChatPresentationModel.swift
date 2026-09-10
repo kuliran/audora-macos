@@ -24,6 +24,7 @@ public final class ChatPresentationModel: ObservableObject {
     private var projectedStateContext: ChatCommandContext?
     private var stateConsumer: Task<Void, Never>?
     private var lastAnnouncedPickerIssue: ChatAttachmentPickerIssue?
+    private var lastAnnouncedTransientNotice: ChatTransientNotice?
 
     public init(
         dispatcher: ChatCommandDispatcher,
@@ -43,6 +44,7 @@ public final class ChatPresentationModel: ObservableObject {
 
         stateConsumer?.cancel()
         lastAnnouncedPickerIssue = nil
+        lastAnnouncedTransientNotice = nil
         installSnapshot(
             ChatFeatureState(
                 catalog: .loading,
@@ -92,6 +94,16 @@ public final class ChatPresentationModel: ObservableObject {
 
     private func installSnapshot(_ replacement: ChatFeatureState) {
         snapshot = replacement
+        if replacement.transientNotice != lastAnnouncedTransientNotice {
+            lastAnnouncedTransientNotice = replacement.transientNotice
+            if let notice = replacement.transientNotice {
+                announcements.post(
+                    ChatTransientNoticePresentation.accessibilityLabel(
+                        for: notice
+                    )
+                )
+            }
+        }
         let issue: ChatAttachmentPickerIssue?
         switch replacement.newChatPicker {
         case let .ready(picker):
@@ -228,6 +240,13 @@ public final class ChatPresentationModel: ObservableObject {
         send(.stopCoachResponse(context, authority))
     }
 
+    public func stopProfileReconsideration() {
+        guard let context = commandContext,
+              let authority = snapshot.profileReconsiderationStopAuthority
+        else { return }
+        send(.stopProfileReconsideration(context, authority))
+    }
+
     /// Re-resolves current Profile, Memory, history, attachments, and provider
     /// configuration without changing the Chat or invoking a provider.
     public func refreshContextQuote() {
@@ -261,7 +280,9 @@ public final class ChatPresentationModel: ObservableObject {
         guard let context = commandContext,
               ChatInteractionPolicy.allowsNavigationAndMutation(in: snapshot),
               case let .open(aggregate) = snapshot.selection,
-              aggregate.profileProposal?.id == proposalID
+              aggregate.profileProposal?.id == proposalID,
+              aggregate.profileReconsideration == nil,
+              snapshot.profileEffectReview == .current(.proposal(proposalID))
         else { return }
         send(.acceptProfileProposal(context, proposalID))
     }
@@ -270,7 +291,10 @@ public final class ChatPresentationModel: ObservableObject {
         guard let context = commandContext,
               ChatInteractionPolicy.allowsNavigationAndMutation(in: snapshot),
               case let .open(aggregate) = snapshot.selection,
-              aggregate.profileProposal?.id == proposalID
+              aggregate.profileProposal?.id == proposalID,
+              aggregate.profileReconsideration == nil,
+              snapshot.profileEffectReview?.sourceEffectIdentity ==
+                .proposal(proposalID)
         else { return }
         send(.discardProfileProposal(context, proposalID))
     }
@@ -282,7 +306,11 @@ public final class ChatPresentationModel: ObservableObject {
               ChatInteractionPolicy.allowsNavigationAndMutation(in: snapshot),
               case let .open(aggregate) = snapshot.selection,
               aggregate.profileEvidencePublication?.responsePositionID ==
-                responsePositionID
+                responsePositionID,
+              aggregate.profileReconsideration == nil,
+              snapshot.profileEffectReview == .current(
+                .evidencePublication(responsePositionID)
+              )
         else { return }
         send(.retryProfileEvidencePublication(context, responsePositionID))
     }
@@ -294,9 +322,66 @@ public final class ChatPresentationModel: ObservableObject {
               ChatInteractionPolicy.allowsNavigationAndMutation(in: snapshot),
               case let .open(aggregate) = snapshot.selection,
               aggregate.profileEvidencePublication?.responsePositionID ==
-                responsePositionID
+                responsePositionID,
+              aggregate.profileReconsideration == nil,
+              snapshot.profileEffectReview?.sourceEffectIdentity ==
+                .evidencePublication(responsePositionID)
         else { return }
         send(.discardProfileEvidencePublication(context, responsePositionID))
+    }
+
+    public func reconsiderProfileEffect(
+        _ sourceEffectIdentity: ChatProfileEffectIdentity
+    ) {
+        guard let context = commandContext,
+              ChatInteractionPolicy.allowsProfileReconsideration(in: snapshot),
+              case let .open(aggregate) = snapshot.selection,
+              aggregate.profileEffect?.identity == sourceEffectIdentity,
+              aggregate.profileReconsideration == nil,
+              snapshot.profileEffectReview?.sourceEffectIdentity ==
+                sourceEffectIdentity
+        else { return }
+        send(.reconsiderProfileEffect(context, sourceEffectIdentity))
+    }
+
+    public func retryProfileReconsideration(
+        _ sourceEffectIdentity: ChatProfileEffectIdentity
+    ) {
+        guard let context = commandContext,
+              ChatInteractionPolicy.allowsNavigationAndMutation(in: snapshot),
+              snapshot.admissionAvailability == .available,
+              case let .open(aggregate) = snapshot.selection,
+              aggregate.profileEffect?.identity == sourceEffectIdentity,
+              let reconsideration = aggregate.profileReconsideration,
+              reconsideration.sourceEffectIdentity == sourceEffectIdentity,
+              snapshot.isProfileReconsiderationRetryableFailure(
+                reconsideration
+              ),
+              snapshot.profileEffectReview?.sourceEffectIdentity ==
+                sourceEffectIdentity
+        else { return }
+        send(.retryProfileReconsideration(context, sourceEffectIdentity))
+    }
+
+    public func discardProfileReconsiderationFailure(
+        _ sourceEffectIdentity: ChatProfileEffectIdentity
+    ) {
+        guard let context = commandContext,
+              ChatInteractionPolicy.allowsNavigationAndMutation(in: snapshot),
+              case let .open(aggregate) = snapshot.selection,
+              aggregate.profileEffect?.identity == sourceEffectIdentity,
+              let reconsideration = aggregate.profileReconsideration,
+              reconsideration.sourceEffectIdentity == sourceEffectIdentity,
+              reconsideration.failure != nil,
+              snapshot.profileEffectReview?.sourceEffectIdentity ==
+                sourceEffectIdentity
+        else { return }
+        send(
+            .discardProfileReconsiderationFailure(
+                context,
+                sourceEffectIdentity
+            )
+        )
     }
 
     public func announceEvidenceUnavailable(_ explanation: String) {

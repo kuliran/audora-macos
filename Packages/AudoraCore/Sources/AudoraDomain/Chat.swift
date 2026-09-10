@@ -444,6 +444,48 @@ public struct PendingUserTurn: Equatable, Sendable {
     }
 }
 
+/// Durable Chat-owned authority for one Reconsider Invocation. The source
+/// effect remains installed until a successful result replaces or withdraws it.
+public struct ProfileReconsideration: Equatable, Sendable {
+    public static let schemaVersion: UInt32 = 1
+
+    public let sourceEffectIdentity: ChatProfileEffectIdentity
+    public let resultResponsePositionID: ChatResponsePositionID
+    public let failure: PendingUserTurnFailure?
+
+    public init(
+        sourceEffectIdentity: ChatProfileEffectIdentity,
+        resultResponsePositionID: ChatResponsePositionID,
+        failure: PendingUserTurnFailure? = nil
+    ) {
+        self.sourceEffectIdentity = sourceEffectIdentity
+        self.resultResponsePositionID = resultResponsePositionID
+        self.failure = failure
+    }
+
+    public init(
+        sourceEffect: ChatProfileEffect,
+        resultResponsePositionID: ChatResponsePositionID,
+        failure: PendingUserTurnFailure? = nil
+    ) {
+        self.init(
+            sourceEffectIdentity: sourceEffect.identity,
+            resultResponsePositionID: resultResponsePositionID,
+            failure: failure
+        )
+    }
+
+    public func replacingFailure(
+        _ failure: PendingUserTurnFailure?
+    ) -> ProfileReconsideration {
+        ProfileReconsideration(
+            sourceEffectIdentity: sourceEffectIdentity,
+            resultResponsePositionID: resultResponsePositionID,
+            failure: failure
+        )
+    }
+}
+
 public struct CoachMemorySessionSummary: Equatable, Sendable {
     public let sessionAttachmentID: ChatSessionAttachmentID
     public let notes: String
@@ -518,6 +560,10 @@ public enum ChatAggregateError: Error, Equatable, Sendable {
     case memoryOwnerMismatch
     case manifestRevisionOverflow
     case messageHistoryMismatch
+    case multipleProfileEffects
+    case reconsiderationSourceMismatch
+    case reconsiderationResponsePositionMismatch
+    case reconsiderationFailureAttachmentMismatch
 }
 
 public struct Chat: Equatable, Sendable {
@@ -618,17 +664,41 @@ public struct ChatAggregate: Equatable, Sendable {
     public let memory: CoachMemory
     public let messages: [ChatMessage]
     public let pendingUserTurn: PendingUserTurn?
-    public let profileProposal: ProfileChangeProposal?
-    public let profileEvidencePublication: ProfileEvidencePublication?
+    public let profileEffect: ChatProfileEffect?
+    public let profileReconsideration: ProfileReconsideration?
+
+    /// Compatibility projections for callers and persisted schema adapters from
+    /// the pre-Reconsider slices. New transformations should preserve the single
+    /// `profileEffect` value directly.
+    public var profileProposal: ProfileChangeProposal? {
+        profileEffect?.proposal
+    }
+
+    public var profileEvidencePublication: ProfileEvidencePublication? {
+        profileEffect?.evidencePublication
+    }
 
     public init(
         chat: Chat,
         memory: CoachMemory,
         messages: [ChatMessage] = [],
         pendingUserTurn: PendingUserTurn? = nil,
+        profileEffect: ChatProfileEffect? = nil,
         profileProposal: ProfileChangeProposal? = nil,
-        profileEvidencePublication: ProfileEvidencePublication? = nil
+        profileEvidencePublication: ProfileEvidencePublication? = nil,
+        profileReconsideration: ProfileReconsideration? = nil
     ) throws {
+        let legacyEffects: [ChatProfileEffect] = [
+            profileProposal.map(ChatProfileEffect.proposal),
+            profileEvidencePublication.map(
+                ChatProfileEffect.evidencePublication
+            ),
+        ].compactMap { $0 }
+        guard legacyEffects.count <= 1,
+              profileEffect == nil || legacyEffects.isEmpty
+        else { throw ChatAggregateError.multipleProfileEffects }
+        let resolvedProfileEffect = profileEffect ?? legacyEffects.first
+
         guard chat.currentMemoryID == memory.memoryID else {
             throw ChatAggregateError.memoryPointerMismatch
         }
@@ -636,21 +706,37 @@ public struct ChatAggregate: Equatable, Sendable {
             throw ChatAggregateError.memoryOwnerMismatch
         }
         if !messages.isEmpty || chat.messageIDs.isEmpty {
-            guard messages.map(\.id) == chat.messageIDs,
-                  messages.count.isMultiple(of: 2)
-            else { throw ChatAggregateError.messageHistoryMismatch }
+            guard messages.map(\.id) == chat.messageIDs else {
+                throw ChatAggregateError.messageHistoryMismatch
+            }
             var responsePositions: Set<ChatResponsePositionID> = []
-            for index in stride(from: 0, to: messages.count, by: 2) {
-                guard case .user = messages[index].content,
-                      case .coach = messages[index + 1].content,
-                      messages[index].responsePositionID ==
-                        messages[index + 1].responsePositionID,
-                      responsePositions.insert(
-                          messages[index].responsePositionID
-                      ).inserted,
-                      messages[index].persistedSchemaVersion ==
-                        messages[index + 1].persistedSchemaVersion
-                else { throw ChatAggregateError.messageHistoryMismatch }
+            var index = 0
+            while index < messages.count {
+                let first = messages[index]
+                guard responsePositions.insert(
+                    first.responsePositionID
+                ).inserted else {
+                    throw ChatAggregateError.messageHistoryMismatch
+                }
+                switch first.content {
+                case .coach:
+                    // A coach-only group is a successful Reconsider result.
+                    index += 1
+                case .user:
+                    guard index + 1 < messages.count else {
+                        throw ChatAggregateError.messageHistoryMismatch
+                    }
+                    let second = messages[index + 1]
+                    guard case .coach = second.content,
+                          second.responsePositionID ==
+                            first.responsePositionID,
+                          first.persistedSchemaVersion ==
+                            second.persistedSchemaVersion
+                    else {
+                        throw ChatAggregateError.messageHistoryMismatch
+                    }
+                    index += 2
+                }
             }
             let attachmentPairs = Set(chat.attachments.values.map {
                 EvidenceAttachmentPair(
@@ -676,6 +762,9 @@ public struct ChatAggregate: Equatable, Sendable {
                 }
             }
         }
+        let profileProposal = resolvedProfileEffect?.proposal
+        let profileEvidencePublication =
+            resolvedProfileEffect?.evidencePublication
         if let pendingUserTurn {
             guard pendingUserTurn.draftID == chat.draft.draftID,
                   pendingUserTurn.draftVersion == chat.draft.version,
@@ -710,9 +799,17 @@ public struct ChatAggregate: Equatable, Sendable {
                             return false
                         }()
                 }
-                guard sourceMessages.count == 1,
-                      sourceMessages[0].coachProfile == profileProposal.baseProfile
-                else { throw ChatAggregateError.messageHistoryMismatch }
+                // Reconsider may publish a reviewed replacement without adding
+                // a coach message. When a source message is present it still
+                // has to be the single, exact response for this proposal.
+                guard sourceMessages.count <= 1 else {
+                    throw ChatAggregateError.messageHistoryMismatch
+                }
+                if let sourceMessage = sourceMessages.first {
+                    guard sourceMessage.coachProfile ==
+                            profileProposal.baseProfile
+                    else { throw ChatAggregateError.messageHistoryMismatch }
+                }
             }
             let attachmentPairs = Set(chat.attachments.values.map {
                 EvidenceAttachmentPair(
@@ -766,12 +863,46 @@ public struct ChatAggregate: Equatable, Sendable {
                 )
             }) else { throw ChatAggregateError.messageHistoryMismatch }
         }
+        if let profileReconsideration {
+            guard pendingUserTurn == nil,
+                  let resolvedProfileEffect,
+                  resolvedProfileEffect.identity ==
+                    profileReconsideration.sourceEffectIdentity
+            else {
+                throw ChatAggregateError.reconsiderationSourceMismatch
+            }
+            guard profileReconsideration.resultResponsePositionID !=
+                    resolvedProfileEffect.responsePositionID,
+                  messages.isEmpty || !messages.contains(where: {
+                      $0.responsePositionID ==
+                        profileReconsideration.resultResponsePositionID
+                  })
+            else {
+                throw ChatAggregateError
+                    .reconsiderationResponsePositionMismatch
+            }
+            if let summary = profileReconsideration.failure?
+                .transcriptReadFailureSummary
+            {
+                let attachmentIDs = Set(
+                    chat.attachments.values.map(\.attachmentID)
+                )
+                guard summary.sessions.allSatisfy({
+                    attachmentIDs.contains($0.sessionAttachmentID)
+                }), summary.sessions.count +
+                    Int(summary.additionalSessionCount) <= attachmentIDs.count
+                else {
+                    throw ChatAggregateError
+                        .reconsiderationFailureAttachmentMismatch
+                }
+            }
+        }
         self.chat = chat
         self.memory = memory
         self.messages = messages
         self.pendingUserTurn = pendingUserTurn
-        self.profileProposal = profileProposal
-        self.profileEvidencePublication = profileEvidencePublication
+        self.profileEffect = resolvedProfileEffect
+        self.profileReconsideration = profileReconsideration
     }
 
     public static func emptyDevelopmentChat(

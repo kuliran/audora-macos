@@ -27,6 +27,152 @@ private extension PortableInvocationStore {
 }
 
 final class PortableInvocationStoreTests: XCTestCase {
+    func testV5ReconsiderInvocationRoundTripsSealedIntentAndAttemptAuthority()
+        throws
+    {
+        let attempt = try CoachProviderAttempt(
+            id: CoachProviderAttemptID("atm-20260830T120022000Z-9YZ0"),
+            ordinal: 1,
+            kind: .standard,
+            providerIdempotencyValue: ProviderIdempotencyValue("opaque-reconsider"),
+            transcriptHandles: [],
+            publicationAuthority: .reconsiderProfileChange(
+                coachMessageID: try ChatMessageID(
+                    "msg-20260830T120022000Z-1BCD"
+                )
+            )
+        )
+        let invocation = try CoachInvocation(
+            id: CoachInvocationID("inv-20260830T120002000Z-5KMN"),
+            attempt: attempt,
+            library: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T120000000Z-2ABC")
+            ),
+            chatID: ChatID("cht-20260830T120010000Z-3DEF"),
+            intent: .reconsiderProfileChange(
+                sourceEffectIdentity: .proposal(
+                    try ProfileChangeProposalID(
+                        "prp-20260830T120020000Z-4GHJ"
+                    )
+                ),
+                resultResponsePositionID: try ChatResponsePositionID(
+                    "rsp-20260830T120021000Z-6PQR"
+                )
+            ),
+            preparedProfile: CoachProfileProvenance(
+                revisionID: nil,
+                statementGeneration: 3
+            ),
+            expectedManifestRevision: 7,
+            admittedAt: UTCInstant("2026-08-30T12:00:22.000Z")
+        )
+        let codec = PortableInvocationEvidenceCodec(
+            maximumRootBytes: PortableChatPersistence.maximumRootBytes,
+            maximumMessageCount:
+                PortableChatPersistence.maximumMessageDirectoryEntries
+        )
+
+        let encoded = try codec.encodeInvocation(invocation)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        XCTAssertNil(object["pendingUserTurnId"])
+        XCTAssertNil(object["draftId"])
+        XCTAssertNil(object["draftVersion"])
+        XCTAssertNil(object["responsePositionId"])
+        let intent = try XCTUnwrap(object["intent"] as? [String: Any])
+        XCTAssertEqual(intent["kind"] as? String, "reconsiderProfileChange")
+        let encodedAttempt = try XCTUnwrap(
+            (object["attempts"] as? [[String: Any]])?.first
+        )
+        XCTAssertNil(encodedAttempt["userMessageId"])
+        XCTAssertNil(encodedAttempt["freshDraftId"])
+        XCTAssertEqual(
+            (encodedAttempt["publicationAuthority"] as? [String: Any])?["kind"]
+                as? String,
+            "reconsiderProfileChange"
+        )
+        XCTAssertEqual(
+            try codec.decodeInvocation(encoded),
+            try invocation.durableProjection()
+        )
+    }
+
+    func testV4ReconsiderPublicationProofRoundTripsEachExactSourceIdentity()
+        throws
+    {
+        let codec = PortableInvocationEvidenceCodec(
+            maximumRootBytes: PortableChatPersistence.maximumRootBytes,
+            maximumMessageCount:
+                PortableChatPersistence.maximumMessageDirectoryEntries
+        )
+        let identities: [ChatProfileEffectIdentity] = [
+            .proposal(
+                try ProfileChangeProposalID(
+                    "prp-20260910T120020000Z-4GHJ"
+                )
+            ),
+            .evidencePublication(
+                try ChatResponsePositionID(
+                    "rsp-20260910T120021000Z-5KMN"
+                )
+            ),
+        ]
+        for (index, identity) in identities.enumerated() {
+            let proof = InvocationPublicationProof(
+                persistedSchemaVersion: InvocationPublicationProof.schemaVersion,
+                invocationID: try CoachInvocationID(
+                    "inv-20260910T12002200\(index)Z-6PQR"
+                ),
+                libraryID: try LibraryID(
+                    "lib-20260910T120000000Z-1ABC"
+                ),
+                chatID: try ChatID("cht-20260910T120010000Z-2DEF"),
+                responsePositionID: try ChatResponsePositionID(
+                    "rsp-20260910T120023000Z-7STV"
+                ),
+                publishedManifestRevision: 4,
+                publishedChatSHA256: String(repeating: "1", count: 64),
+                stableChatSHA256: String(repeating: "2", count: 64),
+                memorySHA256: String(repeating: "3", count: 64),
+                messageIDs: [],
+                coachMessageID: try ChatMessageID(
+                    "msg-20260910T120024000Z-8WXY"
+                ),
+                coachMessageSHA256: nil,
+                proposalSHA256: index == 0
+                    ? String(repeating: "4", count: 64)
+                    : nil,
+                profileEvidencePublicationSHA256: nil,
+                intent: .reconsiderProfileChange(
+                    sourceEffectIdentity: identity,
+                    baseManifestRevision: 3,
+                    baseChatSHA256: String(repeating: "5", count: 64),
+                    baseMemorySHA256: String(repeating: "6", count: 64),
+                    sourceEffectSHA256: String(repeating: "7", count: 64),
+                    profileReconsiderationSHA256:
+                        String(repeating: "8", count: 64)
+                )
+            )
+            let encoded = try codec.encodePublicationProof(proof)
+            XCTAssertEqual(try codec.decodePublicationProof(encoded), proof)
+
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+            )
+            var source = try XCTUnwrap(
+                object["sourceEffect"] as? [String: Any]
+            )
+            source[index == 0 ? "responsePositionId" : "proposalId"] = NSNull()
+            object["sourceEffect"] = source
+            let malformed = try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys]
+            )
+            XCTAssertThrowsError(try codec.decodePublicationProof(malformed))
+        }
+    }
+
     func testPublicationAtomicallySwitchesMemoryAndRemovesSupersededSnapshot()
         async throws
     {
@@ -161,7 +307,9 @@ final class PortableInvocationStoreTests: XCTestCase {
         }
     }
 
-    func testV4InvocationAndProofPersistNoProviderTransportAuthority() async throws {
+    func testV5AnswerInvocationAndProofPersistNoProviderTransportAuthority()
+        async throws
+    {
         try await withTemporaryParent { parent in
             let handle = try CoachProviderTranscriptHandle(
                 "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -201,8 +349,7 @@ final class PortableInvocationStoreTests: XCTestCase {
             )
             let attempts = try XCTUnwrap(root["attempts"] as? [[String: Any]])
             XCTAssertEqual(Set(try XCTUnwrap(attempts.first).keys), [
-                "attemptId", "ordinal", "kind", "userMessageId",
-                "coachMessageId", "freshDraftId",
+                "attemptId", "ordinal", "kind", "publicationAuthority",
             ])
         }
     }
@@ -491,7 +638,10 @@ final class PortableInvocationStoreTests: XCTestCase {
                     with: Data(contentsOf: invocationURL)
                 ) as? [String: Any]
             )
-            XCTAssertEqual(invocationObject["schemaVersion"] as? Int, 4)
+            XCTAssertEqual(
+                invocationObject["schemaVersion"] as? Int,
+                Int(CoachInvocation.schemaVersion)
+            )
             XCTAssertEqual(
                 invocationObject["terminalFailure"] as? String,
                 "coachTranscriptReadFailed"
@@ -818,7 +968,10 @@ final class PortableInvocationStoreTests: XCTestCase {
                     with: Data(contentsOf: invocationURL)
                 ) as? [String: Any]
             )
-            XCTAssertEqual(object["schemaVersion"] as? Int, 4)
+            XCTAssertEqual(
+                object["schemaVersion"] as? Int,
+                Int(CoachInvocation.schemaVersion)
+            )
             XCTAssertEqual((object["attempts"] as? [[String: Any]])?.count, 2)
 
             guard case let .committed(aggregate) = await nextSession.abort(
@@ -4222,7 +4375,20 @@ final class PortableInvocationStoreTests: XCTestCase {
             object["providerIdempotencyValue"] = try XCTUnwrap(
                 fixture.install.invocation.attempt.transportAuthority
             ).providerIdempotencyValue.rawValue
+            guard case let .answerPendingUserTurn(
+                pendingUserTurnID,
+                draftID,
+                draftVersion,
+                responsePositionID
+            ) = fixture.install.invocation.intent else {
+                return XCTFail("Fixture Invocation was not an Answer")
+            }
+            object["pendingUserTurnId"] = pendingUserTurnID.rawValue
+            object["draftId"] = draftID.rawValue
+            object["draftVersion"] = draftVersion
+            object["responsePositionId"] = responsePositionID.rawValue
             object.removeValue(forKey: "attempts")
+            object.removeValue(forKey: "intent")
             try JSONSerialization.data(
                 withJSONObject: object,
                 options: [.sortedKeys]
@@ -4431,7 +4597,7 @@ final class PortableInvocationStoreTests: XCTestCase {
                 if mode == "newer" {
                     data = Data(
                         """
-                        {"schemaVersion":5,"invocationId":"\(invocation.id.rawValue)","libraryId":"\(fixture.scope.libraryID.rawValue)","chatId":"\(fixture.locked.chat.id.rawValue)","futureBody":"first","futureBody":"second"}
+                        {"schemaVersion":6,"invocationId":"\(invocation.id.rawValue)","libraryId":"\(fixture.scope.libraryID.rawValue)","chatId":"\(fixture.locked.chat.id.rawValue)","futureBody":"first","futureBody":"second"}
                         """.utf8
                     )
                 } else {

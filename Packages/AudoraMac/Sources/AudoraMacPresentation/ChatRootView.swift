@@ -65,6 +65,36 @@ struct CoachResponseStopInteractionPresentation: Equatable, Sendable {
     }
 }
 
+struct ProfileReconsiderationStopInteractionPresentation: Equatable, Sendable {
+    let isEnabled: Bool
+
+    init(
+        admissionState: ApplicationCommandAdmissionState,
+        chatState: ChatFeatureState
+    ) {
+        guard !admissionState.isOrderlyTerminationPending,
+              let authority =
+                chatState.profileReconsiderationStopAuthority,
+              case let .open(aggregate) = chatState.selection,
+              aggregate.chat.id == authority.chatID,
+              aggregate.profileEffect?.identity ==
+                authority.sourceEffectIdentity,
+              aggregate.profileReconsideration?.sourceEffectIdentity ==
+                authority.sourceEffectIdentity,
+              aggregate.profileReconsideration?.resultResponsePositionID ==
+                authority.resultResponsePositionID,
+              chatState.activity ==
+                .reconsideringProfileEffect(authority.chatID) ||
+                chatState.activity ==
+                    .stoppingProfileReconsideration(authority.chatID)
+        else {
+            isEnabled = false
+            return
+        }
+        isEnabled = true
+    }
+}
+
 enum ChatNoticePresentation {
     static func recoveryText(for notice: ChatNotice) -> String {
         switch notice {
@@ -99,12 +129,31 @@ enum ChatNoticePresentation {
         case .profileProposalDiscardFailed:
             "The Profile proposal could not be discarded. Review it and try again."
         case .profileProposalStale:
-            "The Profile changed elsewhere, so this proposal can no longer be accepted. Discard it and continue chatting with the coach."
+            "The Profile changed elsewhere, so this suggestion must be reconsidered before it can be accepted."
+        case .profileEffectAssessmentFailed:
+            "The current Profile could not be compared with this suggestion. Reopen the Chat and try again."
+        case .profileReconsiderationUnavailable:
+            "The suggestion could not be reconsidered. Retry or discard the failure."
+        case .profileReconsiderationDiscardFailed:
+            "The Reconsider failure could not be discarded. Try again."
         }
     }
 
     static func accessibilityLabel(for notice: ChatNotice) -> String {
         "Chat notice: \(recoveryText(for: notice))"
+    }
+}
+
+enum ChatTransientNoticePresentation {
+    static func text(for notice: ChatTransientNotice) -> String {
+        switch notice {
+        case .suggestionNoLongerRelevant:
+            "Suggestion is no longer relevant."
+        }
+    }
+
+    static func accessibilityLabel(for notice: ChatTransientNotice) -> String {
+        text(for: notice)
     }
 }
 
@@ -209,6 +258,85 @@ struct ProfileProposalCardPresentation: Equatable {
     }
 }
 
+enum ProfileEffectRecoveryAction: Equatable, Hashable, Sendable {
+    case acceptProposal
+    case retryEvidencePublication
+    case reconsider
+    case retryReconsideration
+    case stopReconsideration
+    case discardEffect
+    case discardReconsiderationFailure
+
+    var title: String {
+        switch self {
+        case .acceptProposal: "Accept"
+        case .retryEvidencePublication, .retryReconsideration: "Retry"
+        case .stopReconsideration: "Stop"
+        case .reconsider: "Reconsider"
+        case .discardEffect, .discardReconsiderationFailure: "Discard"
+        }
+    }
+}
+
+enum ProfileEffectRecoveryPresentation {
+    /// Projects only actions that are valid for the exact assessed effect.
+    /// The Application layer independently enforces the same identity and
+    /// staleness fences when a command arrives.
+    static func actions(
+        for sourceEffectIdentity: ChatProfileEffectIdentity,
+        in state: ChatFeatureState
+    ) -> [ProfileEffectRecoveryAction] {
+        guard case let .open(aggregate) = state.selection,
+              aggregate.profileEffect?.identity == sourceEffectIdentity,
+              state.profileEffectReview?.sourceEffectIdentity ==
+                sourceEffectIdentity
+        else { return [] }
+
+        if let reconsideration = aggregate.profileReconsideration {
+            guard reconsideration.sourceEffectIdentity == sourceEffectIdentity
+            else { return [] }
+            if reconsideration.failure != nil, state.activity == nil {
+                return [
+                    .retryReconsideration,
+                    .discardReconsiderationFailure,
+                ]
+            }
+            if state.isProfileReconsiderationRetryableFailure(reconsideration),
+               state.activity == nil
+            {
+                // An unproven terminal write retains only exact operational
+                // Retry authority. Local Discard appears after recovery has
+                // durably classified the sidecar failure.
+                return [.retryReconsideration]
+            }
+            if let authority = state.profileReconsiderationStopAuthority,
+               authority.sourceEffectIdentity == sourceEffectIdentity,
+               authority.resultResponsePositionID ==
+                reconsideration.resultResponsePositionID,
+               state.activity ==
+                .reconsideringProfileEffect(aggregate.chat.id) ||
+                state.activity ==
+                    .stoppingProfileReconsideration(aggregate.chat.id)
+            {
+                return [.stopReconsideration]
+            }
+            return []
+        }
+
+        guard state.activity == nil else { return [] }
+        switch state.profileEffectReview {
+        case .current(.proposal):
+            return [.acceptProposal, .discardEffect]
+        case .current(.evidencePublication):
+            return [.retryEvidencePublication, .discardEffect]
+        case .stale:
+            return [.reconsider, .discardEffect]
+        case .unavailable, .none:
+            return []
+        }
+    }
+}
+
 struct ProfileEvidencePublicationFailureCardPresentation: Equatable {
     static let headingText = "Profile evidence couldn't be saved"
     static let retryActionTitle = "Retry"
@@ -301,6 +429,11 @@ enum ChatActivityPresentation {
         case .publishingProfileEvidence: nil
         case .retryingProfileEvidencePublication: "Retrying Profile evidence…"
         case .discardingProfileEvidencePublication: "Discarding Profile evidence…"
+        case .reconsideringProfileEffect: "Coach is reconsidering the suggestion…"
+        case .stoppingProfileReconsideration:
+            "Stopping Profile reconsideration…"
+        case .discardingProfileReconsiderationFailure:
+            "Restoring Profile suggestion actions…"
         case nil: nil
         }
     }
@@ -770,6 +903,22 @@ public struct ChatRootView: View {
                 .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.leading, 12)
         }
+        .overlay(alignment: .top) {
+            if let notice = model.snapshot.transientNotice {
+                Text(ChatTransientNoticePresentation.text(for: notice))
+                    .font(.callout.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(radius: 4, y: 2)
+                    .padding(.top, 12)
+                    .accessibilityLabel(
+                        ChatTransientNoticePresentation.accessibilityLabel(
+                            for: notice
+                        )
+                    )
+            }
+        }
         .task { await model.start(in: scope) }
         .sheet(isPresented: newChatSheetIsPresented) {
             newChatSheet
@@ -990,21 +1139,14 @@ public struct ChatRootView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack {
-                    Spacer()
-                    Button(ProfileProposalCardPresentation.discardActionTitle) {
-                        model.discardProfileProposal(presentation.proposalID)
-                    }
-                    .accessibilityLabel("Discard Profile Change Proposal")
-                    .disabled(!allowsNavigationAndMutation)
-
-                    Button(ProfileProposalCardPresentation.acceptActionTitle) {
-                        model.acceptProfileProposal(presentation.proposalID)
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityLabel("Accept Profile Change Proposal")
-                    .disabled(!allowsNavigationAndMutation)
+                if let reconsideration = currentProfileReconsideration(
+                    for: .proposal(presentation.proposalID)
+                ) {
+                    profileReconsiderationFailureDetails(reconsideration)
                 }
+                profileEffectRecoveryActions(
+                    for: .proposal(presentation.proposalID)
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -1025,35 +1167,162 @@ public struct ChatRootView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                HStack {
-                    Spacer()
-                    Button(
-                        ProfileEvidencePublicationFailureCardPresentation
-                            .retryActionTitle
-                    ) {
-                        model.retryProfileEvidencePublication(
-                            presentation.responsePositionID
-                        )
-                    }
-                    .accessibilityLabel("Retry Profile Evidence Publication")
-                    .disabled(!allowsNavigationAndMutation)
-
-                    Button(
-                        ProfileEvidencePublicationFailureCardPresentation
-                            .discardActionTitle
-                    ) {
-                        model.discardProfileEvidencePublication(
-                            presentation.responsePositionID
-                        )
-                    }
-                    .accessibilityLabel("Discard Profile Evidence Publication")
-                    .disabled(!allowsNavigationAndMutation)
+                let identity = ChatProfileEffectIdentity.evidencePublication(
+                    presentation.responsePositionID
+                )
+                if let reconsideration = currentProfileReconsideration(
+                    for: identity
+                ) {
+                    profileReconsiderationFailureDetails(reconsideration)
                 }
+                profileEffectRecoveryActions(for: identity)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(presentation.accessibilityLabel)
+    }
+
+    private func currentProfileReconsideration(
+        for identity: ChatProfileEffectIdentity
+    ) -> ProfileReconsideration? {
+        guard case let .open(aggregate) = model.snapshot.selection,
+              aggregate.profileEffect?.identity == identity,
+              aggregate.profileReconsideration?.sourceEffectIdentity ==
+                identity
+        else { return nil }
+        return aggregate.profileReconsideration
+    }
+
+    @ViewBuilder
+    private func profileReconsiderationFailureDetails(
+        _ reconsideration: ProfileReconsideration
+    ) -> some View {
+        if let failure = reconsideration.failure {
+            let card = CoachResponseFailurePresentation.card(
+                for: failure,
+                attachments: selectedChatAttachments
+            )
+            VStack(alignment: .leading, spacing: 6) {
+                Text(card.heading)
+                    .font(.callout.weight(.semibold))
+                    .accessibilityLabel(card.heading)
+                if let body = card.body {
+                    Text(body)
+                        .font(.callout)
+                        .accessibilityLabel(body)
+                }
+                ForEach(card.sessionLinks, id: \.attachmentID) { link in
+                    CoachResponseFailureSessionLinkView(
+                        link: link,
+                        onOpenSession: onOpenSession
+                    )
+                }
+                if card.additionalSessionCount > 0 {
+                    Text("+ \(card.additionalSessionCount) more Sessions")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel(
+                            "\(card.additionalSessionCount) additional affected Sessions"
+                        )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func profileEffectRecoveryActions(
+        for identity: ChatProfileEffectIdentity
+    ) -> some View {
+        let actions = ProfileEffectRecoveryPresentation.actions(
+            for: identity,
+            in: model.snapshot
+        )
+        if !actions.isEmpty {
+            HStack {
+                Spacer()
+                ForEach(Array(actions.reversed()), id: \.self) { action in
+                    profileEffectRecoveryButton(action, identity: identity)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func profileEffectRecoveryButton(
+        _ action: ProfileEffectRecoveryAction,
+        identity: ChatProfileEffectIdentity
+    ) -> some View {
+        switch action {
+        case .reconsider, .retryReconsideration:
+            Button(action.title) {
+                if action == .reconsider {
+                    model.reconsiderProfileEffect(identity)
+                } else {
+                    model.retryProfileReconsideration(identity)
+                }
+            }
+            .accessibilityLabel(
+                action == .reconsider
+                    ? "Reconsider Profile Suggestion"
+                    : "Retry Profile Reconsideration"
+            )
+            .coachInvocationControl(
+                disabled: !allowsNavigationAndMutation ||
+                    model.snapshot.admissionAvailability != .available,
+                admissionAvailability: model.snapshot.admissionAvailability
+            )
+
+        case .stopReconsideration:
+            Button(action.title) {
+                model.stopProfileReconsideration()
+            }
+            .accessibilityLabel("Stop Profile Reconsideration")
+            .disabled(
+                !ProfileReconsiderationStopInteractionPresentation(
+                    admissionState: dispatcher.admissionState,
+                    chatState: model.snapshot
+                ).isEnabled
+            )
+
+        case .acceptProposal:
+            if case let .proposal(proposalID) = identity {
+                Button(action.title) {
+                    model.acceptProfileProposal(proposalID)
+                }
+                .keyboardShortcut(.defaultAction)
+                .accessibilityLabel("Accept Profile Change Proposal")
+                .disabled(!allowsNavigationAndMutation)
+            }
+
+        case .retryEvidencePublication:
+            if case let .evidencePublication(responsePositionID) = identity {
+                Button(action.title) {
+                    model.retryProfileEvidencePublication(responsePositionID)
+                }
+                .accessibilityLabel("Retry Profile Evidence Publication")
+                .disabled(!allowsNavigationAndMutation)
+            }
+
+        case .discardEffect:
+            Button(action.title) {
+                switch identity {
+                case let .proposal(proposalID):
+                    model.discardProfileProposal(proposalID)
+                case let .evidencePublication(responsePositionID):
+                    model.discardProfileEvidencePublication(responsePositionID)
+                }
+            }
+            .accessibilityLabel("Discard Profile Suggestion")
+            .disabled(!allowsNavigationAndMutation)
+
+        case .discardReconsiderationFailure:
+            Button(action.title) {
+                model.discardProfileReconsiderationFailure(identity)
+            }
+            .accessibilityLabel("Discard Profile Reconsideration Failure")
+            .disabled(!allowsNavigationAndMutation)
+        }
     }
 
     private func profileProposalChangeView(
