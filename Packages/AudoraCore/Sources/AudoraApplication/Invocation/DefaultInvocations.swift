@@ -2528,12 +2528,21 @@ public struct ContinuousInvocationRetryTiming: InvocationRetryTiming {
 @_spi(InvocationInfrastructure)
 public enum InvocationRetryDiagnosticReason: String, Equatable, Sendable {
     case contextCapacityExceeded
+    case contextPreparationUnavailable
     case admissionCommitUncertain
     case admissionCooldown
     case admissionClockRollback
     case admissionLedgerFull
     case admissionUnavailable
     case preparedContextStale
+    case invocationEligibilityChanged
+    case invocationRevalidationUnavailable
+    case launchIdentityConstructionFailed
+    case launchIdentityUnavailable
+    case launchIdentityCollisionExhausted
+    case invocationConstructionFailed
+    case invocationInstallationFailed
+    case invalidInvocationIntent
     case relaunchedInvocationInterrupted
     case coachResponseStopped
     case providerAutoRetryable
@@ -3194,7 +3203,11 @@ public actor DefaultInvocations: Invocations {
             }
             session = opened
         case let .ineligible(current):
-            return .rejected(current, .eligibilityChanged)
+            return await rejectStaleProfileReconsiderationIfRetryVisible(
+                current,
+                request: request.request,
+                diagnosticContext: .unavailable
+            )
         case .blockedByActiveInvocation:
             return .rejected(nil, .activeInvocation)
         case .unavailable:
@@ -3340,7 +3353,8 @@ public actor DefaultInvocations: Invocations {
             return await rejectProfileReconsideration(
                 session,
                 fallback: firstAuthority.aggregate,
-                reason: .eligibilityChanged
+                reason: .eligibilityChanged,
+                diagnosticContext: .unavailable
             )
         }
 
@@ -3354,6 +3368,9 @@ public actor DefaultInvocations: Invocations {
                 fallback: firstAuthority.aggregate,
                 request: request,
                 failure: .coachContextCannotFit,
+                diagnosticReason: .contextCapacityExceeded,
+                classification: .contextCapacity,
+                diagnosticContext: diagnosticContext(for: failure.quote),
                 outcome: { current in
                     .contextCapacityFailure(current, failure.quote)
                 }
@@ -3364,6 +3381,9 @@ public actor DefaultInvocations: Invocations {
                 fallback: firstAuthority.aggregate,
                 request: request,
                 failure: .coachResponseInterrupted,
+                diagnosticReason: .contextPreparationUnavailable,
+                classification: .retryInfrastructureFailure,
+                diagnosticContext: .unavailable,
                 outcome: { current in
                     .rejected(current, .contextUnavailable(reason))
                 }
@@ -3378,16 +3398,24 @@ public actor DefaultInvocations: Invocations {
             return await rejectProfileReconsideration(
                 session,
                 fallback: authority.aggregate,
-                reason: .eligibilityChanged
+                reason: .eligibilityChanged,
+                diagnosticContext: diagnosticContext(for: prepared)
             )
         case let .ineligible(current):
-            return .rejected(current, .eligibilityChanged)
+            return await rejectStaleProfileReconsiderationIfRetryVisible(
+                current,
+                request: request,
+                diagnosticContext: diagnosticContext(for: prepared)
+            )
         case .unavailable:
             return await failProfileReconsiderationBeforeInstall(
                 session,
                 fallback: firstAuthority.aggregate,
                 request: request,
                 failure: .coachResponseInterrupted,
+                diagnosticReason: .invocationRevalidationUnavailable,
+                classification: .persistenceUnavailable,
+                diagnosticContext: diagnosticContext(for: prepared),
                 outcome: { current in
                     .interrupted(current, .persistenceUnavailable)
                 }
@@ -3419,7 +3447,8 @@ public actor DefaultInvocations: Invocations {
                 return await rejectProfileReconsideration(
                     session,
                     fallback: finalAuthority.aggregate,
-                    reason: .persistenceUnavailable
+                    reason: .persistenceUnavailable,
+                    diagnosticContext: diagnosticContext(for: prepared)
                 )
             }
             let candidate = InvocationProfileReconsiderationLaunchIdentity(
@@ -3439,13 +3468,20 @@ public actor DefaultInvocations: Invocations {
                 continue
             case let .stale(current):
                 await session.abandon()
-                return .rejected(current, .eligibilityChanged)
+                return await rejectStaleProfileReconsiderationIfRetryVisible(
+                    current,
+                    request: request,
+                    diagnosticContext: diagnosticContext(for: prepared)
+                )
             case .unavailable:
                 return await failProfileReconsiderationBeforeInstall(
                     session,
                     fallback: finalAuthority.aggregate,
                     request: request,
                     failure: .coachResponseInterrupted,
+                    diagnosticReason: .launchIdentityUnavailable,
+                    classification: .persistenceUnavailable,
+                    diagnosticContext: diagnosticContext(for: prepared),
                     outcome: { current in
                         .interrupted(current, .persistenceUnavailable)
                     }
@@ -3459,7 +3495,8 @@ public actor DefaultInvocations: Invocations {
                 fallback: finalAuthority.aggregate,
                 reason: .identityCollisionExhausted(
                     lastCollision: lastCollision ?? .invocationID
-                )
+                ),
+                diagnosticContext: diagnosticContext(for: prepared)
             )
         }
 
@@ -3475,6 +3512,9 @@ public actor DefaultInvocations: Invocations {
                 fallback: finalAuthority.aggregate,
                 request: request,
                 failure: .coachContextCannotFit,
+                diagnosticReason: .transcriptContextCannotFit,
+                classification: .contextCapacity,
+                diagnosticContext: diagnosticContext(for: prepared),
                 outcome: { current in
                     .contextCapacityFailure(current, prepared.quote)
                 }
@@ -3485,6 +3525,9 @@ public actor DefaultInvocations: Invocations {
                 fallback: finalAuthority.aggregate,
                 request: request,
                 failure: .coachResponseInterrupted,
+                diagnosticReason: .attemptTranscriptAccessLaunchFailed,
+                classification: .retryInfrastructureFailure,
+                diagnosticContext: diagnosticContext(for: prepared),
                 outcome: { current in
                     .interrupted(current, .retryInfrastructureFailed)
                 }
@@ -3504,6 +3547,9 @@ public actor DefaultInvocations: Invocations {
                 fallback: finalAuthority.aggregate,
                 request: request,
                 failure: .coachResponseInterrupted,
+                diagnosticReason: .admissionCommitUncertain,
+                classification: .interruption,
+                diagnosticContext: diagnosticContext(for: prepared),
                 outcome: { current in
                     .interrupted(current, .persistenceUnavailable)
                 }
@@ -3512,25 +3558,29 @@ public actor DefaultInvocations: Invocations {
             return await rejectProfileReconsideration(
                 session,
                 fallback: finalAuthority.aggregate,
-                reason: .admissionCooldown
+                reason: .admissionCooldown,
+                diagnosticContext: diagnosticContext(for: prepared)
             )
         case .clockRollback:
             return await rejectProfileReconsideration(
                 session,
                 fallback: finalAuthority.aggregate,
-                reason: .clockRollback
+                reason: .clockRollback,
+                diagnosticContext: diagnosticContext(for: prepared)
             )
         case .ledgerFull:
             return await rejectProfileReconsideration(
                 session,
                 fallback: finalAuthority.aggregate,
-                reason: .admissionLedgerFull
+                reason: .admissionLedgerFull,
+                diagnosticContext: diagnosticContext(for: prepared)
             )
         case .unavailable:
             return await rejectProfileReconsideration(
                 session,
                 fallback: finalAuthority.aggregate,
-                reason: .admissionUnavailable
+                reason: .admissionUnavailable,
+                diagnosticContext: diagnosticContext(for: prepared)
             )
         }
 
@@ -3548,6 +3598,9 @@ public actor DefaultInvocations: Invocations {
                 fallback: finalAuthority.aggregate,
                 request: request,
                 failure: .coachResponseInterrupted,
+                diagnosticReason: .invocationConstructionFailed,
+                classification: .retryInfrastructureFailure,
+                diagnosticContext: diagnosticContext(for: prepared),
                 outcome: { current in
                     .interrupted(current, .persistenceUnavailable)
                 }
@@ -3563,17 +3616,25 @@ public actor DefaultInvocations: Invocations {
             return await rejectProfileReconsideration(
                 session,
                 fallback: finalAuthority.aggregate,
-                reason: .activeInvocation
+                reason: .activeInvocation,
+                diagnosticContext: diagnosticContext(for: prepared)
             )
         case let .stale(current):
             await session.abandon()
-            return .rejected(current, .eligibilityChanged)
+            return await rejectStaleProfileReconsiderationIfRetryVisible(
+                current,
+                request: request,
+                diagnosticContext: diagnosticContext(for: prepared)
+            )
         case .failed:
             return await failProfileReconsiderationBeforeInstall(
                 session,
                 fallback: finalAuthority.aggregate,
                 request: request,
                 failure: .coachResponseInterrupted,
+                diagnosticReason: .invocationInstallationFailed,
+                classification: .persistenceUnavailable,
+                diagnosticContext: diagnosticContext(for: prepared),
                 outcome: { current in
                     .interrupted(current, .persistenceUnavailable)
                 }
@@ -3581,12 +3642,17 @@ public actor DefaultInvocations: Invocations {
         }
 
         guard await coachContext.isPreparedContextCurrent(prepared) else {
-            let current = await abortProfileReconsideration(
+            let startedAt = retryTiming.nowMilliseconds()
+            let current = await abortProfileReconsiderationRecordingUserRetry(
                 activeSession,
                 fallback: activeSession.processingAggregate,
                 request: request,
                 failure: .coachResponseInterrupted,
-                reason: .persistenceUnavailable
+                reason: .persistenceUnavailable,
+                diagnosticReason: .preparedContextStale,
+                classification: .interruption,
+                prepared: prepared,
+                startedAt: startedAt
             )
             if case let .interrupted(aggregate, _) = current {
                 return .rejected(aggregate, .contextChanged)
@@ -3604,40 +3670,117 @@ public actor DefaultInvocations: Invocations {
     private func rejectProfileReconsideration(
         _ session: any InvocationProfileReconsiderationPersistenceSession,
         fallback: ChatAggregate,
-        reason: InvocationRejectionReason
+        reason: InvocationRejectionReason,
+        diagnosticContext: InvocationRetryDiagnosticContext
     ) async -> ProfileReconsiderationInvocationTryOutcome {
         let request = session.authority.request
-        switch await session.terminate(.rejected) {
+        let outcome = switch await session.terminate(.rejected) {
         case let .committed(current):
-            return .rejected(current, reason)
+            ProfileReconsiderationInvocationTryOutcome.rejected(current, reason)
         case let .stale(current):
-            return profileReconsiderationTerminalOutcome(
+            profileReconsiderationTerminalOutcome(
                 current: current,
                 fallback: fallback,
                 request: request,
                 outcome: { .rejected($0, .eligibilityChanged) }
             )
         case let .recovered(.eligible(authority)):
-            return profileReconsiderationTerminalOutcome(
+            profileReconsiderationTerminalOutcome(
                 current: authority.aggregate,
                 fallback: fallback,
                 request: request,
                 outcome: { .rejected($0, reason) }
             )
         case let .recovered(.ineligible(current)):
-            return profileReconsiderationTerminalOutcome(
+            profileReconsiderationTerminalOutcome(
                 current: current,
                 fallback: fallback,
                 request: request,
                 outcome: { .rejected($0, .eligibilityChanged) }
             )
         case .recovered(.unavailable):
-            return profileReconsiderationTerminalOutcome(
+            profileReconsiderationTerminalOutcome(
                 current: nil,
                 fallback: fallback,
                 request: request,
                 outcome: { .rejected($0, .persistenceUnavailable) }
             )
+        }
+        guard case let .rejected(current, outcomeReason) = outcome else {
+            return outcome
+        }
+        let preservesOperationalRetry = outcomeReason != .eligibilityChanged &&
+            hasExactProfileReconsideration(current, request: request) &&
+            current?.profileReconsideration?.failure == nil
+        guard presentsProfileReconsiderationUserRetry(
+            outcome,
+            request: request
+        ) || preservesOperationalRetry else { return outcome }
+        let diagnostic = Self.profileReconsiderationRejectionDiagnostic(
+            outcomeReason
+        )
+        await recordRetryDiagnostic(
+            reason: diagnostic.reason,
+            classification: diagnostic.classification,
+            disposition: .userRetryableFailure,
+            invocation: nil,
+            context: diagnosticContext,
+            durationMilliseconds: 0
+        )
+        return outcome
+    }
+
+    private func rejectStaleProfileReconsiderationIfRetryVisible(
+        _ current: ChatAggregate?,
+        request: ProfileReconsiderationInvocationRequest,
+        diagnosticContext: InvocationRetryDiagnosticContext
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        let outcome = ProfileReconsiderationInvocationTryOutcome.rejected(
+            current,
+            .eligibilityChanged
+        )
+        guard presentsProfileReconsiderationUserRetry(
+            outcome,
+            request: request
+        ) else { return outcome }
+        await recordRetryDiagnostic(
+            reason: .invocationEligibilityChanged,
+            classification: .interruption,
+            disposition: .userRetryableFailure,
+            invocation: nil,
+            context: diagnosticContext,
+            durationMilliseconds: 0
+        )
+        return outcome
+    }
+
+    private static func profileReconsiderationRejectionDiagnostic(
+        _ reason: InvocationRejectionReason
+    ) -> (
+        reason: InvocationRetryDiagnosticReason,
+        classification: InvocationRetryDiagnosticClassification
+    ) {
+        switch reason {
+        case .eligibilityChanged:
+            (.invocationEligibilityChanged, .interruption)
+        case .activeInvocation:
+            (.invocationInstallationFailed, .retryInfrastructureFailure)
+        case .messageMustBeShortened, .contextUnavailable:
+            (.contextPreparationUnavailable, .retryInfrastructureFailure)
+        case .contextChanged:
+            (.preparedContextStale, .interruption)
+        case .admissionCooldown:
+            (.admissionCooldown, .admissionRejected)
+        case .clockRollback:
+            (.admissionClockRollback, .admissionRejected)
+        case .admissionLedgerFull:
+            (.admissionLedgerFull, .admissionRejected)
+        case .admissionUnavailable:
+            (.admissionUnavailable, .admissionRejected)
+        case .persistenceUnavailable:
+            (.launchIdentityConstructionFailed, .retryInfrastructureFailure)
+        case .identityCollisionExhausted:
+            (.launchIdentityCollisionExhausted, .retryInfrastructureFailure)
         }
     }
 
@@ -3646,43 +3789,59 @@ public actor DefaultInvocations: Invocations {
         fallback: ChatAggregate,
         request: ProfileReconsiderationInvocationRequest,
         failure: PendingUserTurnFailure,
+        diagnosticReason: InvocationRetryDiagnosticReason,
+        classification: InvocationRetryDiagnosticClassification,
+        diagnosticContext: InvocationRetryDiagnosticContext,
         outcome: (ChatAggregate) -> ProfileReconsiderationInvocationTryOutcome
     ) async -> ProfileReconsiderationInvocationTryOutcome {
-        switch await session.terminate(.failed(failure)) {
+        let terminalOutcome = switch await session.terminate(.failed(failure)) {
         case let .committed(current):
-            return profileReconsiderationTerminalOutcome(
+            profileReconsiderationTerminalOutcome(
                 current: current,
                 fallback: fallback,
                 request: request,
                 outcome: outcome
             )
         case let .stale(current):
-            return profileReconsiderationTerminalOutcome(
+            profileReconsiderationTerminalOutcome(
                 current: current,
                 fallback: fallback,
                 request: request,
                 outcome: outcome
             )
         case let .recovered(.eligible(authority)):
-            return profileReconsiderationTerminalOutcome(
+            profileReconsiderationTerminalOutcome(
                 current: authority.aggregate,
                 fallback: fallback,
                 request: request,
                 outcome: outcome
             )
         case let .recovered(.ineligible(current)):
-            return profileReconsiderationTerminalOutcome(
+            profileReconsiderationTerminalOutcome(
                 current: current,
                 fallback: fallback,
                 request: request,
                 outcome: outcome
             )
         case .recovered(.unavailable):
-            return retainOperationalProfileReconsiderationRetry(
+            retainOperationalProfileReconsiderationRetry(
                 request: request,
                 fallback: fallback
             )
         }
+        guard presentsProfileReconsiderationUserRetry(
+            terminalOutcome,
+            request: request
+        ) else { return terminalOutcome }
+        await recordRetryDiagnostic(
+            reason: diagnosticReason,
+            classification: classification,
+            disposition: .userRetryableFailure,
+            invocation: nil,
+            context: diagnosticContext,
+            durationMilliseconds: 0
+        )
+        return terminalOutcome
     }
 
     private func abortProfileReconsideration(
@@ -3730,21 +3889,65 @@ public actor DefaultInvocations: Invocations {
         }
     }
 
+    private func abortProfileReconsiderationRecordingUserRetry(
+        _ session:
+            any InvocationProfileReconsiderationActivePersistenceSession,
+        fallback: ChatAggregate,
+        request: ProfileReconsiderationInvocationRequest,
+        failure: PendingUserTurnFailure,
+        reason: InvocationInterruptionReason,
+        diagnosticReason: InvocationRetryDiagnosticReason,
+        classification: InvocationRetryDiagnosticClassification,
+        prepared: PreparedCoachLaunchContext,
+        startedAt: UInt64
+    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        let invocation = session.invocation
+        let context = diagnosticContext(for: prepared)
+        let durationMilliseconds = elapsedMilliseconds(since: startedAt)
+        let outcome = await abortProfileReconsideration(
+            session,
+            fallback: fallback,
+            request: request,
+            failure: failure,
+            reason: reason
+        )
+        guard presentsProfileReconsiderationUserRetry(
+            outcome,
+            request: request
+        ) else { return outcome }
+        await recordRetryDiagnostic(
+            reason: diagnosticReason,
+            classification: classification,
+            disposition: .userRetryableFailure,
+            invocation: invocation,
+            context: context,
+            durationMilliseconds: durationMilliseconds
+        )
+        return outcome
+    }
+
     private func interruptProfileReconsiderationPublicationAndAbort(
         _ session:
             any InvocationProfileReconsiderationActivePersistenceSession,
         fallback: ChatAggregate,
         request: ProfileReconsiderationInvocationRequest,
         reason: InvocationInterruptionReason,
-        publication: ProfileReconsiderationPublicationRecoveryIntent
+        publication: ProfileReconsiderationPublicationRecoveryIntent,
+        diagnosticReason: InvocationRetryDiagnosticReason,
+        classification: InvocationRetryDiagnosticClassification,
+        prepared: PreparedCoachLaunchContext,
+        startedAt: UInt64
     ) async -> ProfileReconsiderationInvocationTryOutcome {
+        let invocation = session.invocation
+        let context = diagnosticContext(for: prepared)
+        let durationMilliseconds = elapsedMilliseconds(since: startedAt)
         let priorRecovery = await resolveProfileReconsiderationPublicationRecovery(
             publication,
             using: session
         )
         if case let .published(outcome) = priorRecovery { return outcome }
 
-        return switch await session.abort(
+        let outcome = switch await session.abort(
             failure: .coachResponseInterrupted
         ) {
         case let .committed(current):
@@ -3773,6 +3976,19 @@ public actor DefaultInvocations: Invocations {
                 priorRecovery: priorRecovery
             )
         }
+        guard presentsProfileReconsiderationUserRetry(
+            outcome,
+            request: request
+        ) else { return outcome }
+        await recordRetryDiagnostic(
+            reason: diagnosticReason,
+            classification: classification,
+            disposition: .userRetryableFailure,
+            invocation: invocation,
+            context: context,
+            durationMilliseconds: durationMilliseconds
+        )
+        return outcome
     }
 
     private func profileReconsiderationOutcomeAfterStaleAbort(
@@ -4086,18 +4302,24 @@ public actor DefaultInvocations: Invocations {
         prepared: PreparedCoachLaunchContext,
         observingStopAuthority observer:
             @escaping ProfileReconsiderationInvocationStopAuthorityObserver
-    ) async -> ProfileReconsiderationInvocationTryOutcome {
+        ) async -> ProfileReconsiderationInvocationTryOutcome {
         var activeSession = installedSession
         let processingAggregate = installedSession.processingAggregate
+        let invocationStartedAt = retryTiming.nowMilliseconds()
         guard let request = profileReconsiderationRequest(
             for: installedSession.invocation
         ) else {
-            return await abortProfileReconsideration(
+            let request = installedSessionRequest(installedSession)
+            return await abortProfileReconsiderationRecordingUserRetry(
                 installedSession,
                 fallback: processingAggregate,
-                request: installedSessionRequest(installedSession),
+                request: request,
                 failure: .coachResponseInterrupted,
-                reason: .retryInfrastructureFailed
+                reason: .retryInfrastructureFailed,
+                diagnosticReason: .invalidInvocationIntent,
+                classification: .retryInfrastructureFailure,
+                prepared: prepared,
+                startedAt: invocationStartedAt
             )
         }
         let runID = UUID()
@@ -4108,12 +4330,16 @@ public actor DefaultInvocations: Invocations {
             let attempt = invocation.attempt
             let startedAt = retryTiming.nowMilliseconds()
             guard let transportAuthority = attempt.transportAuthority else {
-                return await abortProfileReconsideration(
+                return await abortProfileReconsiderationRecordingUserRetry(
                     activeSession,
                     fallback: processingAggregate,
                     request: request,
                     failure: .coachResponseInterrupted,
-                    reason: .retryInfrastructureFailed
+                    reason: .retryInfrastructureFailed,
+                    diagnosticReason: .missingAttemptTransportAuthority,
+                    classification: .retryInfrastructureFailure,
+                    prepared: prepared,
+                    startedAt: startedAt
                 )
             }
             let pinnedInstruction = Self.pinnedInstruction(
@@ -4148,23 +4374,31 @@ public actor DefaultInvocations: Invocations {
                         completion: completion
                     )
                 } catch {
-                    return await abortProfileReconsideration(
+                    return await abortProfileReconsiderationRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
                         request: request,
                         failure: .coachResponseInterrupted,
-                        reason: .retryInfrastructureFailed
+                        reason: .retryInfrastructureFailed,
+                        diagnosticReason: .attemptTranscriptAccessLaunchFailed,
+                        classification: .retryInfrastructureFailure,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 }
             }
             guard !hasUnreapedProviderAuthority else {
                 transcriptAccess?.closeReads()
-                return await abortProfileReconsideration(
+                return await abortProfileReconsiderationRecordingUserRetry(
                     activeSession,
                     fallback: processingAggregate,
                     request: request,
                     failure: .coachResponseInterrupted,
-                    reason: .retryInfrastructureFailed
+                    reason: .retryInfrastructureFailed,
+                    diagnosticReason: .unreapedProviderBlockedSuccessor,
+                    classification: .retryInfrastructureFailure,
+                    prepared: prepared,
+                    startedAt: startedAt
                 )
             }
             let control: CoachProviderAttemptControl = switch attempt.kind {
@@ -4317,12 +4551,17 @@ public actor DefaultInvocations: Invocations {
                 case .rejected, .revoked, .completed:
                     .invalidProviderResponse
                 }
-                let aborted = await abortProfileReconsideration(
+                let diagnostic = retainedTerminalDiagnostic(for: status)
+                let aborted = await abortProfileReconsiderationRecordingUserRetry(
                     activeSession,
                     fallback: processingAggregate,
                     request: request,
                     failure: failure,
-                    reason: reason
+                    reason: reason,
+                    diagnosticReason: diagnostic.reason,
+                    classification: diagnostic.classification,
+                    prepared: prepared,
+                    startedAt: startedAt
                 )
                 if status == .contextCannotFit,
                    case let .interrupted(current?, _) = aborted
@@ -4332,12 +4571,20 @@ public actor DefaultInvocations: Invocations {
                 return aborted
             }
             guard let providerOutcome else {
-                return await abortProfileReconsideration(
+                guard claimProfileReconsiderationCompletion(
+                    runID: runID,
+                    authority: stopAuthority
+                ) else { return .stopped }
+                return await abortProfileReconsiderationRecordingUserRetry(
                     activeSession,
                     fallback: processingAggregate,
                     request: request,
                     failure: .coachResponseInvalid,
-                    reason: .invalidProviderResponse
+                    reason: .invalidProviderResponse,
+                    diagnosticReason: .transcriptAccessProtocolFailure,
+                    classification: .invalidProviderResponse,
+                    prepared: prepared,
+                    startedAt: startedAt
                 )
             }
 
@@ -4370,16 +4617,23 @@ public actor DefaultInvocations: Invocations {
                         completedAt: completedAt
                     )
                 } catch {
+                    let diagnosticReason = Self.completeResponseDiagnosticReason(
+                        error
+                    )
                     guard claimProfileReconsiderationCompletion(
                         runID: runID,
                         authority: stopAuthority
                     ) else { return .stopped }
-                    return await abortProfileReconsideration(
+                    return await abortProfileReconsiderationRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
                         request: request,
                         failure: .coachResponseInvalid,
-                        reason: .invalidProviderResponse
+                        reason: .invalidProviderResponse,
+                        diagnosticReason: diagnosticReason,
+                        classification: .invalidProviderResponse,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 }
                 guard claimProfileReconsiderationCompletion(
@@ -4401,7 +4655,11 @@ public actor DefaultInvocations: Invocations {
                             ProfileReconsiderationPublicationRecoveryIntent(
                                 mutation: publication,
                                 quote: prepared.quote
-                            )
+                            ),
+                        diagnosticReason: .publicationConflict,
+                        classification: .publicationConflict,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 case .failed:
                     return await interruptProfileReconsiderationPublicationAndAbort(
@@ -4413,7 +4671,11 @@ public actor DefaultInvocations: Invocations {
                             ProfileReconsiderationPublicationRecoveryIntent(
                                 mutation: publication,
                                 quote: prepared.quote
-                            )
+                            ),
+                        diagnosticReason: .publicationPersistenceUnavailable,
+                        classification: .persistenceUnavailable,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 }
 
@@ -4422,12 +4684,16 @@ public actor DefaultInvocations: Invocations {
                     runID: runID,
                     authority: stopAuthority
                 ) else { return .stopped }
-                return await abortProfileReconsideration(
+                return await abortProfileReconsiderationRecordingUserRetry(
                     activeSession,
                     fallback: processingAggregate,
                     request: request,
                     failure: .coachProviderError,
-                    reason: .providerFailed
+                    reason: .providerFailed,
+                    diagnosticReason: .providerUserRetryable,
+                    classification: .providerUserRetryable,
+                    prepared: prepared,
+                    startedAt: startedAt
                 )
 
             case .autoRetryableFailure:
@@ -4438,12 +4704,18 @@ public actor DefaultInvocations: Invocations {
                         runID: runID,
                         authority: stopAuthority
                     ) else { return .stopped }
-                    return await abortProfileReconsideration(
+                    return await abortProfileReconsiderationRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
                         request: request,
                         failure: .coachProviderError,
-                        reason: .providerFailed
+                        reason: .providerFailed,
+                        diagnosticReason: attempt.kind == .shorterRepair
+                            ? .shorterRepairProviderFailure
+                            : .automaticRetriesExhausted,
+                        classification: .providerUserRetryable,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 }
                 let index = Int(attempt.ordinal - 1)
@@ -4454,14 +4726,30 @@ public actor DefaultInvocations: Invocations {
                         runID: runID,
                         authority: stopAuthority
                     ) else { return .stopped }
-                    return await abortProfileReconsideration(
+                    return await abortProfileReconsiderationRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
                         request: request,
                         failure: .coachResponseInterrupted,
-                        reason: .retryInfrastructureFailed
+                        reason: .retryInfrastructureFailed,
+                        diagnosticReason: .retryScheduleUnavailable,
+                        classification: .retryInfrastructureFailure,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 }
+                await recordRetryDiagnostic(
+                    reason: .providerAutoRetryable,
+                    classification: .providerAutoRetryable,
+                    disposition: .automaticRetry,
+                    invocation: invocation,
+                    prepared: prepared,
+                    startedAt: startedAt
+                )
+                guard isProfileReconsiderationCompletionAuthorized(
+                    runID: runID,
+                    authority: stopAuthority
+                ) else { return .stopped }
                 let sleeper = self.retrySleeper
                 let backoff = BackoffCompletion()
                 let backoffTask = Task {
@@ -4489,12 +4777,16 @@ public actor DefaultInvocations: Invocations {
                         runID: runID,
                         authority: stopAuthority
                     ) else { return .stopped }
-                    return await abortProfileReconsideration(
+                    return await abortProfileReconsiderationRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
                         request: request,
                         failure: .coachResponseInterrupted,
-                        reason: .retryInfrastructureFailed
+                        reason: .retryInfrastructureFailed,
+                        diagnosticReason: .retrySleepFailed,
+                        classification: .retryInfrastructureFailure,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 case .elapsed:
                     break
@@ -4506,6 +4798,7 @@ public actor DefaultInvocations: Invocations {
                         prepared: prepared,
                         fallback: processingAggregate,
                         request: request,
+                        startedAt: startedAt,
                         runID: runID,
                         authority: stopAuthority
                     )
@@ -4536,14 +4829,32 @@ public actor DefaultInvocations: Invocations {
                         runID: runID,
                         authority: stopAuthority
                     ) else { return .stopped }
-                    return await abortProfileReconsideration(
+                    return await abortProfileReconsiderationRecordingUserRetry(
                         activeSession,
                         fallback: processingAggregate,
                         request: request,
                         failure: .coachResponseInvalid,
-                        reason: .invalidProviderResponse
+                        reason: .invalidProviderResponse,
+                        diagnosticReason: attempt.kind == .shorterRepair
+                            ? .responseOverflowRepeated
+                            : .responseOverflowAttemptLimitReached,
+                        classification: .invalidProviderResponse,
+                        prepared: prepared,
+                        startedAt: startedAt
                     )
                 }
+                await recordRetryDiagnostic(
+                    reason: .responseOverflowRepair,
+                    classification: .invalidProviderResponse,
+                    disposition: .automaticRetry,
+                    invocation: invocation,
+                    prepared: prepared,
+                    startedAt: startedAt
+                )
+                guard isProfileReconsiderationCompletionAuthorized(
+                    runID: runID,
+                    authority: stopAuthority
+                ) else { return .stopped }
                 let transition = Task {
                     await self.installNextProfileReconsiderationAttempt(
                         after: activeSession,
@@ -4551,6 +4862,7 @@ public actor DefaultInvocations: Invocations {
                         prepared: prepared,
                         fallback: processingAggregate,
                         request: request,
+                        startedAt: startedAt,
                         runID: runID,
                         authority: stopAuthority
                     )
@@ -4583,6 +4895,7 @@ public actor DefaultInvocations: Invocations {
         prepared: PreparedCoachLaunchContext,
         fallback: ChatAggregate,
         request: ProfileReconsiderationInvocationRequest,
+        startedAt: UInt64,
         runID: UUID,
         authority: ProfileReconsiderationInvocationStopAuthority
     ) async -> ProfileReconsiderationNextAttemptResolution {
@@ -4617,34 +4930,46 @@ public actor DefaultInvocations: Invocations {
                 )
             } catch let error as InstallNextCoachProviderAttemptMutationError {
                 if case .identityCollision = error { continue }
-                return .terminal(
-                    await abortProfileReconsideration(
-                        session,
-                        fallback: fallback,
-                        request: request,
-                        failure: .coachResponseInterrupted,
-                        reason: .retryInfrastructureFailed
-                    )
+                return await finishFailedProfileReconsiderationAttemptTransition(
+                    session,
+                    fallback: fallback,
+                    request: request,
+                    failure: .coachResponseInterrupted,
+                    reason: .retryInfrastructureFailed,
+                    diagnosticReason: .nextAttemptConstructionFailed,
+                    classification: .retryInfrastructureFailure,
+                    prepared: prepared,
+                    startedAt: startedAt,
+                    runID: runID,
+                    authority: authority
                 )
             } catch AttemptTranscriptAccessGrantIssueError.contextCannotFit {
-                return .terminal(
-                    await abortProfileReconsideration(
-                        session,
-                        fallback: fallback,
-                        request: request,
-                        failure: .coachContextCannotFit,
-                        reason: .retryInfrastructureFailed
-                    )
+                return await finishFailedProfileReconsiderationAttemptTransition(
+                    session,
+                    fallback: fallback,
+                    request: request,
+                    failure: .coachContextCannotFit,
+                    reason: .retryInfrastructureFailed,
+                    diagnosticReason: .transcriptContextCannotFit,
+                    classification: .contextCapacity,
+                    prepared: prepared,
+                    startedAt: startedAt,
+                    runID: runID,
+                    authority: authority
                 )
             } catch {
-                return .terminal(
-                    await abortProfileReconsideration(
-                        session,
-                        fallback: fallback,
-                        request: request,
-                        failure: .coachResponseInterrupted,
-                        reason: .retryInfrastructureFailed
-                    )
+                return await finishFailedProfileReconsiderationAttemptTransition(
+                    session,
+                    fallback: fallback,
+                    request: request,
+                    failure: .coachResponseInterrupted,
+                    reason: .retryInfrastructureFailed,
+                    diagnosticReason: .attemptTranscriptAccessLaunchFailed,
+                    classification: .retryInfrastructureFailure,
+                    prepared: prepared,
+                    startedAt: startedAt,
+                    runID: runID,
+                    authority: authority
                 )
             }
             guard isProfileReconsiderationCompletionAuthorized(
@@ -4657,34 +4982,79 @@ public actor DefaultInvocations: Invocations {
             case .collision:
                 continue
             case let .stale(current):
-                return .terminal(
-                    await abortProfileReconsideration(
-                        session,
-                        fallback: current ?? fallback,
-                        request: request,
-                        failure: .coachResponseInterrupted,
-                        reason: .persistenceUnavailable
-                    )
+                return await finishFailedProfileReconsiderationAttemptTransition(
+                    session,
+                    fallback: current ?? fallback,
+                    request: request,
+                    failure: .coachResponseInterrupted,
+                    reason: .persistenceUnavailable,
+                    diagnosticReason: .nextAttemptBecameStale,
+                    classification: .retryInfrastructureFailure,
+                    prepared: prepared,
+                    startedAt: startedAt,
+                    runID: runID,
+                    authority: authority
                 )
             case .failed:
-                return .terminal(
-                    await abortProfileReconsideration(
-                        session,
-                        fallback: fallback,
-                        request: request,
-                        failure: .coachResponseInterrupted,
-                        reason: .retryInfrastructureFailed
-                    )
+                return await finishFailedProfileReconsiderationAttemptTransition(
+                    session,
+                    fallback: fallback,
+                    request: request,
+                    failure: .coachResponseInterrupted,
+                    reason: .retryInfrastructureFailed,
+                    diagnosticReason: .nextAttemptInstallationFailed,
+                    classification: .retryInfrastructureFailure,
+                    prepared: prepared,
+                    startedAt: startedAt,
+                    runID: runID,
+                    authority: authority
                 )
             }
         }
+        return await finishFailedProfileReconsiderationAttemptTransition(
+            session,
+            fallback: fallback,
+            request: request,
+            failure: .coachResponseInterrupted,
+            reason: .retryInfrastructureFailed,
+            diagnosticReason: .nextAttemptIdentityCollisionExhausted,
+            classification: .retryInfrastructureFailure,
+            prepared: prepared,
+            startedAt: startedAt,
+            runID: runID,
+            authority: authority
+        )
+    }
+
+    private func finishFailedProfileReconsiderationAttemptTransition(
+        _ session:
+            any InvocationProfileReconsiderationActivePersistenceSession,
+        fallback: ChatAggregate,
+        request: ProfileReconsiderationInvocationRequest,
+        failure: PendingUserTurnFailure,
+        reason: InvocationInterruptionReason,
+        diagnosticReason: InvocationRetryDiagnosticReason,
+        classification: InvocationRetryDiagnosticClassification,
+        prepared: PreparedCoachLaunchContext,
+        startedAt: UInt64,
+        runID: UUID,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) async -> ProfileReconsiderationNextAttemptResolution {
+        guard claimProfileReconsiderationCompletion(
+            runID: runID,
+            authority: authority
+        ) else { return .revoked(session) }
         return .terminal(
-            await abortProfileReconsideration(
+            await abortProfileReconsiderationRecordingUserRetry(
                 session,
                 fallback: fallback,
                 request: request,
-                failure: .coachResponseInterrupted,
-                reason: .retryInfrastructureFailed
+                failure: failure,
+                reason: reason,
+                diagnosticReason: diagnosticReason,
+                classification: classification,
+                prepared: prepared,
+                startedAt: startedAt
             )
         )
     }
@@ -5132,9 +5502,7 @@ public actor DefaultInvocations: Invocations {
                     )
                 }
             }
-            guard !activeInvocationControls.values.contains(where: {
-                $0.runID != runID && $0.isRevoked
-            }) else {
+            guard !hasUnreapedProviderAuthority else {
                 transcriptAccess?.closeReads()
                 return await interruptAndAbortRecordingUserRetry(
                     activeSession,
@@ -5983,6 +6351,48 @@ public actor DefaultInvocations: Invocations {
         }
     }
 
+    private func presentsProfileReconsiderationUserRetry(
+        _ outcome: ProfileReconsiderationInvocationTryOutcome,
+        request: ProfileReconsiderationInvocationRequest
+    ) -> Bool {
+        switch outcome {
+        case let .contextCapacityFailure(current, _):
+            return hasExactProfileReconsiderationRetry(
+                current,
+                request: request
+            )
+        case let .rejected(current, _), let .interrupted(current, _):
+            return hasExactProfileReconsiderationRetry(
+                current,
+                request: request
+            )
+        case let .operationallyInterrupted(_, retryRequest, _):
+            return retryRequest == request
+        case .published, .withdrawn, .stopped, .providerReapPending:
+            return false
+        }
+    }
+
+    private func hasExactProfileReconsiderationRetry(
+        _ current: ChatAggregate?,
+        request: ProfileReconsiderationInvocationRequest
+    ) -> Bool {
+        hasExactProfileReconsideration(current, request: request) &&
+            current?.profileReconsideration?.failure != nil
+    }
+
+    private func hasExactProfileReconsideration(
+        _ current: ChatAggregate?,
+        request: ProfileReconsiderationInvocationRequest
+    ) -> Bool {
+        current?.chat.id == request.chatID &&
+            current?.profileEffect?.identity == request.sourceEffectIdentity &&
+            current?.profileReconsideration?.sourceEffectIdentity ==
+                request.sourceEffectIdentity &&
+            current?.profileReconsideration?.resultResponsePositionID ==
+                request.resultResponsePositionID
+    }
+
     private func elapsedMilliseconds(since startedAt: UInt64) -> UInt64 {
         let current = retryTiming.nowMilliseconds()
         guard current >= startedAt else { return 0 }
@@ -6070,13 +6480,14 @@ public actor DefaultInvocations: Invocations {
                     ] = control
                     return .unableToReap
                 }
-                activeProfileReconsiderationControls.removeValue(
-                    forKey: authority.capabilityID
-                )
-                return profileReconsiderationStopOutcome(
-                    from: outcome,
-                    request: request,
-                    fallback: control.fallback
+                return await completeStoppedProfileReconsideration(
+                    profileReconsiderationStopOutcome(
+                        from: outcome,
+                        request: request,
+                        fallback: control.fallback
+                    ),
+                    control: control,
+                    authority: authority
                 )
             }
         }
@@ -6087,13 +6498,14 @@ public actor DefaultInvocations: Invocations {
             return .unableToReap
         }
         if case let .reapPending(outcome?) = work {
-            activeProfileReconsiderationControls.removeValue(
-                forKey: authority.capabilityID
-            )
-            return profileReconsiderationStopOutcome(
-                from: outcome,
-                request: request,
-                fallback: control.fallback
+            return await completeStoppedProfileReconsideration(
+                profileReconsiderationStopOutcome(
+                    from: outcome,
+                    request: request,
+                    fallback: control.fallback
+                ),
+                control: control,
+                authority: authority
             )
         }
 
@@ -6135,9 +6547,51 @@ public actor DefaultInvocations: Invocations {
                     fallback: control.fallback
                 )
             }
+        return await completeStoppedProfileReconsideration(
+            outcome,
+            control: control,
+            authority: authority
+        )
+    }
+
+    private func completeStoppedProfileReconsideration(
+        _ outcome: ProfileReconsiderationInvocationStopOutcome,
+        control: ActiveProfileReconsiderationControl,
+        authority: ProfileReconsiderationInvocationStopAuthority
+    ) async -> ProfileReconsiderationInvocationStopOutcome {
         activeProfileReconsiderationControls.removeValue(
             forKey: authority.capabilityID
         )
+        let presentsExactRetry: Bool = switch outcome {
+        case .interrupted:
+            true
+        case let .persistenceUnavailable(current):
+            current?.chat.id == authority.chatID &&
+                current?.profileEffect?.identity ==
+                    authority.sourceEffectIdentity &&
+                current?.profileReconsideration?.sourceEffectIdentity ==
+                    authority.sourceEffectIdentity &&
+                current?.profileReconsideration?.resultResponsePositionID ==
+                    authority.resultResponsePositionID &&
+                current?.profileReconsideration?.failure == nil
+        case .staleAuthority, .noActiveInvocation, .unableToReap:
+            false
+        }
+        if presentsExactRetry {
+            let diagnostic = retainedTerminalDiagnostic(
+                for: control.retainedTranscriptTerminalStatus
+            )
+            await recordRetryDiagnostic(
+                reason: diagnostic.reason,
+                classification: diagnostic.classification,
+                disposition: .userRetryableFailure,
+                invocation: control.session.invocation,
+                context: control.diagnosticContext,
+                durationMilliseconds: elapsedMilliseconds(
+                    since: control.startedAtMilliseconds
+                )
+            )
+        }
         return outcome
     }
 

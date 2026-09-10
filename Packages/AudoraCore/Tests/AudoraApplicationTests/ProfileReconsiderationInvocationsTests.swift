@@ -179,6 +179,106 @@ final class ProfileReconsiderationInvocationsTests: XCTestCase {
         XCTAssertTrue(installedAttempts.allSatisfy {
             $0.userMessageID == nil && $0.freshDraftID == nil
         })
+        let diagnostics = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(
+            diagnostics.map(\.reason),
+            [
+                .providerAutoRetryable,
+                .providerAutoRetryable,
+                .providerAutoRetryable,
+            ]
+        )
+        XCTAssertTrue(diagnostics.allSatisfy {
+            $0.classification == .providerAutoRetryable &&
+                $0.disposition == .automaticRetry
+        })
+    }
+
+    func testReconsiderAutomaticRetryExhaustionRecordsFinalUserRetryDiagnostic()
+        async throws
+    {
+        let fixture = try ProfileReconsiderationInvocationFixture(
+            retainedActiveEvidence: false,
+            providerOutcomes: Array(
+                repeating: .autoRetryableFailure,
+                count: 4
+            )
+        )
+        let prepared = try await fixture.prepareNew()
+
+        guard case .interrupted(_, .providerFailed) =
+            await fixture.invocations.tryReconsiderProfileChange(prepared)
+        else { return XCTFail("retry exhaustion must remain user-retryable") }
+
+        let diagnostics = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(
+            diagnostics.map(\.reason),
+            [
+                .providerAutoRetryable,
+                .providerAutoRetryable,
+                .providerAutoRetryable,
+                .automaticRetriesExhausted,
+            ]
+        )
+        XCTAssertEqual(diagnostics.last?.classification, .providerUserRetryable)
+        XCTAssertEqual(diagnostics.last?.disposition, .userRetryableFailure)
+    }
+
+    func testReconsiderProviderUserRetryableRecordsExactDiagnostic()
+        async throws
+    {
+        let fixture = try ProfileReconsiderationInvocationFixture(
+            retainedActiveEvidence: false,
+            providerOutcomes: [.userRetryableFailure]
+        )
+        let prepared = try await fixture.prepareNew()
+
+        guard case .interrupted(_, .providerFailed) =
+            await fixture.invocations.tryReconsiderProfileChange(prepared)
+        else { return XCTFail("provider failure must remain retryable") }
+
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().first)
+        XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
+        XCTAssertEqual(event.reason, .providerUserRetryable)
+        XCTAssertEqual(event.classification, .providerUserRetryable)
+        XCTAssertEqual(event.disposition, .userRetryableFailure)
+        let installedInvocation = await fixture.persistence.installedInvocation
+        let requests = await fixture.provider.requests
+        XCTAssertEqual(event.invocationID, installedInvocation?.id)
+        XCTAssertEqual(event.attemptID, requests.first?.attemptID)
+        XCTAssertEqual(event.attemptOrdinal, 1)
+        XCTAssertEqual(event.retryNumber, 1)
+    }
+
+    func testReconsiderRetryStaleRevalidationRecordsEligibilityDiagnostic()
+        async throws
+    {
+        let fixture = try ProfileReconsiderationInvocationFixture(
+            retainedActiveEvidence: false,
+            providerOutcomes: [.userRetryableFailure]
+        )
+        let prepared = try await fixture.prepareNew()
+        guard case let .interrupted(current?, .providerFailed) =
+            await fixture.invocations.tryReconsiderProfileChange(prepared)
+        else { return XCTFail("fixture must first retain the exact Retry") }
+        let retry = try RetryProfileReconsiderationInvocationRequest(
+            library: fixture.scope,
+            observedAggregate: current,
+            basis: fixture.basis
+        )
+        await fixture.persistence.rejectNextRevalidationAsIneligible()
+
+        guard case .rejected(_, .eligibilityChanged) =
+            await fixture.invocations.tryReconsiderProfileChange(retry)
+        else { return XCTFail("stale retry must remain an eligibility rejection") }
+
+        let diagnostics = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(
+            diagnostics.map(\.reason),
+            [.providerUserRetryable, .invocationEligibilityChanged]
+        )
+        XCTAssertEqual(diagnostics.last?.classification, .interruption)
+        XCTAssertEqual(diagnostics.last?.disposition, .userRetryableFailure)
     }
 
     func testReconsiderOverflowGetsOnlyOneShorterRepair() async throws {
@@ -204,6 +304,11 @@ final class ProfileReconsiderationInvocationsTests: XCTestCase {
                 DefaultInvocations.shorterRepairInstruction
             )
         )
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().first)
+        XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
+        XCTAssertEqual(event.reason, .responseOverflowRepair)
+        XCTAssertEqual(event.classification, .invalidProviderResponse)
+        XCTAssertEqual(event.disposition, .automaticRetry)
     }
 
     func testPreparedReconsiderCapabilityIsOneShot() async throws {
@@ -437,6 +542,11 @@ final class ProfileReconsiderationInvocationsTests: XCTestCase {
         XCTAssertEqual(providerCount, 1)
         XCTAssertEqual(publicationCount, 1)
         XCTAssertEqual(acquisitionCount, 0)
+        let diagnostics = fixture.diagnostics.recordedEvents()
+        XCTAssertEqual(diagnostics.count, 1)
+        XCTAssertEqual(diagnostics.first?.reason, .publicationPersistenceUnavailable)
+        XCTAssertEqual(diagnostics.first?.classification, .persistenceUnavailable)
+        XCTAssertEqual(diagnostics.first?.disposition, .userRetryableFailure)
     }
 
     func testCommittedAbortTurnsUncertainPublicationIntoOneClickDurableRetry()
@@ -612,6 +722,12 @@ final class ProfileReconsiderationInvocationsTests: XCTestCase {
         XCTAssertEqual(invocationOutcome, .stopped)
         XCTAssertEqual(cancelledAttemptIDs, [authority.attemptID])
         XCTAssertEqual(publicationCount, 0)
+        let event = try XCTUnwrap(fixture.diagnostics.recordedEvents().first)
+        XCTAssertEqual(fixture.diagnostics.recordedEvents().count, 1)
+        XCTAssertEqual(event.reason, .coachResponseStopped)
+        XCTAssertEqual(event.classification, .interruption)
+        XCTAssertEqual(event.disposition, .userRetryableFailure)
+        XCTAssertEqual(event.attemptID, authority.attemptID)
     }
 
     func testUnprovenStopAbortRetainsExactOperationalRetry() async throws {
@@ -698,6 +814,66 @@ final class ProfileReconsiderationInvocationsTests: XCTestCase {
         let invocationOutcome = await task.value
         XCTAssertEqual(invocationOutcome, .stopped)
     }
+
+    func testUnreapedReconsiderStopBlocksAnswerProviderLaunchUntilReaped()
+        async throws
+    {
+        let fixture = try ProfileReconsiderationInvocationFixture(
+            retainedActiveEvidence: false,
+            cancellationOutcomes: [.unableToConfirm, .reaped]
+        )
+        let preparedAnswer = try await fixture.prepareAnswer()
+        let preparedReconsider = try await fixture.prepareNew()
+        await fixture.contextSource.suspendAnswerPostInstallCheck()
+        let answerTask = Task {
+            await fixture.invocations.tryInvoke(preparedAnswer)
+        }
+        await fixture.contextSource.waitForAnswerPostInstallCheck()
+
+        await fixture.provider.suspendNextLaunch()
+        let authorities = ProfileReconsiderationStopAuthorityRecorder()
+        let reconsiderTask = Task {
+            await fixture.invocations.tryReconsiderProfileChange(
+                preparedReconsider,
+                observingStopAuthority: { authority in
+                    await authorities.record(authority)
+                }
+            )
+        }
+        let authority = await authorities.waitForAuthority()
+        let stopRequest = StopProfileReconsiderationInvocationRequest(
+            preparedReconsider.request
+        )
+        let firstStop = await fixture.invocations.stopProfileReconsideration(
+            stopRequest,
+            authority: authority
+        )
+        XCTAssertEqual(firstStop, .unableToReap)
+
+        await fixture.contextSource.resumeAnswerPostInstallCheck()
+        guard case .interrupted(_, .retryInfrastructureFailed) =
+            await answerTask.value
+        else {
+            return XCTFail(
+                "the process-wide unreaped authority must block Answer launch"
+            )
+        }
+        let providerRequestsBeforeReap = await fixture.provider.requests
+        XCTAssertEqual(providerRequestsBeforeReap.count, 1)
+        XCTAssertEqual(
+            providerRequestsBeforeReap.first?.attemptID,
+            authority.attemptID
+        )
+
+        guard case .interrupted =
+            await fixture.invocations.stopProfileReconsideration(
+                stopRequest,
+                authority: authority
+            )
+        else { return XCTFail("the exact Stop authority must finish reaping") }
+        let reconsiderOutcome = await reconsiderTask.value
+        XCTAssertEqual(reconsiderOutcome, .stopped)
+    }
 }
 
 private func fixtureResponse(_ raw: String) -> CoachProviderCompleteResponse {
@@ -710,6 +886,9 @@ private final class ProfileReconsiderationInvocationFixture:
     let scope = LibraryScope(
         libraryID: try! LibraryID("lib-20260909T115000000Z-1ABC")
     )
+    let answerScope = LibraryScope(
+        libraryID: try! LibraryID("lib-20260909T115000000Z-2DEF")
+    )
     let instant = try! UTCInstant("2026-09-09T12:00:00.000Z")
     let observed: ChatAggregate
     let basis: ProfileReconsiderationBasis
@@ -719,6 +898,7 @@ private final class ProfileReconsiderationInvocationFixture:
     let admission: ProfileReconsiderationAdmission
     let provider: ProfileReconsiderationProvider
     let sleeper = ProfileReconsiderationSleeper()
+    let diagnostics = ProfileReconsiderationRetryDiagnostics()
     let contextSource: ProfileReconsiderationContextSource
     let invocations: DefaultInvocations
     let coachMessageIDs: [ChatMessageID]
@@ -895,7 +1075,9 @@ private final class ProfileReconsiderationInvocationFixture:
             persistence: persistence,
             cancellationOutcomes: cancellationOutcomes
         )
-        contextSource = ProfileReconsiderationContextSource()
+        contextSource = ProfileReconsiderationContextSource(
+            profile: basis.latestProfile.provenance
+        )
         coachMessageIDs = try (0 ..< 4).map { ordinal in
             try ChatMessageID(
                 [
@@ -918,6 +1100,7 @@ private final class ProfileReconsiderationInvocationFixture:
             identities: identities,
             memoryIDGenerator: ProfileReconsiderationMemoryIDs(),
             retrySleeper: sleeper,
+            retryDiagnostics: diagnostics,
             transcriptAvailability: .allAvailable
         )
     }
@@ -929,6 +1112,44 @@ private final class ProfileReconsiderationInvocationFixture:
         guard case let .prepared(prepared) = outcome else {
             throw ProfileReconsiderationFixtureError.preparationFailed
         }
+        return prepared
+    }
+
+    func prepareAnswer() async throws -> PreparedPendingCoachInvocation {
+        let empty = try ChatAggregate.newChat(
+            chatID: ChatID("cht-20260909T114500000Z-KVWX"),
+            draftID: ChatDraftID("drf-20260909T114500000Z-KXYZ"),
+            memoryID: CoachMemoryID("mem-20260909T114500000Z-MABC"),
+            instant: instant,
+            profileStatementGeneration:
+                basis.latestProfile.provenance.statementGeneration,
+            attachments: .empty
+        )
+        let draft = try empty.chat.draft.edited(
+            text: "Answer only after Reconsider has been reaped.",
+            at: instant
+        )
+        let observed = try ChatAggregate(
+            chat: empty.chat.replacingDraft(with: draft),
+            memory: empty.memory
+        )
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260909T114500000Z-NDEF"),
+            draftID: draft.draftID,
+            draftVersion: draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260909T114500000Z-PGHJ"
+            ),
+            failure: nil
+        )
+        let request = try NewPendingCoachInvocationRequest(
+            library: answerScope,
+            observedAggregate: observed,
+            pendingUserTurn: pending
+        )
+        guard case let .prepared(prepared) =
+            await invocations.prepareNewInvocation(request)
+        else { throw ProfileReconsiderationFixtureError.preparationFailed }
         return prepared
     }
 
@@ -944,6 +1165,7 @@ private final class ProfileReconsiderationInvocationFixture:
             ),
             memoryIDGenerator: ProfileReconsiderationMemoryIDs(),
             retrySleeper: sleeper,
+            retryDiagnostics: diagnostics,
             transcriptAvailability: .allAvailable
         )
     }
@@ -953,10 +1175,33 @@ private enum ProfileReconsiderationFixtureError: Error {
     case preparationFailed
 }
 
+private final class ProfileReconsiderationRetryDiagnostics:
+    @unchecked Sendable,
+    InvocationRetryDiagnostics
+{
+    private let lock = NSLock()
+    private var events: [InvocationRetryDiagnosticEvent] = []
+
+    func enqueue(_ event: InvocationRetryDiagnosticEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        events.append(event)
+    }
+
+    func recordedEvents() -> [InvocationRetryDiagnosticEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+}
+
 private actor ProfileReconsiderationMemoryPersistence:
     InvocationPersistencePort
 {
     private var aggregate: ChatAggregate
+    private var answerAggregate: ChatAggregate?
+    private var answerReservation: InvocationPendingAuthority?
+    private var answerActiveInvocation: CoachInvocation?
     private var reservation:
         (authority: InvocationProfileReconsiderationAuthority, provisional: Bool)?
     private(set) var activeInvocation: CoachInvocation?
@@ -1005,11 +1250,147 @@ private actor ProfileReconsiderationMemoryPersistence:
 
     func openNewPendingInvocation(
         _ request: NewPendingCoachInvocationRequest
-    ) async -> InvocationPendingSessionPreparationOutcome { .unavailable }
+    ) async -> InvocationPendingSessionPreparationOutcome {
+        guard answerReservation == nil, answerActiveInvocation == nil else {
+            return .blockedByActiveInvocation
+        }
+        do {
+            let locked = try ChatAggregate(
+                chat: request.observedAggregate.chat,
+                memory: request.observedAggregate.memory,
+                messages: request.observedAggregate.messages,
+                pendingUserTurn: request.pendingUserTurn,
+                profileProposal: request.observedAggregate.profileProposal,
+                profileEvidencePublication:
+                    request.observedAggregate.profileEvidencePublication
+            )
+            let pendingRequest = PendingCoachInvocationRequest(
+                library: request.library,
+                chatID: request.chatID,
+                pendingUserTurnID: request.pendingUserTurn.id
+            )
+            let authority = try InvocationPendingAuthority(
+                request: pendingRequest,
+                aggregate: locked
+            )
+            answerAggregate = locked
+            answerReservation = authority
+            return .opened(
+                ProfileReconsiderationAnswerPendingSession(
+                    persistence: self,
+                    authority: authority
+                )
+            )
+        } catch {
+            return .unavailable
+        }
+    }
 
     func openPendingInvocation(
         _ request: PendingCoachInvocationRequest
     ) async -> InvocationPendingSessionAcquisitionOutcome { .unavailable }
+
+    func revalidateAnswer(
+        _ authority: InvocationPendingAuthority
+    ) -> InvocationPendingResolutionOutcome {
+        guard answerReservation == authority else { return .unavailable }
+        return .eligible(authority)
+    }
+
+    func checkAnswerIdentity(
+        _ identity: InvocationLaunchIdentity,
+        authority: InvocationPendingAuthority
+    ) -> InvocationLaunchIdentityAvailabilityOutcome {
+        guard answerReservation == authority else { return .unavailable }
+        return .available
+    }
+
+    func installAnswer(
+        _ mutation: InstallCoachInvocationMutation
+    ) -> InvocationSessionInstallOutcome {
+        guard answerReservation == mutation.authority else {
+            return .stale(answerAggregate)
+        }
+        answerReservation = nil
+        answerAggregate = mutation.processingAggregate
+        answerActiveInvocation = mutation.invocation
+        return .installed(
+            ProfileReconsiderationAnswerActiveSession(
+                persistence: self,
+                invocation: mutation.invocation,
+                processingAggregate: mutation.processingAggregate
+            )
+        )
+    }
+
+    func terminateAnswer(
+        _ authority: InvocationPendingAuthority,
+        termination: InvocationPendingTermination
+    ) -> InvocationTerminalPersistenceOutcome {
+        guard answerReservation == authority,
+              let current = answerAggregate,
+              let pending = current.pendingUserTurn
+        else { return .recovered(.unavailable) }
+        answerReservation = nil
+        do {
+            switch termination {
+            case .rejected:
+                answerAggregate = try ChatAggregate(
+                    chat: current.chat,
+                    memory: current.memory,
+                    messages: current.messages
+                )
+            case .contextCapacityFailure:
+                answerAggregate = try ChatAggregate(
+                    chat: current.chat,
+                    memory: current.memory,
+                    messages: current.messages,
+                    pendingUserTurn: pending.replacingFailure(
+                        .coachContextCannotFit
+                    )
+                )
+            case .interrupted:
+                answerAggregate = try ChatAggregate(
+                    chat: current.chat,
+                    memory: current.memory,
+                    messages: current.messages,
+                    pendingUserTurn: pending.replacingFailure(
+                        .coachResponseInterrupted
+                    )
+                )
+            }
+            return .committed(answerAggregate!)
+        } catch {
+            return .recovered(.unavailable)
+        }
+    }
+
+    func abandonAnswer(_ authority: InvocationPendingAuthority) {
+        guard answerReservation == authority else { return }
+        answerReservation = nil
+    }
+
+    func abortAnswer(
+        invocation: CoachInvocation,
+        failure: PendingUserTurnFailure
+    ) -> InvocationTerminalPersistenceOutcome {
+        guard answerActiveInvocation == invocation,
+              let current = answerAggregate,
+              let pending = current.pendingUserTurn
+        else { return .recovered(.unavailable) }
+        answerActiveInvocation = nil
+        do {
+            answerAggregate = try ChatAggregate(
+                chat: current.chat,
+                memory: current.memory,
+                messages: current.messages,
+                pendingUserTurn: pending.replacingFailure(failure)
+            )
+            return .committed(answerAggregate!)
+        } catch {
+            return .recovered(.unavailable)
+        }
+    }
 
     func openNewProfileReconsiderationInvocation(
         _ request: NewProfileReconsiderationInvocationRequest
@@ -1347,6 +1728,111 @@ private actor ProfileReconsiderationMemoryPersistence:
 
 }
 
+private actor ProfileReconsiderationAnswerPendingSession:
+    InvocationPendingPersistenceSession
+{
+    nonisolated let authority: InvocationPendingAuthority
+    private let persistence: ProfileReconsiderationMemoryPersistence
+    private var active = true
+
+    init(
+        persistence: ProfileReconsiderationMemoryPersistence,
+        authority: InvocationPendingAuthority
+    ) {
+        self.persistence = persistence
+        self.authority = authority
+    }
+
+    func revalidate() async -> InvocationPendingResolutionOutcome {
+        guard active else { return .unavailable }
+        return await persistence.revalidateAnswer(authority)
+    }
+
+    func checkLaunchIdentity(
+        _ identity: InvocationLaunchIdentity
+    ) async -> InvocationLaunchIdentityAvailabilityOutcome {
+        guard active else { return .unavailable }
+        return await persistence.checkAnswerIdentity(
+            identity,
+            authority: authority
+        )
+    }
+
+    func install(
+        _ mutation: InstallCoachInvocationMutation
+    ) async -> InvocationSessionInstallOutcome {
+        guard active else { return .failed }
+        let outcome = await persistence.installAnswer(mutation)
+        if case .installed = outcome { active = false }
+        return outcome
+    }
+
+    func terminate(
+        _ termination: InvocationPendingTermination
+    ) async -> InvocationTerminalPersistenceOutcome {
+        guard active else { return .recovered(.unavailable) }
+        active = false
+        return await persistence.terminateAnswer(
+            authority,
+            termination: termination
+        )
+    }
+
+    func abandon() async {
+        guard active else { return }
+        active = false
+        await persistence.abandonAnswer(authority)
+    }
+}
+
+private actor ProfileReconsiderationAnswerActiveSession:
+    InvocationActivePersistenceSession
+{
+    nonisolated let invocation: CoachInvocation
+    nonisolated let processingAggregate: ChatAggregate
+    private let persistence: ProfileReconsiderationMemoryPersistence
+    private var active = true
+
+    init(
+        persistence: ProfileReconsiderationMemoryPersistence,
+        invocation: CoachInvocation,
+        processingAggregate: ChatAggregate
+    ) {
+        self.persistence = persistence
+        self.invocation = invocation
+        self.processingAggregate = processingAggregate
+    }
+
+    func installNextAttempt(
+        _ mutation: InstallNextCoachProviderAttemptMutation
+    ) async -> InvocationNextAttemptInstallOutcome {
+        .failed
+    }
+
+    func abort(
+        failure: PendingUserTurnFailure
+    ) async -> InvocationTerminalPersistenceOutcome {
+        guard active else { return .recovered(.unavailable) }
+        active = false
+        return await persistence.abortAnswer(
+            invocation: invocation,
+            failure: failure
+        )
+    }
+
+    func publish(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationOutcome {
+        .failed
+    }
+
+    func recoverPublished(
+        _ mutation: PublishCoachInvocationMutation
+    ) async -> InvocationPublicationRecoveryOutcome {
+        .unavailable
+    }
+}
+
 private actor ProfileReconsiderationPendingSession:
     InvocationProfileReconsiderationPersistenceSession
 {
@@ -1552,8 +2038,30 @@ private actor ProfileReconsiderationSleeper: InvocationRetrySleeping {
 }
 
 private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
+    private let profile: CoachProfileProvenance
     private(set) var reconsiderResolutionCount = 0
     private(set) var lastBasis: ProfileReconsiderationBasis?
+    private var pendingCurrentCheckCount = 0
+    private var shouldSuspendAnswerPostInstallCheck = false
+    private var answerPostInstallContinuation:
+        CheckedContinuation<Void, Never>?
+
+    init(profile: CoachProfileProvenance) {
+        self.profile = profile
+    }
+
+    func suspendAnswerPostInstallCheck() {
+        shouldSuspendAnswerPostInstallCheck = true
+    }
+
+    func waitForAnswerPostInstallCheck() async {
+        while answerPostInstallContinuation == nil { await Task.yield() }
+    }
+
+    func resumeAnswerPostInstallCheck() {
+        answerPostInstallContinuation?.resume()
+        answerPostInstallContinuation = nil
+    }
 
     func resolveNewChat(
         _ request: CoachContextNewChatQuoteRequest
@@ -1565,7 +2073,40 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
 
     func resolvePendingUserTurn(
         _ request: CoachContextPendingTurnRequest
-    ) async -> CoachContextSnapshotOutcome { .sourceUnavailable }
+    ) async -> CoachContextSnapshotOutcome {
+        do {
+            return .resolved(
+                try CoachContextResolvedSnapshot(
+                    input: CoachContextQuoteInput(
+                        profile: .object(["statements": .array([])]),
+                        memory: .object([
+                            "generalNotes": .string(""),
+                            "sessionSummaries": .array([]),
+                        ]),
+                        history: [],
+                        currentDraft: request.draft.text
+                    ),
+                    configuration: try fixtureContextConfiguration(),
+                    authority: CoachContextSnapshotAuthority(
+                        binding: .pending(
+                            library: request.library,
+                            chatID: request.chatID,
+                            draftID: request.draft.draftID,
+                            draftVersion: request.draft.version,
+                            pendingUserTurnID: request.pendingUserTurn.id,
+                            responsePositionID:
+                                request.pendingUserTurn.responsePositionID
+                        ),
+                        contextGeneration: 1,
+                        configurationGeneration: 1,
+                        profile: profile
+                    )
+                )
+            )
+        } catch {
+            return .sourceUnavailable
+        }
+    }
 
     func resolveReconsider(
         _ request: CoachContextReconsiderRequest
@@ -1595,27 +2136,7 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
                         reconsidering: request,
                         attachments: attachments
                     ),
-                    configuration: try CoachContextConfiguration(
-                        descriptor: CoachProviderDescriptor(
-                            displayName: "Reconsider fixture",
-                            contextBudget: CoachContextBudget(
-                                contextWindowTokens: 100_000,
-                                responseReservedTokens: 2_048,
-                                safetyMarginTokens: 1
-                            ),
-                            coachMemoryMaxTokens: 2_048
-                        ),
-                        policy: CoachProviderEstimationPolicy(
-                            providerIdentifier: "reconsider-fixture-v1",
-                            responseCollectorByteCeiling: 64_000,
-                            framing: CoachProviderFraming(),
-                            attachmentProjectionPolicy:
-                                try CoachAttachmentProjectionPolicy(
-                                    maximumInlineTranscriptTokens: 1_024,
-                                    tokenEstimator: .utf8ByteUpperBound()
-                                )
-                        )
-                    ),
+                    configuration: try fixtureContextConfiguration(),
                     authority: CoachContextSnapshotAuthority(
                         binding: .reconsider(request),
                         contextGeneration: 1,
@@ -1630,13 +2151,49 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
     }
 
     func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
-        true
+        if case .pending = authority.binding {
+            pendingCurrentCheckCount += 1
+            if pendingCurrentCheckCount > 1,
+               shouldSuspendAnswerPostInstallCheck
+            {
+                shouldSuspendAnswerPostInstallCheck = false
+                await withCheckedContinuation {
+                    answerPostInstallContinuation = $0
+                }
+            }
+        }
+        return true
     }
 
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
         await acquireImmutableAuthorityLease(authority)
+    }
+
+    private func fixtureContextConfiguration() throws
+        -> CoachContextConfiguration
+    {
+        try CoachContextConfiguration(
+            descriptor: CoachProviderDescriptor(
+                displayName: "Reconsider fixture",
+                contextBudget: CoachContextBudget(
+                    contextWindowTokens: 100_000,
+                    responseReservedTokens: 2_048,
+                    safetyMarginTokens: 1
+                ),
+                coachMemoryMaxTokens: 2_048
+            ),
+            policy: CoachProviderEstimationPolicy(
+                providerIdentifier: "reconsider-fixture-v1",
+                responseCollectorByteCeiling: 64_000,
+                framing: CoachProviderFraming(),
+                attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
+                    maximumInlineTranscriptTokens: 1_024,
+                    tokenEstimator: .utf8ByteUpperBound()
+                )
+            )
+        )
     }
 }
 
