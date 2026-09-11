@@ -16,6 +16,32 @@ public struct FrozenChatSnapshot: Equatable, Sendable {
     }
 }
 
+public enum ChatActivityIndicator: Equatable, Sendable {
+    case idle
+    case processing
+    case interrupted
+    case newMessage
+}
+
+public enum ProfileUpdateIndicator: Equatable, Sendable {
+    case none
+    case pendingApproval
+    case publicationFailure
+}
+
+public struct ChatRowIndicators: Equatable, Sendable {
+    public let activity: ChatActivityIndicator
+    public let profileUpdate: ProfileUpdateIndicator
+
+    public init(
+        activity: ChatActivityIndicator,
+        profileUpdate: ProfileUpdateIndicator
+    ) {
+        self.activity = activity
+        self.profileUpdate = profileUpdate
+    }
+}
+
 public struct ChatRowSnapshot: Equatable, Sendable {
     public enum Availability: Equatable, Sendable {
         case available
@@ -27,13 +53,44 @@ public struct ChatRowSnapshot: Equatable, Sendable {
     public let createdAt: UTCInstant?
     public let updatedAt: UTCInstant?
     public let availability: Availability
+    /// Durable lifecycle projection before process-local overlays are applied
+    /// by `ChatFeatureState.indicators(for:isUnread:)`.
+    public let restingIndicators: ChatRowIndicators
+    /// An exact process-live Retry capability retained for this Chat even when
+    /// another row is selected. It is never reconstructed after relaunch.
+    public let hasOperationalInterruption: Bool
+    /// The tail changes only when a complete response is atomically published.
+    /// Presentation uses it as a process-local unread revision; it is not a
+    /// portable read receipt.
+    public let latestCompletedResponseMessageID: ChatMessageID?
 
-    public init(aggregate: ChatAggregate) {
+    public init(
+        aggregate: ChatAggregate,
+        hasOperationalInterruption: Bool = false
+    ) {
         chatID = aggregate.chat.id
         title = aggregate.chat.title
         createdAt = aggregate.chat.createdAt
         updatedAt = aggregate.chat.updatedAt
         availability = .available
+        let isInterrupted = aggregate.pendingUserTurn?.failure != nil ||
+            aggregate.profileReconsideration?.failure != nil
+        let activity: ChatActivityIndicator = if isInterrupted {
+            .interrupted
+        } else {
+            .idle
+        }
+        let profileUpdate: ProfileUpdateIndicator = switch aggregate.profileEffect {
+        case .some(.proposal): .pendingApproval
+        case .some(.evidencePublication): .publicationFailure
+        case nil: .none
+        }
+        restingIndicators = ChatRowIndicators(
+            activity: activity,
+            profileUpdate: profileUpdate
+        )
+        self.hasOperationalInterruption = hasOperationalInterruption
+        latestCompletedResponseMessageID = aggregate.chat.messageIDs.last
     }
 
     public init(frozen: FrozenChatSnapshot) {
@@ -42,6 +99,12 @@ public struct ChatRowSnapshot: Equatable, Sendable {
         createdAt = nil
         updatedAt = nil
         availability = .frozen(frozen.reason)
+        restingIndicators = ChatRowIndicators(
+            activity: .idle,
+            profileUpdate: .none
+        )
+        hasOperationalInterruption = false
+        latestCompletedResponseMessageID = nil
     }
 }
 
@@ -186,6 +249,10 @@ public struct ChatFeatureState: Equatable, Sendable {
     /// resumption after relaunch.
     public let operationallyInterruptedProfileReconsideration:
         ProfileReconsiderationInvocationRequest?
+    /// Process-local failed Accept state for the current selection, kept
+    /// separate from the proposal so permission and persistence failures can
+    /// use the Profile failure indicator. Navigation clears it.
+    public let failedProfileProposalAcceptanceChatID: ChatID?
     /// Process-live, Attempt-scoped capability presented only while the exact
     /// active Coach response can still be stopped.
     public let coachInvocationStopAuthority: InvocationStopAuthority?
@@ -212,6 +279,7 @@ public struct ChatFeatureState: Equatable, Sendable {
         operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
         operationallyInterruptedProfileReconsideration:
             ProfileReconsiderationInvocationRequest? = nil,
+        failedProfileProposalAcceptanceChatID: ChatID? = nil,
         coachInvocationStopAuthority: InvocationStopAuthority? = nil,
         profileReconsiderationStopAuthority:
             ProfileReconsiderationInvocationStopAuthority? = nil,
@@ -234,6 +302,8 @@ public struct ChatFeatureState: Equatable, Sendable {
         self.operationallyInterruptedInvocation = operationallyInterruptedInvocation
         self.operationallyInterruptedProfileReconsideration =
             operationallyInterruptedProfileReconsideration
+        self.failedProfileProposalAcceptanceChatID =
+            failedProfileProposalAcceptanceChatID
         self.coachInvocationStopAuthority = coachInvocationStopAuthority
         self.profileReconsiderationStopAuthority =
             profileReconsiderationStopAuthority
@@ -282,5 +352,84 @@ public struct ChatFeatureState: Equatable, Sendable {
                 request.resultResponsePositionID
         else { return false }
         return true
+    }
+
+    /// Combines a row's durable lifecycle with the one process-live operation
+    /// and Presentation's process-local unread observation. Activity has a
+    /// single priority so one Chat never accumulates competing status icons;
+    /// the independent Profile projection is deliberately preserved.
+    public func indicators(
+        for row: ChatRowSnapshot,
+        isUnread: Bool = false
+    ) -> ChatRowIndicators {
+        guard case .available = row.availability else {
+            return row.restingIndicators
+        }
+        let activity: ChatActivityIndicator
+        if self.activity?.processingChatID == row.chatID {
+            activity = .processing
+        } else if row.hasOperationalInterruption ||
+            hasOperationalInterruption(for: row.chatID)
+        {
+            activity = .interrupted
+        } else if row.restingIndicators.activity == .idle, isUnread {
+            activity = .newMessage
+        } else {
+            activity = row.restingIndicators.activity
+        }
+
+        let profileUpdate: ProfileUpdateIndicator
+        if failedProfileProposalAcceptanceChatID == row.chatID,
+           row.restingIndicators.profileUpdate == .pendingApproval
+        {
+            profileUpdate = .publicationFailure
+        } else if self.activity == .publishingProfileEvidence(row.chatID),
+           row.restingIndicators.profileUpdate == .publicationFailure
+        {
+            profileUpdate = .none
+        } else {
+            profileUpdate = row.restingIndicators.profileUpdate
+        }
+        return ChatRowIndicators(
+            activity: activity,
+            profileUpdate: profileUpdate
+        )
+    }
+
+    private func hasOperationalInterruption(for chatID: ChatID) -> Bool {
+        guard case let .open(aggregate) = selection,
+              aggregate.chat.id == chatID
+        else { return false }
+        if let pending = aggregate.pendingUserTurn,
+           isCoachResponseRetryableFailure(pending)
+        {
+            return true
+        }
+        if let reconsideration = aggregate.profileReconsideration,
+           isProfileReconsiderationRetryableFailure(reconsideration)
+        {
+            return true
+        }
+        return false
+    }
+}
+
+public extension ChatFeatureState.Activity {
+    var processingChatID: ChatID? {
+        switch self {
+        case let .invokingCoach(chatID),
+             let .stoppingCoach(chatID),
+             let .retryingPendingUserTurn(chatID),
+             let .reconsideringProfileEffect(chatID),
+             let .stoppingProfileReconsideration(chatID):
+            chatID
+        case .creating, .renaming, .lockingDraft,
+             .discardingPendingUserTurn, .acceptingProfileProposal,
+             .discardingProfileProposal, .publishingProfileEvidence,
+             .retryingProfileEvidencePublication,
+             .discardingProfileEvidencePublication,
+             .discardingProfileReconsiderationFailure:
+            nil
+        }
     }
 }

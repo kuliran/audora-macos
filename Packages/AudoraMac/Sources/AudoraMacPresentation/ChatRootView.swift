@@ -412,6 +412,98 @@ enum ProfileEvidencePublicationFailurePresentation {
     }
 }
 
+struct ChatRowIndicatorPresentation: Equatable {
+    let indicators: ChatRowIndicators
+
+    var activityAccessibilityLabel: String? {
+        switch indicators.activity {
+        case .idle: nil
+        case .processing: "Coach response in progress"
+        case .interrupted: "Coach response needs attention"
+        case .newMessage: "New Coach message"
+        }
+    }
+
+    var profileAccessibilityLabel: String? {
+        switch indicators.profileUpdate {
+        case .none: nil
+        case .pendingApproval: "Profile changes awaiting approval"
+        case .publicationFailure: "Profile update could not be saved"
+        }
+    }
+
+    var activitySymbolName: String? {
+        switch indicators.activity {
+        case .idle, .processing: nil
+        case .interrupted: "exclamationmark.circle.fill"
+        case .newMessage: "circle.fill"
+        }
+    }
+
+    var profileSymbolName: String? {
+        switch indicators.profileUpdate {
+        case .none: nil
+        case .pendingApproval: "person.crop.circle.badge.questionmark"
+        case .publicationFailure: "exclamationmark.triangle.fill"
+        }
+    }
+
+    var hasVisibleIndicator: Bool {
+        indicators.activity != .idle || indicators.profileUpdate != .none
+    }
+
+    func accessibilityLabel(for row: ChatRowSnapshot) -> String {
+        let openingLabel = row.title.map { "Open Chat, \($0.rawValue)" }
+            ?? "Open unavailable Chat"
+        let availabilityLabel: String? = switch row.availability {
+        case .available: nil
+        case .frozen(.newerSchema): "Chat is read-only"
+        case .frozen(.corrupt), .frozen(.unsupportedSchema):
+            "Chat is unavailable"
+        }
+        return ([openingLabel] + [
+            availabilityLabel,
+            activityAccessibilityLabel,
+            profileAccessibilityLabel,
+        ].compactMap { $0 })
+            .map { $0 + "." }
+            .joined(separator: " ")
+    }
+}
+
+struct SlowChatRowSpinner: View {
+    /// A deliberately calm cadence: one full turn is slower than the system's
+    /// compact indeterminate progress treatment.
+    static let rotationDuration: TimeInterval = 1.8
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isRotating = false
+
+    var body: some View {
+        Circle()
+            .trim(from: 0.12, to: 0.78)
+            .stroke(
+                Color.secondary,
+                style: StrokeStyle(lineWidth: 1.5, lineCap: .round)
+            )
+            .frame(width: 11, height: 11)
+            .rotationEffect(.degrees(isRotating ? 360 : 0))
+            .animation(
+                reduceMotion
+                    ? nil
+                    : .linear(duration: Self.rotationDuration)
+                        .repeatForever(autoreverses: false),
+                value: isRotating
+            )
+            .onAppear {
+                isRotating = !reduceMotion
+            }
+            .onChange(of: reduceMotion) { _, newValue in
+                isRotating = !newValue
+            }
+    }
+}
+
 enum ChatActivityPresentation {
     static func progressLabel(
         for activity: ChatFeatureState.Activity?
@@ -436,6 +528,22 @@ enum ChatActivityPresentation {
             "Restoring Profile suggestion actions…"
         case nil: nil
         }
+    }
+
+    static func usesChatRowSpinner(
+        for activity: ChatFeatureState.Activity?
+    ) -> Bool {
+        activity?.processingChatID != nil
+    }
+
+    static func usesVisibleChatRowSpinner(
+        for activity: ChatFeatureState.Activity?,
+        visibleChatIDs: [ChatID]
+    ) -> Bool {
+        guard let processingChatID = activity?.processingChatID else {
+            return false
+        }
+        return visibleChatIDs.contains(processingChatID)
     }
 }
 
@@ -943,12 +1051,16 @@ public struct ChatRootView: View {
                 )
             } else {
                 List(catalog.visibleRows, id: \.chatID) { row in
+                    let indicatorPresentation = ChatRowIndicatorPresentation(
+                        indicators: model.indicators(for: row)
+                    )
                     Button {
                         model.open(row.chatID)
                     } label: {
                         HStack {
                             Text(row.title?.rawValue ?? "Unavailable Chat")
                             Spacer()
+                            chatRowIndicators(indicatorPresentation)
                             if case .frozen = row.availability {
                                 Image(systemName: "lock.fill")
                                     .accessibilityHidden(true)
@@ -957,13 +1069,47 @@ public struct ChatRootView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(
-                        row.title.map { "Open Chat, \($0.rawValue)" }
-                            ?? "Open unavailable Chat"
+                        indicatorPresentation.accessibilityLabel(for: row)
                     )
                     .disabled(!allowsNavigationAndMutation)
                 }
                 .listStyle(.sidebar)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func chatRowIndicators(
+        _ presentation: ChatRowIndicatorPresentation
+    ) -> some View {
+        if presentation.hasVisibleIndicator {
+            HStack(spacing: 7) {
+                switch presentation.indicators.activity {
+                case .idle:
+                    EmptyView()
+                case .processing:
+                    SlowChatRowSpinner()
+                        .help(presentation.activityAccessibilityLabel ?? "")
+                case .interrupted:
+                    Image(systemName: presentation.activitySymbolName ?? "")
+                        .foregroundStyle(.orange)
+                        .help(presentation.activityAccessibilityLabel ?? "")
+                case .newMessage:
+                    Image(systemName: presentation.activitySymbolName ?? "")
+                        .font(.system(size: 7, weight: .semibold))
+                        .foregroundStyle(.tint)
+                        .help(presentation.activityAccessibilityLabel ?? "")
+                }
+                if let profileSymbolName = presentation.profileSymbolName {
+                    Image(systemName: profileSymbolName)
+                        .foregroundStyle(
+                            presentation.indicators.profileUpdate ==
+                                .publicationFailure ? .red : .purple
+                        )
+                        .help(presentation.profileAccessibilityLabel ?? "")
+                }
+            }
+            .accessibilityHidden(true)
         }
     }
 
@@ -1708,8 +1854,35 @@ public struct ChatRootView: View {
         if let label = ChatActivityPresentation.progressLabel(
             for: model.snapshot.activity
         ) {
-            ProgressView(label)
+            if ChatActivityPresentation.usesVisibleChatRowSpinner(
+                for: model.snapshot.activity,
+                visibleChatIDs: visibleChatIDs
+            ) {
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if ChatActivityPresentation.usesChatRowSpinner(
+                for: model.snapshot.activity
+            ) {
+                HStack(spacing: 7) {
+                    SlowChatRowSpinner()
+                    Text(label)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(label)
+            } else {
+                ProgressView(label)
+            }
         }
+    }
+
+    private var visibleChatIDs: [ChatID] {
+        guard case let .ready(catalog) = model.snapshot.catalog else {
+            return []
+        }
+        return catalog.visibleRows.map(\.chatID)
     }
 
     @ViewBuilder

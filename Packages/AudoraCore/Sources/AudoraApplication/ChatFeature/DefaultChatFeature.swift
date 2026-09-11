@@ -135,6 +135,8 @@ public actor DefaultChatFeature: ChatFeature {
     /// Process-live capabilities outlive selection changes, but never relaunch.
     /// Durable failure-free sidecars are only projected as Retry when one of
     /// these exact requests is still owned by `Invocations` in this process.
+    private var operationalCoachRetryRequests:
+        [PendingCoachInvocationRequest] = []
     private var operationalProfileReconsiderationRetryRequests:
         [ProfileReconsiderationInvocationRequest] = []
     private var state = ChatFeatureState()
@@ -1293,10 +1295,25 @@ public actor DefaultChatFeature: ChatFeature {
             case let .loaded(aggregate):
                 base = aggregate
             case let .frozen(frozen):
-                install(frozen, selection: .frozen(frozen), notice: .chatFrozen)
+                install(
+                    frozen,
+                    selection: selectionReplacing(
+                        chatID,
+                        with: .frozen(frozen)
+                    ),
+                    notice: .chatFrozen
+                )
                 return
             case .missing:
-                state = replacing(activity: nil, notice: .chatMissing)
+                forgetOperationalRetries(for: chatID, in: library)
+                state = replacing(
+                    catalog: catalogRemovingChat(chatID),
+                    failedProfileProposalAcceptanceChatID: nil,
+                    replacesFailedProfileProposalAcceptanceChatID:
+                        state.failedProfileProposalAcceptanceChatID == chatID,
+                    activity: nil,
+                    notice: .chatMissing
+                )
                 publish()
                 return
             case .readOnlyLibrary:
@@ -1331,8 +1348,11 @@ public actor DefaultChatFeature: ChatFeature {
             return
         }
         if base.chat.title == title {
-            state = replacing(activity: nil, notice: nil)
-            publish()
+            install(
+                base,
+                selection: selectionReplacing(chatID, with: .open(base)),
+                notice: nil
+            )
             return
         }
 
@@ -1393,6 +1413,8 @@ public actor DefaultChatFeature: ChatFeature {
                     state.operationallyInterruptedInvocation,
                 operationallyInterruptedProfileReconsideration:
                     state.operationallyInterruptedProfileReconsideration,
+                failedProfileProposalAcceptanceChatID:
+                    state.failedProfileProposalAcceptanceChatID,
                 coachInvocationStopAuthority:
                     state.coachInvocationStopAuthority,
                 profileReconsiderationStopAuthority:
@@ -1426,6 +1448,8 @@ public actor DefaultChatFeature: ChatFeature {
                 state.operationallyInterruptedInvocation,
             operationallyInterruptedProfileReconsideration:
                 state.operationallyInterruptedProfileReconsideration,
+            failedProfileProposalAcceptanceChatID:
+                state.failedProfileProposalAcceptanceChatID,
             coachInvocationStopAuthority:
                 state.coachInvocationStopAuthority,
             profileReconsiderationStopAuthority:
@@ -1448,6 +1472,12 @@ public actor DefaultChatFeature: ChatFeature {
             selection: .opening(chatID),
             composer: nil,
             replacesComposer: true,
+            operationallyInterruptedInvocation: nil,
+            replacesOperationallyInterruptedInvocation: true,
+            operationallyInterruptedProfileReconsideration: nil,
+            replacesOperationallyInterruptedProfileReconsideration: true,
+            failedProfileProposalAcceptanceChatID: nil,
+            replacesFailedProfileProposalAcceptanceChatID: true,
             openedAttachments: .notRequested,
             activity: nil,
             notice: nil
@@ -1482,12 +1512,20 @@ public actor DefaultChatFeature: ChatFeature {
         case let .frozen(frozen):
             install(frozen, selection: .frozen(frozen), notice: .chatFrozen)
         case .missing:
+            forgetOperationalRetries(
+                for: chatID,
+                in: context.libraryScope
+            )
             state = replacing(
+                catalog: catalogRemovingChat(chatID),
                 selection: ChatFeatureState.Selection.none,
                 composer: nil,
                 replacesComposer: true,
                 currentProfileStatementGeneration: nil,
                 replacesCurrentProfileStatementGeneration: true,
+                failedProfileProposalAcceptanceChatID: nil,
+                replacesFailedProfileProposalAcceptanceChatID:
+                    state.failedProfileProposalAcceptanceChatID == chatID,
                 activity: nil,
                 notice: .chatMissing
             )
@@ -2323,6 +2361,7 @@ public actor DefaultChatFeature: ChatFeature {
                 publish()
             }
         case let .operationallyInterrupted(current, request, _):
+            rememberOperationalCoachRetry(request)
             if let current = preferredOperationalInterruptionAggregate(
                 current,
                 request: request
@@ -2356,21 +2395,17 @@ public actor DefaultChatFeature: ChatFeature {
         _ observed: ChatAggregate?,
         request: PendingCoachInvocationRequest
     ) -> ChatAggregate? {
-        func exactFailureFreePending(_ aggregate: ChatAggregate?) -> ChatAggregate? {
-            guard let aggregate,
-                  aggregate.chat.id == request.chatID,
-                  let pending = aggregate.pendingUserTurn,
-                  pending.id == request.pendingUserTurnID,
-                  pending.failure == nil
-            else { return nil }
-            return aggregate
-        }
-
         let selected: ChatAggregate? = {
             guard case let .open(aggregate) = state.selection else { return nil }
-            return exactFailureFreePending(aggregate)
+            return exactFailureFreePendingAggregate(
+                aggregate,
+                request: request
+            )
         }()
-        let observed = exactFailureFreePending(observed)
+        let observed = exactFailureFreePendingAggregate(
+            observed,
+            request: request
+        )
         switch (selected, observed) {
         case let (.some(selected), .some(observed)):
             return preferredOperationalAggregate(
@@ -2457,6 +2492,8 @@ public actor DefaultChatFeature: ChatFeature {
               state.profileEffectReview == .current(.proposal(proposalID))
         else { return }
         state = replacing(
+            failedProfileProposalAcceptanceChatID: nil,
+            replacesFailedProfileProposalAcceptanceChatID: true,
             activity: .acceptingProfileProposal(aggregate.chat.id),
             notice: nil
         )
@@ -2497,6 +2534,8 @@ public actor DefaultChatFeature: ChatFeature {
               )
         else { return }
         state = replacing(
+            failedProfileProposalAcceptanceChatID: nil,
+            replacesFailedProfileProposalAcceptanceChatID: true,
             activity: .discardingProfileProposal(aggregate.chat.id),
             notice: nil
         )
@@ -2514,6 +2553,12 @@ public actor DefaultChatFeature: ChatFeature {
         failureNotice: ChatNotice
     ) async {
         guard isActive(context) else { return }
+        let failedAcceptanceChatID: ChatID? = {
+            guard failureNotice == .profileProposalAcceptFailed,
+                  case let .open(aggregate) = state.selection
+            else { return nil }
+            return aggregate.chat.id
+        }()
         switch outcome {
         case let .committed(current):
             let profileStatementGeneration = await profileReader
@@ -2544,10 +2589,24 @@ public actor DefaultChatFeature: ChatFeature {
                 profileEffectReview: assessed.review
             )
         case .readOnlyLibrary:
-            state = replacing(activity: nil, notice: .readOnlyLibrary)
+            state = replacing(
+                failedProfileProposalAcceptanceChatID:
+                    failedAcceptanceChatID,
+                replacesFailedProfileProposalAcceptanceChatID:
+                    failedAcceptanceChatID != nil,
+                activity: nil,
+                notice: .readOnlyLibrary
+            )
             publish()
         case .failed:
-            state = replacing(activity: nil, notice: failureNotice)
+            state = replacing(
+                failedProfileProposalAcceptanceChatID:
+                    failedAcceptanceChatID,
+                replacesFailedProfileProposalAcceptanceChatID:
+                    failedAcceptanceChatID != nil,
+                activity: nil,
+                notice: failureNotice
+            )
             publish()
         }
     }
@@ -2780,6 +2839,9 @@ public actor DefaultChatFeature: ChatFeature {
         )
         retainProviderReapAuthority(from: outcome)
         guard isActive(context) else { return }
+        if case .rejected(_, .eligibilityChanged) = outcome {
+            forgetOperationalCoachRetry(request)
+        }
         let presentedOutcome: InvocationTryOutcome
         if case let .interrupted(nil, reason) = outcome,
            let retryOperationalInterruption
@@ -2835,6 +2897,7 @@ public actor DefaultChatFeature: ChatFeature {
         guard case .rejected(nil, .eligibilityChanged) = outcome,
               request.library == context.libraryScope
         else { return }
+        forgetOperationalCoachRetry(request)
         await open(request.chatID, context: context)
     }
 
@@ -2887,6 +2950,8 @@ public actor DefaultChatFeature: ChatFeature {
                 state.operationallyInterruptedInvocation,
             operationallyInterruptedProfileReconsideration:
                 state.operationallyInterruptedProfileReconsideration,
+            failedProfileProposalAcceptanceChatID:
+                state.failedProfileProposalAcceptanceChatID,
             coachInvocationStopAuthority:
                 state.coachInvocationStopAuthority,
             profileReconsiderationStopAuthority:
@@ -3326,63 +3391,95 @@ public actor DefaultChatFeature: ChatFeature {
         operationallyInterruptedInvocation: PendingCoachInvocationRequest? = nil,
         operationallyInterruptedProfileReconsideration:
             ProfileReconsiderationInvocationRequest? = nil,
+        exposesSelectedOperationalProfileReconsiderationRetry: Bool = true,
         profileEffectReview: ProfileEffectReviewState? = nil
     ) {
-        var rows = currentAllRows.filter { $0.chatID != aggregate.chat.id }
-        rows.append(ChatRowSnapshot(aggregate: aggregate))
         let installedComposer: ChatComposerState?
         if case let .open(selected) = selection, selected.chat.id == aggregate.chat.id {
             installedComposer = override ?? composer(for: aggregate)
         } else {
             installedComposer = state.composer
         }
-        let retainedOperationalInterruption =
-            operationallyInterruptedInvocation ?? state.operationallyInterruptedInvocation
-        let installedOperationalInterruption: PendingCoachInvocationRequest? = {
-            guard let request = retainedOperationalInterruption,
-                  activeContext?.libraryScope == request.library,
-                  aggregate.chat.id == request.chatID,
-                  let pending = aggregate.pendingUserTurn,
-                  pending.id == request.pendingUserTurnID,
-                  pending.failure == nil
-            else { return nil }
-            return request
-        }()
-        let installedProfileOperationalInterruption:
-            ProfileReconsiderationInvocationRequest? = {
-                let immediate = [
+        let rowOperationalInterruption = resolvedOperationalCoachRetry(
+            for: aggregate,
+            in: activeContext?.libraryScope,
+            preferring: [
+                operationallyInterruptedInvocation,
+                state.operationallyInterruptedInvocation,
+            ]
+        )
+        let rowProfileOperationalInterruption =
+            resolvedOperationalProfileReconsiderationRetry(
+                for: aggregate,
+                in: activeContext?.libraryScope,
+                preferring: [
                     operationallyInterruptedProfileReconsideration,
                     state.operationallyInterruptedProfileReconsideration,
-                ].compactMap { $0 }
-                if let request = immediate.first(where: {
-                    activeContext?.libraryScope == $0.library &&
-                        exactFailureFreeProfileReconsiderationAggregate(
-                            aggregate,
-                            request: $0
-                        ) != nil
-                }) {
-                    return request
-                }
-                return cachedOperationalProfileReconsiderationRetry(
-                    for: aggregate,
-                    in: activeContext?.libraryScope
-                )
-            }()
+                ]
+            )
+        synchronizeOperationalCoachRetryCache(
+            for: aggregate,
+            installed: rowOperationalInterruption
+        )
         synchronizeOperationalProfileReconsiderationRetryCache(
             for: aggregate,
-            installed: installedProfileOperationalInterruption
+            installed: rowProfileOperationalInterruption
+        )
+        var rows = currentAllRows.filter { $0.chatID != aggregate.chat.id }
+        rows.append(
+            ChatRowSnapshot(
+                aggregate: aggregate,
+                hasOperationalInterruption:
+                    rowOperationalInterruption != nil ||
+                    rowProfileOperationalInterruption != nil
+            )
         )
         let installedProfileEffectReview: ProfileEffectReviewState? = {
-            guard let identity = aggregate.profileEffect?.identity else { return nil }
-            if let profileEffectReview,
-               profileEffectReview.sourceEffectIdentity == identity
-            {
-                return profileEffectReview
+            guard case let .open(selected) = selection,
+                  let identity = selected.profileEffect?.identity
+            else { return nil }
+            if selected.chat.id == aggregate.chat.id {
+                if let profileEffectReview,
+                   profileEffectReview.sourceEffectIdentity == identity
+                {
+                    return profileEffectReview
+                }
             }
             guard state.profileEffectReview?.sourceEffectIdentity == identity else {
                 return nil
             }
             return state.profileEffectReview
+        }()
+        let selectedOperationalInterruption: PendingCoachInvocationRequest? = {
+            guard case let .open(selected) = selection else { return nil }
+            if selected.chat.id == aggregate.chat.id {
+                return rowOperationalInterruption
+            }
+            return resolvedOperationalCoachRetry(
+                for: selected,
+                in: activeContext?.libraryScope,
+                preferring: [state.operationallyInterruptedInvocation]
+            )
+        }()
+        let selectedProfileOperationalInterruption:
+            ProfileReconsiderationInvocationRequest? = {
+                guard exposesSelectedOperationalProfileReconsiderationRetry,
+                      case let .open(selected) = selection
+                else { return nil }
+                if selected.chat.id == aggregate.chat.id {
+                    return rowProfileOperationalInterruption
+                }
+                return resolvedOperationalProfileReconsiderationRetry(
+                    for: selected,
+                    in: activeContext?.libraryScope,
+                    preferring: [
+                        state.operationallyInterruptedProfileReconsideration
+                    ]
+                )
+            }()
+        let preservesDifferentOpenSelection: Bool = {
+            guard case let .open(selected) = selection else { return false }
+            return selected.chat.id != aggregate.chat.id
         }()
         finishInstall(
             rows: rows,
@@ -3391,12 +3488,13 @@ public actor DefaultChatFeature: ChatFeature {
             currentProfileStatementGeneration:
                 currentProfileStatementGeneration,
             replacesCurrentProfileStatementGeneration:
-                replacesCurrentProfileStatementGeneration,
+                replacesCurrentProfileStatementGeneration &&
+                !preservesDifferentOpenSelection,
             activity: activity,
             notice: notice,
-            operationallyInterruptedInvocation: installedOperationalInterruption,
+            operationallyInterruptedInvocation: selectedOperationalInterruption,
             operationallyInterruptedProfileReconsideration:
-                installedProfileOperationalInterruption,
+                selectedProfileOperationalInterruption,
             profileEffectReview: installedProfileEffectReview
         )
     }
@@ -3407,9 +3505,7 @@ public actor DefaultChatFeature: ChatFeature {
         notice: ChatNotice?
     ) {
         if let library = activeContext?.libraryScope {
-            operationalProfileReconsiderationRetryRequests.removeAll {
-                $0.library == library && $0.chatID == frozen.chatID
-            }
+            forgetOperationalRetries(for: frozen.chatID, in: library)
         }
         var rows = currentAllRows.filter { $0.chatID != frozen.chatID }
         rows.append(ChatRowSnapshot(frozen: frozen))
@@ -3419,17 +3515,47 @@ public actor DefaultChatFeature: ChatFeature {
         } else {
             composer = state.composer
         }
+        let preservesSelectedChat: Bool = {
+            guard case let .open(previous) = state.selection,
+                  case let .open(selected) = selection
+            else { return false }
+            return previous.chat.id == selected.chat.id
+        }()
+        let selectedOperationalInterruption: PendingCoachInvocationRequest? = {
+            guard case let .open(selected) = selection else { return nil }
+            return resolvedOperationalCoachRetry(
+                for: selected,
+                in: activeContext?.libraryScope,
+                preferring: [state.operationallyInterruptedInvocation]
+            )
+        }()
+        let selectedProfileOperationalInterruption:
+            ProfileReconsiderationInvocationRequest? = {
+                guard case let .open(selected) = selection else { return nil }
+                return resolvedOperationalProfileReconsiderationRetry(
+                    for: selected,
+                    in: activeContext?.libraryScope,
+                    preferring: [
+                        state.operationallyInterruptedProfileReconsideration
+                    ]
+                )
+            }()
         finishInstall(
             rows: rows,
             selection: selection,
             composer: composer,
-            currentProfileStatementGeneration: nil,
+            currentProfileStatementGeneration: preservesSelectedChat
+                ? state.currentProfileStatementGeneration
+                : nil,
             replacesCurrentProfileStatementGeneration: true,
             activity: nil,
             notice: notice,
-            operationallyInterruptedInvocation: nil,
-            operationallyInterruptedProfileReconsideration: nil,
-            profileEffectReview: nil
+            operationallyInterruptedInvocation: selectedOperationalInterruption,
+            operationallyInterruptedProfileReconsideration:
+                selectedProfileOperationalInterruption,
+            profileEffectReview: preservesSelectedChat
+                ? state.profileEffectReview
+                : nil
         )
     }
 
@@ -3455,6 +3581,17 @@ public actor DefaultChatFeature: ChatFeature {
             }
             return previous.chat.id == next.chat.id
         }()
+        let preservesFailedProfileProposalAcceptance: Bool = {
+            guard preservesSelectedChat,
+                  case let .open(previous) = state.selection,
+                  case let .open(next) = selection,
+                  state.failedProfileProposalAcceptanceChatID == previous.chat.id,
+                  let previousProposalID = previous.profileProposal?.id
+            else {
+                return false
+            }
+            return next.profileProposal?.id == previousProposalID
+        }()
         state = ChatFeatureState(
             catalog: .ready(
                 ChatCatalogSnapshot(
@@ -3479,6 +3616,10 @@ public actor DefaultChatFeature: ChatFeature {
             operationallyInterruptedInvocation: operationallyInterruptedInvocation,
             operationallyInterruptedProfileReconsideration:
                 operationallyInterruptedProfileReconsideration,
+            failedProfileProposalAcceptanceChatID:
+                preservesFailedProfileProposalAcceptance
+                ? state.failedProfileProposalAcceptanceChatID
+                : nil,
             coachInvocationStopAuthority: nil,
             profileReconsiderationStopAuthority: nil,
             profileEffectReview: profileEffectReview,
@@ -3502,9 +3643,25 @@ public actor DefaultChatFeature: ChatFeature {
         from entries: [ChatCatalogEntry],
         query: ChatFilterQuery
     ) -> ChatFeatureState.Catalog {
+        reconcileOperationalRetryCaches(
+            with: entries,
+            in: activeContext?.libraryScope
+        )
         let rows = sortedRows(entries.map { entry in
             switch entry {
-            case let .available(aggregate): ChatRowSnapshot(aggregate: aggregate)
+            case let .available(aggregate):
+                ChatRowSnapshot(
+                    aggregate: aggregate,
+                    hasOperationalInterruption:
+                        cachedOperationalCoachRetry(
+                            for: aggregate,
+                            in: activeContext?.libraryScope
+                        ) != nil ||
+                        cachedOperationalProfileReconsiderationRetry(
+                            for: aggregate,
+                            in: activeContext?.libraryScope
+                        ) != nil
+                )
             case let .frozen(frozen): ChatRowSnapshot(frozen: frozen)
             }
         })
@@ -3514,6 +3671,50 @@ public actor DefaultChatFeature: ChatFeature {
                 visibleRows: filtered(rows, by: query)
             )
         )
+    }
+
+    private func catalogRemovingChat(
+        _ chatID: ChatID
+    ) -> ChatFeatureState.Catalog {
+        guard case let .ready(catalog) = state.catalog else {
+            return state.catalog
+        }
+        let rows = catalog.allRows.filter { $0.chatID != chatID }
+        return .ready(
+            ChatCatalogSnapshot(
+                allRows: rows,
+                visibleRows: filtered(rows, by: state.filterQuery)
+            )
+        )
+    }
+
+    /// A successful full-catalog load is authoritative for whether each
+    /// process-live capability still has its exact failure-free sidecar.
+    private func reconcileOperationalRetryCaches(
+        with entries: [ChatCatalogEntry],
+        in library: LibraryScope?
+    ) {
+        guard let library else { return }
+        let aggregates = entries.compactMap { entry -> ChatAggregate? in
+            guard case let .available(aggregate) = entry else { return nil }
+            return aggregate
+        }
+        operationalCoachRetryRequests.removeAll { request in
+            request.library == library && !aggregates.contains { aggregate in
+                exactFailureFreePendingAggregate(
+                    aggregate,
+                    request: request
+                ) != nil
+            }
+        }
+        operationalProfileReconsiderationRetryRequests.removeAll { request in
+            request.library == library && !aggregates.contains { aggregate in
+                exactFailureFreeProfileReconsiderationAggregate(
+                    aggregate,
+                    request: request
+                ) != nil
+            }
+        }
     }
 
     private func sortedRows(_ rows: [ChatRowSnapshot]) -> [ChatRowSnapshot] {
@@ -3576,6 +3777,7 @@ public actor DefaultChatFeature: ChatFeature {
     }
 
     private func replacing(
+        catalog: ChatFeatureState.Catalog? = nil,
         selection: ChatFeatureState.Selection? = nil,
         composer: ChatComposerState? = nil,
         replacesComposer: Bool = false,
@@ -3589,6 +3791,8 @@ public actor DefaultChatFeature: ChatFeature {
         operationallyInterruptedProfileReconsideration:
             ProfileReconsiderationInvocationRequest? = nil,
         replacesOperationallyInterruptedProfileReconsideration: Bool = false,
+        failedProfileProposalAcceptanceChatID: ChatID? = nil,
+        replacesFailedProfileProposalAcceptanceChatID: Bool = false,
         coachInvocationStopAuthority: InvocationStopAuthority? = nil,
         replacesCoachInvocationStopAuthority: Bool = false,
         profileReconsiderationStopAuthority:
@@ -3604,7 +3808,7 @@ public actor DefaultChatFeature: ChatFeature {
         notice: ChatNotice?
     ) -> ChatFeatureState {
         ChatFeatureState(
-            catalog: state.catalog,
+            catalog: catalog ?? state.catalog,
             filterQuery: state.filterQuery,
             selection: selection ?? state.selection,
             composer: replacesComposer ? composer : state.composer,
@@ -3625,6 +3829,10 @@ public actor DefaultChatFeature: ChatFeature {
                 replacesOperationallyInterruptedProfileReconsideration
                 ? operationallyInterruptedProfileReconsideration
                 : state.operationallyInterruptedProfileReconsideration,
+            failedProfileProposalAcceptanceChatID:
+                replacesFailedProfileProposalAcceptanceChatID
+                ? failedProfileProposalAcceptanceChatID
+                : state.failedProfileProposalAcceptanceChatID,
             coachInvocationStopAuthority:
                 replacesCoachInvocationStopAuthority
                 ? coachInvocationStopAuthority
@@ -3852,6 +4060,8 @@ private extension DefaultChatFeature {
         let retryOperationalInterruption =
             state.operationallyInterruptedProfileReconsideration
         state = replacing(
+            operationallyInterruptedProfileReconsideration: nil,
+            replacesOperationallyInterruptedProfileReconsideration: true,
             activity: .reconsideringProfileEffect(observed.chat.id),
             notice: nil
         )
@@ -3898,6 +4108,7 @@ private extension DefaultChatFeature {
             selection: .open(assessed.aggregate),
             notice: nil,
             activity: .reconsideringProfileEffect(assessed.aggregate.chat.id),
+            exposesSelectedOperationalProfileReconsiderationRetry: false,
             profileEffectReview: .stale(basis)
         )
         let outcome: ProfileReconsiderationInvocationTryOutcome
@@ -3959,6 +4170,9 @@ private extension DefaultChatFeature {
         }
         retainProfileReconsiderationReapAuthority(from: outcome)
         guard isActive(context) else { return }
+        if case .rejected(_, .eligibilityChanged) = outcome {
+            forgetOperationalProfileReconsiderationRetry(attemptedRequest)
+        }
         let presentedOutcome: ProfileReconsiderationInvocationTryOutcome =
             switch outcome {
             case let .rejected(nil, reason):
@@ -4290,7 +4504,7 @@ private extension DefaultChatFeature {
 
     /// Invocation installation rewrites its operational sidecar without
     /// advancing the Chat manifest. On an equal manifest revision, keep the
-    /// aggregate that retains the newest exact prepared Profile generation.
+    /// aggregate that retains the newest exact prepared context generation.
     private func preferredOperationalAggregate(
         selected: ChatAggregate,
         observed: ChatAggregate,
@@ -4322,6 +4536,112 @@ private extension DefaultChatFeature {
                     aggregate,
                     request: request
                 ) != nil
+        }
+    }
+
+    private func exactFailureFreePendingAggregate(
+        _ aggregate: ChatAggregate?,
+        request: PendingCoachInvocationRequest
+    ) -> ChatAggregate? {
+        guard let aggregate,
+              aggregate.chat.id == request.chatID,
+              let pending = aggregate.pendingUserTurn,
+              pending.id == request.pendingUserTurnID,
+              pending.failure == nil
+        else { return nil }
+        return aggregate
+    }
+
+    private func cachedOperationalCoachRetry(
+        for aggregate: ChatAggregate,
+        in library: LibraryScope?
+    ) -> PendingCoachInvocationRequest? {
+        guard let library else { return nil }
+        return operationalCoachRetryRequests.first { request in
+            request.library == library &&
+                exactFailureFreePendingAggregate(
+                    aggregate,
+                    request: request
+                ) != nil
+        }
+    }
+
+    private func resolvedOperationalCoachRetry(
+        for aggregate: ChatAggregate,
+        in library: LibraryScope?,
+        preferring requests: [PendingCoachInvocationRequest?]
+    ) -> PendingCoachInvocationRequest? {
+        guard let library else { return nil }
+        if let request = requests.compactMap({ $0 }).first(where: {
+            $0.library == library &&
+                exactFailureFreePendingAggregate(
+                    aggregate,
+                    request: $0
+                ) != nil
+        }) {
+            return request
+        }
+        return cachedOperationalCoachRetry(for: aggregate, in: library)
+    }
+
+    private func resolvedOperationalProfileReconsiderationRetry(
+        for aggregate: ChatAggregate,
+        in library: LibraryScope?,
+        preferring requests: [ProfileReconsiderationInvocationRequest?]
+    ) -> ProfileReconsiderationInvocationRequest? {
+        guard let library else { return nil }
+        if let request = requests.compactMap({ $0 }).first(where: {
+            $0.library == library &&
+                exactFailureFreeProfileReconsiderationAggregate(
+                    aggregate,
+                    request: $0
+                ) != nil
+        }) {
+            return request
+        }
+        return cachedOperationalProfileReconsiderationRetry(
+            for: aggregate,
+            in: library
+        )
+    }
+
+    private func rememberOperationalCoachRetry(
+        _ request: PendingCoachInvocationRequest
+    ) {
+        forgetOperationalCoachRetry(request)
+        operationalCoachRetryRequests.append(request)
+    }
+
+    private func forgetOperationalCoachRetry(
+        _ request: PendingCoachInvocationRequest
+    ) {
+        operationalCoachRetryRequests.removeAll {
+            $0.library == request.library && $0.chatID == request.chatID
+        }
+    }
+
+    private func forgetOperationalRetries(
+        for chatID: ChatID,
+        in library: LibraryScope
+    ) {
+        operationalCoachRetryRequests.removeAll {
+            $0.library == library && $0.chatID == chatID
+        }
+        operationalProfileReconsiderationRetryRequests.removeAll {
+            $0.library == library && $0.chatID == chatID
+        }
+    }
+
+    private func synchronizeOperationalCoachRetryCache(
+        for aggregate: ChatAggregate,
+        installed request: PendingCoachInvocationRequest?
+    ) {
+        guard let library = activeContext?.libraryScope else { return }
+        operationalCoachRetryRequests.removeAll {
+            $0.library == library && $0.chatID == aggregate.chat.id
+        }
+        if let request {
+            operationalCoachRetryRequests.append(request)
         }
     }
 

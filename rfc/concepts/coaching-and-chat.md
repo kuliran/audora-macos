@@ -1029,10 +1029,27 @@ ProfileUpdateIndicator
 ```
 
 `processing` covers provider execution, automatic backoff, response validation,
-and atomic Invocation-result publication. It uses one slow spinner. `interrupted`
-covers a visible Invocation UserRetryable failure. `newMessage` marks an unread
-completed response. Proposal approval and Profile publication failure are projected
-separately so they cannot be confused with coach execution.
+and atomic Invocation-result publication. It is projected only from process-live
+Activity for the exact Chat, never merely from a retained failure-free sidecar, and
+uses one slow spinner. `interrupted` covers a visible Invocation UserRetryable
+failure. `newMessage` marks an unread completed response. Proposal approval and
+Profile publication failure are projected separately so they cannot be confused
+with coach execution.
+
+Unread response state is process-local Presentation state, not portable Library
+content. The first accepted catalog snapshot after a Library is selected establishes
+the latest-message baseline without marking existing history unread. A later atomic
+message-tail change marks an unselected Chat; installing that Chat as the successful
+open selection acknowledges it. Filtering and a failed open preserve the marker.
+Selecting another Library or relaunching establishes a fresh baseline, and no read
+receipt is persisted.
+
+An unresolved Proposal projects `pendingApproval`, including while Reconsider is
+processing or interrupted. A retained evidence-publication operation projects
+`publicationFailure` after its initial automatic publication attempt stops, and a
+process-live failed Proposal acceptance temporarily projects the same failure state.
+Initial evidence publication is not mislabeled as a failure. These Profile states
+remain independent of the Chat activity indicator.
 
 When processing, the composer and Reconsider are disabled. When a turn-level
 UserRetryable error is visible, the exact Draft remains read-only in the composer;

@@ -283,8 +283,13 @@ The native application has a reduced set of states:
   **Discard** actions; they never accumulate as ordinary history items or appear as
   toast-only errors. A post-response Profile-publication failure remains a separate
   card on its already published coach Message. Chat rows project independent
-  activity and Profile-update icons; one slow `processing` state covers provider
-  work and automatic retry delays. While processing, an accessible **Stop Coach
+  activity and Profile-update icons; one slow process-live `processing` state covers
+  provider work and automatic retry delays without being reconstructed from a
+  retained failure-free sidecar. Unread completed-response markers are
+  process-local: the first catalog snapshot is the baseline, a successful open
+  acknowledges a later message-tail change, and no read receipt is persisted.
+  Pending Profile approval remains distinct from evidence-publication or
+  process-live Proposal-acceptance failure. While processing, an accessible **Stop Coach
   Response** action bypasses queued mutations; **Stopping Coach Response** remains
   visible until the exact Attempt is reaped and interruption is durable. The Chat
   Draft is persisted periodically and

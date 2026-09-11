@@ -1559,6 +1559,337 @@ final class ChatPresentationModelTests: XCTestCase {
         )
     }
 
+    func testChatRowIndicatorPresentationKeepsActivityAndProfileAccessible()
+        throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let aggregate = try aggregate(
+            in: scope,
+            chatID: "cht-20260830T120000000Z-2ABC",
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "Weekly reflection"
+        )
+        let presentation = ChatRowIndicatorPresentation(
+            indicators: ChatRowIndicators(
+                activity: .interrupted,
+                profileUpdate: .pendingApproval
+            )
+        )
+
+        XCTAssertEqual(
+            presentation.activitySymbolName,
+            "exclamationmark.circle.fill"
+        )
+        XCTAssertEqual(
+            presentation.profileSymbolName,
+            "person.crop.circle.badge.questionmark"
+        )
+        XCTAssertEqual(
+            presentation.accessibilityLabel(
+                for: ChatRowSnapshot(aggregate: aggregate)
+            ),
+            "Open Chat, Weekly reflection. Coach response needs attention. " +
+                "Profile changes awaiting approval."
+        )
+    }
+
+    func testChatRowIndicatorPresentationDistinguishesEveryVisibleState() {
+        let cases: [
+            (
+                ChatRowIndicators,
+                activityLabel: String?,
+                activitySymbol: String?,
+                profileLabel: String?,
+                profileSymbol: String?
+            )
+        ] = [
+            (
+                ChatRowIndicators(activity: .idle, profileUpdate: .none),
+                nil,
+                nil,
+                nil,
+                nil
+            ),
+            (
+                ChatRowIndicators(activity: .processing, profileUpdate: .none),
+                "Coach response in progress",
+                nil,
+                nil,
+                nil
+            ),
+            (
+                ChatRowIndicators(activity: .newMessage, profileUpdate: .none),
+                "New Coach message",
+                "circle.fill",
+                nil,
+                nil
+            ),
+            (
+                ChatRowIndicators(
+                    activity: .idle,
+                    profileUpdate: .publicationFailure
+                ),
+                nil,
+                nil,
+                "Profile update could not be saved",
+                "exclamationmark.triangle.fill"
+            ),
+        ]
+
+        for value in cases {
+            let presentation = ChatRowIndicatorPresentation(
+                indicators: value.0
+            )
+            XCTAssertEqual(
+                presentation.activityAccessibilityLabel,
+                value.activityLabel
+            )
+            XCTAssertEqual(
+                presentation.activitySymbolName,
+                value.activitySymbol
+            )
+            XCTAssertEqual(
+                presentation.profileAccessibilityLabel,
+                value.profileLabel
+            )
+            XCTAssertEqual(
+                presentation.profileSymbolName,
+                value.profileSymbol
+            )
+        }
+    }
+
+    func testFrozenChatRowAccessibilityNamesItsAvailability() throws {
+        let chatID = try ChatID("cht-20260909T190000000Z-1ABC")
+        let row = ChatRowSnapshot(
+            frozen: FrozenChatSnapshot(
+                chatID: chatID,
+                reason: .newerSchema
+            )
+        )
+        let presentation = ChatRowIndicatorPresentation(
+            indicators: ChatFeatureState().indicators(
+                for: row,
+                isUnread: true
+            )
+        )
+
+        XCTAssertFalse(presentation.hasVisibleIndicator)
+        XCTAssertEqual(
+            presentation.accessibilityLabel(for: row),
+            "Open unavailable Chat. Chat is read-only."
+        )
+    }
+
+    func testOnlyCoachExecutionActivitiesUseTheChatRowSpinner() throws {
+        let chatID = try ChatID("cht-20260909T190000000Z-1ABC")
+        let rowSpinnerActivities: [ChatFeatureState.Activity] = [
+            .invokingCoach(chatID),
+            .stoppingCoach(chatID),
+            .retryingPendingUserTurn(chatID),
+            .reconsideringProfileEffect(chatID),
+            .stoppingProfileReconsideration(chatID),
+        ]
+        for activity in rowSpinnerActivities {
+            XCTAssertTrue(
+                ChatActivityPresentation.usesChatRowSpinner(for: activity)
+            )
+        }
+        XCTAssertFalse(
+            ChatActivityPresentation.usesChatRowSpinner(
+                for: .publishingProfileEvidence(chatID)
+            )
+        )
+        XCTAssertFalse(
+            ChatActivityPresentation.usesChatRowSpinner(
+                for: .acceptingProfileProposal(chatID)
+            )
+        )
+        XCTAssertGreaterThan(
+            SlowChatRowSpinner.rotationDuration,
+            1,
+            "the row spinner must keep the RFC's deliberately slow cadence"
+        )
+        XCTAssertTrue(
+            ChatActivityPresentation.usesVisibleChatRowSpinner(
+                for: .invokingCoach(chatID),
+                visibleChatIDs: [chatID]
+            )
+        )
+        XCTAssertFalse(
+            ChatActivityPresentation.usesVisibleChatRowSpinner(
+                for: .invokingCoach(chatID),
+                visibleChatIDs: []
+            ),
+            "a filtered active row must move the sole spinner to activity copy"
+        )
+    }
+
+    func testUnreadResponseTrackerBaselinesMarksFiltersAndAcknowledgesOnOpen()
+        throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260830T120000000Z-2ABC",
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "Unread lifecycle",
+            attachments: profileProposalAttachments()
+        )
+        let completed = try aggregate(
+            byStaging: profileEvidencePublication(for: base.chat.id),
+            on: base
+        )
+        let row = ChatRowSnapshot(aggregate: completed)
+        let catalog = ChatCatalogSnapshot(
+            allRows: [row],
+            visibleRows: [row]
+        )
+        var tracker = ChatUnreadResponseTracker()
+
+        tracker.observe(readyState(for: base))
+        XCTAssertTrue(tracker.unreadChatIDs.isEmpty)
+
+        tracker.observe(readyState(for: completed))
+        XCTAssertEqual(tracker.unreadChatIDs, [base.chat.id])
+        tracker.observe(readyState(for: completed))
+        XCTAssertEqual(
+            tracker.unreadChatIDs,
+            [base.chat.id],
+            "replaying an identical snapshot must be idempotent"
+        )
+
+        tracker.observe(
+            ChatFeatureState(
+                catalog: .ready(
+                    ChatCatalogSnapshot(allRows: [row], visibleRows: [])
+                ),
+                filterQuery: try ChatFilterQuery("no match"),
+                selection: .opening(base.chat.id)
+            )
+        )
+        XCTAssertEqual(
+            tracker.unreadChatIDs,
+            [base.chat.id],
+            "filtering and an uncompleted Open must retain unread state"
+        )
+
+        tracker.observe(
+            ChatFeatureState(
+                catalog: .ready(catalog),
+                selection: .open(completed)
+            )
+        )
+        XCTAssertTrue(tracker.unreadChatIDs.isEmpty)
+    }
+
+    func testUnreadResponseTrackerBaselinesNewRowsAndPrunesFrozenRows()
+        throws
+    {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let first = try aggregate(
+            in: scope,
+            chatID: "cht-20260830T120000000Z-2ABC",
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "First"
+        )
+        let secondBase = try aggregate(
+            in: scope,
+            chatID: "cht-20260830T121000000Z-5KMN",
+            draftID: "drf-20260830T121000000Z-6PQR",
+            memoryID: "mem-20260830T121000000Z-7QRS",
+            title: "Second",
+            attachments: profileProposalAttachments()
+        )
+        let secondCompleted = try aggregate(
+            byStaging: profileEvidencePublication(for: secondBase.chat.id),
+            on: secondBase
+        )
+        let firstRow = ChatRowSnapshot(aggregate: first)
+        let secondRow = ChatRowSnapshot(aggregate: secondCompleted)
+        var tracker = ChatUnreadResponseTracker()
+
+        tracker.observe(readyState(for: first))
+        tracker.observe(
+            ChatFeatureState(
+                catalog: .ready(
+                    ChatCatalogSnapshot(
+                        allRows: [firstRow, secondRow],
+                        visibleRows: [firstRow, secondRow]
+                    )
+                )
+            )
+        )
+        XCTAssertTrue(
+            tracker.unreadChatIDs.isEmpty,
+            "a newly discovered row establishes its own baseline"
+        )
+
+        var unreadTracker = ChatUnreadResponseTracker()
+        unreadTracker.observe(readyState(for: secondBase))
+        unreadTracker.observe(readyState(for: secondCompleted))
+        XCTAssertEqual(unreadTracker.unreadChatIDs, [secondBase.chat.id])
+        let frozen = ChatRowSnapshot(
+            frozen: FrozenChatSnapshot(
+                chatID: secondBase.chat.id,
+                reason: .corrupt
+            )
+        )
+        unreadTracker.observe(
+            ChatFeatureState(
+                catalog: .ready(
+                    ChatCatalogSnapshot(
+                        allRows: [frozen],
+                        visibleRows: [frozen]
+                    )
+                )
+            )
+        )
+        XCTAssertTrue(unreadTracker.unreadChatIDs.isEmpty)
+    }
+
+    func testUnreadResponseTrackerNeverMarksInitialOrSelectedHistory() throws {
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let base = try aggregate(
+            in: scope,
+            chatID: "cht-20260830T120000000Z-2ABC",
+            draftID: "drf-20260830T120000000Z-3DEF",
+            memoryID: "mem-20260830T120000000Z-4GHJ",
+            title: "Selected response",
+            attachments: profileProposalAttachments()
+        )
+        let completed = try aggregate(
+            byStaging: profileEvidencePublication(for: base.chat.id),
+            on: base
+        )
+
+        var relaunchTracker = ChatUnreadResponseTracker()
+        relaunchTracker.observe(readyState(for: completed))
+        XCTAssertTrue(relaunchTracker.unreadChatIDs.isEmpty)
+
+        var selectedTracker = ChatUnreadResponseTracker()
+        selectedTracker.observe(readyState(for: base, selection: .open(base)))
+        selectedTracker.observe(
+            readyState(for: completed, selection: .open(completed))
+        )
+        XCTAssertTrue(selectedTracker.unreadChatIDs.isEmpty)
+
+        selectedTracker.reset()
+        selectedTracker.observe(readyState(for: completed))
+        XCTAssertTrue(selectedTracker.unreadChatIDs.isEmpty)
+    }
+
     func testRenameEditorTaskIdentityChangesBetweenRevisionZeroChats() throws {
         let first = ChatRenameEditorTaskID(
             chatID: try ChatID("cht-20260830T120000000Z-2ABC"),

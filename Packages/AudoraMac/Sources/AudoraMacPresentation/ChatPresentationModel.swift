@@ -8,11 +8,88 @@ public enum NewChatAttachmentPickerAction: Equatable, Sendable {
     case cancelAction
 }
 
+struct ChatUnreadResponseTracker: Equatable {
+    private(set) var unreadChatIDs: Set<ChatID> = []
+
+    private var observedChatIDs: Set<ChatID> = []
+    private var latestResponseMessageIDs: [ChatID: ChatMessageID] = [:]
+    private var hasCatalogBaseline = false
+
+    mutating func reset() {
+        self = ChatUnreadResponseTracker()
+    }
+
+    mutating func observe(_ state: ChatFeatureState) {
+        guard case let .ready(catalog) = state.catalog else { return }
+        let rows = catalog.allRows.filter { row in
+            if case .available = row.availability { return true }
+            return false
+        }
+        let currentChatIDs = Set(rows.map(\.chatID))
+
+        guard hasCatalogBaseline else {
+            hasCatalogBaseline = true
+            observedChatIDs = currentChatIDs
+            latestResponseMessageIDs = Dictionary(
+                uniqueKeysWithValues: rows.compactMap { row in
+                    row.latestCompletedResponseMessageID.map {
+                        (row.chatID, $0)
+                    }
+                }
+            )
+            unreadChatIDs.removeAll(keepingCapacity: true)
+            acknowledgeSelectedChat(in: state)
+            return
+        }
+
+        observedChatIDs.formIntersection(currentChatIDs)
+        unreadChatIDs.formIntersection(currentChatIDs)
+        latestResponseMessageIDs = latestResponseMessageIDs.filter {
+            currentChatIDs.contains($0.key)
+        }
+
+        let selectedChatID: ChatID? = if case let .open(aggregate) =
+            state.selection
+        {
+            aggregate.chat.id
+        } else {
+            nil
+        }
+        for row in rows {
+            let wasObserved = observedChatIDs.contains(row.chatID)
+            let previous = latestResponseMessageIDs[row.chatID]
+            let current = row.latestCompletedResponseMessageID
+            if wasObserved, current != previous, current != nil {
+                if row.chatID == selectedChatID {
+                    unreadChatIDs.remove(row.chatID)
+                } else {
+                    unreadChatIDs.insert(row.chatID)
+                }
+            }
+            observedChatIDs.insert(row.chatID)
+            if let current {
+                latestResponseMessageIDs[row.chatID] = current
+            } else {
+                latestResponseMessageIDs.removeValue(forKey: row.chatID)
+            }
+        }
+        acknowledgeSelectedChat(in: state)
+    }
+
+    private mutating func acknowledgeSelectedChat(
+        in state: ChatFeatureState
+    ) {
+        guard case let .open(aggregate) = state.selection else { return }
+        unreadChatIDs.remove(aggregate.chat.id)
+    }
+}
+
 @MainActor
 public final class ChatPresentationModel: ObservableObject {
     private static var lastIssuedCommandGeneration: UInt64 = 0
 
     @Published public private(set) var snapshot = ChatFeatureState()
+    private(set) var unreadChatIDs: Set<ChatID> = []
     @Published public var filterText = ""
     @Published public var newChatAttachmentFilterText = ""
 
@@ -25,6 +102,7 @@ public final class ChatPresentationModel: ObservableObject {
     private var stateConsumer: Task<Void, Never>?
     private var lastAnnouncedPickerIssue: ChatAttachmentPickerIssue?
     private var lastAnnouncedTransientNotice: ChatTransientNotice?
+    private var unreadResponseTracker = ChatUnreadResponseTracker()
 
     public init(
         dispatcher: ChatCommandDispatcher,
@@ -45,6 +123,8 @@ public final class ChatPresentationModel: ObservableObject {
         stateConsumer?.cancel()
         lastAnnouncedPickerIssue = nil
         lastAnnouncedTransientNotice = nil
+        unreadResponseTracker.reset()
+        unreadChatIDs = []
         installSnapshot(
             ChatFeatureState(
                 catalog: .loading,
@@ -93,6 +173,8 @@ public final class ChatPresentationModel: ObservableObject {
     }
 
     private func installSnapshot(_ replacement: ChatFeatureState) {
+        unreadResponseTracker.observe(replacement)
+        unreadChatIDs = unreadResponseTracker.unreadChatIDs
         snapshot = replacement
         if replacement.transientNotice != lastAnnouncedTransientNotice {
             lastAnnouncedTransientNotice = replacement.transientNotice
@@ -125,6 +207,13 @@ public final class ChatPresentationModel: ObservableObject {
                 )
             )
         }
+    }
+
+    func indicators(for row: ChatRowSnapshot) -> ChatRowIndicators {
+        snapshot.indicators(
+            for: row,
+            isUnread: unreadChatIDs.contains(row.chatID)
+        )
     }
 
     private static func issueCommandContext(
