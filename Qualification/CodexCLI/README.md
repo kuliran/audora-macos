@@ -22,10 +22,14 @@ Requirements:
 - an absolute path to Codex CLI 0.143.0 or a version being requalified.
 
 No existing login is promised or required by the currently safe public path.
-Codex CLI 0.143 namespaces macOS keyring credentials by canonical `CODEX_HOME`,
-so a fresh client home cannot reuse the ordinary login's keyring entry. Restoring
-the ordinary home would allow ambient global instruction files to be loaded and
-is therefore not an acceptable workaround.
+On 12 September 2026, the locally installed CLI was probed only with isolated
+`--version` and help commands and reported `codex-cli 0.143.0`. That release
+cannot accept the required
+`tools.view_image=false` strict override. Its documented token input is a separate
+`login` command, while an ephemeral credential exists only in the process that
+received it, so it also has no verified nonpersistent path into the later `exec`
+process. Restoring the ordinary home would allow ambient global instruction files
+to be loaded and is not an acceptable workaround.
 
 Run deterministic tests:
 
@@ -52,13 +56,15 @@ swift run codex-cli-qualification \
   --model gpt-5.4
 ```
 
-The bundled command performs only a bounded, isolated `--version` probe, then
-exits nonzero with a sanitized refusal before any provider case can launch.
-Provider execution remains blocked because stock 0.143 cannot combine an empty
-instruction-free client home with reuse of an ordinary existing login. The
-single-case launch surface and lower-level invocation runner are internal and
-exist only for deterministic process-fixture tests. No metadata report with
-fabricated case results is emitted by the blocked public path.
+The bundled command performs only a bounded, isolated `--version` probe, emits a
+sanitized preflight report, and exits nonzero before any provider case can launch.
+The report records `providerCasesLaunched: 0`, separate status for image-tool
+suppression and same-process ephemeral authorization, closed blocker codes, and
+the manual handoff actions below. Unknown future versions remain `unverified`;
+version/help output alone cannot prove that strict runtime configuration is
+accepted. The single-case launch surface and lower-level invocation runner are
+internal and exist only for deterministic process-fixture tests. No fabricated
+case result is emitted by the blocked public path.
 
 Fixture reports include only an allowlisted model identifier and a normalized
 CLI product/ASCII-numeric version; untrusted version build metadata is discarded,
@@ -72,6 +78,10 @@ The implementation follows the documented Codex non-interactive controls:
 empty `--cd`, and inline configuration overrides. See the official
 [Codex non-interactive-mode reference](https://learn.chatgpt.com/docs/non-interactive-mode)
 and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+The [authentication reference](https://learn.chatgpt.com/docs/auth) documents
+ephemeral credential storage and stdin token login, while the
+[AGENTS.md reference](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
+documents that global instructions are loaded from `CODEX_HOME`.
 
 ## Confinement
 
@@ -89,12 +99,12 @@ The process plan then applies these defenses:
 | --- | --- |
 | User/project instructions | source `HOME`/`CODEX_HOME` are replaced by the empty per-case client home, so global `AGENTS.md` and `AGENTS.override.md` files are absent; `--ignore-user-config`, `--ignore-rules`, `skills.include_instructions=false`, an empty skill configuration, `tools.experimental_request_user_input={enabled=false}`, zero project-doc bytes, no fallback names or root markers, and an empty workspace add independent layers |
 | Rollout/history | `--ephemeral` and history persistence disabled |
-| Authentication | `cli_auth_credentials_store="keyring"`; no `auth.json` is copied or linked into the client home. Because 0.143 keys macOS keyring entries by canonical `CODEX_HOME`, the fresh client home cannot reuse an ordinary login and the public path refuses before provider launch |
+| Authentication | the dormant clean profile pins `cli_auth_credentials_store="ephemeral"`; no `auth.json` is copied or linked and no credential environment variable is inherited. The public path refuses because 0.143 has no verified way to deliver authorization to the same ephemeral `exec` process |
 | Shell and patch | shell/unified-exec features disabled; generated model metadata sets `shell_type` to `disabled` and has no apply-patch tool |
 | Browser, web, and generic model network | browser/app/web features disabled, top-level web search set to `disabled`, and generated model metadata advertises text-only input with no search support; only the Codex client itself can contact its provider |
 | Plugins and MCP | user config ignored, plugin/app/tool-suggestion features disabled, and empty plugin, marketplace, and MCP maps |
 | Environment | source `HOME` and `CODEX_HOME` never pass through; both are replaced with the fresh client-home path, while only `PATH`, temporary-directory, and locale values may be inherited; token/key/secret/browser/session variables are dropped |
-| Files and images | Codex CLI 0.143 has no strict `tools.view_image` field, so no unsupported override is sent; the model catalog is text-only, image-related features are disabled where supported, and emitted file, image, or executable-tool items fail the case |
+| Files and images | the dormant clean profile pins the currently documented `tools.view_image=false`; 0.143 is rejected by preflight before that unsupported override can reach provider execution. The model catalog is text-only, image-related features are disabled where supported, and emitted file, image, or executable-tool items fail the case |
 | Output | exactly one completed agent response in a strict UTF-8 JSONL and Markdown-only subset of `CoachResponse`; duplicate object keys are rejected recursively in both layers, and unknown item shapes, integer token use, event stream, response bytes, duration, and stderr inspection are bounded |
 
 The prompt travels over standard input instead of process arguments, and its
@@ -264,8 +274,24 @@ instructions. The production adapter remains blocked on:
    unavailable-model signals without weakening diagnostic redaction.
 
 Until those points pass on the exact shipping CLI/model pair, Audora must not wire
-this spike into the application composition root. Enabling a real qualification
-run additionally requires either a separately provisioned, stable
-qualification-only client home or upstream support that disables global
-instructions independently from authentication. Secrets must never be copied
-from an ordinary client home to create it.
+this spike into the application composition root.
+
+### Manual handoff for a future clean run
+
+1. Obtain an exact Codex CLI build whose authoritative schema has been
+   independently verified to accept `tools.view_image=false` with strict config.
+   Do not infer support from `--version` or `--help`; those commands can return
+   before runtime configuration is loaded.
+2. Require a documented mechanism that supplies an access token or API key to
+   that same `codex exec` process while
+   `cli_auth_credentials_store="ephemeral"`. A separate ephemeral `codex login`
+   process is insufficient because its in-memory credential ends when it exits.
+3. Add only that exact normalized CLI version to the source compatibility matrix,
+   preserving the fresh empty `HOME`/`CODEX_HOME`, every existing feature/tool
+   disable, and the bounded JSONL process host.
+4. Rerun the public preflight and confirm it permits launch before supplying a
+   qualification-only credential through the newly documented channel.
+
+Never copy or link `auth.json`, query a keyring, inherit an ordinary Codex home,
+or pass a credential through process arguments. Until both capabilities are
+verified, the preflight must continue to report zero launched provider cases.

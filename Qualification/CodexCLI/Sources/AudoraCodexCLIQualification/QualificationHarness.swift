@@ -3,7 +3,7 @@ import Foundation
 public enum CodexCLIQualificationStartError: Error, Equatable, Sendable {
     case executableMustBeAbsolute
     case modelNotAllowlisted
-    case authenticationAndGlobalInstructionIsolationUnsupported
+    case qualificationUnavailable(CodexCLIQualificationPreflightReport)
 }
 
 public struct CodexCLIQualificationHarness {
@@ -35,9 +35,17 @@ public struct CodexCLIQualificationHarness {
             throw CodexCLIQualificationStartError.modelNotAllowlisted
         }
 
-        _ = sanitizedCLIVersion(executableURL: executableURL)
-        throw CodexCLIQualificationStartError
-            .authenticationAndGlobalInstructionIsolationUnsupported
+        let cliVersion = sanitizedCLIVersion(executableURL: executableURL)
+        let preflight = CodexCLIQualificationPreflightReport(cliVersion: cliVersion)
+        guard preflight.providerLaunchPermitted else {
+            throw CodexCLIQualificationStartError.qualificationUnavailable(preflight)
+        }
+        return try runCases(
+            QualificationCase.allCases,
+            executableURL: executableURL,
+            model: model,
+            limits: limits
+        )
     }
 
     func runCases(

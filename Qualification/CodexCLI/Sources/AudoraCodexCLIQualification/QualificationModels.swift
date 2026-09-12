@@ -398,7 +398,7 @@ public struct QualificationSuiteReport: Codable, Equatable, Sendable {
             "The qualified Codex CLI surface does not expose a provider-side max-output-token setting; the spike verifies reported usage and enforces a local byte collector ceiling.",
             "The shipping Codex CLI/model pair has no pinned exact tokenizer or documented complete model-framing count; the synthetic model-catalog context values are harness inputs, not a qualified context-window claim.",
             "Codex CLI 0.143 always registers a model-facing ViewImage filesystem tool when an environment is present, exposes no supported removal switch, and omits image-view items from JSONL; therefore the exact production tool allowlist is not qualified.",
-            "Codex CLI 0.143 namespaces macOS keyring credentials by canonical CODEX_HOME while also loading global instruction files from that home; a fresh isolated home cannot reuse an ordinary login, so public qualification refuses before provider launch until a stable qualification-only home can be provisioned or upstream separates authentication from global instructions.",
+            "Codex CLI 0.143 loads global instructions from CODEX_HOME, cannot disable view_image, and exposes token input only through a separate login process; a fresh isolated home therefore has no verified same-process ephemeral exec authorization path, so public qualification refuses before provider launch.",
         ]
     }
 

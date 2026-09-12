@@ -14,11 +14,11 @@ final class CodexInvocationPlanTests: XCTestCase {
         XCTAssertTrue(plan.arguments.contains("--skip-git-repo-check"))
         XCTAssertTrue(plan.arguments.contains("read-only"))
         XCTAssertTrue(plan.arguments.contains("web_search=\"disabled\""))
-        XCTAssertFalse(plan.arguments.contains("tools.view_image=false"))
+        XCTAssertTrue(plan.arguments.contains("tools.view_image=false"))
         XCTAssertTrue(plan.arguments.contains("mcp_servers={}"))
         XCTAssertTrue(plan.arguments.contains("plugins={}"))
         XCTAssertTrue(
-            plan.arguments.contains("cli_auth_credentials_store=\"keyring\"")
+            plan.arguments.contains("cli_auth_credentials_store=\"ephemeral\"")
         )
         XCTAssertTrue(plan.arguments.contains("skills.include_instructions=false"))
         XCTAssertTrue(
@@ -80,26 +80,22 @@ final class CodexInvocationPlanTests: XCTestCase {
         XCTAssertEqual(model["include_skills_usage_instructions"] as? Bool, false)
     }
 
-    func testStrictToolOverridesMatchCodexCLI0143Schema() throws {
+    func testCleanProfilePinsDocumentedViewImageAndEphemeralAuthenticationControls() throws {
         let plan = try makePlan()
         let toolOverrides = plan.arguments.filter { $0.hasPrefix("tools.") }
         let toolFields = Set(toolOverrides.compactMap { override in
             override.split(separator: "=", maxSplits: 1).first.map(String.init)
         })
 
-        // Codex CLI 0.143's strict ToolsToml schema only exposes these fields.
-        let codexCLI0143ToolFields: Set<String> = [
+        let documentedToolFields: Set<String> = [
             "tools.experimental_request_user_input",
+            "tools.view_image",
             "tools.web_search",
         ]
 
-        XCTAssertEqual(
-            toolFields,
-            ["tools.experimental_request_user_input", "tools.web_search"]
-        )
-        XCTAssertTrue(toolFields.isSubset(of: codexCLI0143ToolFields))
+        XCTAssertEqual(toolFields, documentedToolFields)
         XCTAssertTrue(
-            plan.arguments.contains("cli_auth_credentials_store=\"keyring\"")
+            plan.arguments.contains("cli_auth_credentials_store=\"ephemeral\"")
         )
     }
 

@@ -122,13 +122,13 @@ final class QualificationHarnessTests: XCTestCase {
         XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("ViewImage") }))
         XCTAssertTrue(
             report.externalLimitations.contains(where: {
-                $0.contains("qualification-only home")
+                $0.contains("same-process ephemeral")
                     && $0.contains("refuses before provider launch")
             })
         )
     }
 
-    func testPublicSuiteRefusesBeforeProviderLaunchWhenIsolationCannotReuseAuthentication() throws {
+    func testPublicSuiteReportsCodexCLI0143CapabilityBlockersBeforeProviderLaunch() throws {
         let fixtureDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "audora-codex-public-refusal-\(UUID().uuidString)",
             isDirectory: true
@@ -164,12 +164,86 @@ final class QualificationHarnessTests: XCTestCase {
                 model: "gpt-5.4"
             )
         ) { error in
+            guard case let .qualificationUnavailable(report) = error as? CodexCLIQualificationStartError else {
+                return XCTFail("Expected a sanitized qualification preflight report")
+            }
+            XCTAssertEqual(report.cliVersion, "codex-cli 0.143.0")
+            XCTAssertEqual(report.providerCasesLaunched, 0)
+            XCTAssertFalse(report.providerLaunchPermitted)
+            XCTAssertEqual(report.viewImageDisableStatus, .unsupported)
+            XCTAssertEqual(report.ephemeralExecAuthorizationStatus, .unsupported)
             XCTAssertEqual(
-                error as? CodexCLIQualificationStartError,
-                .authenticationAndGlobalInstructionIsolationUnsupported
+                report.blockers,
+                [
+                    .viewImageDisableUnsupported,
+                    .sameProcessEphemeralAuthorizationUnsupported,
+                ]
+            )
+            XCTAssertEqual(
+                report.manualHandoff,
+                [
+                    .installIndependentlyVerifiedCLI,
+                    .provideDocumentedSameProcessEphemeralAuthorization,
+                    .addExactVersionToCompatibilityMatrix,
+                    .rerunPublicPreflight,
+                ]
             )
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: versionProbeMarker.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: providerLaunchMarker.path))
+    }
+
+    func testPublicSuiteTreatsAnUnknownFutureCLIVersionAsUnverified() throws {
+        let fixtureDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "audora-codex-unverified-version-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: fixtureDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
+
+        let executable = fixtureDirectory.appendingPathComponent("fake-codex")
+        let providerLaunchMarker = fixtureDirectory.appendingPathComponent("provider-launched")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s\n' 'codex-cli 9.999.0'
+          exit 0
+        fi
+        printf '%s' 'launched' > '\(providerLaunchMarker.path)'
+        exit 0
+        """
+        try Data(script.utf8).write(to: executable, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path
+        )
+
+        XCTAssertThrowsError(
+            try CodexCLIQualificationHarness().runSuite(
+                executableURL: executable,
+                model: "gpt-5.4"
+            )
+        ) { error in
+            guard case let .qualificationUnavailable(report) = error as? CodexCLIQualificationStartError else {
+                return XCTFail("Expected a sanitized qualification preflight report")
+            }
+            XCTAssertEqual(report.cliVersion, "codex-cli 9.999.0")
+            XCTAssertEqual(report.providerCasesLaunched, 0)
+            XCTAssertFalse(report.providerLaunchPermitted)
+            XCTAssertEqual(report.viewImageDisableStatus, .unverified)
+            XCTAssertEqual(report.ephemeralExecAuthorizationStatus, .unverified)
+            XCTAssertEqual(
+                report.blockers,
+                [
+                    .cliVersionUnverified,
+                    .viewImageDisableUnverified,
+                    .sameProcessEphemeralAuthorizationUnverified,
+                ]
+            )
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: providerLaunchMarker.path))
     }
 
@@ -556,6 +630,36 @@ final class QualificationHarnessTests: XCTestCase {
         XCTAssertFalse(report.issueGateAccepted)
         XCTAssertFalse(report.productionProviderQualified)
         XCTAssertFalse(report.fullyQualifiedForProduction)
+    }
+
+    func testPreflightDecoderRejectsForgedProviderLaunchReadiness() throws {
+        let report = CodexCLIQualificationPreflightReport(
+            cliVersion: "codex-cli 0.143.0"
+        )
+        let encoded = try JSONEncoder().encode(report)
+        let original = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        let mutations: [(String, Any)] = [
+            ("providerCasesLaunched", 1),
+            ("providerLaunchPermitted", true),
+            ("viewImageDisableStatus", "verified"),
+            ("ephemeralExecAuthorizationStatus", "verified"),
+            ("blockers", []),
+            ("manualHandoff", []),
+        ]
+
+        for (key, value) in mutations {
+            var payload = original
+            payload[key] = value
+            XCTAssertThrowsError(
+                try JSONDecoder().decode(
+                    CodexCLIQualificationPreflightReport.self,
+                    from: JSONSerialization.data(withJSONObject: payload)
+                ),
+                "accepted forged preflight field \(key)"
+            )
+        }
     }
 
     func testReportDecoderRejectsUnsupportedSchemaVersions() throws {

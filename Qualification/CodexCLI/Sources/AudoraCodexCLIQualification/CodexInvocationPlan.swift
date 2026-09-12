@@ -118,7 +118,7 @@ struct CodexInvocationPlanBuilder: Sendable {
             "approval_policy=\"never\"",
             "analytics.enabled=false",
             "check_for_update_on_startup=false",
-            "cli_auth_credentials_store=\"keyring\"",
+            "cli_auth_credentials_store=\"ephemeral\"",
             "feedback=false",
             "history.persistence=\"none\"",
             "hooks={}",
@@ -145,6 +145,7 @@ struct CodexInvocationPlanBuilder: Sendable {
             "skills.include_instructions=false",
             "suppress_unstable_features_warning=true",
             "tools.experimental_request_user_input={enabled=false}",
+            "tools.view_image=false",
             "tools.web_search=false",
             "web_search=\"disabled\"",
         ]
