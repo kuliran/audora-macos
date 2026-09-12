@@ -2,6 +2,10 @@
   "schemaVersion": 1,
   "corpusId": "audora-english-verbatim-v1",
   "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
+  "publicSourcePlan": {
+    "planId": "audora-public-qualification-audio-v1",
+    "sha256": "b2570a7ee4a4ad08f93ccda227861e5431e4ab392c0654db923120fa87fe70e9"
+  },
   "audioFormat": {
     "container": "wav",
     "encoding": "linear-pcm-signed-16-bit-little-endian",
@@ -15,6 +19,7 @@
       "minimumVerbatimEventRecall": 0.85,
       "minimumBeginningAnchorCoverage": 1.0,
       "minimumTailAnchorCoverage": 1.0,
+      "anchorBoundaryWindowWords": 12,
       "minimumWordCountRatio": 0.8,
       "maximumWordCountRatio": 1.2,
       "maximumExcessRepeatedNgramRun": 1
@@ -23,6 +28,19 @@
       "minimumTimedWordRatio": 0.98,
       "maximumZeroDurationWordRatio": 0.0,
       "maximumTailLagMs": 1500,
+      "maximumWordStartErrorMs": 750,
+      "maximumWordEndErrorMs": 750,
+      "minimumAlignedWordTimingRatio": 0.8,
+      "minimumLongPauseMs": 2000,
+      "maximumLongPauseBoundaryErrorMs": 750,
+      "maximumLongPauseDurationErrorMs": 1000,
+      "minimumLongPauseTimingRecall": 1.0,
+      "longformBoundaryIntervalMs": 26000,
+      "maximumLongformBoundaryErrorMs": 750,
+      "minimumLongformBoundaryTimingRecall": 1.0,
+      "finalWindowSizeMs": 30000,
+      "maximumFinalUnderfilledWindowErrorMs": 1500,
+      "minimumFinalUnderfilledWindowTimingRecall": 1.0,
       "requireMonotonicWordTimes": true,
       "requireWordsWithinAudio": true
     },
@@ -50,20 +68,32 @@
       "id": "short",
       "audioPath": "audio/short.wav",
       "referencePath": "reference/short.json",
-      "audioSha256": null,
+      "audioSha256": "a5276466a62a42c9dd2f4d1142741371688bce819068d3c34e02976cbc71b127",
       "referenceSha256": null,
       "durationRangeMs": [10000, 30000],
       "requiredPhenomena": ["beginning-speech", "filled-pause", "immediate-repetition", "tail-speech"],
+      "sourceProvenance": {
+        "sourceId": "ami-es2002a-headset",
+        "startMs": 50000,
+        "durationMs": 10350,
+        "candidateAudioSha256": "a5276466a62a42c9dd2f4d1142741371688bce819068d3c34e02976cbc71b127"
+      },
       "assetStatus": "awaiting-capture-and-hand-label"
     },
     {
       "id": "one-minute",
       "audioPath": "audio/one-minute.wav",
       "referencePath": "reference/one-minute.json",
-      "audioSha256": null,
+      "audioSha256": "933240223f9fa38b3b7deedda1d5a876917d11969407f77f70c06c4d358609fe",
       "referenceSha256": null,
       "durationRangeMs": [55000, 65000],
       "requiredPhenomena": ["quiet-speech", "filled-pause", "immediate-repetition", "partial-word", "laughter", "long-pause", "tail-speech"],
+      "sourceProvenance": {
+        "sourceId": "ami-es2002a-headset",
+        "startMs": 60350,
+        "durationMs": 60630,
+        "candidateAudioSha256": "933240223f9fa38b3b7deedda1d5a876917d11969407f77f70c06c4d358609fe"
+      },
       "assetStatus": "awaiting-capture-and-hand-label"
     },
     {
@@ -74,6 +104,12 @@
       "referenceSha256": null,
       "durationRangeMs": [710000, 730000],
       "requiredPhenomena": ["quiet-speech", "filled-pause", "immediate-repetition", "partial-word", "laughter", "long-pause", "longform-boundary", "tail-speech"],
+      "sourceProvenance": {
+        "sourceId": "nasa-astronaut-health-episode-22",
+        "startMs": 1648000,
+        "durationMs": 718000,
+        "candidateAudioSha256": null
+      },
       "assetStatus": "awaiting-capture-and-hand-label"
     },
     {
@@ -82,8 +118,14 @@
       "referencePath": "reference/forty-five-minute.json",
       "audioSha256": null,
       "referenceSha256": null,
-      "durationRangeMs": [2690000, 2700000],
+      "durationRangeMs": [2690000, 2699999],
       "requiredPhenomena": ["quiet-speech", "filled-pause", "immediate-repetition", "partial-word", "laughter", "long-pause", "longform-boundary", "final-underfilled-window", "tail-speech"],
+      "sourceProvenance": {
+        "sourceId": "nasa-astronaut-health-episode-22",
+        "startMs": 243000,
+        "durationMs": 2695000,
+        "candidateAudioSha256": null
+      },
       "assetStatus": "awaiting-capture-and-hand-label"
     }
   ]

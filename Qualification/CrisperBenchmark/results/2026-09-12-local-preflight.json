@@ -1,0 +1,306 @@
+{
+  "cachedOffline": {
+    "reasonCodes": [
+      "AUDIO_FILE_MISSING",
+      "CORPUS_ASSET_NOT_READY",
+      "MODEL_DIRECTORY_NOT_PROVIDED",
+      "PACKAGE_MISSING_OR_DRIFTED",
+      "REFERENCE_HASH_NOT_PINNED",
+      "RUNTIME_VERSION_MISMATCH"
+    ],
+    "status": "blocked"
+  },
+  "cancellation": {
+    "reasonCodes": [
+      "ACTIVE_INFERENCE_PROOF_UNAVAILABLE",
+      "AUDIO_HASH_NOT_PINNED",
+      "CORPUS_ASSET_NOT_READY",
+      "DERIVED_AUDIO_HASH_NOT_PINNED",
+      "MODEL_DIRECTORY_NOT_PROVIDED",
+      "PACKAGE_MISSING_OR_DRIFTED",
+      "REFERENCE_HASH_NOT_PINNED",
+      "RUNTIME_VERSION_MISMATCH"
+    ],
+    "status": "blocked"
+  },
+  "corpusManifestSha256": "5cbcff24e993e676addc9a7ae55e2d52afab52e33303807697bd3b474fd0c0c9",
+  "engineLockSha256": "c26c6a97338544edc70d6e50d03f547adc820a488df6339ff0838cccbaceba5c",
+  "engineSelectionChanged": false,
+  "environment": {
+    "machine": "arm64",
+    "operatingSystem": "Darwin",
+    "operatingSystemRelease": "25.6.0",
+    "pythonVersion": "3.9.6"
+  },
+  "fixtures": [
+    {
+      "id": "short",
+      "reasonCodes": [
+        "AUDIO_FILE_MISSING",
+        "CORPUS_ASSET_NOT_READY",
+        "MODEL_DIRECTORY_NOT_PROVIDED",
+        "PACKAGE_MISSING_OR_DRIFTED",
+        "REFERENCE_HASH_NOT_PINNED",
+        "RUNTIME_VERSION_MISMATCH"
+      ],
+      "sourceProvenance": {
+        "candidateAudioSha256": "a5276466a62a42c9dd2f4d1142741371688bce819068d3c34e02976cbc71b127",
+        "durationMs": 10350,
+        "sourceId": "ami-es2002a-headset",
+        "startMs": 50000
+      },
+      "status": "blocked"
+    },
+    {
+      "id": "one-minute",
+      "reasonCodes": [
+        "AUDIO_FILE_MISSING",
+        "CORPUS_ASSET_NOT_READY",
+        "MODEL_DIRECTORY_NOT_PROVIDED",
+        "PACKAGE_MISSING_OR_DRIFTED",
+        "REFERENCE_HASH_NOT_PINNED",
+        "RUNTIME_VERSION_MISMATCH"
+      ],
+      "sourceProvenance": {
+        "candidateAudioSha256": "933240223f9fa38b3b7deedda1d5a876917d11969407f77f70c06c4d358609fe",
+        "durationMs": 60630,
+        "sourceId": "ami-es2002a-headset",
+        "startMs": 60350
+      },
+      "status": "blocked"
+    },
+    {
+      "id": "twelve-minute",
+      "reasonCodes": [
+        "AUDIO_HASH_NOT_PINNED",
+        "CORPUS_ASSET_NOT_READY",
+        "DERIVED_AUDIO_HASH_NOT_PINNED",
+        "MODEL_DIRECTORY_NOT_PROVIDED",
+        "PACKAGE_MISSING_OR_DRIFTED",
+        "REFERENCE_HASH_NOT_PINNED",
+        "RUNTIME_VERSION_MISMATCH"
+      ],
+      "sourceProvenance": {
+        "candidateAudioSha256": null,
+        "durationMs": 718000,
+        "sourceId": "nasa-astronaut-health-episode-22",
+        "startMs": 1648000
+      },
+      "status": "blocked"
+    },
+    {
+      "id": "forty-five-minute",
+      "reasonCodes": [
+        "AUDIO_HASH_NOT_PINNED",
+        "CORPUS_ASSET_NOT_READY",
+        "DERIVED_AUDIO_HASH_NOT_PINNED",
+        "MODEL_DIRECTORY_NOT_PROVIDED",
+        "PACKAGE_MISSING_OR_DRIFTED",
+        "REFERENCE_HASH_NOT_PINNED",
+        "RUNTIME_VERSION_MISMATCH"
+      ],
+      "sourceProvenance": {
+        "candidateAudioSha256": null,
+        "durationMs": 2695000,
+        "sourceId": "nasa-astronaut-health-episode-22",
+        "startMs": 243000
+      },
+      "status": "blocked"
+    }
+  ],
+  "preflight": [
+    {
+      "gate": "runtime.package-lock",
+      "measured": "3c13f64a78c85fd4a2e8319989739d3f89c57a4960117ddefffcc9924272ce19",
+      "status": "passed",
+      "threshold": "3c13f64a78c85fd4a2e8319989739d3f89c57a4960117ddefffcc9924272ce19"
+    },
+    {
+      "gate": "runtime.python-version",
+      "measured": "3.9.6",
+      "reason": "RUNTIME_VERSION_MISMATCH",
+      "status": "blocked",
+      "threshold": "3.12.14"
+    },
+    {
+      "gate": "runtime.package.crisperwhisper",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "2.0.0"
+    },
+    {
+      "gate": "runtime.package.torch",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "2.13.0"
+    },
+    {
+      "gate": "runtime.package.transformers",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "5.14.1"
+    },
+    {
+      "gate": "runtime.package.accelerate",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "1.14.0"
+    },
+    {
+      "gate": "runtime.package.numpy",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "2.5.1"
+    },
+    {
+      "gate": "runtime.package.soundfile",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "0.14.0"
+    },
+    {
+      "gate": "runtime.package.soxr",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "1.1.0"
+    },
+    {
+      "gate": "runtime.package.tokenizers",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "0.22.2"
+    },
+    {
+      "gate": "runtime.package.huggingface-hub",
+      "reason": "PACKAGE_MISSING_OR_DRIFTED",
+      "status": "blocked",
+      "threshold": "1.24.0"
+    },
+    {
+      "gate": "runtime.platform",
+      "measured": "Darwin-arm64",
+      "status": "passed",
+      "threshold": "Darwin-arm64"
+    },
+    {
+      "gate": "model.local-assets",
+      "reason": "MODEL_DIRECTORY_NOT_PROVIDED",
+      "status": "blocked",
+      "threshold": "all pinned files"
+    },
+    {
+      "gate": "cancellation.active-inference-proof",
+      "measured": false,
+      "reason": "ACTIVE_INFERENCE_PROOF_UNAVAILABLE",
+      "status": "blocked",
+      "threshold": true
+    },
+    {
+      "gate": "fixture.short.public-derived-audio-hash",
+      "measured": "a5276466a62a42c9dd2f4d1142741371688bce819068d3c34e02976cbc71b127",
+      "status": "passed",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.one-minute.public-derived-audio-hash",
+      "measured": "933240223f9fa38b3b7deedda1d5a876917d11969407f77f70c06c4d358609fe",
+      "status": "passed",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.twelve-minute.public-derived-audio-hash",
+      "reason": "DERIVED_AUDIO_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.forty-five-minute.public-derived-audio-hash",
+      "reason": "DERIVED_AUDIO_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.short.asset-status",
+      "measured": "awaiting-capture-and-hand-label",
+      "reason": "CORPUS_ASSET_NOT_READY",
+      "status": "blocked",
+      "threshold": "ready"
+    },
+    {
+      "gate": "fixture.short.audio-file",
+      "reason": "AUDIO_FILE_MISSING",
+      "status": "blocked",
+      "threshold": "present"
+    },
+    {
+      "gate": "fixture.short.reference-hash",
+      "reason": "REFERENCE_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.one-minute.asset-status",
+      "measured": "awaiting-capture-and-hand-label",
+      "reason": "CORPUS_ASSET_NOT_READY",
+      "status": "blocked",
+      "threshold": "ready"
+    },
+    {
+      "gate": "fixture.one-minute.audio-file",
+      "reason": "AUDIO_FILE_MISSING",
+      "status": "blocked",
+      "threshold": "present"
+    },
+    {
+      "gate": "fixture.one-minute.reference-hash",
+      "reason": "REFERENCE_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.twelve-minute.asset-status",
+      "measured": "awaiting-capture-and-hand-label",
+      "reason": "CORPUS_ASSET_NOT_READY",
+      "status": "blocked",
+      "threshold": "ready"
+    },
+    {
+      "gate": "fixture.twelve-minute.audio-hash",
+      "reason": "AUDIO_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.twelve-minute.reference-hash",
+      "reason": "REFERENCE_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.forty-five-minute.asset-status",
+      "measured": "awaiting-capture-and-hand-label",
+      "reason": "CORPUS_ASSET_NOT_READY",
+      "status": "blocked",
+      "threshold": "ready"
+    },
+    {
+      "gate": "fixture.forty-five-minute.audio-hash",
+      "reason": "AUDIO_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.forty-five-minute.reference-hash",
+      "reason": "REFERENCE_HASH_NOT_PINNED",
+      "status": "blocked",
+      "threshold": "sha256"
+    }
+  ],
+  "publicSourcePlanId": "audora-public-qualification-audio-v1",
+  "publicSourcePlanSha256": "b2570a7ee4a4ad08f93ccda227861e5431e4ab392c0654db923120fa87fe70e9",
+  "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
+  "qualificationStatus": "blocked",
+  "recordedAt": "2026-09-12T19:59:27.497571Z",
+  "reportKind": "preflight-only",
+  "schemaVersion": 1
+}

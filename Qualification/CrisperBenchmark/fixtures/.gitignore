@@ -1,4 +1,7 @@
 audio/
 reference/
+source/
+work/
+preparation-report*.json
 !.gitignore
 !README.md

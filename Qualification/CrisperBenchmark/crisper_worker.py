@@ -60,7 +60,7 @@ def network_probe() -> str:
 class MemorySampler:
     def __init__(self, torch_module: Any) -> None:
         self.torch = torch_module
-        self.peak_mps = 0
+        self.peak_mps: int | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
@@ -70,7 +70,9 @@ class MemorySampler:
 
     def _sample(self) -> None:
         try:
-            self.peak_mps = max(self.peak_mps, int(self.torch.mps.driver_allocated_memory()))
+            measured = int(self.torch.mps.driver_allocated_memory())
+            if measured > 0:
+                self.peak_mps = max(self.peak_mps or measured, measured)
         except (AttributeError, RuntimeError):
             pass
 
@@ -157,6 +159,10 @@ def main() -> int:
             continue
         sampler = MemorySampler(torch)
         sampler.start()
+        emit({
+            "type": "transcription-started",
+            "fixtureId": request["fixtureId"],
+        })
         started = time.monotonic()
         try:
             result = model.transcribe(

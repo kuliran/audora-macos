@@ -1,13 +1,13 @@
 import Foundation
 
-public struct CodexInvocationPlan: Equatable, Sendable {
-    public let executableURL: URL
-    public let arguments: [String]
-    public let environment: [String: String]
-    public let workingDirectoryURL: URL
-    public let standardInput: Data
+struct CodexInvocationPlan: Equatable, Sendable {
+    let executableURL: URL
+    let arguments: [String]
+    let environment: [String: String]
+    let workingDirectoryURL: URL
+    let standardInput: Data
 
-    public init(
+    init(
         executableURL: URL,
         arguments: [String],
         environment: [String: String],
@@ -22,14 +22,14 @@ public struct CodexInvocationPlan: Equatable, Sendable {
     }
 }
 
-public enum CodexInvocationPlanError: Error, Equatable {
+enum CodexInvocationPlanError: Error, Equatable {
     case executableMustBeAbsolute
     case modelNotAllowlisted
     case invalidSyntheticFixture
 }
 
-public struct CodexInvocationPlanBuilder: Sendable {
-    public static let allowlistedModels: Set<String> = [
+struct CodexInvocationPlanBuilder: Sendable {
+    static let allowlistedModels: Set<String> = [
         "gpt-5.4",
         "gpt-5.5",
         "gpt-5.6-sol",
@@ -37,7 +37,7 @@ public struct CodexInvocationPlanBuilder: Sendable {
         "gpt-5.6-luna",
     ]
 
-    public static let disabledFeatures = [
+    static let disabledFeatures = [
         "apps",
         "artifact",
         "auth_elicitation",
@@ -73,12 +73,13 @@ public struct CodexInvocationPlanBuilder: Sendable {
         "workspace_dependencies",
     ]
 
-    public init() {}
+    init() {}
 
-    public func build(
+    func build(
         executableURL: URL,
         model: String,
         workspaceURL: URL,
+        clientHomeURL: URL,
         responseSchemaURL: URL,
         modelCatalogURL: URL,
         syntheticRequest: Data,
@@ -117,6 +118,7 @@ public struct CodexInvocationPlanBuilder: Sendable {
             "approval_policy=\"never\"",
             "analytics.enabled=false",
             "check_for_update_on_startup=false",
+            "cli_auth_credentials_store=\"keyring\"",
             "feedback=false",
             "history.persistence=\"none\"",
             "hooks={}",
@@ -140,7 +142,9 @@ public struct CodexInvocationPlanBuilder: Sendable {
             "shell_environment_policy.inherit=\"none\"",
             "shell_environment_policy.include_only=[]",
             "skills={config=[]}",
+            "skills.include_instructions=false",
             "suppress_unstable_features_warning=true",
+            "tools.experimental_request_user_input={enabled=false}",
             "tools.web_search=false",
             "web_search=\"disabled\"",
         ]
@@ -152,17 +156,23 @@ public struct CodexInvocationPlanBuilder: Sendable {
         return CodexInvocationPlan(
             executableURL: executableURL,
             arguments: arguments,
-            environment: Self.allowlistedEnvironment(from: sourceEnvironment),
+            environment: Self.allowlistedEnvironment(
+                from: sourceEnvironment,
+                clientHomeURL: clientHomeURL
+            ),
             workingDirectoryURL: workspaceURL,
             standardInput: Self.prompt(for: syntheticRequest)
         )
     }
 
-    public static func allowlistedEnvironment(
-        from source: [String: String]
+    static func allowlistedEnvironment(
+        from source: [String: String],
+        clientHomeURL: URL
     ) -> [String: String] {
-        let allowedNames = ["CODEX_HOME", "HOME", "LANG", "LC_ALL", "PATH", "TMPDIR"]
+        let allowedNames = ["LANG", "LC_ALL", "PATH", "TMPDIR"]
         var result = source.filter { allowedNames.contains($0.key) }
+        result["CODEX_HOME"] = clientHomeURL.path
+        result["HOME"] = clientHomeURL.path
         result["CI"] = "1"
         result["NO_COLOR"] = "1"
         result["TERM"] = "dumb"
@@ -172,7 +182,7 @@ public struct CodexInvocationPlanBuilder: Sendable {
         return result
     }
 
-    public static func modelCatalogData(for model: String) throws -> Data {
+    static func modelCatalogData(for model: String) throws -> Data {
         guard allowlistedModels.contains(model) else {
             throw CodexInvocationPlanError.modelNotAllowlisted
         }

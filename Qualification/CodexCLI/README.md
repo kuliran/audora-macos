@@ -6,18 +6,26 @@ uses only the committed synthetic `CoachRequest` fixture and deliberately does
 not read a Library, a credential value, browser state, user configuration, or raw
 provider diagnostics.
 
-This is a feasibility harness, not the production provider adapter. Its current
-qualification decision is **not qualified**.
+This is a feasibility harness, not the production provider adapter. Reports keep
+behavioral case results separate from qualification decisions. `issueGateAccepted`
+requires every case to pass under the exact fixed limits and independently proven
+model-facing tool-surface confinement. `modelFacingToolSurfaceQualified` is fixed
+to false for stock Codex CLI 0.143, and `productionProviderQualified` remains false
+until the separately listed production limits are resolved. The legacy
+`fullyQualifiedForProduction` field mirrors the latter decision.
 
 ## Reproduce
 
 Requirements:
 
 - macOS with Swift 6;
-- an absolute path to Codex CLI 0.143.0 or a version being requalified; and
-- an existing ChatGPT-authenticated Codex installation. The harness lets Codex
-  use its authentication normally but never reads, copies, prints, or modifies
-  the credential store.
+- an absolute path to Codex CLI 0.143.0 or a version being requalified.
+
+No existing login is promised or required by the currently safe public path.
+Codex CLI 0.143 namespaces macOS keyring credentials by canonical `CODEX_HOME`,
+so a fresh client home cannot reuse the ordinary login's keyring entry. Restoring
+the ordinary home would allow ambient global instruction files to be loaded and
+is therefore not an acceptable workaround.
 
 Run deterministic tests:
 
@@ -36,31 +44,42 @@ CLANG_MODULE_CACHE_PATH=/tmp/audora-codex-clang-cache \
 swift test --disable-sandbox
 ```
 
-Run the synthetic authenticated cases:
+Run the public compatibility check:
 
 ```sh
 swift run codex-cli-qualification \
   --codex /absolute/path/to/codex \
-  --model gpt-5.4 \
-  --case all
+  --model gpt-5.4
 ```
 
-`--case` also accepts `structuredResponse`, `cancellation`, or `timeout`. The
-command emits a metadata-only JSON report and exits nonzero when an exercised
-case misses its expected outcome. It never emits the Coach Response or raw
-standard error.
+The bundled command performs only a bounded, isolated `--version` probe, then
+exits nonzero with a sanitized refusal before any provider case can launch.
+Provider execution remains blocked because stock 0.143 cannot combine an empty
+instruction-free client home with reuse of an ordinary existing login. The
+single-case launch surface and lower-level invocation runner are internal and
+exist only for deterministic process-fixture tests. No metadata report with
+fabricated case results is emitted by the blocked public path.
+
+Fixture reports include only an allowlisted model identifier and a normalized
+CLI product/ASCII-numeric version; untrusted version build metadata is discarded,
+while malformed or prerelease identities become `unavailable`. They never emit
+the Coach Response or raw standard error. Decoding rejects unsupported report
+schemas, forged tool-surface evidence, and decisions that contradict the
+schema-two payload; schema-one reports decode with conservative false decisions.
 
 The implementation follows the documented Codex non-interactive controls:
 `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, `--output-schema`, an
 empty `--cd`, and inline configuration overrides. See the official
-[Codex developer-command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
+[Codex non-interactive-mode reference](https://learn.chatgpt.com/docs/non-interactive-mode)
 and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
 ## Confinement
 
-Each case creates a unique temporary scope with two siblings:
+Each internal deterministic fixture case creates a unique temporary scope with
+three siblings:
 
 - an empty `workspace/`, which is the CLI working directory; and
+- an empty `client-home/`, used for both `HOME` and `CODEX_HOME`; and
 - `transport/`, containing only the synthetic response schema and a generated,
   text-only model catalog.
 
@@ -68,19 +87,49 @@ The process plan then applies these defenses:
 
 | Boundary | Enforcement |
 | --- | --- |
-| User/project instructions | `--ignore-user-config`, `--ignore-rules`, zero project-doc bytes, no fallback names or root markers, and an empty workspace |
+| User/project instructions | source `HOME`/`CODEX_HOME` are replaced by the empty per-case client home, so global `AGENTS.md` and `AGENTS.override.md` files are absent; `--ignore-user-config`, `--ignore-rules`, `skills.include_instructions=false`, an empty skill configuration, `tools.experimental_request_user_input={enabled=false}`, zero project-doc bytes, no fallback names or root markers, and an empty workspace add independent layers |
 | Rollout/history | `--ephemeral` and history persistence disabled |
+| Authentication | `cli_auth_credentials_store="keyring"`; no `auth.json` is copied or linked into the client home. Because 0.143 keys macOS keyring entries by canonical `CODEX_HOME`, the fresh client home cannot reuse an ordinary login and the public path refuses before provider launch |
 | Shell and patch | shell/unified-exec features disabled; generated model metadata sets `shell_type` to `disabled` and has no apply-patch tool |
-| Browser, web, and generic model network | browser/app/web/image features disabled and top-level web search set to `disabled`; only the Codex client itself can contact its provider |
+| Browser, web, and generic model network | browser/app/web features disabled, top-level web search set to `disabled`, and generated model metadata advertises text-only input with no search support; only the Codex client itself can contact its provider |
 | Plugins and MCP | user config ignored, plugin/app/tool-suggestion features disabled, and empty plugin, marketplace, and MCP maps |
-| Environment | only `HOME`, `CODEX_HOME`, `PATH`, temporary-directory and locale values may pass through; token/key/secret/browser/session variables are dropped |
-| Files | the model catalog is text-only, so the CLI's residual `view_image` entry rejects before reading; any emitted file/tool event fails the case |
-| Output | one strict Markdown-only subset of `CoachResponse`; complete JSON, reported token use, event stream, response bytes, duration, and stderr inspection are bounded |
+| Environment | source `HOME` and `CODEX_HOME` never pass through; both are replaced with the fresh client-home path, while only `PATH`, temporary-directory, and locale values may be inherited; token/key/secret/browser/session variables are dropped |
+| Files and images | Codex CLI 0.143 has no strict `tools.view_image` field, so no unsupported override is sent; the model catalog is text-only, image-related features are disabled where supported, and emitted file, image, or executable-tool items fail the case |
+| Output | exactly one completed agent response in a strict UTF-8 JSONL and Markdown-only subset of `CoachResponse`; duplicate object keys are rejected recursively in both layers, and unknown item shapes, integer token use, event stream, response bytes, duration, and stderr inspection are bounded |
 
-The prompt travels over standard input instead of process arguments. Raw stderr
-is kept in a bounded, in-memory classifier only until the child is reaped. Public
-results contain a closed reason, retry disposition, duration, sizes, and reaping
-state—never provider prose, request content, paths, credentials, or raw output.
+The prompt travels over standard input instead of process arguments, and its
+writer runs concurrently with lifetime monitoring so a non-reading CLI cannot
+delay timeout or cancellation. Lifetime, grace, and reap deadlines use a monotonic
+clock, and reaping polls without an unbounded blocking wait. Native process
+spawning launches the requested CLI suspended as a dedicated process session; a
+native process-event watcher is installed before it resumes, and no helper
+executable is introduced. Any observed fork makes whole-process-tree reclamation
+unprovable and fails closed even if the original process group is empty. A fixture
+with a descendant that starts a new session, closes its pipes, and survives group
+termination verifies that such a run is never reported as reaped.
+Normal completion, cancellation, timeout, overflow, and the version probe all
+terminate and reap that process group before bounded pipe transfers finish. Raw
+pipe-reader shutdown is also bounded if a descendant detaches into another
+session while retaining an inherited pipe, including a descendant that writes
+continuously. Readers honor the shutdown signal before every subsequent read.
+If inherited pipes do not reach EOF naturally, forced reader shutdown is reported
+as a sanitized process failure rather than accepting a valid-looking prefix. Raw
+stderr is kept in a bounded, in-memory classifier only until the group is reaped.
+Public results contain a closed reason, retry disposition, duration, sizes, and
+reaping state—never provider prose, request content, paths, credentials, or raw
+output.
+
+Cancellation and timeout remain subject to the same confinement boundary as a
+normal exit: complete captured JSONL capability events are inspected first, so
+a tool, file, or network item emitted before the stop is reported as
+`forbiddenCapabilityUsed` rather than being hidden by the expected stop reason.
+That check reads the item capability before applying the surrounding event-shape
+allowlist, so new or extra event fields cannot hide it. Any non-whitespace
+trailing JSONL fragment left by a stopped process is conservatively reported as
+`malformedOutput` rather than ignored.
+Cancellation additionally requires a well-shaped safe reasoning or agent-message
+event acknowledging provider work before the stop. An elapsed 50 ms timer or an
+idle executable alone therefore cannot pass the cancellation case.
 
 ## Bounds and mappings
 
@@ -100,7 +149,12 @@ These are spike fixtures, not yet a qualified production
 maximum-output-token flag, so the harness can reject reported token excess and
 stop byte overflow but cannot prove the RFC's provider-side output ceiling.
 
-Signals normalize to bounded reasons:
+Codex CLI 0.143's `error`, `turn.failed`, and completed error-item events carry a
+message and may omit a code. Their messages are bounded by the JSONL collector and
+normalized through the same closed pattern matcher as bounded stderr. When a
+recognized stable code is present, it takes precedence over provider prose.
+Messages are never copied into the report, and unmatched text becomes the closed
+`processFailure` reason. Signals normalize to bounded reasons:
 
 | Signal | Reason | Retry disposition |
 | --- | --- | --- |
@@ -114,6 +168,23 @@ Signals normalize to bounded reasons:
 
 Synthetic subprocess fixtures cover every mapping without manufacturing account
 or quota failures.
+
+Schema-two report decoding validates each case as a coherent outcome. Response
+and token counts must be paired and nonnegative, retry disposition must match the
+observed reason, and `passed` must agree with the case-specific response,
+cancellation, or timeout evidence plus the reaping, workspace, and privacy
+fields. Gate acceptance is derived from those validated fields rather than
+trusting an encoded `passed` value. The report also records the complete exercised
+limit profile. Issue-gate acceptance requires exactly `4,096` response bytes,
+`4,096` output tokens, a 256 KiB event stream, 64 KiB of failure signal, a
+90-second process lifetime, and a 2-second termination grace; observed response
+and token counts must fit those limits. A relaxed qualification run remains
+useful evidence but cannot accept the gate. Acceptance also requires
+`modelFacingToolSurfaceQualified`; the field is fixed false because stock 0.143
+always registers a model-visible `ViewImage` filesystem tool when an environment
+is present, provides no supported strict-config or feature switch to remove it,
+and omits that item from its JSONL event mapping. Text-only model metadata blocks
+image execution before path access, but does not prove absence from model context.
 
 ## Exact context-estimation gate
 
@@ -165,7 +236,7 @@ complete hidden-framing measurement, exposes no provider-side output-token cap,
 and cannot yet expose only the scoped transcript-read tool. Those unknowns cannot
 be converted into optimistic zero-cost fields.
 
-## Qualification result — 30 August 2026
+## Historical qualification result — 30 August 2026
 
 Environment: Apple Silicon macOS, Codex CLI 0.143.0, ChatGPT login reported as
 available by `codex login status`.
@@ -178,14 +249,23 @@ available by `codex login status`.
   `processFailure` after 4.3 seconds. No response was accepted and raw stderr was
   intentionally neither displayed nor retained.
 
-The production adapter remains blocked on all of the following:
+That run did not accept the issue gate because its structured-response case
+failed. Current stock 0.143 also cannot accept it because model-facing filesystem
+tool confinement cannot be proven. The historical run also predates isolated
+client homes and is not valid privacy/confinement evidence: its invocation
+inherited the ordinary `CODEX_HOME`, which could expose ambient global
+instructions. The production adapter remains blocked on:
 
 1. one authenticated valid `CoachResponse` under the pinned byte/token limits;
 2. a provider-side output-token ceiling at or below `responseReservedTokens`;
-3. a Codex surface that can reduce the model-visible tool list to no core tools
-   plus, later, only Audora's scoped transcript read; and
+3. qualification of an exact model-facing tool allowlist containing, later,
+   only Audora's scoped transcript read, with no ambient filesystem tool; and
 4. real-environment qualification of authentication, quota, transient, and
    unavailable-model signals without weakening diagnostic redaction.
 
 Until those points pass on the exact shipping CLI/model pair, Audora must not wire
-this spike into the application composition root.
+this spike into the application composition root. Enabling a real qualification
+run additionally requires either a separately provisioned, stable
+qualification-only client home or upstream support that disables global
+instructions independently from authentication. Secrets must never be copied
+from an ordinary client home to create it.

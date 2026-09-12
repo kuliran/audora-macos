@@ -1,10 +1,21 @@
 import Foundation
 
+public enum CodexCLIQualificationStartError: Error, Equatable, Sendable {
+    case executableMustBeAbsolute
+    case modelNotAllowlisted
+    case authenticationAndGlobalInstructionIsolationUnsupported
+}
+
 public struct CodexCLIQualificationHarness {
     private let runner: CodexCLIRunner
     private let fileManager: FileManager
 
-    public init(
+    public init() {
+        runner = CodexCLIRunner()
+        fileManager = .default
+    }
+
+    init(
         runner: CodexCLIRunner = CodexCLIRunner(),
         fileManager: FileManager = .default
     ) {
@@ -17,7 +28,32 @@ public struct CodexCLIQualificationHarness {
         model: String,
         limits: QualificationLimits = QualificationLimits()
     ) throws -> QualificationSuiteReport {
-        let reports = try QualificationCase.allCases.map {
+        guard executableURL.path.hasPrefix("/") else {
+            throw CodexCLIQualificationStartError.executableMustBeAbsolute
+        }
+        guard CodexInvocationPlanBuilder.allowlistedModels.contains(model) else {
+            throw CodexCLIQualificationStartError.modelNotAllowlisted
+        }
+
+        _ = sanitizedCLIVersion(executableURL: executableURL)
+        throw CodexCLIQualificationStartError
+            .authenticationAndGlobalInstructionIsolationUnsupported
+    }
+
+    func runCases(
+        _ qualificationCases: [QualificationCase],
+        executableURL: URL,
+        model: String,
+        limits: QualificationLimits = QualificationLimits()
+    ) throws -> QualificationSuiteReport {
+        guard executableURL.path.hasPrefix("/") else {
+            throw CodexInvocationPlanError.executableMustBeAbsolute
+        }
+        guard CodexInvocationPlanBuilder.allowlistedModels.contains(model) else {
+            throw CodexInvocationPlanError.modelNotAllowlisted
+        }
+        let cliVersion = sanitizedCLIVersion(executableURL: executableURL)
+        let reports = try qualificationCases.map {
             try runCase(
                 $0,
                 executableURL: executableURL,
@@ -25,10 +61,15 @@ public struct CodexCLIQualificationHarness {
                 limits: limits
             )
         }
-        return QualificationSuiteReport(cases: reports)
+        return QualificationSuiteReport(
+            cases: reports,
+            cliVersion: cliVersion,
+            model: model,
+            limits: limits
+        )
     }
 
-    public func runCase(
+    func runCase(
         _ qualificationCase: QualificationCase,
         executableURL: URL,
         model: String,
@@ -39,9 +80,11 @@ public struct CodexCLIQualificationHarness {
             isDirectory: true
         )
         let workspaceURL = scopeURL.appendingPathComponent("workspace", isDirectory: true)
+        let clientHomeURL = scopeURL.appendingPathComponent("client-home", isDirectory: true)
         let transportURL = scopeURL.appendingPathComponent("transport", isDirectory: true)
 
         try fileManager.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: clientHomeURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: transportURL, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: scopeURL) }
 
@@ -61,6 +104,7 @@ public struct CodexCLIQualificationHarness {
             executableURL: executableURL,
             model: model,
             workspaceURL: workspaceURL,
+            clientHomeURL: clientHomeURL,
             responseSchemaURL: responseSchemaURL,
             modelCatalogURL: modelCatalogURL,
             syntheticRequest: QualificationFixtures.syntheticRequestData()
@@ -103,6 +147,61 @@ public struct CodexCLIQualificationHarness {
             includingPropertiesForKeys: nil,
             options: []
         ).isEmpty
+    }
+
+    private func sanitizedCLIVersion(executableURL: URL) -> String {
+        let scopeURL = fileManager.temporaryDirectory.appendingPathComponent(
+            "audora-codex-version-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        guard (try? fileManager.createDirectory(
+            at: scopeURL,
+            withIntermediateDirectories: true
+        )) != nil else {
+            return "unavailable"
+        }
+        defer { try? fileManager.removeItem(at: scopeURL) }
+
+        let process = BoundedProcessHost().run(
+            BoundedProcessRequest(
+                executableURL: executableURL,
+                arguments: ["--version"],
+                environment: [
+                    "CI": "1",
+                    "CODEX_HOME": scopeURL.path,
+                    "HOME": scopeURL.path,
+                    "NO_COLOR": "1",
+                    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                    "TERM": "dumb",
+                ],
+                workingDirectoryURL: scopeURL,
+                standardInput: Data(),
+                standardOutputByteCeiling: 128,
+                standardErrorByteCeiling: 128,
+                timeoutSeconds: 2,
+                cancelAfterSeconds: nil,
+                terminationGraceSeconds: 0.2
+            )
+        )
+
+        guard
+            process.launched,
+            process.stopReason == nil,
+            process.standardInputWasWritten,
+            process.exitedNormally,
+            process.exitStatus == 0,
+            process.processGroupWasReaped
+        else {
+            return "unavailable"
+        }
+
+        guard let versionOutput = String(
+            data: process.standardOutput,
+            encoding: .utf8
+        ) else {
+            return "unavailable"
+        }
+        return QualificationCLIIdentity.normalizedProbeOutput(versionOutput)
     }
 
     private func report(

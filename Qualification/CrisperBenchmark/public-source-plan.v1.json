@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "planId": "audora-public-qualification-audio-v1",
+  "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
+  "status": "candidate-intervals-awaiting-human-reference-review",
+  "podcastConversion": {
+    "tool": "ffmpeg",
+    "argumentsProfile": "audora-pcm16le-16khz-mono-v1",
+    "executableSha256": null,
+    "versionLine": null,
+    "status": "blocked-awaiting-pinned-converter-and-derived-hashes"
+  },
+  "sources": {
+    "ami-es2002a-headset": {
+      "title": "AMI Meeting Corpus ES2002a headset mix",
+      "mediaUrl": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/HeadsetAudio/ES2002a.Mix-Headset.wav",
+      "fileName": "ES2002a.Mix-Headset.wav",
+      "sizeBytes": 40724524,
+      "sha256": "9c76866990fcc8b84006dc32d273ad99df439090b748ebe72103bb78c3216ee7",
+      "mediaKind": "pcm-wav",
+      "license": "CC BY 4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+      "sourcePage": "https://groups.inf.ed.ac.uk/ami/corpus/",
+      "attribution": "AMI Meeting Corpus, meeting ES2002a; excerpted and unmodified except for clipping."
+    },
+    "nasa-astronaut-health-episode-22": {
+      "title": "Houston We Have a Podcast, Episode 22: Astronaut Health",
+      "mediaUrl": "https://www.nasa.gov/wp-content/uploads/2017/12/ep22_astronaut_health.mp3",
+      "fileName": "ep22_astronaut_health.mp3",
+      "sizeBytes": 64361888,
+      "sha256": "444656d86447e832dc6f54cc17a2a152abdef6eafb8c7135d8b176def2abebde",
+      "mediaKind": "mp3",
+      "license": "NASA media usage guidelines; verify separately identified third-party material",
+      "licenseUrl": "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+      "sourcePage": "https://www.nasa.gov/podcasts/houston-we-have-a-podcast/astronaut-health/",
+      "attribution": "NASA, Houston We Have a Podcast, Episode 22: Astronaut Health; excerpted and converted to PCM."
+    }
+  },
+  "referenceSeeds": {
+    "ami-manual-annotations-1.6.2": {
+      "url": "https://groups.inf.ed.ac.uk/ami/AMICorpusAnnotations/ami_public_manual_1.6.2.zip",
+      "sha256": "b56e5babb2496b8795deeeda7e71178d7fbc9963f94276cf2a3f4b56ebbc9f9d",
+      "license": "CC BY 4.0",
+      "use": "Word-timed seed only; the selected excerpts still require a focused human correction pass."
+    },
+    "nasa-episode-page": {
+      "url": "https://www.nasa.gov/podcasts/houston-we-have-a-podcast/astronaut-health/",
+      "use": "Speaker-attributed utterance-timed seed only; it is not a word-timed benchmark reference."
+    }
+  },
+  "fixtures": [
+    {
+      "id": "short",
+      "sourceId": "ami-es2002a-headset",
+      "startMs": 50000,
+      "durationMs": 10350,
+      "outputPath": "audio/short.wav",
+      "candidateAudioSha256": "a5276466a62a42c9dd2f4d1142741371688bce819068d3c34e02976cbc71b127",
+      "selectionEvidence": "Complete AMI turn segment with a filled pause, immediate 'our our' repetition, and complete tail speech.",
+      "reviewStatus": "awaiting-acoustic-and-reference-review"
+    },
+    {
+      "id": "one-minute",
+      "sourceId": "ami-es2002a-headset",
+      "startMs": 60350,
+      "durationMs": 60630,
+      "outputPath": "audio/one-minute.wav",
+      "candidateAudioSha256": "933240223f9fa38b3b7deedda1d5a876917d11969407f77f70c06c4d358609fe",
+      "selectionEvidence": "Complete AMI turns with fillers, laughter, immediate repetition, multi-second pauses, and a trunc='true' partial word.",
+      "reviewStatus": "awaiting-quiet-speech-and-reference-review"
+    },
+    {
+      "id": "twelve-minute",
+      "sourceId": "nasa-astronaut-health-episode-22",
+      "startMs": 1648000,
+      "durationMs": 718000,
+      "outputPath": "audio/twelve-minute.wav",
+      "candidateAudioSha256": null,
+      "selectionEvidence": "Podcast excerpt from 27:28 through 39:26 on complete official-transcript turn boundaries.",
+      "reviewStatus": "awaiting-acoustic-and-reference-review"
+    },
+    {
+      "id": "forty-five-minute",
+      "sourceId": "nasa-astronaut-health-episode-22",
+      "startMs": 243000,
+      "durationMs": 2695000,
+      "outputPath": "audio/forty-five-minute.wav",
+      "candidateAudioSha256": null,
+      "selectionEvidence": "Podcast excerpt from 04:03 through 48:58 on complete official-transcript turn boundaries; the pinned 30-second chunk/26-second stride schedule starts the final continuation at 2,678 seconds and leaves 17 seconds.",
+      "reviewStatus": "awaiting-acoustic-and-reference-review"
+    }
+  ]
+}
