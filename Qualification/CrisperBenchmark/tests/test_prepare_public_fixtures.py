@@ -43,6 +43,49 @@ def sha256_bytes(value: bytes) -> str:
 
 
 class PreparationCLITests(unittest.TestCase):
+    def test_current_plan_pins_converter_and_podcast_outputs(self) -> None:
+        plan = json.loads((ROOT / "public-source-plan.v1.json").read_text())
+        manifest = json.loads((ROOT / "corpus-manifest.v1.json").read_text())
+
+        self.assertEqual(
+            plan["podcastConversion"],
+            {
+                "tool": "ffmpeg",
+                "argumentsProfile": "audora-pcm16le-16khz-mono-v1",
+                "executableSha256": (
+                    "c997afe238f01223e11f47f945e1599e506217bc7ed7f02b0205f21f56fb73c3"
+                ),
+                "versionLine": "ffmpeg version 8.0 Copyright (c) 2000-2025 the FFmpeg developers",
+                "status": "pinned-and-reproduced",
+            },
+        )
+        planned_by_id = {fixture["id"]: fixture for fixture in plan["fixtures"]}
+        manifest_by_id = {
+            fixture["id"]: fixture for fixture in manifest["fixtures"]
+        }
+        expected_hashes = {
+            "twelve-minute": (
+                "e357cbf3a8568a39b897846ba8a988beb86630c7bba22deb2675e652abfa37eb"
+            ),
+            "forty-five-minute": (
+                "8bef07a1cadea11f9a2505592e5ac20c46577c4868499b2d7aeb8fcfe60a08c5"
+            ),
+        }
+        for fixture_id, expected_hash in expected_hashes.items():
+            planned_hash = planned_by_id[fixture_id]["candidateAudioSha256"]
+            self.assertEqual(planned_hash, expected_hash)
+            self.assertEqual(manifest_by_id[fixture_id]["audioSha256"], planned_hash)
+            self.assertEqual(
+                manifest_by_id[fixture_id]["assetStatus"],
+                "awaiting-acoustic-and-reference-review",
+            )
+            self.assertEqual(
+                manifest_by_id[fixture_id]["sourceProvenance"][
+                    "candidateAudioSha256"
+                ],
+                planned_hash,
+            )
+
     def make_pcm_plan(
         self,
         source_bytes: bytes,

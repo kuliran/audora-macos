@@ -1225,6 +1225,7 @@ def validate_locked_configuration(
         if not isinstance(asset_status, str) or asset_status not in {
             "ready",
             "awaiting-capture-and-hand-label",
+            "awaiting-acoustic-and-reference-review",
         }:
             raise QualificationError("corpus fixture asset status is invalid")
         for hash_key in ("audioSha256", "referenceSha256"):

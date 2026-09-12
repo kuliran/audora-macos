@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "planId": "audora-public-qualification-audio-v1",
   "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
-  "status": "candidate-intervals-awaiting-human-reference-review",
+  "status": "derived-audio-pinned-awaiting-human-reference-review",
   "podcastConversion": {
     "tool": "ffmpeg",
     "argumentsProfile": "audora-pcm16le-16khz-mono-v1",
-    "executableSha256": null,
-    "versionLine": null,
-    "status": "blocked-awaiting-pinned-converter-and-derived-hashes"
+    "executableSha256": "c997afe238f01223e11f47f945e1599e506217bc7ed7f02b0205f21f56fb73c3",
+    "versionLine": "ffmpeg version 8.0 Copyright (c) 2000-2025 the FFmpeg developers",
+    "status": "pinned-and-reproduced"
   },
   "sources": {
     "ami-es2002a-headset": {
@@ -75,7 +75,7 @@
       "startMs": 1648000,
       "durationMs": 718000,
       "outputPath": "audio/twelve-minute.wav",
-      "candidateAudioSha256": null,
+      "candidateAudioSha256": "e357cbf3a8568a39b897846ba8a988beb86630c7bba22deb2675e652abfa37eb",
       "selectionEvidence": "Podcast excerpt from 27:28 through 39:26 on complete official-transcript turn boundaries.",
       "reviewStatus": "awaiting-acoustic-and-reference-review"
     },
@@ -85,7 +85,7 @@
       "startMs": 243000,
       "durationMs": 2695000,
       "outputPath": "audio/forty-five-minute.wav",
-      "candidateAudioSha256": null,
+      "candidateAudioSha256": "8bef07a1cadea11f9a2505592e5ac20c46577c4868499b2d7aeb8fcfe60a08c5",
       "selectionEvidence": "Podcast excerpt from 04:03 through 48:58 on complete official-transcript turn boundaries; the pinned 30-second chunk/26-second stride schedule starts the final continuation at 2,678 seconds and leaves 17 seconds.",
       "reviewStatus": "awaiting-acoustic-and-reference-review"
     }

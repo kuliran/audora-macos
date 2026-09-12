@@ -107,15 +107,29 @@ manifest, or makes gate evidence. An optional `--report` path must be a new file
 outside the source and fixture trees; reports never replace plans, media, labels,
 or an earlier report.
 
-Podcast preparation is deliberately blocked with
-`PODCAST_REPRODUCIBILITY_NOT_PINNED`. Before either NASA fixture can be
-prepared, `public-source-plan.v1.json` must pin the exact `ffmpeg` executable
-SHA-256, its first `-version` line, and the expected derived WAV SHA-256 for
-both podcast intervals. The preparer verifies those identities before use.
-`ffmpeg` was not available on the validation host, so the NASA clips were not
-converted and their derived hashes remain explicitly unset. The utility never
-installs a converter, and no podcast output should be treated as reproducible
-until those fields have been independently reviewed and pinned.
+The NASA recipe is pinned to the arm64 `ffmpeg` 8.0 executable whose SHA-256 is
+`c997afe238f01223e11f47f945e1599e506217bc7ed7f02b0205f21f56fb73c3` and
+whose first version line is recorded verbatim in `public-source-plan.v1.json`.
+On the validation host that executable was supplied by Buzz.app at
+`/Applications/Buzz.app/Contents/Frameworks/ffmpeg`; another copy is accepted
+only if both pinned identity checks match. Reproduce the podcast candidates
+from a clean ignored fixture directory with:
+
+```sh
+python3.12 prepare_public_fixtures.py \
+  --download \
+  --fixtures twelve-minute forty-five-minute \
+  --ffmpeg /absolute/path/to/the-pinned/ffmpeg
+```
+
+The pinned outputs are a 718-second WAV with SHA-256
+`e357cbf3a8568a39b897846ba8a988beb86630c7bba22deb2675e652abfa37eb` and a
+2,695-second WAV with SHA-256
+`8bef07a1cadea11f9a2505592e5ac20c46577c4868499b2d7aeb8fcfe60a08c5`.
+The recipe was rerun with `--replace` and reproduced both hashes exactly. The
+downloaded MP3 and derived WAVs remain git-ignored and are not vendored. These
+are candidate audio files only: neither interval has a hand-reviewed word/timing
+reference, so neither fixture is marked ready or counts as qualification evidence.
 
 ## Running
 
@@ -156,15 +170,15 @@ PYTHON_BIN=python3.12 sh run-tests.sh
 
 `results/2026-09-12-local-preflight.json` is the current, explicitly
 `preflight-only` Apple Silicon report; no inference was attempted. Its engine,
-corpus, and public-source-plan hashes match the current configuration. All four corpus cases,
-cancellation, and cached-offline inference are **blocked**, not passed: the
-repository contains no local audio/reference assets, no reviewed reference hashes
-are pinned, no prepared local model snapshot was supplied, and the locked Python
-runtime and packages are not installed. Public source selection is no longer a
-blocker, but the NASA converter and derived hashes remain unpinned, local
-candidate audio is absent, and human-reviewed references are not
-qualification-ready. The engine selection and decoding configuration were not
-changed. The compatibility-patch callback needed to prove cancellation during
-active model inference is also absent
+corpus, and public-source-plan hashes match the current configuration. All four
+corpus cases, cancellation, and cached-offline inference are **blocked**, not
+passed: the AMI audio candidates are absent on the recorded host, no reviewed
+reference hashes are pinned, no prepared local model snapshot was supplied, and
+the locked Python runtime and packages are not installed. Both NASA audio files
+were present with the pinned format, duration, and SHA-256 when preflight was
+recorded, but their manifest entries remain explicitly not ready pending acoustic
+review and hand-aligned references. The engine selection and decoding
+configuration were not changed. The compatibility-patch callback needed to prove
+cancellation during active model inference is also absent
 (`audoraCompatibilityPatchId` is null), so cancellation remains blocked even
 after the corpus, model, and runtime prerequisites are supplied.

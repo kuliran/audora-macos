@@ -5,7 +5,9 @@ paths declared by `../corpus-manifest.v1.json`. These derived assets are
 intentionally not committed. `../public-source-plan.v1.json` records the pinned
 public inputs, exact candidate intervals, attribution, and usage terms; the
 preparation utility writes only local audio candidates and never promotes them
-to ready fixtures.
+to ready fixtures. The two NASA podcast candidates now have pinned converter and
+derived-audio hashes, but they remain unready until their audio is reviewed and
+their word/timing references are hand-aligned and hashed.
 
 Before a qualification run, verify each candidate WAV against the derived hash
 in both the public-source plan and manifest, fill only genuinely derived hashes

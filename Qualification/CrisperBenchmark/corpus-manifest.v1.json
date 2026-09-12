@@ -4,7 +4,7 @@
   "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
   "publicSourcePlan": {
     "planId": "audora-public-qualification-audio-v1",
-    "sha256": "b2570a7ee4a4ad08f93ccda227861e5431e4ab392c0654db923120fa87fe70e9"
+    "sha256": "8089892c561a32a73b7d937476b9add2a4650cba1793f7175aacc66c519e1ec8"
   },
   "audioFormat": {
     "container": "wav",
@@ -100,7 +100,7 @@
       "id": "twelve-minute",
       "audioPath": "audio/twelve-minute.wav",
       "referencePath": "reference/twelve-minute.json",
-      "audioSha256": null,
+      "audioSha256": "e357cbf3a8568a39b897846ba8a988beb86630c7bba22deb2675e652abfa37eb",
       "referenceSha256": null,
       "durationRangeMs": [710000, 730000],
       "requiredPhenomena": ["quiet-speech", "filled-pause", "immediate-repetition", "partial-word", "laughter", "long-pause", "longform-boundary", "tail-speech"],
@@ -108,15 +108,15 @@
         "sourceId": "nasa-astronaut-health-episode-22",
         "startMs": 1648000,
         "durationMs": 718000,
-        "candidateAudioSha256": null
+        "candidateAudioSha256": "e357cbf3a8568a39b897846ba8a988beb86630c7bba22deb2675e652abfa37eb"
       },
-      "assetStatus": "awaiting-capture-and-hand-label"
+      "assetStatus": "awaiting-acoustic-and-reference-review"
     },
     {
       "id": "forty-five-minute",
       "audioPath": "audio/forty-five-minute.wav",
       "referencePath": "reference/forty-five-minute.json",
-      "audioSha256": null,
+      "audioSha256": "8bef07a1cadea11f9a2505592e5ac20c46577c4868499b2d7aeb8fcfe60a08c5",
       "referenceSha256": null,
       "durationRangeMs": [2690000, 2699999],
       "requiredPhenomena": ["quiet-speech", "filled-pause", "immediate-repetition", "partial-word", "laughter", "long-pause", "longform-boundary", "final-underfilled-window", "tail-speech"],
@@ -124,9 +124,9 @@
         "sourceId": "nasa-astronaut-health-episode-22",
         "startMs": 243000,
         "durationMs": 2695000,
-        "candidateAudioSha256": null
+        "candidateAudioSha256": "8bef07a1cadea11f9a2505592e5ac20c46577c4868499b2d7aeb8fcfe60a08c5"
       },
-      "assetStatus": "awaiting-capture-and-hand-label"
+      "assetStatus": "awaiting-acoustic-and-reference-review"
     }
   ]
 }

@@ -1,9 +1,12 @@
 # Audio source research for the CrisperWhisper gate
 
-Research checked 2026-09-12. The public AMI and NASA media were downloaded to
-disposable `/private/tmp` paths solely to validate their format, byte count,
-hashes, and candidate intervals. They were not committed. This document makes
-no claim that those disposable validation copies have since been deleted.
+Research checked 2026-09-12. The public AMI and NASA media were initially
+downloaded to disposable `/private/tmp` paths solely to validate their format,
+byte count, hashes, and candidate intervals. For reproducible long-fixture
+preparation, the NASA MP3 was subsequently downloaded again to git-ignored local
+fixture storage and converted into git-ignored WAV candidates. No source or
+derived audio was committed. This document makes no claim that the earlier
+disposable validation copies have since been deleted.
 
 ## Recommendation
 
@@ -51,6 +54,19 @@ Use NASA's direct MP3 for [Episode 22, “Astronaut Health”](https://www.nasa.
 
 The direct NASA MP3 download verified SHA-256 `444656d86447e832dc6f54cc17a2a152abdef6eafb8c7135d8b176def2abebde` and decodes to approximately 3,218 seconds, enough for the selected 48:58 endpoint. The episode page supplies an official, speaker-attributed transcript with utterance timestamps through the end of the conversation. It visibly retains conversational forms such as repeated words and fillers, cut-offs, `[inaudible]`, and multiple `[laughter]`/`[laughing]` events. This makes it a useful labeling seed, but it is not a word-timed benchmark reference; the extracted clips require word-level hand alignment and correction.
 
+The extraction was reproduced with the arm64 `ffmpeg` 8.0 executable at
+`/Applications/Buzz.app/Contents/Frameworks/ffmpeg`, pinned by executable
+SHA-256 `c997afe238f01223e11f47f945e1599e506217bc7ed7f02b0205f21f56fb73c3`
+and first version line in `public-source-plan.v1.json`. The checked-in argument
+profile produced mono 16 kHz signed 16-bit PCM WAVs with these exact identities:
+
+- `27:28–39:26`: 718,000 ms, 22,976,044 bytes, SHA-256 `e357cbf3a8568a39b897846ba8a988beb86630c7bba22deb2675e652abfa37eb`;
+- `04:03–48:58`: 2,695,000 ms, 86,240,044 bytes, SHA-256 `8bef07a1cadea11f9a2505592e5ac20c46577c4868499b2d7aeb8fcfe60a08c5`.
+
+Running the public preparer again with `--replace` reproduced both hashes. This
+establishes converter/output reproducibility only; acoustic review, word-level
+reference correction, and all model qualification gates remain outstanding.
+
 NASA's [media usage guidelines](https://www.nasa.gov/nasa-brand-center/images-and-media/) state that NASA audio and other NASA content generally are not subject to copyright in the United States, permit educational or informational reuse, require source acknowledgement, prohibit implied endorsement, and warn that separately identified third-party material is not covered. The broader [NASA Brand Center guidance](https://www.nasa.gov/nasa-brand-center/) also warns that some audiovisual works contain licensed music or footage. Therefore:
 
 - extract speech-only spans and omit intro/outro music and embedded archival clips;
@@ -60,4 +76,9 @@ NASA's [media usage guidelines](https://www.nasa.gov/nasa-brand-center/images-an
 
 ## Gate status
 
-These sources remove the “no candidate audio identified” blocker. They do **not** make issue #3 pass by themselves. The gate remains blocked until the exact intervals are reviewed, references are hand-labeled, derived WAVs and references are hashed in `corpus-manifest.v1.json`, and the pinned CrisperWhisper benchmark completes all quality, timing, cancellation, cached-offline, memory, runtime, and thermal checks.
+These sources and reproduced hashes remove the candidate-audio identity blocker.
+They do **not** make issue #3 pass by themselves. The gate remains blocked until
+the exact intervals are acoustically reviewed, references are hand-labeled and
+hashed, each fixture is explicitly marked ready, and the pinned CrisperWhisper
+benchmark completes all quality, timing, cancellation, cached-offline, memory,
+runtime, and thermal checks.

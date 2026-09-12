@@ -229,6 +229,26 @@ def qualification_inputs_with_pinned_public_audio() -> tuple[dict, dict, dict]:
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_acoustic_review_status_is_valid_but_remains_not_ready(self) -> None:
+        lock = benchmark.load_json(benchmark.ENGINE_LOCK)
+        manifest = benchmark.load_json(benchmark.CORPUS_MANIFEST)
+        source_plan = benchmark.load_json(benchmark.PUBLIC_SOURCE_PLAN)
+        for fixture in manifest["fixtures"]:
+            if fixture["id"] in {"twelve-minute", "forty-five-minute"}:
+                fixture["assetStatus"] = "awaiting-acoustic-and-reference-review"
+
+        benchmark.validate_locked_configuration(lock, manifest, source_plan)
+        with tempfile.TemporaryDirectory() as directory:
+            gates, reasons = benchmark._fixture_preflight(manifest, Path(directory))
+
+        gates_by_name = {gate.gate: gate for gate in gates}
+        for fixture_id in ("twelve-minute", "forty-five-minute"):
+            gate = gates_by_name[f"fixture.{fixture_id}.asset-status"]
+            self.assertEqual(gate.status, "blocked")
+            self.assertEqual(gate.measured, "awaiting-acoustic-and-reference-review")
+            self.assertEqual(gate.reason, "CORPUS_ASSET_NOT_READY")
+            self.assertIn("CORPUS_ASSET_NOT_READY", reasons[fixture_id])
+
     def test_committed_manifest_is_bound_to_the_public_source_plan(self) -> None:
         lock = benchmark.load_json(benchmark.ENGINE_LOCK)
         manifest = benchmark.load_json(benchmark.CORPUS_MANIFEST)
@@ -240,7 +260,7 @@ class ConfigurationTests(unittest.TestCase):
             manifest["publicSourcePlan"],
             {
                 "planId": source_plan["planId"],
-                "sha256": "b2570a7ee4a4ad08f93ccda227861e5431e4ab392c0654db923120fa87fe70e9",
+                "sha256": "8089892c561a32a73b7d937476b9add2a4650cba1793f7175aacc66c519e1ec8",
             },
         )
         manifest_by_id = {fixture["id"]: fixture for fixture in manifest["fixtures"]}
@@ -1243,7 +1263,7 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(any(gate.gate == "model.local-assets" and gate.status == "blocked" for gate in gates))
         self.assertTrue(all("CORPUS_ASSET_NOT_READY" in reasons[fixture] for fixture in benchmark.EXPECTED_FIXTURES))
 
-    def test_preflight_blocks_unpinned_public_derived_audio_hashes(self) -> None:
+    def test_preflight_accepts_all_pinned_public_derived_audio_hashes(self) -> None:
         lock = benchmark.load_json(benchmark.ENGINE_LOCK)
         manifest = benchmark.load_json(benchmark.CORPUS_MANIFEST)
         source_plan = benchmark.load_json(benchmark.PUBLIC_SOURCE_PLAN)
@@ -1257,18 +1277,12 @@ class PreflightTests(unittest.TestCase):
             )
 
         gates_by_name = {gate.gate: gate for gate in gates}
-        for fixture_id in ("short", "one-minute"):
+        for fixture_id in benchmark.EXPECTED_FIXTURES:
             self.assertEqual(
                 gates_by_name[f"fixture.{fixture_id}.public-derived-audio-hash"].status,
                 "passed",
             )
-        for fixture_id in ("twelve-minute", "forty-five-minute"):
-            gate = gates_by_name[
-                f"fixture.{fixture_id}.public-derived-audio-hash"
-            ]
-            self.assertEqual(gate.status, "blocked")
-            self.assertEqual(gate.reason, "DERIVED_AUDIO_HASH_NOT_PINNED")
-            self.assertIn("DERIVED_AUDIO_HASH_NOT_PINNED", reasons[fixture_id])
+            self.assertNotIn("DERIVED_AUDIO_HASH_NOT_PINNED", reasons[fixture_id])
 
     def test_blocked_report_records_public_source_plan_and_fixture_provenance(self) -> None:
         lock = benchmark.load_json(benchmark.ENGINE_LOCK)
@@ -1293,7 +1307,7 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(report["publicSourcePlanId"], source_plan["planId"])
         self.assertEqual(
             report["publicSourcePlanSha256"],
-            "b2570a7ee4a4ad08f93ccda227861e5431e4ab392c0654db923120fa87fe70e9",
+            "8089892c561a32a73b7d937476b9add2a4650cba1793f7175aacc66c519e1ec8",
         )
         provenance_by_id = {
             fixture["id"]: fixture["sourceProvenance"]
@@ -2030,6 +2044,8 @@ class QualificationRunTests(unittest.TestCase):
         lock = benchmark.load_json(benchmark.ENGINE_LOCK)
         manifest = benchmark.load_json(benchmark.CORPUS_MANIFEST)
         source_plan = benchmark.load_json(benchmark.PUBLIC_SOURCE_PLAN)
+        source_plan["fixtures"][2]["candidateAudioSha256"] = None
+        bind_manifest_to_source_plan(manifest, source_plan)
         with tempfile.TemporaryDirectory() as directory, self.assertRaises(
             benchmark.QualificationError
         ):

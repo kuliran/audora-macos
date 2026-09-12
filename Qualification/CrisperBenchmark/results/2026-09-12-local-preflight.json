@@ -13,9 +13,7 @@
   "cancellation": {
     "reasonCodes": [
       "ACTIVE_INFERENCE_PROOF_UNAVAILABLE",
-      "AUDIO_HASH_NOT_PINNED",
       "CORPUS_ASSET_NOT_READY",
-      "DERIVED_AUDIO_HASH_NOT_PINNED",
       "MODEL_DIRECTORY_NOT_PROVIDED",
       "PACKAGE_MISSING_OR_DRIFTED",
       "REFERENCE_HASH_NOT_PINNED",
@@ -23,7 +21,7 @@
     ],
     "status": "blocked"
   },
-  "corpusManifestSha256": "5cbcff24e993e676addc9a7ae55e2d52afab52e33303807697bd3b474fd0c0c9",
+  "corpusManifestSha256": "85b66d58df61ea15ba0be22d89a2ef02bb0e6f8bf7684b2f2bfe2f871b24e204",
   "engineLockSha256": "c26c6a97338544edc70d6e50d03f547adc820a488df6339ff0838cccbaceba5c",
   "engineSelectionChanged": false,
   "environment": {
@@ -72,16 +70,14 @@
     {
       "id": "twelve-minute",
       "reasonCodes": [
-        "AUDIO_HASH_NOT_PINNED",
         "CORPUS_ASSET_NOT_READY",
-        "DERIVED_AUDIO_HASH_NOT_PINNED",
         "MODEL_DIRECTORY_NOT_PROVIDED",
         "PACKAGE_MISSING_OR_DRIFTED",
         "REFERENCE_HASH_NOT_PINNED",
         "RUNTIME_VERSION_MISMATCH"
       ],
       "sourceProvenance": {
-        "candidateAudioSha256": null,
+        "candidateAudioSha256": "e357cbf3a8568a39b897846ba8a988beb86630c7bba22deb2675e652abfa37eb",
         "durationMs": 718000,
         "sourceId": "nasa-astronaut-health-episode-22",
         "startMs": 1648000
@@ -91,16 +87,14 @@
     {
       "id": "forty-five-minute",
       "reasonCodes": [
-        "AUDIO_HASH_NOT_PINNED",
         "CORPUS_ASSET_NOT_READY",
-        "DERIVED_AUDIO_HASH_NOT_PINNED",
         "MODEL_DIRECTORY_NOT_PROVIDED",
         "PACKAGE_MISSING_OR_DRIFTED",
         "REFERENCE_HASH_NOT_PINNED",
         "RUNTIME_VERSION_MISMATCH"
       ],
       "sourceProvenance": {
-        "candidateAudioSha256": null,
+        "candidateAudioSha256": "8bef07a1cadea11f9a2505592e5ac20c46577c4868499b2d7aeb8fcfe60a08c5",
         "durationMs": 2695000,
         "sourceId": "nasa-astronaut-health-episode-22",
         "startMs": 243000
@@ -209,14 +203,14 @@
     },
     {
       "gate": "fixture.twelve-minute.public-derived-audio-hash",
-      "reason": "DERIVED_AUDIO_HASH_NOT_PINNED",
-      "status": "blocked",
+      "measured": "e357cbf3a8568a39b897846ba8a988beb86630c7bba22deb2675e652abfa37eb",
+      "status": "passed",
       "threshold": "sha256"
     },
     {
       "gate": "fixture.forty-five-minute.public-derived-audio-hash",
-      "reason": "DERIVED_AUDIO_HASH_NOT_PINNED",
-      "status": "blocked",
+      "measured": "8bef07a1cadea11f9a2505592e5ac20c46577c4868499b2d7aeb8fcfe60a08c5",
+      "status": "passed",
       "threshold": "sha256"
     },
     {
@@ -259,16 +253,16 @@
     },
     {
       "gate": "fixture.twelve-minute.asset-status",
-      "measured": "awaiting-capture-and-hand-label",
+      "measured": "awaiting-acoustic-and-reference-review",
       "reason": "CORPUS_ASSET_NOT_READY",
       "status": "blocked",
       "threshold": "ready"
     },
     {
       "gate": "fixture.twelve-minute.audio-hash",
-      "reason": "AUDIO_HASH_NOT_PINNED",
-      "status": "blocked",
-      "threshold": "sha256"
+      "measured": "e357cbf3a8568a39b897846ba8a988beb86630c7bba22deb2675e652abfa37eb",
+      "status": "passed",
+      "threshold": "e357cbf3a8568a39b897846ba8a988beb86630c7bba22deb2675e652abfa37eb"
     },
     {
       "gate": "fixture.twelve-minute.reference-hash",
@@ -277,30 +271,60 @@
       "threshold": "sha256"
     },
     {
+      "gate": "fixture.twelve-minute.audio-format",
+      "measured": true,
+      "status": "passed",
+      "threshold": true
+    },
+    {
+      "gate": "fixture.twelve-minute.audio-duration-ms",
+      "measured": 718000,
+      "status": "passed",
+      "threshold": [
+        710000,
+        730000
+      ]
+    },
+    {
       "gate": "fixture.forty-five-minute.asset-status",
-      "measured": "awaiting-capture-and-hand-label",
+      "measured": "awaiting-acoustic-and-reference-review",
       "reason": "CORPUS_ASSET_NOT_READY",
       "status": "blocked",
       "threshold": "ready"
     },
     {
       "gate": "fixture.forty-five-minute.audio-hash",
-      "reason": "AUDIO_HASH_NOT_PINNED",
-      "status": "blocked",
-      "threshold": "sha256"
+      "measured": "8bef07a1cadea11f9a2505592e5ac20c46577c4868499b2d7aeb8fcfe60a08c5",
+      "status": "passed",
+      "threshold": "8bef07a1cadea11f9a2505592e5ac20c46577c4868499b2d7aeb8fcfe60a08c5"
     },
     {
       "gate": "fixture.forty-five-minute.reference-hash",
       "reason": "REFERENCE_HASH_NOT_PINNED",
       "status": "blocked",
       "threshold": "sha256"
+    },
+    {
+      "gate": "fixture.forty-five-minute.audio-format",
+      "measured": true,
+      "status": "passed",
+      "threshold": true
+    },
+    {
+      "gate": "fixture.forty-five-minute.audio-duration-ms",
+      "measured": 2695000,
+      "status": "passed",
+      "threshold": [
+        2690000,
+        2699999
+      ]
     }
   ],
   "publicSourcePlanId": "audora-public-qualification-audio-v1",
-  "publicSourcePlanSha256": "b2570a7ee4a4ad08f93ccda227861e5431e4ab392c0654db923120fa87fe70e9",
+  "publicSourcePlanSha256": "8089892c561a32a73b7d937476b9add2a4650cba1793f7175aacc66c519e1ec8",
   "qualificationProfileId": "crisperwhisper-2-small-transformers-mps-v1",
   "qualificationStatus": "blocked",
-  "recordedAt": "2026-09-12T19:59:27.497571Z",
+  "recordedAt": "2026-09-12T20:54:55.597959Z",
   "reportKind": "preflight-only",
   "schemaVersion": 1
 }
