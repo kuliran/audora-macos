@@ -155,7 +155,14 @@ public enum PortableAttemptTranscriptAvailabilitySource {
                 guard let availabilities else { return .retry }
                 return .resolved(
                     availabilities.map { availability in
-                        availability == .available ? .available : .unavailable
+                        switch availability {
+                        case .available:
+                            .available
+                        case .unavailable:
+                            .unavailable
+                        case .externalProcessingDisallowed:
+                            .externalProcessingDisallowed
+                        }
                     }
                 )
             }

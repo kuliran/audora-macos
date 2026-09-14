@@ -807,16 +807,36 @@ public actor PortableSessionProcessingWorkspace:
 
 extension SystemLibraryClock: SessionProcessingClock {}
 
-public struct QualificationBlockedSessionAcousticEvidence:
+/// Stable production gateway for locally derived acoustic evidence. It remains
+/// fail-closed until qualification binds the exact transcription profile and
+/// evidence adapter in the shared provider bundle.
+public struct QualificationGatedSessionAcousticEvidence:
     SessionAcousticEvidencePort
 {
-    public init() {}
+    private let qualifiedBundle: QualifiedTranscriptionProviderBundle?
+
+    /// Empty live composition. No profile is admitted and no resolver runs.
+    public init() {
+        qualifiedBundle = nil
+    }
+
+    /// Installs the evidence transport and exact profile from one qualification
+    /// authority. Supporting another profile requires a new bundle.
+    init(qualifiedBundle: QualifiedTranscriptionProviderBundle) {
+        self.qualifiedBundle = qualifiedBundle
+    }
 
     public func resolve(
         for source: SessionTranscriptionSource,
         profile: QualifiedTranscriptionProfile
     ) async -> SessionAcousticEvidenceResolution {
-        .unavailable
+        guard let qualifiedBundle,
+              profile == qualifiedBundle.profile
+        else { return .unavailable }
+        return await qualifiedBundle.acousticEvidence.resolve(
+            for: source,
+            profile: profile
+        )
     }
 }
 

@@ -14,8 +14,8 @@ enum NewChatAttachmentPickerPresentation {
             "A selected Session changed or is no longer available. Change the selection and try again."
         case .contextCannotFit:
             contextCannotFitRecoveryText
-        case .contextUnavailable:
-            "Current Coach context could not be verified. Change the selection or reopen New Chat to try again."
+        case let .contextUnavailable(reason):
+            CoachContextUnavailablePresentation.recoveryText(for: reason)
         case .qualifiedConfigurationUnavailable:
             "No qualified Coach configuration is available. Check again after installing a configuration update."
         }
@@ -23,6 +23,25 @@ enum NewChatAttachmentPickerPresentation {
 
     static func accessibilityAnnouncement(for issue: ChatAttachmentPickerIssue) -> String {
         "New Chat: \(recoveryText(for: issue))"
+    }
+}
+
+enum CoachContextUnavailablePresentation {
+    static func recoveryText(for reason: CoachContextUnavailableReason) -> String {
+        switch reason {
+        case .externalProcessingDisallowed:
+            "Coach processing is blocked because this context includes transcript-derived material whose engine policy does not permit external processing."
+        case .externalProcessingPolicyUnavailable:
+            "Coach processing is blocked because the engine policy for supporting transcript evidence could not be verified."
+        case .providerUnavailable:
+            "Coach transport is temporarily unavailable. Try again later."
+        case .sourceUnavailable:
+            "Current Coach context could not be loaded. Reopen the Chat and try again."
+        case .staleState:
+            "Current Coach context changed while it was being prepared. Refresh and try again."
+        case .invalidContext:
+            "Current Coach context could not be verified. Change the selection or reopen the Chat to try again."
+        }
     }
 }
 

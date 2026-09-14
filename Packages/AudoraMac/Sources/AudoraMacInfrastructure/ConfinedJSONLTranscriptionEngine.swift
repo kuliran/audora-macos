@@ -203,32 +203,59 @@ public extension ConfinedTranscriptionWorkerHost {
     ) async -> ConfinedStagedCandidateResolution { .unavailable }
 }
 
-/// Production fail-closed host used while the reviewed Crisper qualification
-/// artifact records blocked cached inference. It performs no process launch;
-/// a future release must replace it together with passing confinement and
-/// qualification evidence.
-public struct QualificationBlockedTranscriptionWorkerHost:
+/// Stable production gateway for the transcription bundle admitted by
+/// qualification. An empty gateway proves that no worker exists and performs no
+/// process launch; future worker adapters remain behind this same boundary.
+public struct QualificationGatedTranscriptionWorkerHost:
     ConfinedTranscriptionWorkerHost
 {
-    public init() {}
+    private let qualifiedBundle: QualifiedTranscriptionProviderBundle?
+
+    /// Empty live composition. No profile is admitted and no host can launch.
+    public init() {
+        qualifiedBundle = nil
+    }
+
+    /// Installs the worker transport and exact profile from one qualification
+    /// authority. Supporting another profile requires a new bundle.
+    init(qualifiedBundle: QualifiedTranscriptionProviderBundle) {
+        self.qualifiedBundle = qualifiedBundle
+    }
 
     public func start(
         _ invocation: ConfinedTranscriptionWorkerInvocation
     ) async throws -> ConfinedTranscriptionWorkerStarted {
-        throw TranscriptionEngineFailure.launchFailed
+        guard let qualifiedBundle,
+              invocation.profile == qualifiedBundle.profile
+        else {
+            throw TranscriptionEngineFailure.launchFailed
+        }
+        return try await qualifiedBundle.workerHost.start(invocation)
     }
 
     public func cancelAndReap(
         _ execution: TranscriptionExecutionReference,
         graceMilliseconds: UInt32
     ) async -> TranscriptionCancellationOutcome {
-        .alreadyAbsent
+        guard let qualifiedBundle else { return .unableToConfirm }
+        return await qualifiedBundle.workerHost.cancelAndReap(
+            execution,
+            graceMilliseconds: graceMilliseconds
+        )
     }
 
     public func workerPresence(
         for execution: TranscriptionExecutionReference
     ) async -> TranscriptionWorkerPresence {
-        .absent
+        guard let qualifiedBundle else { return .unknown }
+        return await qualifiedBundle.workerHost.workerPresence(for: execution)
+    }
+
+    public func recoverCandidate(
+        _ request: ConfinedTranscriptionCandidateRecoveryRequest
+    ) async -> ConfinedStagedCandidateResolution {
+        guard let qualifiedBundle else { return .unavailable }
+        return await qualifiedBundle.workerHost.recoverCandidate(request)
     }
 }
 

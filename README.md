@@ -13,16 +13,22 @@ and publishes one immutable Session only after flush, atomic install, and strict
 reread. The portable Domain, Application, and Contracts products remain separate
 from the macOS-only Infrastructure and Presentation products.
 
+Review treats the immutable transcript as authoritative independently of audio
+playback. Missing, corrupt, or unopenable canonical audio leaves the transcript,
+annotations, revision selection, and evidence highlighting available while exposing
+no playback state and disabling play/seek controls.
+
 Chat also has a portable context-capacity coordinator. It projects
 the current Profile, Coach Memory, complete successful history, Draft, framing,
 immutable attachments, one complete transcript-read exchange, response reserve,
 and safety margin through one deterministic serializer. Quotes are advisory; Send
 repeats the exact preflight and fails closed because no production provider
-descriptor is qualified yet. Attachment projection and capacity-sensitive Chat
-creation fail closed for the same reason. A temporary provider outage permits
-local creation only when an injected adapter retains a known current qualified
-configuration. Context failure recovery is local and invokes no provider or
-admission service. Creation quotes use an explicit no-Draft framing;
+configuration-and-transport bundle is qualified yet. Attachment projection and
+capacity-sensitive Chat creation fail closed for the same reason. A temporary
+provider outage permits local creation only when an injected adapter retains a
+known current qualified configuration. Context failure recovery is local and
+invokes no provider or admission service. Creation quotes use an explicit
+no-Draft framing;
 Send rejects the independent 16,384-byte message limit before resolving provider
 state, and exact snapshots are fenced by stable Draft/Pending identity plus current
 context and configuration generations.
@@ -30,13 +36,15 @@ context and configuration generations.
 Send now crosses one `Invocations.tryInvoke` coordinator. It re-resolves the
 locked Draft and exact context, enforces one active Invocation per Library, and
 claims a machine-local Library-keyed rolling 60-second ledger. The debit and
-portable Invocation authority are durable before the deterministic synthetic
-provider can start. Successful fake turns publish one exact user message and one
-Markdown Coach message behind a single Chat-manifest CAS; pre-commit crashes and
-CAS conflicts publish neither. The current live composition still fails closed at
-context qualification because no production provider descriptor is qualified. The
-synthetic vertical slice owns the exact bounded 5/10/15-second Attempt schedule
-and one shorter complete repair. Its process-live Stop authority bypasses queued
+portable Invocation authority are durable before the injected `CoachProvider`
+can start. Application treats every complete provider response as opaque bytes
+until the whole-response trust gate succeeds, then publishes one exact user
+message and one Markdown Coach message behind a single Chat-manifest CAS;
+pre-commit crashes and CAS conflicts publish neither. The current live composition
+uses a qualification-gated provider gateway and therefore fails closed because no
+production adapter is qualified. Test-only providers exercise the exact bounded
+5/10/15-second Attempt schedule and one shorter complete repair without entering
+shipping composition. Process-live Stop authority bypasses queued
 Chat mutations, revokes result publication before cancellation, and retains
 Invocation liveness until the exact Attempt is reaped and the Pending User Turn is
 durably interrupted. Retry builds a fresh Invocation from current context; Discard

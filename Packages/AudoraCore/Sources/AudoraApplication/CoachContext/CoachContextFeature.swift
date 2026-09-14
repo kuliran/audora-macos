@@ -203,19 +203,35 @@ extension CoachContextReconsiderRequest {
 
 /// Internal-adapter value after current Profile, Memory, history, and evidence resolve.
 /// It never crosses the product-facing CoachContextFeature interface.
+enum CoachContextResolvedSnapshotError: Error, Equatable, Sendable {
+    case profileProjectionMismatch
+}
+
 struct CoachContextResolvedSnapshot: Sendable {
     let input: CoachContextQuoteInput
     let configuration: CoachContextConfiguration
     let authority: CoachContextSnapshotAuthority
+    let profileProjection: CoachProfileContextProjection
+
+    var profileEvidence: CoachProfileEvidenceObligations {
+        profileProjection.evidenceObligations
+    }
 
     init(
         input: CoachContextQuoteInput,
         configuration: CoachContextConfiguration,
-        authority: CoachContextSnapshotAuthority
+        authority: CoachContextSnapshotAuthority,
+        profileProjection: CoachProfileContextProjection
     ) throws {
+        guard input.profile == profileProjection.value,
+              authority.profile == profileProjection.provenance
+        else {
+            throw CoachContextResolvedSnapshotError.profileProjectionMismatch
+        }
         self.input = input
         self.configuration = configuration
         self.authority = authority
+        self.profileProjection = profileProjection
     }
 }
 
@@ -234,7 +250,7 @@ enum CoachContextSourceLeaseAuthority: Equatable, Sendable {
 actor CoachContextAuthorityLease {
     private var releaseAction: (@Sendable () async -> Void)?
 
-    init(release: @escaping @Sendable () async -> Void = {}) {
+    init(release: @escaping @Sendable () async -> Void) {
         releaseAction = release
     }
 
@@ -322,22 +338,6 @@ extension CoachContextSnapshotPort {
         false
     }
 
-    /// Explicit opt-in for fixtures and adapters whose generations are immutable.
-    /// Mutable sources must implement lease acquisition and defer their writes.
-    func acquireImmutableAuthorityLease(
-        _ authority: CoachContextSourceLeaseAuthority
-    ) async -> CoachContextAuthorityLeaseOutcome {
-        let current: Bool
-        switch authority {
-        case let .snapshot(snapshot):
-            current = await isCurrent(snapshot)
-        case let .configuration(generation):
-            current = await isCurrentConfiguration(generation)
-        }
-        return current
-            ? .acquired(CoachContextAuthorityLease())
-            : .stale
-    }
 }
 
 extension ProfileReconsiderationUnavailableCoachContextSnapshotPort {
@@ -418,6 +418,8 @@ public enum CoachContextUnavailableReason: String, Error, Equatable, Sendable {
     case sourceUnavailable
     case staleState
     case invalidContext
+    case externalProcessingDisallowed
+    case externalProcessingPolicyUnavailable
 }
 
 public enum CoachContextQuoteOutcome: Equatable, Sendable {
@@ -471,19 +473,22 @@ struct ChatCreationQuoteAuthority: Equatable, Sendable {
     }
 }
 
-/// Exact bytes plus the identity/configuration fence required by the future #22
-/// admission coordinator. This module does not invoke a provider.
+/// Exact bytes plus the identity/configuration fence required by Invocation
+/// admission. This module does not invoke a provider.
 struct PreparedCoachLaunchContext: Equatable, Sendable {
     let quote: CoachContextQuote
     let exchange: CanonicalCoachExchange
+    let providerBinding: CoachProviderConfigurationBinding
     let authority: CoachContextSnapshotAuthority
 
     init(
         measured: MeasuredCoachLaunchContext,
+        providerBinding: CoachProviderConfigurationBinding,
         authority: CoachContextSnapshotAuthority
     ) {
         quote = measured.quote
         exchange = measured.exchange
+        self.providerBinding = providerBinding
         self.authority = authority
     }
 }
@@ -500,8 +505,8 @@ public protocol CoachContextFeature: Sendable {
 
 }
 
-/// Application-internal preflight seam. Its exact serialized exchange is reserved
-/// for the future provider/admission coordinator owned by #22.
+/// Application-internal preflight seam. Its exact serialized exchange is consumed
+/// by the Invocation admission coordinator without provider-side reconstruction.
 protocol CoachContextPendingPreparing: Sendable {
     func preparePendingUserTurn(
         _ request: CoachContextPendingTurnRequest
@@ -568,8 +573,10 @@ public struct DefaultCoachContextFeature:
     private let configurationAuthority: CoachContextConfigurationAuthority
     private let attachmentSource: any ChatSessionAttachmentSource
     private let attachmentCapacityPreparer: any ChatAttachmentCapacityPreparing
+    private let externalProcessingAuthorizer: CoachExternalProcessingAuthorizer
 
-    /// Live composition fails closed until a provider descriptor is qualified.
+    /// Live composition fails closed until one complete provider configuration
+    /// and its transport have passed qualification.
     public init() {
         let source = UnavailableCoachContextSnapshotPort()
         self.source = source
@@ -577,6 +584,7 @@ public struct DefaultCoachContextFeature:
         configurationAuthority = CoachContextConfigurationAuthority(source: source)
         attachmentSource = MissingQualifiedConfigurationChatSessionAttachmentSource()
         attachmentCapacityPreparer = UnavailableChatAttachmentCapacityPreparer()
+        externalProcessingAuthorizer = CoachExternalProcessingAuthorizer()
     }
 
     @_spi(CoachContextQualification)
@@ -594,6 +602,10 @@ public struct DefaultCoachContextFeature:
         )
         attachmentSource = projectedAttachmentSource
         attachmentCapacityPreparer = projectedAttachmentSource
+        externalProcessingAuthorizer = CoachExternalProcessingAuthorizer(
+            sourceIfAvailable:
+                attachmentEvidenceSource as? any CoachEvidenceUsePolicySource
+        )
     }
 
     init(
@@ -608,10 +620,30 @@ public struct DefaultCoachContextFeature:
             authorityID: configurationAuthorityID
         )
         attachmentSource = UnavailableChatSessionAttachmentSource()
-        attachmentCapacityPreparer =
-            ConfigurationBoundEmptyChatAttachmentCapacityPreparer(
-                configurationAuthorityID: configurationAuthority.authorityID
-            )
+        attachmentCapacityPreparer = UnavailableChatAttachmentCapacityPreparer()
+        externalProcessingAuthorizer = CoachExternalProcessingAuthorizer()
+    }
+
+    /// Internal dependency-complete initializer used by focused adapters and
+    /// tests. No attachment authority or evidence is synthesized here.
+    init(
+        source: any CoachContextSnapshotPort,
+        attachmentCapacityPreparer: any ChatAttachmentCapacityPreparing,
+        evidenceUsePolicySource: (any CoachEvidenceUsePolicySource)? = nil,
+        capacity: CoachContextCapacity = CoachContextCapacity(),
+        configurationAuthorityID: UUID = UUID()
+    ) {
+        self.source = source
+        self.capacity = capacity
+        configurationAuthority = CoachContextConfigurationAuthority(
+            source: source,
+            authorityID: configurationAuthorityID
+        )
+        attachmentSource = UnavailableChatSessionAttachmentSource()
+        self.attachmentCapacityPreparer = attachmentCapacityPreparer
+        externalProcessingAuthorizer = CoachExternalProcessingAuthorizer(
+            sourceIfAvailable: evidenceUsePolicySource
+        )
     }
 
     init(
@@ -633,6 +665,29 @@ public struct DefaultCoachContextFeature:
         )
         attachmentSource = projectedAttachmentSource
         attachmentCapacityPreparer = projectedAttachmentSource
+        externalProcessingAuthorizer = CoachExternalProcessingAuthorizer(
+            sourceIfAvailable:
+                attachmentEvidenceSource as? any CoachEvidenceUsePolicySource
+        )
+    }
+
+    init(
+        source: any CoachContextSnapshotPort,
+        evidenceUsePolicySource: any CoachEvidenceUsePolicySource,
+        capacity: CoachContextCapacity = CoachContextCapacity(),
+        configurationAuthorityID: UUID = UUID()
+    ) {
+        self.source = source
+        self.capacity = capacity
+        configurationAuthority = CoachContextConfigurationAuthority(
+            source: source,
+            authorityID: configurationAuthorityID
+        )
+        attachmentSource = UnavailableChatSessionAttachmentSource()
+        attachmentCapacityPreparer = UnavailableChatAttachmentCapacityPreparer()
+        externalProcessingAuthorizer = CoachExternalProcessingAuthorizer(
+            source: evidenceUsePolicySource
+        )
     }
 
     func loadAttachmentCandidates(
@@ -668,6 +723,8 @@ public struct DefaultCoachContextFeature:
             return .unavailable(.sourceUnavailable)
         case .attachmentUnavailable:
             return .unavailable(.invalidContext)
+        case .externalProcessingDisallowed:
+            return .unavailable(.externalProcessingDisallowed)
         case .invalidContext:
             return .unavailable(.invalidContext)
         case .failed:
@@ -677,17 +734,20 @@ public struct DefaultCoachContextFeature:
         case let .resolved(snapshot):
             guard snapshot.authority.binding == request.snapshotBinding,
                   snapshot.input.trigger == .chatCreation(request.creation),
-                  (!evidenceAuthority.requiresExactPreparedEvidence ||
-                    snapshot.input.attachments == preparedAttachments)
+                  snapshot.input.attachments == preparedAttachments
             else {
                 return .unavailable(.staleState)
+            }
+            if let reason = await externalProcessingAuthorizer.unavailableReason(
+                for: snapshot.profileEvidence,
+                in: request.library
+            ) {
+                return .unavailable(reason)
             }
             let configuration = configurationAuthority.stamp(
                 for: snapshot.authority.configurationGeneration
             )
-            guard !evidenceAuthority.requiresExactPreparedEvidence ||
-                    configuration == preparedConfiguration
-            else {
+            guard configuration == preparedConfiguration else {
                 return .unavailable(.staleState)
             }
             do {
@@ -719,9 +779,7 @@ public struct DefaultCoachContextFeature:
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
                 return .unavailable(.staleState)
             }
-            guard !evidenceAuthority.requiresExactPreparedEvidence ||
-                    preparedConfiguration == configuration.stamp
-            else {
+            guard preparedConfiguration == configuration.stamp else {
                 return .unavailable(.staleState)
             }
             guard await configurationAuthority.isCurrent(configuration.stamp) else {
@@ -793,6 +851,12 @@ public struct DefaultCoachContextFeature:
             else {
                 return .unavailable(.staleState)
             }
+            if let reason = await externalProcessingAuthorizer.unavailableReason(
+                for: snapshot.profileEvidence,
+                in: request.library
+            ) {
+                return .unavailable(reason)
+            }
             do {
                 let quote = try capacity.quoteChat(
                     snapshot.input,
@@ -831,6 +895,12 @@ public struct DefaultCoachContextFeature:
             else {
                 return .unavailable(.staleState)
             }
+            if let reason = await externalProcessingAuthorizer.unavailableReason(
+                for: snapshot.profileEvidence,
+                in: request.library
+            ) {
+                return .unavailable(reason)
+            }
             do {
                 let measured = try capacity.prepareForLaunch(
                     snapshot.input,
@@ -842,6 +912,7 @@ public struct DefaultCoachContextFeature:
                 return .prepared(
                     PreparedCoachLaunchContext(
                         measured: measured,
+                        providerBinding: snapshot.configuration.providerBinding,
                         authority: snapshot.authority
                     )
                 )
@@ -880,10 +951,20 @@ public struct DefaultCoachContextFeature:
             guard snapshot.authority.binding == request.snapshotBinding,
                   snapshot.authority.profile ==
                     request.basis.latestProfile.provenance,
+                  snapshot.profileProjection == CoachProfileContextProjection(
+                    snapshot: request.basis.latestProfile,
+                    attachments: request.chat.attachments
+                  ),
                   snapshot.input.trigger ==
                     .reconsiderProfileChange(request.trigger)
             else {
                 return .unavailable(.staleState)
+            }
+            if let reason = await externalProcessingAuthorizer.unavailableReason(
+                for: snapshot.profileEvidence,
+                in: request.library
+            ) {
+                return .unavailable(reason)
             }
             do {
                 let measured = try capacity.prepareForLaunch(
@@ -896,6 +977,7 @@ public struct DefaultCoachContextFeature:
                 return .prepared(
                     PreparedCoachLaunchContext(
                         measured: measured,
+                        providerBinding: snapshot.configuration.providerBinding,
                         authority: snapshot.authority
                     )
                 )

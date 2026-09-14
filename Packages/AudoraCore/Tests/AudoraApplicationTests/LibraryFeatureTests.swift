@@ -27,7 +27,12 @@ final class LibraryFeatureTests: XCTestCase {
         let calls = await workspace.calls
         let clockCalls = await clock.callCount
         let idCalls = await ids.callCount
-        XCTAssertEqual(finalState, LibraryFeatureState(selection: .active(restored)))
+        XCTAssertEqual(
+            finalState,
+            LibraryFeatureState(
+                selection: .active(restored.activated(generation: 1))
+            )
+        )
         XCTAssertEqual(calls, [.restore])
         XCTAssertEqual(clockCalls, 0)
         XCTAssertEqual(idCalls, 0)
@@ -55,7 +60,12 @@ final class LibraryFeatureTests: XCTestCase {
         await feature.send(.create)
 
         let finalState = await feature.currentState
-        XCTAssertEqual(finalState, LibraryFeatureState(selection: .active(created)))
+        XCTAssertEqual(
+            finalState,
+            LibraryFeatureState(
+                selection: .active(created.activated(generation: 2))
+            )
+        )
         let seeds = await workspace.createSeeds
         XCTAssertEqual(seeds.count, 1)
         XCTAssertEqual(seeds[0].libraryID, try LibraryID("lib-20260830T120000000Z-2ABC"))
@@ -79,12 +89,20 @@ final class LibraryFeatureTests: XCTestCase {
         let failedState = await feature.currentState
         XCTAssertEqual(
             failedState,
-            LibraryFeatureState(selection: .active(original), notice: .candidateCorrupt)
+            LibraryFeatureState(
+                selection: .active(original.activated(generation: 1)),
+                notice: .candidateCorrupt
+            )
         )
 
         await feature.send(.chooseExisting)
         let cancelledState = await feature.currentState
-        XCTAssertEqual(cancelledState, LibraryFeatureState(selection: .active(original)))
+        XCTAssertEqual(
+            cancelledState,
+            LibraryFeatureState(
+                selection: .active(original.activated(generation: 1))
+            )
+        )
     }
 
     func testIdenticalWritableOpenAllocatesFreshProcessLocalActivation() async throws {
@@ -110,7 +128,9 @@ final class LibraryFeatureTests: XCTestCase {
         let finalState = await feature.currentState
         XCTAssertEqual(
             finalState,
-            LibraryFeatureState(selection: .active(identical))
+            LibraryFeatureState(
+                selection: .active(identical.activated(generation: 2))
+            )
         )
     }
 
@@ -132,14 +152,19 @@ final class LibraryFeatureTests: XCTestCase {
         )
         await feature.send(.reopenRecent)
         let reopenedState = await feature.currentState
-        XCTAssertEqual(reopenedState, LibraryFeatureState(selection: .active(original)))
+        XCTAssertEqual(
+            reopenedState,
+            LibraryFeatureState(
+                selection: .active(original.activated(generation: 2))
+            )
+        )
     }
 
     func testRevealDoesNotMutateAuthority() async throws {
         let original = try snapshot(id: "lib-20260830T120000000Z-2ABC")
         let workspace = ScriptedWorkspace(
             restore: [.opened(original)],
-            reveal: [.succeeded()]
+            reveal: [.accepted]
         )
         let feature = makeFeature(workspace)
         await feature.send(.start)
@@ -148,7 +173,12 @@ final class LibraryFeatureTests: XCTestCase {
 
         let finalState = await feature.currentState
         let calls = await workspace.calls
-        XCTAssertEqual(finalState, LibraryFeatureState(selection: .active(original)))
+        XCTAssertEqual(
+            finalState,
+            LibraryFeatureState(
+                selection: .active(original.activated(generation: 1))
+            )
+        )
         XCTAssertEqual(calls, [.restore, .reveal])
     }
 
@@ -156,7 +186,7 @@ final class LibraryFeatureTests: XCTestCase {
         let original = try snapshot(id: "lib-20260830T120000000Z-2ABC")
         let workspace = ScriptedWorkspace(
             restore: [.opened(original)],
-            reveal: [.succeeded()]
+            reveal: [.accepted]
         )
         let activity = LibraryActivityCoordinator()
         let feature = DefaultLibraryFeature(
@@ -174,7 +204,7 @@ final class LibraryFeatureTests: XCTestCase {
         XCTAssertEqual(
             blockedState,
             LibraryFeatureState(
-                selection: .active(original),
+                selection: .active(original.activated(generation: 1)),
                 notice: .libraryActivityInProgress
             )
         )
@@ -186,7 +216,9 @@ final class LibraryFeatureTests: XCTestCase {
         XCTAssertEqual(calls, [.restore, .reveal])
         XCTAssertEqual(
             revealedState,
-            LibraryFeatureState(selection: .active(original))
+            LibraryFeatureState(
+                selection: .active(original.activated(generation: 1))
+            )
         )
         await activity.release(lease)
     }
@@ -222,7 +254,12 @@ final class LibraryFeatureTests: XCTestCase {
 
         let finalState = await feature.currentState
         let tokens = await workspace.externalTokens
-        XCTAssertEqual(finalState, LibraryFeatureState(selection: .active(replacement)))
+        XCTAssertEqual(
+            finalState,
+            LibraryFeatureState(
+                selection: .active(replacement.activated(generation: 2))
+            )
+        )
         XCTAssertEqual(tokens, [token])
     }
 
@@ -231,7 +268,7 @@ final class LibraryFeatureTests: XCTestCase {
         let readOnly = ReadOnlyLibrarySnapshot(libraryID: libraryID)
         let workspace = ScriptedWorkspace(
             restore: [.readOnly(readOnly, reason: .newerSchema)],
-            reveal: [.succeeded()]
+            reveal: [.accepted]
         )
         let feature = makeFeature(workspace)
 
@@ -302,7 +339,12 @@ final class LibraryFeatureTests: XCTestCase {
         let returnedAfterReplay = await completion.isCompleted
         XCTAssertEqual(calls, [.restore, .external])
         XCTAssertEqual(externalTokens, [token])
-        XCTAssertEqual(finalState, LibraryFeatureState(selection: .active(external)))
+        XCTAssertEqual(
+            finalState,
+            LibraryFeatureState(
+                selection: .active(external.activated(generation: 2))
+            )
+        )
         XCTAssertTrue(returnedAfterReplay)
     }
 
@@ -348,7 +390,12 @@ final class LibraryFeatureTests: XCTestCase {
         let finalState = await feature.currentState
         XCTAssertEqual(calls, [.restore, .external])
         XCTAssertEqual(externalTokens, [latestToken])
-        XCTAssertEqual(finalState, LibraryFeatureState(selection: .active(external)))
+        XCTAssertEqual(
+            finalState,
+            LibraryFeatureState(
+                selection: .active(external.activated(generation: 2))
+            )
+        )
     }
 
     func testMultipleExternalRequestPublishesBoundedNoticeWithoutWorkspaceCall() async {
@@ -424,7 +471,7 @@ final class LibraryFeatureTests: XCTestCase {
         XCTAssertEqual(
             finalState,
             LibraryFeatureState(
-                selection: .active(original),
+                selection: .active(original.activated(generation: 1)),
                 notice: .libraryActivityInProgress
             )
         )
@@ -572,7 +619,7 @@ private actor ScriptedWorkspace: LibraryWorkspacePort {
     private var chooseOutcomes: [LibraryOpenOutcome]
     private var externalOutcomes: [LibraryOpenOutcome]
     private var reopenOutcomes: [LibraryOpenOutcome]
-    private var revealOutcomes: [LibraryActionOutcome]
+    private var revealOutcomes: [LibraryRevealRequestOutcome]
     private var closeOutcomes: [LibraryActionOutcome]
     private let suspendFirstCreate: Bool
     private let suspendFirstRestore: Bool
@@ -588,7 +635,7 @@ private actor ScriptedWorkspace: LibraryWorkspacePort {
         choose: [LibraryOpenOutcome] = [],
         external: [LibraryOpenOutcome] = [],
         reopen: [LibraryOpenOutcome] = [],
-        reveal: [LibraryActionOutcome] = [],
+        reveal: [LibraryRevealRequestOutcome] = [],
         close: [LibraryActionOutcome] = [],
         suspendFirstCreate: Bool = false,
         suspendFirstRestore: Bool = false
@@ -641,7 +688,7 @@ private actor ScriptedWorkspace: LibraryWorkspacePort {
         return pop(&reopenOutcomes, fallback: .failed(.selectionRequired))
     }
 
-    func revealActiveLibrary() async -> LibraryActionOutcome {
+    func revealActiveLibrary() async -> LibraryRevealRequestOutcome {
         calls.append(.reveal)
         return pop(&revealOutcomes, fallback: .failed(.revealFailed))
     }

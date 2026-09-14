@@ -149,21 +149,26 @@ final class DefaultInvocationsTests: XCTestCase {
         let request = try XCTUnwrap(providerRequests.first)
         XCTAssertEqual(
             Set(Mirror(reflecting: request).children.compactMap(\.label)),
+            Set(["request", "execution", "transcriptAccess"])
+        )
+        XCTAssertEqual(
+            Set(Mirror(reflecting: request.request).children.compactMap(\.label)),
+            Set([
+                "body",
+                "outputTokenCeiling",
+                "pinnedInstruction",
+                "providerBinding",
+            ])
+        )
+        XCTAssertEqual(
+            Set(Mirror(reflecting: request.execution).children.compactMap(\.label)),
             Set([
                 "attemptID",
                 "attemptOrdinal",
                 "attemptKind",
                 "providerIdempotencyValue",
-                "exchange",
-                "transcriptAccess",
-                "outputTokenCeiling",
-                "pinnedInstruction",
                 "control",
             ])
-        )
-        XCTAssertEqual(
-            Set(Mirror(reflecting: request.exchange).children.compactMap(\.label)),
-            Set(["request", "transcriptHandles"])
         )
         let lateRead = await request.transcriptAccess?.read(
             transportRequestID: AttemptTranscriptTransportRequestID("late-read")!,
@@ -759,7 +764,8 @@ final class DefaultInvocationsTests: XCTestCase {
             ),
             retrySleeper: RecordingInvocationRetrySleeper(),
             retryDiagnostics: RecordingInvocationRetryDiagnostics(),
-            retryTiming: ScriptedInvocationRetryTiming(milliseconds: [0])
+            retryTiming: ScriptedInvocationRetryTiming(milliseconds: [0]),
+            transcriptAvailability: .testAllAvailable
         )
         let firstAuthorities = InvocationStopAuthorityRecorder()
         let secondAuthorities = InvocationStopAuthorityRecorder()
@@ -3441,7 +3447,7 @@ private actor TwoLibraryInvocationIdentities: InvocationIdentityGenerating {
     }
 }
 
-private actor TwoLibrarySuspendingProvider: SyntheticCoachProviderPort {
+private actor TwoLibrarySuspendingProvider: CoachProvider {
     private var continuations: [
         CoachProviderAttemptID: CheckedContinuation<Void, Never>
     ] = [:]
@@ -3450,14 +3456,16 @@ private actor TwoLibrarySuspendingProvider: SyntheticCoachProviderPort {
     private(set) var cancelledAttemptIDs: [CoachProviderAttemptID] = []
 
     func run(
-        _ request: SyntheticCoachProviderRequest
-    ) async -> CoachProviderAttemptOutcome {
+        request: CoachRequest,
+        execution: ProviderAttemptMetadata,
+        transcriptAccess: CoachTranscriptAccess?
+    ) async throws -> CoachProviderCompleteResponse {
         launchCount += 1
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            continuations[request.attemptID] = continuation
+            continuations[execution.attemptID] = continuation
         }
-        finishedAttemptIDs.insert(request.attemptID)
-        return .complete(markdown: "A complete response for its own Library.")
+        finishedAttemptIDs.insert(execution.attemptID)
+        return .singleMarkdown("A complete response for its own Library.")
     }
 
     func cancelAndReap(
@@ -3537,7 +3545,7 @@ private final class InvocationFixture: @unchecked Sendable {
         ],
         includesOnDemandAttachment: Bool = false,
         providerTranscriptReadPlan: ProviderTranscriptReadPlan = .none,
-        transcriptAvailability: AttemptTranscriptAvailabilitySource = .allAvailable,
+        transcriptAvailability: AttemptTranscriptAvailabilitySource = .testAllAvailable,
         providerCancellationOutcomes: [CoachProviderAttemptCancellationOutcome] = [
             .reaped,
         ],
@@ -4439,9 +4447,9 @@ private actor ScriptedInvocationAdmission: InvocationAdmissionPort {
     }
 }
 
-private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
+private actor RecordingSyntheticCoachProvider: CoachProvider {
     private(set) var serializedRequests: [[UInt8]] = []
-    private(set) var requests: [SyntheticCoachProviderRequest] = []
+    private(set) var requests: [RecordedCoachProviderCall] = []
     private(set) var launchCount = 0
     private(set) var durableBeforeLaunch: [Bool] = []
     private(set) var cancelledAttemptIDs: [CoachProviderAttemptID] = []
@@ -4536,7 +4544,16 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
         requests.map(\.attemptOrdinal)
     }
 
-    func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome {
+    func run(
+        request providerRequest: CoachRequest,
+        execution: ProviderAttemptMetadata,
+        transcriptAccess: CoachTranscriptAccess?
+    ) async throws -> CoachProviderCompleteResponse {
+        let request = RecordedCoachProviderCall(
+            request: providerRequest,
+            execution: execution,
+            transcriptAccess: transcriptAccess
+        )
         durableBeforeLaunch.append(
             await persistence.isAttemptDurable(
                 attemptID: request.attemptID,
@@ -4626,9 +4643,9 @@ private actor RecordingSyntheticCoachProvider: SyntheticCoachProviderPort {
             await withCheckedContinuation { launchContinuation = $0 }
         }
         guard !outcomes.isEmpty else {
-            return .complete(markdown: "A concise **synthetic** answer.")
+            return .singleMarkdown("A concise **synthetic** answer.")
         }
-        return outcomes.removeFirst()
+        return try resolveScriptedCoachProviderOutcome(outcomes.removeFirst())
     }
 
     func cancelAndReap(
@@ -4704,7 +4721,7 @@ private actor InvocationStopAuthorityRecorder {
 }
 
 private func maskingTranscriptDescriptorHandles(
-    in request: SyntheticCoachProviderRequest
+    in request: RecordedCoachProviderCall
 ) throws -> Data {
     guard var object = try JSONSerialization.jsonObject(
         with: request.exchange.request
@@ -4860,13 +4877,12 @@ private actor InvocationContextSource:
     private let current: Bool
     private let includesOnDemandAttachment: Bool
     private let tokenEstimator: CoachTokenEstimator
-    private let activeProfileStatementIDs: [String]
     private(set) var pendingResolutionCount = 0
     private var currentCheckCount = 0
-    nonisolated let profile = CoachProfileProvenance(
-        revisionID: try! ProfileRevisionID("prf-20260830T115900000Z-4GHJ"),
-        statementGeneration: 9
-    )
+    nonisolated let profileSnapshot: ProfileSnapshot
+    nonisolated var profile: CoachProfileProvenance {
+        profileSnapshot.provenance
+    }
 
     init(
         contextWindow: Int,
@@ -4881,7 +4897,26 @@ private actor InvocationContextSource:
         current = isCurrent
         self.includesOnDemandAttachment = includesOnDemandAttachment
         self.tokenEstimator = tokenEstimator
-        self.activeProfileStatementIDs = activeProfileStatementIDs
+        profileSnapshot = ProfileSnapshot(
+            revision: try! ProfileRevision(
+                revisionID: ProfileRevisionID(
+                    "prf-20260830T115900000Z-4GHJ"
+                ),
+                parentRevisionID: nil,
+                generation: 9,
+                statementGeneration: 9,
+                createdAt: UTCInstant("2026-08-30T11:59:00.000Z"),
+                statements: activeProfileStatementIDs.map { statementID in
+                    try! ProfileStatement(
+                        statementID: ProfileStatementID(statementID),
+                        statementKind: .goal,
+                        wording: "Speak with clarity.",
+                        supportingSessionCount: 0,
+                        evidence: []
+                    )
+                }
+            )
+        )
     }
 
     func resolveNewChat(
@@ -4897,21 +4932,14 @@ private actor InvocationContextSource:
     ) async -> CoachContextSnapshotOutcome {
         pendingResolutionCount += 1
         do {
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: profileSnapshot,
+                attachments: .empty
+            )
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object([
-                            "statements": .array(
-                                activeProfileStatementIDs.map { statementID in
-                                    .object([
-                                        "statementId": .string(statementID),
-                                        "statementKind": .string("goal"),
-                                        "wording": .string("Speak with clarity."),
-                                        "supportingSessionCount": .integer(0),
-                                    ])
-                                }
-                            ),
-                        ]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -4996,7 +5024,7 @@ private actor InvocationContextSource:
                         policy: CoachProviderEstimationPolicy(
                             providerIdentifier: "synthetic-fixture-v1",
                             responseCollectorByteCeiling: 8_192,
-                            framing: CoachProviderFraming(),
+                            framing: .testZero,
                             attachmentProjectionPolicy:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
@@ -5015,8 +5043,9 @@ private actor InvocationContextSource:
                         ),
                         contextGeneration: 1,
                         configurationGeneration: 1,
-                        profile: profile
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -5032,7 +5061,7 @@ private actor InvocationContextSource:
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        await acquireImmutableAuthorityLease(authority)
+        await acquireTestImmutableAuthorityLease(authority)
     }
 }
 

@@ -38,6 +38,7 @@ struct AttemptTranscriptAccessLimits: Equatable, Sendable {
 public enum AttemptTranscriptAvailability: Equatable, Sendable {
     case available
     case unavailable
+    case externalProcessingDisallowed
 }
 
 private enum AttemptTranscriptAvailabilityError: Error {
@@ -98,12 +99,6 @@ public struct AttemptTranscriptAvailabilitySource: Sendable {
     ) {
         implementation = batchImplementation
     }
-
-    public static let allAvailable = AttemptTranscriptAvailabilitySource(
-        batchImplementation: { queries in
-            Array(repeating: .available, count: queries.count)
-        }
-    )
 
     public func availability(
         for query: AttemptTranscriptAvailabilityQuery
@@ -180,12 +175,6 @@ struct AttemptTranscriptAvailabilityChecker: Sendable {
         implementation = batchImplementation
     }
 
-    static let allAvailable = AttemptTranscriptAvailabilityChecker(
-        batchImplementation: { sources in
-            Array(repeating: .available, count: sources.count)
-        }
-    )
-
     fileprivate func availability(
         of source: AttemptTranscriptSourceIdentity
     ) async throws -> AttemptTranscriptAvailability {
@@ -203,30 +192,34 @@ struct AttemptTranscriptAvailabilityChecker: Sendable {
     }
 }
 
-enum AttemptTranscriptAccessResponseKind: String, Equatable, Sendable {
+@_spi(InvocationInfrastructure)
+public enum CoachTranscriptResponseKind: String, Equatable, Sendable {
     case complete
     case sessionUnavailable
     case contextCannotFit
 }
 
-struct AttemptTranscriptAccessDelivery: Equatable, Sendable {
-    let responseBody: Data
-    let kind: AttemptTranscriptAccessResponseKind
-    let isReplay: Bool
-    let terminatesAttempt: Bool
+@_spi(InvocationInfrastructure)
+public struct CoachTranscriptDelivery: Equatable, Sendable {
+    public let responseBody: Data
+    public let kind: CoachTranscriptResponseKind
+    public let isReplay: Bool
+    public let terminatesAttempt: Bool
 }
 
-enum AttemptTranscriptAccessRejection: String, Equatable, Sendable {
+@_spi(InvocationInfrastructure)
+public enum CoachTranscriptRejection: String, Equatable, Sendable {
     case closed
 }
 
 /// Adapter-owned identity for one logical transport delivery. A transport may
 /// redeliver the same identity once; a model-originated second tool call must
 /// carry a different identity even when its arguments are byte-identical.
-struct AttemptTranscriptTransportRequestID: Hashable, Sendable {
-    let rawValue: String
+@_spi(InvocationInfrastructure)
+public struct CoachTranscriptRequestID: Hashable, Sendable {
+    public let rawValue: String
 
-    init?(_ rawValue: String) {
+    public init?(_ rawValue: String) {
         guard !rawValue.isEmpty,
               rawValue.utf8.count <= 128,
               !rawValue.unicodeScalars.contains(where: {
@@ -237,13 +230,20 @@ struct AttemptTranscriptTransportRequestID: Hashable, Sendable {
     }
 
     fileprivate static let directBrokerCall =
-        AttemptTranscriptTransportRequestID("direct-broker-call")!
+        CoachTranscriptRequestID("direct-broker-call")!
 }
 
-enum AttemptTranscriptAccessResult: Equatable, Sendable {
-    case delivered(AttemptTranscriptAccessDelivery)
-    case rejected(AttemptTranscriptAccessRejection)
+@_spi(InvocationInfrastructure)
+public enum CoachTranscriptReadResult: Equatable, Sendable {
+    case delivered(CoachTranscriptDelivery)
+    case rejected(CoachTranscriptRejection)
 }
+
+typealias AttemptTranscriptAccessResponseKind = CoachTranscriptResponseKind
+typealias AttemptTranscriptAccessDelivery = CoachTranscriptDelivery
+typealias AttemptTranscriptAccessRejection = CoachTranscriptRejection
+typealias AttemptTranscriptTransportRequestID = CoachTranscriptRequestID
+typealias AttemptTranscriptAccessResult = CoachTranscriptReadResult
 
 enum AttemptTranscriptAccessRevocationReason: String, CaseIterable, Equatable, Sendable {
     case attemptCompleted
@@ -377,7 +377,7 @@ struct AttemptTranscriptAccessGrantIssuer: Sendable {
         exchange: CanonicalCoachExchange,
         freshHandles: [PreparedCoachTranscriptHandle],
         pinnedInstruction: String? = nil,
-        availabilityChecker: AttemptTranscriptAvailabilityChecker = .allAvailable,
+        availabilityChecker: AttemptTranscriptAvailabilityChecker,
         limits: AttemptTranscriptAccessLimits = AttemptTranscriptAccessLimits()
     ) throws -> AttemptTranscriptAccessGrant {
         guard limits.maximumRequestBytes > 0,
@@ -681,7 +681,10 @@ actor AttemptTranscriptAccessBroker {
                 return .rejected(.closed)
             }
             requested.append((handle, record))
-            if availability == .unavailable {
+            switch availability {
+            case .available:
+                break
+            case .unavailable, .externalProcessingDisallowed:
                 unavailableHandles.append(handle)
                 unavailableSessions.append(
                     AttemptTranscriptFailureSession(

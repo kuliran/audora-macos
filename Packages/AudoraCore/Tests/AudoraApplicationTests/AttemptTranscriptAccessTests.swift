@@ -313,6 +313,40 @@ final class AttemptTranscriptAccessTests: XCTestCase {
         XCTAssertEqual(late, .rejected(.closed))
     }
 
+    func testExternalProcessingIsRevalidatedBeforeOnDemandTranscriptDisclosure()
+        async throws
+    {
+        let fixture = try makeExchange()
+        let fresh = [try handle(101)]
+        let availability = TranscriptPolicyRevalidationObservation()
+        let grant = try AttemptTranscriptAccessGrantIssuer().issue(
+            exchange: fixture.exchange,
+            freshHandles: fresh,
+            availabilityChecker: AttemptTranscriptAvailabilityChecker { source in
+                availability.record(source)
+                return .externalProcessingDisallowed
+            }
+        )
+
+        let result = await grant.broker.read(
+            capability: grant.capability,
+            handles: fresh
+        )
+
+        guard case let .delivered(delivery) = result else {
+            return XCTFail("expected a closed unavailable response")
+        }
+        XCTAssertEqual(delivery.kind, .sessionUnavailable)
+        XCTAssertTrue(delivery.terminatesAttempt)
+        let body = String(decoding: delivery.responseBody, as: UTF8.self)
+        XCTAssertFalse(body.contains("private transcript"))
+        XCTAssertFalse(body.contains("transcripts"))
+        XCTAssertEqual(
+            availability.values.map(\.sessionAttachmentID),
+            [try ChatSessionAttachmentID("attachment-1")]
+        )
+    }
+
     func testAvailabilityIsCheckedOnceForTheCompleteOrderedBatch() async throws {
         let fixture = try makeExchange(attachmentCount: 2)
         let fresh = [try handle(101), try handle(102)]
@@ -590,6 +624,19 @@ private actor BatchTranscriptAvailabilityProbe {
     }
 }
 
+private final class TranscriptPolicyRevalidationObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [AttemptTranscriptSourceIdentity] = []
+
+    var values: [AttemptTranscriptSourceIdentity] {
+        lock.withLock { recorded }
+    }
+
+    func record(_ value: AttemptTranscriptSourceIdentity) {
+        lock.withLock { recorded.append(value) }
+    }
+}
+
 private extension AttemptTranscriptAccessTests {
     struct ExchangeFixture {
         let exchange: CanonicalCoachExchange
@@ -702,7 +749,7 @@ private extension AttemptTranscriptAccessTests {
                     AttemptTranscriptResponseBudgetAuthority(
                         inputCeilingTokens: inputCeilingTokens,
                         pinnedInstructionFrame: Data(),
-                        framing: CoachProviderFraming(),
+                        framing: .testZero,
                         tokenEstimator: .utf8ByteUpperBound()
                     )
             ),

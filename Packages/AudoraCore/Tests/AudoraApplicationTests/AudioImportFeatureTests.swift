@@ -6,6 +6,7 @@ import XCTest
 final class AudioImportFeatureTests: XCTestCase {
     func testSuccessfulImportPublishesOnlyReopenedValidatedSession() async throws {
         let fixture = try AudioFixture()
+        let catalogMutations = CatalogMutationRecorder()
         let port = ScriptedAudioPort(
             chooseOutcome: .selected(fixture.token, scope: fixture.scope),
             preparedCandidate: fixture.candidate,
@@ -17,7 +18,8 @@ final class AudioImportFeatureTests: XCTestCase {
             port: port,
             clock: clock,
             sessionIDGenerator: ids,
-            activityCoordinator: LibraryActivityCoordinator()
+            activityCoordinator: LibraryActivityCoordinator(),
+            catalogMutationPublisher: catalogMutations
         )
 
         await feature.send(.chooseAudio)
@@ -32,6 +34,69 @@ final class AudioImportFeatureTests: XCTestCase {
         XCTAssertEqual(recording.seeds, [fixture.seed])
         XCTAssertEqual(clockCalls, 1)
         XCTAssertEqual(idCalls, 1)
+        let commits = await catalogMutations.commits
+        XCTAssertEqual(
+            commits,
+            [
+                LibraryCatalogMutationCommit(
+                    expectedScope: LibraryScope(libraryID: fixture.scope.libraryID),
+                    mutation: .importedSession(fixture.session.sessionID),
+                    confirmation: .confirmed
+                ),
+            ]
+        )
+    }
+
+    func testCatalogMutationBindsBeforeSameIDLibraryReplacementCanInterleave() async throws {
+        let fixture = try AudioFixture()
+        let librarySnapshot = ActiveLibrarySnapshot(
+            libraryID: fixture.scope.libraryID,
+            preferences: .defaults,
+            profile: .nullProfile(statementCount: 0)
+        )
+        let activity = LibraryActivityCoordinator()
+        let library = DefaultLibraryFeature(
+            workspace: SameIDReplacementWorkspace(snapshot: librarySnapshot),
+            clock: AudioClock(value: fixture.instant),
+            idGenerator: AudioLibraryIDGenerator(value: fixture.scope.libraryID),
+            activityCoordinator: activity
+        )
+        guard case let .activated(originalActivation) = await library.send(.start) else {
+            return XCTFail("expected the original Library activation")
+        }
+        let broker = ApplicationLibraryCatalogMutationEventBroker(library: library)
+        let mutationEvents = broker.events
+        let replacementPublisher = SameIDReplacementBeforeForwardingPublisher(
+            library: library,
+            broker: broker
+        )
+        let port = ScriptedAudioPort(
+            chooseOutcome: .selected(fixture.token, scope: fixture.scope),
+            preparedCandidate: fixture.candidate,
+            installResult: .success(fixture.snapshot)
+        )
+        let feature = DefaultAudioImportFeature(
+            port: port,
+            clock: AudioClock(value: fixture.instant),
+            sessionIDGenerator: AudioSessionIDGenerator(value: fixture.session.sessionID),
+            activityCoordinator: activity,
+            catalogMutationPublisher: replacementPublisher
+        )
+
+        await feature.send(.chooseAudio)
+        let state = await waitForTerminal(feature)
+        var eventIterator = mutationEvents.makeAsyncIterator()
+        let event = await eventIterator.next()
+        let replacementResult = await replacementPublisher.replacementResult
+        let finalLibrarySelection = await library.currentState.selection
+
+        XCTAssertEqual(state.status, .succeeded(fixture.snapshot))
+        XCTAssertEqual(event?.activation, originalActivation)
+        XCTAssertEqual(replacementResult, .noSelectionMutation)
+        XCTAssertEqual(
+            finalLibrarySelection,
+            .active(librarySnapshot.activated(generation: originalActivation.generation))
+        )
     }
 
     func testSelectionCancellationPublishesBoundedFailureWithoutCreatingIdentity() async throws {
@@ -116,12 +181,19 @@ final class AudioImportFeatureTests: XCTestCase {
 
     func testPostcommitReopenFailureDoesNotRequestDeletion() async throws {
         let fixture = try AudioFixture()
+        let catalogMutations = CatalogMutationRecorder()
         let port = ScriptedAudioPort(
             chooseOutcome: .selected(fixture.token, scope: fixture.scope),
             preparedCandidate: fixture.candidate,
             installResult: .failure(.installedNeedsRefresh)
         )
-        let feature = makeFeature(port, fixture)
+        let feature = DefaultAudioImportFeature(
+            port: port,
+            clock: AudioClock(value: fixture.instant),
+            sessionIDGenerator: AudioSessionIDGenerator(value: fixture.session.sessionID),
+            activityCoordinator: LibraryActivityCoordinator(),
+            catalogMutationPublisher: catalogMutations
+        )
 
         await feature.send(.chooseAudio)
         let state = await waitForTerminal(feature)
@@ -130,6 +202,17 @@ final class AudioImportFeatureTests: XCTestCase {
         XCTAssertEqual(state.status, .failed(.installedNeedsRefresh))
         XCTAssertEqual(recording.calls, [.choose, .reserveSessionID, .prepare, .install])
         XCTAssertTrue(recording.discarded.isEmpty)
+        let commits = await catalogMutations.commits
+        XCTAssertEqual(
+            commits,
+            [
+                LibraryCatalogMutationCommit(
+                    expectedScope: LibraryScope(libraryID: fixture.scope.libraryID),
+                    mutation: .importedSession(fixture.session.sessionID),
+                    confirmation: .installedNeedsRefresh
+                ),
+            ]
+        )
     }
 
     func testCancellationAfterPrepareDiscardsStagedCandidateBeforePublication() async throws {
@@ -371,6 +454,65 @@ final class AudioImportFeatureTests: XCTestCase {
         XCTFail("audio import did not reach a terminal state")
         return await feature.currentState
     }
+}
+
+private actor CatalogMutationRecorder: LibraryCatalogMutationCommitPublishing {
+    private(set) var commits: [LibraryCatalogMutationCommit] = []
+
+    func publish(_ commit: LibraryCatalogMutationCommit) {
+        commits.append(commit)
+    }
+}
+
+private actor SameIDReplacementBeforeForwardingPublisher:
+    LibraryCatalogMutationCommitPublishing
+{
+    private let library: any LibraryFeature
+    private let broker: ApplicationLibraryCatalogMutationEventBroker
+    private(set) var replacementResult: LibraryCommandResult?
+
+    init(
+        library: any LibraryFeature,
+        broker: ApplicationLibraryCatalogMutationEventBroker
+    ) {
+        self.library = library
+        self.broker = broker
+    }
+
+    func publish(_ commit: LibraryCatalogMutationCommit) async {
+        replacementResult = await library.send(.chooseExisting)
+        await broker.publish(commit)
+    }
+}
+
+private actor SameIDReplacementWorkspace: LibraryWorkspacePort {
+    private let snapshot: ActiveLibrarySnapshot
+
+    init(snapshot: ActiveLibrarySnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func restoreActiveLibrary() -> LibraryOpenOutcome { .opened(snapshot) }
+    func createLibrary(_ seed: NewLibrarySeed) -> LibraryOpenOutcome {
+        .failed(.createFailed)
+    }
+    func chooseLibrary() -> LibraryOpenOutcome { .opened(snapshot) }
+    func openExternalRequest(_ token: LibraryOpenRequestToken) -> LibraryOpenOutcome {
+        .failed(.externalOpenRequestExpired)
+    }
+    func reopenRecentLibrary() -> LibraryOpenOutcome { .failed(.selectionRequired) }
+    func revealActiveLibrary() -> LibraryRevealRequestOutcome { .accepted }
+    func closeActiveLibrary() -> LibraryActionOutcome { .failed(.closeFailed) }
+}
+
+private actor AudioLibraryIDGenerator: LibraryIDGenerator {
+    private let value: LibraryID
+
+    init(value: LibraryID) {
+        self.value = value
+    }
+
+    func generateLibraryID(at instant: UTCInstant) -> LibraryID { value }
 }
 
 private struct AudioFixture {

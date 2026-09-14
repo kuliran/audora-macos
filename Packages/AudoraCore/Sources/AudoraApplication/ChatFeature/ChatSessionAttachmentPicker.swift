@@ -166,18 +166,11 @@ public struct NewChatConfirmationToken: Equatable, Sendable {
 /// Application may compare and carry this value, but cannot derive filesystem
 /// location or evidence fingerprints from it.
 public struct ChatCreationEvidenceAuthority: Equatable, Sendable {
-    private enum Provenance: Equatable, Sendable {
-        case portablePersistence
-        case testFixture
-    }
-
     private let opaqueIdentifier: UUID
-    private let provenance: Provenance
 
     @_spi(CoachContextQualification)
     public init(portableOpaqueIdentifier: UUID) {
         opaqueIdentifier = portableOpaqueIdentifier
-        provenance = .portablePersistence
     }
 
     @_spi(CoachContextQualification)
@@ -186,11 +179,6 @@ public struct ChatCreationEvidenceAuthority: Equatable, Sendable {
     @_spi(ChatCreationAuthorityTesting)
     public init(testingValue: UUID) {
         opaqueIdentifier = testingValue
-        provenance = .testFixture
-    }
-
-    var requiresExactPreparedEvidence: Bool {
-        provenance == .portablePersistence
     }
 }
 
@@ -247,6 +235,7 @@ public enum ChatAttachmentUnavailableReason: String, Equatable, Sendable {
     case inTrash
     case corrupt
     case unsupportedSchema
+    case externalProcessingDisallowed
 }
 
 public enum ChatAttachmentResolution: Equatable, Sendable {

@@ -8,6 +8,7 @@ public enum CoachAttachmentProjectionPolicyError: Error, Equatable, Sendable {
 
 enum CoachAttachmentProjectionError: Error, Equatable, Sendable {
     case canonicalTranscriptTooLarge
+    case externalProcessingDisallowed
     case invalidRevisionFingerprint
 }
 
@@ -136,6 +137,11 @@ public struct CoachAttachmentProjectionPolicy: Sendable {
     public func project(
         evidence: ChatAttachmentEvidence
     ) throws -> CoachAttachmentProjection {
+        // Policy authorization precedes construction, measurement, serialization,
+        // or tokenization of any provider-facing transcript value.
+        guard evidence.revision.engine.usePolicy.externalProcessingAllowed else {
+            throw CoachAttachmentProjectionError.externalProcessingDisallowed
+        }
         guard AudioArtifactFingerprint.isSHA256(evidence.revisionSHA256) else {
             throw CoachAttachmentProjectionError.invalidRevisionFingerprint
         }
@@ -294,6 +300,7 @@ enum ChatAttachmentCapacityPreparationOutcome: Sendable {
     case configurationChanged
     case qualifiedConfigurationUnavailable
     case attachmentUnavailable
+    case externalProcessingDisallowed
     case invalidContext
     case failed
 }
@@ -313,32 +320,6 @@ struct UnavailableChatAttachmentCapacityPreparer:
         in library: LibraryScope
     ) async -> ChatAttachmentCapacityPreparationOutcome {
         .failed
-    }
-}
-
-/// Internal snapshot-fixture adapter used when context tests intentionally omit
-/// portable attachment persistence. Product composition always installs the
-/// projected persistence adapter below.
-struct ConfigurationBoundEmptyChatAttachmentCapacityPreparer:
-    ChatAttachmentCapacityPreparing
-{
-    let configurationAuthorityID: UUID
-    private let evidenceAuthority = ChatCreationEvidenceAuthority(
-        testingValue: UUID()
-    )
-
-    func prepareCapacityAttachments(
-        _ attachments: ChatAttachments,
-        in library: LibraryScope
-    ) async -> ChatAttachmentCapacityPreparationOutcome {
-        return .prepared(
-            [],
-            configuration: CoachContextConfigurationStamp(
-                authorityID: configurationAuthorityID,
-                generation: 0
-            ),
-            evidenceAuthority: evidenceAuthority
-        )
     }
 }
 
@@ -455,6 +436,9 @@ actor ProjectedChatSessionAttachmentSource:
         ) {
         case let .completedWithAuthority(evidenceAuthority):
             guard !Task.isCancelled else { return .failed }
+            guard !accumulator.externalProcessingDisallowed else {
+                return .externalProcessingDisallowed
+            }
             guard !accumulator.exhaustedAggregateTranscriptBudget else {
                 return .invalidContext
             }
@@ -475,6 +459,8 @@ actor ProjectedChatSessionAttachmentSource:
             return .failed
         case .failed where accumulator.exhaustedAggregateTranscriptBudget:
             return .invalidContext
+        case .failed where accumulator.externalProcessingDisallowed:
+            return .externalProcessingDisallowed
         case .readOnlyLibrary, .failed:
             return .failed
         }
@@ -505,6 +491,10 @@ private final class ChatAttachmentCandidateProjectionAccumulator:
             return
         } catch CoachAttachmentProjectionError.canonicalTranscriptTooLarge {
             return
+        } catch CoachAttachmentProjectionError.externalProcessingDisallowed {
+            // Catalogs list only evidence that is eligible for Coach projection.
+            // Exact Chat pins are resolved below as an explicit unavailable state.
+            return
         }
     }
 
@@ -529,9 +519,13 @@ private final class ResolvedChatAttachmentProjectionAccumulator:
         let resolution: ChatAttachmentResolution
         switch item.resolution {
         case let .available(evidence):
-            resolution = .available(
-                try policy.project(evidence: evidence).makeCandidate()
-            )
+            do {
+                resolution = .available(
+                    try policy.project(evidence: evidence).makeCandidate()
+                )
+            } catch CoachAttachmentProjectionError.externalProcessingDisallowed {
+                resolution = .unavailable(.externalProcessingDisallowed)
+            }
         case let .unavailable(reason):
             resolution = .unavailable(reason)
         }
@@ -562,6 +556,7 @@ private final class CapacityAttachmentProjectionAccumulator:
     private var aggregateTranscriptBudget: CoachContextAggregateBudget
     private var invalid = false
     private var aggregateTranscriptBudgetExhausted = false
+    private var policyDisallowed = false
 
     init(
         attachments: ChatAttachments,
@@ -587,7 +582,14 @@ private final class CapacityAttachmentProjectionAccumulator:
                 invalid = true
                 return
             }
-            let projection = try policy.project(evidence: evidence)
+            let projection: CoachAttachmentProjection
+            do {
+                projection = try policy.project(evidence: evidence)
+            } catch CoachAttachmentProjectionError.externalProcessingDisallowed {
+                policyDisallowed = true
+                invalid = true
+                return
+            }
             do {
                 try aggregateTranscriptBudget.consume(
                     projection.canonicalTranscriptUTF8ByteCount
@@ -614,6 +616,10 @@ private final class CapacityAttachmentProjectionAccumulator:
 
     var exhaustedAggregateTranscriptBudget: Bool {
         lock.withLock { aggregateTranscriptBudgetExhausted }
+    }
+
+    var externalProcessingDisallowed: Bool {
+        lock.withLock { policyDisallowed }
     }
 
     private func capacityHandle(index: Int) throws -> PreparedCoachTranscriptHandle {

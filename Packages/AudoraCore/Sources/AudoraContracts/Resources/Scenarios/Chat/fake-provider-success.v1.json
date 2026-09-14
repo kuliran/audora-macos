@@ -48,7 +48,8 @@
       "effect": "next",
       "outcome": "rsp-20260830T120002000Z-6PQR"
     },
-    { "port": "chatStore", "effect": "lockPendingUserTurn", "outcome": "committed" }
+    { "port": "chatStore", "effect": "lockPendingUserTurn", "outcome": "committed" },
+    { "port": "chatStore", "effect": "replacePendingUserTurn", "outcome": "committed" }
   ],
   "expectedState": {
     "allChatIds": ["cht-20260830T120000000Z-2ABC"],

@@ -353,6 +353,12 @@ private final class ScriptedSessionProcessingFeature:
         return true
     }
 
+    func retranscribeExactly(
+        _ selection: SessionProcessingSelection
+    ) async -> SessionProcessingRetranscriptionResult {
+        .failed
+    }
+
     func recordedCommands() -> [SessionProcessingCommand] { commands }
 
     func waitForCommandCount(_ expected: Int) async {

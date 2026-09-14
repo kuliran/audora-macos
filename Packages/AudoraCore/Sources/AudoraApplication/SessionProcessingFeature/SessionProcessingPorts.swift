@@ -137,11 +137,21 @@ public protocol SessionProcessingJobPort: Sendable {
     ) async -> SessionProcessingJobWriteResult
 }
 
+/// Explicit opt-in for an adapter whose inventory retains no reconciliation
+/// lease or other resource that must be released after the inventory is used.
+/// Ports that bind an active-Library authority must implement
+/// `finishReconciliation` themselves.
+public protocol SessionProcessingJobPortWithoutRetainedReconciliationLease:
+    SessionProcessingJobPort
+{}
+
 public extension SessionProcessingJobPort {
     func inventory(
         for scope: LibraryScope
     ) async -> SessionProcessingJobInventoryResult { .unavailable }
+}
 
+public extension SessionProcessingJobPortWithoutRetainedReconciliationLease {
     func finishReconciliation(
         _ reconciliationID: SessionProcessingReconciliationID
     ) async {}
@@ -198,8 +208,19 @@ public protocol SessionProcessingIDGenerator: Sendable {
     ) async -> TranscriptionCancellationAuthorityID
 }
 
+/// Exact, actor-owned Review retranscription authority. The implementation owns
+/// selection, launch validation, the complete worker run, and terminal outcome
+/// capture as one operation; callers cannot assemble those steps from ambient
+/// Session-processing state.
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
-public protocol SessionProcessingFeature: Sendable {
+public protocol SessionProcessingExactRetranscriptionFeature: Sendable {
+    func retranscribeExactly(
+        _ selection: SessionProcessingSelection
+    ) async -> SessionProcessingRetranscriptionResult
+}
+
+@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+public protocol SessionProcessingFeature: LibraryCatalogSessionLifecycle {
     var currentState: SessionProcessingFeatureState { get async }
     var states: AsyncStream<SessionProcessingFeatureState> { get }
     func send(_ command: SessionProcessingCommand) async

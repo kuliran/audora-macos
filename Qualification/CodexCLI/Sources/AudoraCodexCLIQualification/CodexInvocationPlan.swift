@@ -1,6 +1,8 @@
 import Foundation
 
-struct CodexInvocationPlan: Equatable, Sendable {
+struct CodexInvocationPlan: Equatable, Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible
+{
     let executableURL: URL
     let arguments: [String]
     let environment: [String: String]
@@ -20,6 +22,14 @@ struct CodexInvocationPlan: Equatable, Sendable {
         self.workingDirectoryURL = workingDirectoryURL
         self.standardInput = standardInput
     }
+
+    var description: String {
+        "CodexInvocationPlan(executable: \(executableURL.lastPathComponent), " +
+            "arguments: <redacted>, environment: <redacted>, " +
+            "standardInput: <redacted>)"
+    }
+
+    var debugDescription: String { description }
 }
 
 enum CodexInvocationPlanError: Error, Equatable {
@@ -29,6 +39,8 @@ enum CodexInvocationPlanError: Error, Equatable {
 }
 
 struct CodexInvocationPlanBuilder: Sendable {
+    static let pinnedExecutableSearchPath = "/usr/bin:/bin:/usr/sbin:/sbin"
+
     static let allowlistedModels: Set<String> = [
         "gpt-5.4",
         "gpt-5.5",
@@ -80,9 +92,11 @@ struct CodexInvocationPlanBuilder: Sendable {
         model: String,
         workspaceURL: URL,
         clientHomeURL: URL,
+        temporaryDirectoryURL: URL,
         responseSchemaURL: URL,
         modelCatalogURL: URL,
         syntheticRequest: Data,
+        authorization: CodexCLIQualificationExecutionAuthorization? = nil,
         sourceEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> CodexInvocationPlan {
         guard executableURL.path.hasPrefix("/") else {
@@ -159,7 +173,9 @@ struct CodexInvocationPlanBuilder: Sendable {
             arguments: arguments,
             environment: Self.allowlistedEnvironment(
                 from: sourceEnvironment,
-                clientHomeURL: clientHomeURL
+                clientHomeURL: clientHomeURL,
+                temporaryDirectoryURL: temporaryDirectoryURL,
+                authorization: authorization
             ),
             workingDirectoryURL: workspaceURL,
             standardInput: Self.prompt(for: syntheticRequest)
@@ -168,17 +184,21 @@ struct CodexInvocationPlanBuilder: Sendable {
 
     static func allowlistedEnvironment(
         from source: [String: String],
-        clientHomeURL: URL
+        clientHomeURL: URL,
+        temporaryDirectoryURL: URL,
+        authorization: CodexCLIQualificationExecutionAuthorization? = nil
     ) -> [String: String] {
-        let allowedNames = ["LANG", "LC_ALL", "PATH", "TMPDIR"]
+        let allowedNames = ["LANG", "LC_ALL"]
         var result = source.filter { allowedNames.contains($0.key) }
         result["CODEX_HOME"] = clientHomeURL.path
         result["HOME"] = clientHomeURL.path
+        result["PATH"] = pinnedExecutableSearchPath
+        result["TMPDIR"] = temporaryDirectoryURL.path
         result["CI"] = "1"
         result["NO_COLOR"] = "1"
         result["TERM"] = "dumb"
-        if result["PATH"] == nil {
-            result["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        if let authorization {
+            result["CODEX_ACCESS_TOKEN"] = authorization.accessToken
         }
         return result
     }

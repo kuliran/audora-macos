@@ -281,3 +281,19 @@ struct CoachContextProfileProjector: Sendable {
         ])
     }
 }
+
+/// One Application-derived Profile view. Provider-visible JSON, immutable
+/// provenance, and local evidence-policy obligations cannot be supplied or
+/// changed independently.
+struct CoachProfileContextProjection: Equatable, Sendable {
+    let value: CanonicalJSONValue
+    let provenance: CoachProfileProvenance
+    let evidenceObligations: CoachProfileEvidenceObligations
+
+    init(snapshot: ProfileSnapshot, attachments: ChatAttachments) {
+        value = CoachContextProfileProjector(attachments: attachments)
+            .profile(snapshot)
+        provenance = snapshot.provenance
+        evidenceObligations = CoachProfileEvidenceObligations(profile: snapshot)
+    }
+}

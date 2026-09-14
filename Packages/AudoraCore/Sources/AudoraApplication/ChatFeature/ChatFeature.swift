@@ -70,8 +70,18 @@ public protocol ChatFeature: Sendable {
     var currentState: ChatFeatureState { get async }
     var states: AsyncStream<ChatFeatureState> { get }
 
-    func currentState(in scope: LibraryScope) async -> ChatFeatureState?
+    func currentState(in context: ChatCommandContext) async -> ChatFeatureState?
     func send(_ command: ChatCommand) async
+    /// Quiesces transient Chat work and durably flushes the selected Draft
+    /// before a whole-Library aggregate mutation may begin.
+    func prepareForLibraryCatalogMutation(
+        for activation: LibraryActivation
+    ) async -> Bool
+    /// Reloads Chat ownership after a catalog mutation, reopening the prior
+    /// selection only when that exact Chat remains active.
+    func reloadAfterLibraryCatalogMutation(
+        for activation: LibraryActivation
+    ) async -> Bool
     /// Begins the lifecycle fence used by orderly termination. Idempotently
     /// rejects queued or later transient work and requests cancellation of any
     /// transient work already running before it returns; durable mutations
@@ -80,8 +90,20 @@ public protocol ChatFeature: Sendable {
     func flushForOrderlyTermination() async -> Bool
 }
 
-@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 public extension ChatFeature {
-    /// Default for adapters that own no transient work or local admission state.
-    func beginOrderlyTermination() async {}
+    /// Implementations without an explicit catalog lifecycle cannot safely
+    /// authorize aggregate mutation.
+    func prepareForLibraryCatalogMutation(
+        for activation: LibraryActivation
+    ) async -> Bool {
+        false
+    }
+
+    /// A missing reload implementation is an explicit unavailable result, not
+    /// a successful no-op.
+    func reloadAfterLibraryCatalogMutation(
+        for activation: LibraryActivation
+    ) async -> Bool {
+        false
+    }
 }

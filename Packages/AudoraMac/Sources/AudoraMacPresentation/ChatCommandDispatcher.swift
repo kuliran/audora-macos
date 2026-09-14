@@ -32,6 +32,10 @@ public final class ChatCommandDispatcher: ObservableObject {
         admissionState.isChatBoundaryPending
     }
 
+    public var isLibraryCatalogMutationPending: Bool {
+        admissionState.isLibraryCatalogMutationPending
+    }
+
     public var isOrderlyTerminationPending: Bool {
         admissionState.isOrderlyTerminationPending
     }

@@ -942,7 +942,9 @@ private actor FeatureScenarioAcoustics: SessionAcousticEvidencePort {
     }
 }
 
-private actor FeatureScenarioJobStore: SessionProcessingJobPort {
+private actor FeatureScenarioJobStore:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     struct Metrics {
         let inventoryCount: Int
         let createCount: Int
@@ -997,7 +999,8 @@ private actor FeatureScenarioJobStore: SessionProcessingJobPort {
                     "reconcile-feature-scenario"
                 ),
                 scope: scope,
-                jobs: jobs
+                jobs: jobs,
+                isComplete: true
             )
         )
     }

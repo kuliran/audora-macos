@@ -1092,7 +1092,7 @@ private final class ProfileReconsiderationInvocationFixture:
             cancellationOutcomes: cancellationOutcomes
         )
         contextSource = ProfileReconsiderationContextSource(
-            profile: basis.latestProfile.provenance
+            profile: basis.latestProfile
         )
         coachMessageIDs = try (0 ..< 4).map { ordinal in
             try ChatMessageID(
@@ -1117,7 +1117,7 @@ private final class ProfileReconsiderationInvocationFixture:
             memoryIDGenerator: ProfileReconsiderationMemoryIDs(),
             retrySleeper: sleeper,
             retryDiagnostics: diagnostics,
-            transcriptAvailability: .allAvailable
+            transcriptAvailability: .testAllAvailable
         )
     }
 
@@ -1182,7 +1182,7 @@ private final class ProfileReconsiderationInvocationFixture:
             memoryIDGenerator: ProfileReconsiderationMemoryIDs(),
             retrySleeper: sleeper,
             retryDiagnostics: diagnostics,
-            transcriptAvailability: .allAvailable
+            transcriptAvailability: .testAllAvailable
         )
     }
 }
@@ -1991,13 +1991,13 @@ private actor ProfileReconsiderationAdmission: InvocationAdmissionPort {
     }
 }
 
-private actor ProfileReconsiderationProvider: SyntheticCoachProviderPort {
+private actor ProfileReconsiderationProvider: CoachProvider {
     private var outcomes: [CoachProviderAttemptOutcome]
     private let persistence: ProfileReconsiderationMemoryPersistence
     private var cancellationOutcomes: [CoachProviderAttemptCancellationOutcome]
     private var suspendNext = false
     private var continuation: CheckedContinuation<Void, Never>?
-    private(set) var requests: [SyntheticCoachProviderRequest] = []
+    private(set) var requests: [RecordedCoachProviderCall] = []
     private(set) var durableBeforeLaunch: [Bool] = []
     private(set) var cancelledAttemptIDs: [CoachProviderAttemptID] = []
 
@@ -2014,8 +2014,15 @@ private actor ProfileReconsiderationProvider: SyntheticCoachProviderPort {
     func suspendNextLaunch() { suspendNext = true }
 
     func run(
-        _ request: SyntheticCoachProviderRequest
-    ) async -> CoachProviderAttemptOutcome {
+        request providerRequest: CoachRequest,
+        execution: ProviderAttemptMetadata,
+        transcriptAccess: CoachTranscriptAccess?
+    ) async throws -> CoachProviderCompleteResponse {
+        let request = RecordedCoachProviderCall(
+            request: providerRequest,
+            execution: execution,
+            transcriptAccess: transcriptAccess
+        )
         durableBeforeLaunch.append(
             await persistence.isDurable(
                 attemptID: request.attemptID,
@@ -2027,9 +2034,9 @@ private actor ProfileReconsiderationProvider: SyntheticCoachProviderPort {
             suspendNext = false
             await withCheckedContinuation { continuation = $0 }
         }
-        return outcomes.isEmpty
-            ? .complete(fixtureResponse("{}"))
-            : outcomes.removeFirst()
+        return try outcomes.isEmpty
+            ? fixtureResponse("{}")
+            : resolveScriptedCoachProviderOutcome(outcomes.removeFirst())
     }
 
     func cancelAndReap(
@@ -2054,7 +2061,7 @@ private actor ProfileReconsiderationSleeper: InvocationRetrySleeping {
 }
 
 private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
-    private let profile: CoachProfileProvenance
+    private let profile: ProfileSnapshot
     private(set) var reconsiderResolutionCount = 0
     private(set) var lastBasis: ProfileReconsiderationBasis?
     private var pendingCurrentCheckCount = 0
@@ -2062,7 +2069,7 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
     private var answerPostInstallContinuation:
         CheckedContinuation<Void, Never>?
 
-    init(profile: CoachProfileProvenance) {
+    init(profile: ProfileSnapshot) {
         self.profile = profile
     }
 
@@ -2091,10 +2098,14 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
         _ request: CoachContextPendingTurnRequest
     ) async -> CoachContextSnapshotOutcome {
         do {
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: profile,
+                attachments: .empty
+            )
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object(["statements": .array([])]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -2115,8 +2126,9 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
                         ),
                         contextGeneration: 1,
                         configurationGeneration: 1,
-                        profile: profile
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -2130,6 +2142,10 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
         reconsiderResolutionCount += 1
         lastBasis = request.basis
         do {
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: request.basis.latestProfile,
+                attachments: request.chat.attachments
+            )
             let attachments = request.chat.attachments.values.map {
                 PreparedCoachAttachment.inline(requestValue: .object([
                     "displayLabel": .string("Practice"),
@@ -2157,8 +2173,9 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
                         binding: .reconsider(request),
                         contextGeneration: 1,
                         configurationGeneration: 1,
-                        profile: request.basis.latestProfile.provenance
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -2184,7 +2201,7 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        await acquireImmutableAuthorityLease(authority)
+        await acquireTestImmutableAuthorityLease(authority)
     }
 
     private func fixtureContextConfiguration() throws
@@ -2203,7 +2220,7 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
             policy: CoachProviderEstimationPolicy(
                 providerIdentifier: "reconsider-fixture-v1",
                 responseCollectorByteCeiling: 64_000,
-                framing: CoachProviderFraming(),
+                framing: .testZero,
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 1_024,
                     tokenEstimator: .utf8ByteUpperBound()

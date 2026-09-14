@@ -17,9 +17,8 @@ public actor PortableReviewWorkspace: ReviewSessionPort,
         let selection: ReviewSelection
         let scope: ActiveLibraryProcessingScope
         let revisions: PortableTranscriptRevisionRepository
-        let audioCapabilityID: ReviewAudioCapabilityID
-        let durationMilliseconds: UInt64
-        let canonicalWAV: Data
+        let audioSource: ReviewAudioSource?
+        let canonicalWAV: Data?
         let annotationEvidence: SpeechAnnotationEvidence
     }
 
@@ -53,15 +52,23 @@ public actor PortableReviewWorkspace: ReviewSessionPort,
         switch read {
         case let .available(verified):
             do {
-                let capabilityID = try ReviewAudioCapabilityID(
-                    "review-\(UUID().uuidString)"
-                )
+                let audioSource: ReviewAudioSource?
+                if verified.canonicalWAV != nil {
+                    audioSource = ReviewAudioSource(
+                        selection: selection,
+                        audioCapabilityID: try ReviewAudioCapabilityID(
+                            "review-\(UUID().uuidString)"
+                        ),
+                        durationMilliseconds: verified.durationMilliseconds
+                    )
+                } else {
+                    audioSource = nil
+                }
                 let snapshot = try ReviewSessionSnapshot(
                     selection: selection,
                     revisionIDs: verified.revision.revisionIDs,
                     selectedRevision: verified.revision.selectedRevision,
-                    audioCapabilityID: capabilityID,
-                    canonicalAudioDurationMilliseconds: verified.durationMilliseconds,
+                    audioSource: audioSource,
                     annotationEvidence: verified.annotationEvidence
                 )
                 guard await scopes.isCurrentSessionProcessingScope(active.identity)
@@ -70,8 +77,7 @@ public actor PortableReviewWorkspace: ReviewSessionPort,
                     selection: selection,
                     scope: active,
                     revisions: revisions,
-                    audioCapabilityID: capabilityID,
-                    durationMilliseconds: verified.durationMilliseconds,
+                    audioSource: audioSource,
                     canonicalWAV: verified.canonicalWAV,
                     annotationEvidence: verified.annotationEvidence
                 )
@@ -111,8 +117,7 @@ public actor PortableReviewWorkspace: ReviewSessionPort,
                     selection: selection,
                     revisionIDs: reopened.revisionIDs,
                     selectedRevision: reopened.selectedRevision,
-                    audioCapabilityID: binding.audioCapabilityID,
-                    canonicalAudioDurationMilliseconds: binding.durationMilliseconds,
+                    audioSource: binding.audioSource,
                     annotationEvidence: binding.annotationEvidence
                 )
             )
@@ -137,9 +142,7 @@ public actor PortableReviewWorkspace: ReviewSessionPort,
 
     public func resolveCanonicalAudio(for source: ReviewAudioSource) async -> Data? {
         guard let binding,
-              binding.selection == source.selection,
-              binding.audioCapabilityID == source.audioCapabilityID,
-              binding.durationMilliseconds == source.durationMilliseconds,
+              binding.audioSource == source,
               await scopes.isCurrentSessionProcessingScope(binding.scope.identity)
         else { return nil }
         return binding.canonicalWAV

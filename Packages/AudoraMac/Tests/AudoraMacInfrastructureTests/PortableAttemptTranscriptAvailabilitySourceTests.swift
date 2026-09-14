@@ -135,6 +135,60 @@ final class PortableAttemptTranscriptAvailabilitySourceTests: XCTestCase {
         }
     }
 
+    func testExactDeniedRevisionIsNotAvailableForOnDemandDisclosure() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent(
+                "DeniedTranscriptAvailability.audoralibrary",
+                isDirectory: true
+            )
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: makeSeed()
+            )
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+            let attachment = try await installRecordedChatAttachmentFixture(
+                at: root,
+                in: scope,
+                externalProcessingAllowed: false
+            )
+            let attachments = try ChatAttachments(validating: [attachment])
+            let fingerprints = try PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: scope.libraryID
+            ).forEachResolvedChatAttachmentEvidenceSynchronously(attachments) { _ in }
+            let persistence = PortableChatPersistence()
+            let chat = try persistence.create(
+                makeChatSeed(scope: scope, attachments: attachments),
+                at: root
+            )
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+            let source = PortableAttemptTranscriptAvailabilitySource.make(
+                workspace: workspace,
+                persistence: persistence
+            )
+
+            let result = try await source.availability(
+                for: AttemptTranscriptAvailabilityQuery(
+                    library: scope,
+                    chatID: chat.chat.id,
+                    sourceAttachment: attachment,
+                    revisionSHA256: try XCTUnwrap(
+                        fingerprints.first?.revisionSHA256
+                    )
+                )
+            )
+
+            XCTAssertEqual(result, .externalProcessingDisallowed)
+        }
+    }
+
     func testBatchHoldsEverySessionFenceUntilTheCompleteSnapshotIsResolved()
         async throws
     {

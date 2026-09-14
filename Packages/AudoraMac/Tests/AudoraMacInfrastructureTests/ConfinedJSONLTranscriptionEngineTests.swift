@@ -470,11 +470,11 @@ final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
         XCTAssertEqual(finalCancellation, .reaped)
     }
 
-    func testQualificationBlockedHostProvesItsNeverLaunchedAuthorityAbsent()
+    func testEmptyQualificationGatewayDoesNotClaimAuthorityOverAnEarlierWorker()
         async throws
     {
         let execution = try WorkerFixture().request.execution
-        let host = QualificationBlockedTranscriptionWorkerHost()
+        let host = QualificationGatedTranscriptionWorkerHost()
 
         let presence = await host.workerPresence(for: execution)
         let cancellation = await host.cancelAndReap(
@@ -482,8 +482,88 @@ final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
             graceMilliseconds: 50
         )
 
-        XCTAssertEqual(presence, .absent)
-        XCTAssertEqual(cancellation, .alreadyAbsent)
+        XCTAssertEqual(presence, .unknown)
+        XCTAssertEqual(cancellation, .unableToConfirm)
+    }
+
+    func testQualificationGatewayDelegatesExactWorkerControl() async throws {
+        let fixture = try WorkerFixture()
+        let execution = fixture.request.execution
+        let qualifiedHost = SequencedCancellationWorkerHostProbe(
+            outcomes: [.reaped]
+        )
+        let gateway = QualificationGatedTranscriptionWorkerHost(
+            qualifiedBundle: QualifiedTranscriptionProviderBundle(
+                profile: fixture.profile,
+                workerHost: qualifiedHost,
+                acousticEvidence: QualificationGatedSessionAcousticEvidence()
+            )
+        )
+
+        let presence = await gateway.workerPresence(for: execution)
+        let cancellation = await gateway.cancelAndReap(
+            execution,
+            graceMilliseconds: 50
+        )
+        let invocation = ConfinedTranscriptionWorkerInvocation(
+            execution: execution,
+            profile: fixture.profile,
+            runtime: WorkerRuntimeInput(
+                capabilityID: fixture.request.runtimeCapability.capabilityID,
+                profileID: fixture.profile.profileID,
+                runtimeIdentity: fixture.profile.runtimeVersion
+            ),
+            networkAccess: .disabled,
+            limits: .versionOne
+        )
+        do {
+            _ = try await gateway.start(invocation)
+            XCTFail("the recording host always reports launch failure")
+        } catch let error as TranscriptionEngineFailure {
+            XCTAssertEqual(error, .launchFailed)
+        }
+
+        XCTAssertEqual(presence, .unknown)
+        XCTAssertEqual(cancellation, .reaped)
+        let cancellationCount = await qualifiedHost.cancelCountValue()
+        XCTAssertEqual(cancellationCount, 1)
+        let startCount = await qualifiedHost.startCountValue()
+        XCTAssertEqual(startCount, 1)
+    }
+
+    func testQualificationGatewayRejectsMismatchedProfileWithoutStartingHost()
+        async throws
+    {
+        let fixture = try WorkerFixture()
+        let mismatchedProfile = try fixture.mismatchedProfile()
+        let qualifiedHost = SequencedCancellationWorkerHostProbe(outcomes: [])
+        let gateway = QualificationGatedTranscriptionWorkerHost(
+            qualifiedBundle: QualifiedTranscriptionProviderBundle(
+                profile: fixture.profile,
+                workerHost: qualifiedHost,
+                acousticEvidence: QualificationGatedSessionAcousticEvidence()
+            )
+        )
+        let invocation = ConfinedTranscriptionWorkerInvocation(
+            execution: fixture.request.execution,
+            profile: mismatchedProfile,
+            runtime: WorkerRuntimeInput(
+                capabilityID: fixture.request.runtimeCapability.capabilityID,
+                profileID: mismatchedProfile.profileID,
+                runtimeIdentity: mismatchedProfile.runtimeVersion
+            ),
+            networkAccess: .disabled,
+            limits: .versionOne
+        )
+
+        do {
+            _ = try await gateway.start(invocation)
+            XCTFail("a differently qualified profile must not reach the host")
+        } catch let error as TranscriptionEngineFailure {
+            XCTAssertEqual(error, .launchFailed)
+        }
+        let startCount = await qualifiedHost.startCountValue()
+        XCTAssertEqual(startCount, 0)
     }
 
     func testCancelWhileLiveEventIsObservedStillRejectsLaterCandidate() async throws {
@@ -798,6 +878,7 @@ private actor SequencedCancellationWorkerHostProbe:
 {
     private var outcomes: [TranscriptionCancellationOutcome]
     private(set) var cancelCount = 0
+    private var startCount = 0
 
     init(outcomes: [TranscriptionCancellationOutcome]) {
         self.outcomes = outcomes
@@ -806,6 +887,7 @@ private actor SequencedCancellationWorkerHostProbe:
     func start(
         _ invocation: ConfinedTranscriptionWorkerInvocation
     ) async throws -> ConfinedTranscriptionWorkerStarted {
+        startCount += 1
         throw TranscriptionEngineFailure.launchFailed
     }
 
@@ -825,6 +907,7 @@ private actor SequencedCancellationWorkerHostProbe:
     }
 
     func cancelCountValue() -> Int { cancelCount }
+    func startCountValue() -> Int { startCount }
 }
 
 private actor SpawnThenThrowWorkerHostProbe: ConfinedTranscriptionWorkerHost {
@@ -1256,6 +1339,35 @@ private struct WorkerFixture {
             state: .validating,
             cancellationAuthorityID: request.execution.cancellationAuthorityID!,
             candidateArtifactSHA256: candidateArtifactSHA256
+        )
+    }
+
+    func mismatchedProfile() throws -> QualifiedTranscriptionProfile {
+        let qualification = try TranscriptEngineQualification(
+            qualificationProfileID: "synthetic-qualified-v2",
+            engineLockSHA256: String(repeating: "7", count: 64),
+            runtimeIdentity: "synthetic-runtime-v2",
+            runtimeLockSHA256: String(repeating: "5", count: 64),
+            compatibilityPatchID: "synthetic-progress-patch-v2"
+        )
+        let engine = try TranscriptEngineProvenance(
+            provider: profile.engine.provider,
+            model: profile.engine.model,
+            revision: profile.engine.revision,
+            language: profile.engine.language,
+            mode: profile.engine.mode,
+            decodingOptionsSHA256: profile.engine.decodingOptionsSHA256,
+            qualification: qualification,
+            usePolicy: profile.engine.usePolicy
+        )
+        return try QualifiedTranscriptionProfile(
+            profileID: qualification.qualificationProfileID,
+            protocolVersion: profile.protocolVersion,
+            runtimeVersion: qualification.runtimeIdentity,
+            packageLockSHA256: qualification.runtimeLockSHA256,
+            modelRevision: engine.revision,
+            compatibilityPatchID: qualification.compatibilityPatchID,
+            engine: engine
         )
     }
 }

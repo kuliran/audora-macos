@@ -16,7 +16,8 @@ enum JobReconciliationFault: Hashable, Sendable {
 /// Portable, descriptor-confined durable job state. Each state change is a
 /// compare-and-swap under the job directory lock; no caller can replace an
 /// unobserved state. Issue #16 can deepen reconciliation behind this same port.
-public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
+public struct PortableSessionProcessingJobRepository:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease,
     @unchecked Sendable
 {
     private static let maximumJobBytes = 65_536
@@ -113,7 +114,8 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: scope,
-                    jobs: state.orderedJobs
+                    jobs: state.orderedJobs,
+                    isComplete: true
                 )
             )
         } catch let JobPersistenceError.unsupportedSchema(version) {
@@ -217,6 +219,12 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
         do {
             return try withJobs(exclusive: true) { authority in
                 var state = try loadRepositoryState(authority)
+                // Trash moves use this same exclusive Jobs authority. A move
+                // that wins the lock installs the Session in persistent Trash
+                // before releasing it, so a later Start cannot create a new
+                // nonterminal Job for an aggregate that is no longer active.
+                guard try !sessionIsInTrash(job.sessionID, authority: authority)
+                else { return .failed }
                 guard state.jobsByID.count < creationJobCountLimit else {
                     return .failed
                 }
@@ -446,6 +454,51 @@ public struct PortableSessionProcessingJobRepository: SessionProcessingJobPort,
             return .failed
         }
     }
+
+    /// Holds the authoritative Jobs repository lock across the supplied
+    /// Session aggregate mutation. New Jobs and state transitions therefore
+    /// cannot cross the idle proof, while any durable nonterminal Job blocks
+    /// the mutation until Session processing has reached a terminal state.
+    /// Job creation also rejects a Session already installed in Trash while
+    /// holding this same authority, closing both possible lock orderings.
+    func withSessionAggregateTrashAuthority<Value>(
+        for sessionID: SessionID,
+        _ operation: (LibraryRootIdentity) -> Value
+    ) throws -> Value? {
+        do {
+            return try withJobs(exclusive: true) { authority in
+                let state = try loadRepositoryState(authority)
+                guard state.orderedJobs
+                    .filter({ $0.sessionID == sessionID })
+                    .allSatisfy({ $0.state.isTerminal })
+                else { return nil }
+                try revalidate(authority)
+                return operation(
+                    LibraryRootIdentity(
+                        device: authority.rootIdentity.device,
+                        inode: authority.rootIdentity.inode
+                    )
+                )
+            }
+        } catch let error as JobPersistenceError {
+            switch error {
+            case .unsupportedSchema:
+                throw PortableSessionAggregateTrashCoordinationError
+                    .unsupportedSchema
+            case .unavailable:
+                throw PortableSessionAggregateTrashCoordinationError.unavailable
+            case .integrityMismatch, .collision, .io:
+                throw PortableSessionAggregateTrashCoordinationError
+                    .integrityMismatch
+            }
+        }
+    }
+}
+
+enum PortableSessionAggregateTrashCoordinationError: Error {
+    case unsupportedSchema
+    case unavailable
+    case integrityMismatch
 }
 
 private extension PortableSessionProcessingJobRepository {
@@ -965,6 +1018,28 @@ private extension PortableSessionProcessingJobRepository {
         guard case let .readWrite(library) = loaded,
               library.manifest.libraryID == libraryID
         else { throw JobPersistenceError.integrityMismatch }
+    }
+
+    func sessionIsInTrash(
+        _ sessionID: SessionID,
+        authority: RootAuthority
+    ) throws -> Bool {
+        let trashDescriptor = try confined.openDirectory(
+            named: "trash",
+            under: authority.rootDescriptor
+        )
+        defer { Darwin.close(trashDescriptor) }
+        let sessionsDescriptor = try confined.openDirectory(
+            named: "sessions",
+            under: trashDescriptor
+        )
+        defer { Darwin.close(sessionsDescriptor) }
+        let isTrashed = try confined.entryExists(
+            named: sessionID.rawValue,
+            under: sessionsDescriptor
+        )
+        try revalidate(authority)
+        return isTrashed
     }
 
     func loadJob(under descriptor: Int32) throws -> SessionProcessingJob {

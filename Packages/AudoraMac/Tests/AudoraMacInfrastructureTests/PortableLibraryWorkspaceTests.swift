@@ -7,6 +7,53 @@ import Foundation
 import XCTest
 
 final class PortableLibraryWorkspaceTests: XCTestCase {
+    func testProfileEvidencePolicyLookupKeepsExactSourceIdentityAndDenial()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Policy.audoralibrary")
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: makeSeed()
+            )
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+            let attachment = try await installRecordedAttachment(
+                at: root,
+                in: scope
+            )
+            let exact = CoachEvidencePolicySourceIdentity(
+                sessionID: attachment.sessionID,
+                transcriptRevisionID: attachment.transcriptRevisionID
+            )
+            let missing = CoachEvidencePolicySourceIdentity(
+                sessionID: try SessionID("ses-20260830T130000000Z-5GHJ"),
+                transcriptRevisionID: try TranscriptRevisionID(
+                    "trv-20260830T131000000Z-6KMN"
+                )
+            )
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            _ = await workspace.chooseLibrary()
+
+            let resolutions = await PortableChatSessionAttachmentSource(
+                workspace: workspace
+            ).resolveUsePolicies(for: [exact, missing], in: scope)
+
+            XCTAssertEqual(resolutions.count, 2)
+            guard case let .resolved(source, policy) = resolutions[0] else {
+                return XCTFail("Expected the exact persisted policy")
+            }
+            XCTAssertEqual(source, exact)
+            XCTAssertFalse(policy.externalProcessingAllowed)
+            XCTAssertEqual(resolutions[1], .unavailable(source: missing))
+        }
+    }
+
     func testNewChatAuthorityRejectsSameLibraryIDRootReplacementBeforeCreate()
         async throws
     {
@@ -302,7 +349,7 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
             let revealedNames = await revealer.revealedNames
             XCTAssertEqual(firstOpen, .opened(firstAuthority.snapshot))
             XCTAssertEqual(failedOpen, .failed(.candidateCorrupt))
-            XCTAssertEqual(reveal, .succeeded())
+            XCTAssertEqual(reveal, .accepted)
 
             XCTAssertEqual(
                 access.events,
@@ -340,7 +387,7 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
             let reveal = await workspace.revealActiveLibrary()
             let revealedNames = await revealer.revealedNames
             XCTAssertEqual(mismatch, .failed(.identityMismatch))
-            XCTAssertEqual(reveal, .succeeded())
+            XCTAssertEqual(reveal, .accepted)
             XCTAssertEqual(revealedNames, ["First.audoralibrary"])
             XCTAssertEqual(
                 Array(access.events.suffix(2)),
@@ -409,8 +456,30 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
             }
             let reveal = await workspace.revealActiveLibrary()
             let revealedNames = await revealer.revealedNames
-            XCTAssertEqual(reveal, .succeeded())
+            XCTAssertEqual(reveal, .accepted)
             XCTAssertEqual(revealedNames, ["Created.audoralibrary"])
+        }
+    }
+
+    func testRevealRequestRejectionIsNotReportedAsAccepted() async throws {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Rejected.audoralibrary")
+            _ = try PortableLibraryPersistence().create(at: root, seed: makeSeed())
+            let revealer = RecordingRevealer(disposition: .rejected)
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: revealer
+            )
+            _ = await workspace.chooseLibrary()
+
+            let reveal = await workspace.revealActiveLibrary()
+            let revealedNames = await revealer.revealedNames
+
+            XCTAssertEqual(reveal, .failed(.revealFailed))
+            XCTAssertEqual(revealedNames, ["Rejected.audoralibrary"])
         }
     }
 
@@ -908,16 +977,21 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 )
                 _ = await workspace.chooseLibrary()
                 let seed = try makeChatSeed(scope: scope)
+                let persistence = PortableChatPersistence { reached in
+                    if reached == point {
+                        throw PortableChatPersistenceError.injectedFault(point)
+                    }
+                }
                 let store = PortableChatStore(
-                    persistence: PortableChatPersistence { reached in
-                        if reached == point {
-                            throw PortableChatPersistenceError.injectedFault(point)
-                        }
-                    },
+                    persistence: persistence,
                     workspace: workspace
                 )
 
-                let outcome = await store.create(seed)
+                let outcome = await createAuthorizedChatForPersistenceScenario(
+                    seed,
+                    store: store,
+                    workspace: workspace
+                )
                 let reopened = await store.load(seed.aggregate.chat.id, in: scope)
 
                 XCTAssertEqual(
@@ -957,8 +1031,11 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 )
                 _ = await workspace.chooseLibrary()
                 let seed = try makeChatSeed(scope: scope)
-                let initialStore = PortableChatStore(workspace: workspace)
-                let created = await initialStore.create(seed)
+                let created = await createAuthorizedChatForPersistenceScenario(
+                    seed,
+                    store: PortableChatStore(workspace: workspace),
+                    workspace: workspace
+                )
                 XCTAssertEqual(created, .committed(seed.aggregate))
                 let mutation = try RenameChatMutation(
                     library: scope,
@@ -1015,8 +1092,11 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 )
                 _ = await workspace.chooseLibrary()
                 let seed = try makeChatSeed(scope: scope)
-                let initialStore = PortableChatStore(workspace: workspace)
-                let created = await initialStore.create(seed)
+                let created = await createAuthorizedChatForPersistenceScenario(
+                    seed,
+                    store: PortableChatStore(workspace: workspace),
+                    workspace: workspace
+                )
                 XCTAssertEqual(created, .committed(seed.aggregate))
                 let draft = try seed.aggregate.chat.draft.edited(
                     text: "Durable synthetic Draft",
@@ -1070,8 +1150,11 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 )
                 _ = await workspace.chooseLibrary()
                 let seed = try makeChatSeed(scope: scope)
-                let initialStore = PortableChatStore(workspace: workspace)
-                let created = await initialStore.create(seed)
+                let created = await createAuthorizedChatForPersistenceScenario(
+                    seed,
+                    store: PortableChatStore(workspace: workspace),
+                    workspace: workspace
+                )
                 XCTAssertEqual(created, .committed(seed.aggregate))
                 let pending = PendingUserTurn(
                     id: try PendingUserTurnID("ptu-20260830T120100000Z-5KMN"),
@@ -1139,7 +1222,11 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 _ = await workspace.chooseLibrary()
                 let seed = try makeChatSeed(scope: scope)
                 let initialStore = PortableChatStore(workspace: workspace)
-                let created = await initialStore.create(seed)
+                let created = await createAuthorizedChatForPersistenceScenario(
+                    seed,
+                    store: initialStore,
+                    workspace: workspace
+                )
                 XCTAssertEqual(created, .committed(seed.aggregate))
                 let pending = PendingUserTurn(
                     id: try PendingUserTurnID("ptu-20260830T120100000Z-5KMN"),
@@ -1213,7 +1300,11 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
                 _ = await workspace.chooseLibrary()
                 let seed = try makeChatSeed(scope: scope)
                 let initialStore = PortableChatStore(workspace: workspace)
-                let created = await initialStore.create(seed)
+                let created = await createAuthorizedChatForPersistenceScenario(
+                    seed,
+                    store: initialStore,
+                    workspace: workspace
+                )
                 XCTAssertEqual(created, .committed(seed.aggregate))
                 let pending = PendingUserTurn(
                     id: try PendingUserTurnID("ptu-20260830T120100000Z-5KMN"),

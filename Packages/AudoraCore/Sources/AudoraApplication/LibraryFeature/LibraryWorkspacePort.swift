@@ -6,7 +6,7 @@ public protocol LibraryWorkspacePort: Sendable {
     func chooseLibrary() async -> LibraryOpenOutcome
     func openExternalRequest(_ token: LibraryOpenRequestToken) async -> LibraryOpenOutcome
     func reopenRecentLibrary() async -> LibraryOpenOutcome
-    func revealActiveLibrary() async -> LibraryActionOutcome
+    func revealActiveLibrary() async -> LibraryRevealRequestOutcome
     func closeActiveLibrary() async -> LibraryActionOutcome
 }
 
@@ -63,5 +63,13 @@ public enum LibraryOpenOutcome: Equatable, Sendable {
 
 public enum LibraryActionOutcome: Equatable, Sendable {
     case succeeded(recentAvailable: Bool = true)
+    case failed(LibraryNotice)
+}
+
+/// Finder exposes a best-effort request API rather than confirmation that a
+/// window became visible. This outcome deliberately records only whether that
+/// reveal request was accepted for dispatch.
+public enum LibraryRevealRequestOutcome: Equatable, Sendable {
+    case accepted
     case failed(LibraryNotice)
 }

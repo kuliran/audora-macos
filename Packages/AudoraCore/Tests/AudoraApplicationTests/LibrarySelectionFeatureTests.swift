@@ -2,6 +2,18 @@
 import AudoraDomain
 import XCTest
 
+private struct UnusedReviewFeature: ReviewFeature {
+    let currentState = ReviewFeatureState.unavailable(
+        selection: nil,
+        reason: .noSession
+    )
+    let states = AsyncStream<ReviewFeatureState> { $0.finish() }
+
+    func send(_ command: ReviewCommand) async {}
+    func reserveLibraryNavigation() async -> Bool { true }
+    func finishLibraryNavigation(_ result: LibraryCommandResult) async {}
+}
+
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
 @MainActor
 final class ApplicationCommandFeatureTests: XCTestCase {
@@ -424,6 +436,498 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         XCTAssertEqual(events, ["chat.flush"])
     }
 
+    func testLibrarySelectionFencesReviewBeforeFlushAndFinishesExactActivation()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: true, trace: trace)
+        let snapshot = ActiveLibrarySnapshot(
+            libraryID: try LibraryID("lib-20260830T120000000Z-2ABC"),
+            preferences: .defaults,
+            profile: .nullProfile(statementCount: 0)
+        )
+        let library = IdenticalReplacementLibraryFeature(
+            snapshot: snapshot,
+            trace: trace
+        )
+        let review = NavigationReviewLifecycleProbe(trace: trace)
+        let feature = DefaultApplicationCommandFeature(
+            library: library,
+            chat: chat
+        )
+        feature.installReviewLibraryNavigationLifecycle(review)
+
+        let succeeded = await feature.enqueue(.chooseExisting).value
+
+        let activation = LibraryActivation(
+            scope: LibraryScope(libraryID: snapshot.libraryID),
+            generation: 2
+        )
+        XCTAssertTrue(succeeded)
+        let completions = await review.completions
+        XCTAssertEqual(completions, [.activated(activation)])
+        let events = await trace.events
+        XCTAssertEqual(
+            events,
+            [
+                "review.navigation.reserve",
+                "chat.flush",
+                "library.identicalReplacement",
+                "review.navigation.finish",
+            ]
+        )
+    }
+
+    func testFailedChatFlushRestoresReservedReviewBeforeBoundaryReopens() async {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: false, trace: trace)
+        let review = NavigationReviewLifecycleProbe(trace: trace)
+        let feature = DefaultApplicationCommandFeature(
+            library: SelectionLibraryFeature(trace: trace),
+            chat: chat
+        )
+        feature.installReviewLibraryNavigationLifecycle(review)
+
+        let succeeded = await feature.enqueue(.close).value
+
+        XCTAssertFalse(succeeded)
+        let completions = await review.completions
+        XCTAssertEqual(completions, [.noSelectionMutation])
+        let isReserved = await review.isReserved
+        XCTAssertFalse(isReserved)
+        let events = await trace.events
+        XCTAssertEqual(
+            events,
+            [
+                "review.navigation.reserve",
+                "chat.flush",
+                "review.navigation.finish",
+            ]
+        )
+    }
+
+    func testReviewAuthorityRejectsLibrarySelectionBeforeChatOrRootMutation()
+        async
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: true, trace: trace)
+        let review = NavigationReviewLifecycleProbe(
+            trace: trace,
+            permitsReservation: false
+        )
+        let feature = DefaultApplicationCommandFeature(
+            library: SelectionLibraryFeature(trace: trace),
+            chat: chat
+        )
+        feature.installReviewLibraryNavigationLifecycle(review)
+
+        let succeeded = await feature.enqueue(.close).value
+
+        XCTAssertFalse(succeeded)
+        let events = await trace.events
+        XCTAssertEqual(events, ["review.navigation.reserve"])
+    }
+
+    func testCatalogMutationFlushesAndReloadsChatInsideApplicationBoundary()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: true, trace: trace)
+        let catalog = SelectionLibraryCatalogFeature(trace: trace)
+        let activation = LibraryActivation(
+            scope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let feature = DefaultApplicationCommandFeature(
+            library: ExactActivationLibraryFeature(activation: activation),
+            chat: chat,
+            libraryCatalog: catalog
+        )
+        let aggregate = LibraryAggregate.chat(
+            try ChatID("cht-20260830T120000000Z-2ABC")
+        )
+
+        let catalogFeature = ApplicationCoordinatedLibraryCatalogFeature(
+            application: feature,
+            review: UnusedReviewFeature()
+        )
+        let result = await catalogFeature.send(
+            .moveToTrash(activation, [aggregate])
+        )
+
+        XCTAssertEqual(
+            result,
+            .mutation(
+                [
+                    LibraryAggregateMutationResult(
+                        aggregate: aggregate,
+                        outcome: .succeeded
+                    ),
+                ],
+                catalog: .available(
+                    LibraryCatalogSnapshot(
+                        active: [],
+                        trash: [librarySelectionCatalogRow(aggregate)]
+                    )
+                )
+            )
+        )
+        XCTAssertEqual(feature.admissionState, .idle)
+        let events = await trace.events
+        XCTAssertEqual(
+            events,
+            ["chat.catalog.prepare", "catalog.mutate", "chat.catalog.reload"]
+        )
+    }
+
+    func testCatalogMutationDoesNotTouchStorageWhenChatCannotFlush()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: false, trace: trace)
+        let catalog = SelectionLibraryCatalogFeature(trace: trace)
+        let activation = LibraryActivation(
+            scope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let feature = DefaultApplicationCommandFeature(
+            library: ExactActivationLibraryFeature(activation: activation),
+            chat: chat,
+            libraryCatalog: catalog
+        )
+        let aggregate = LibraryAggregate.chat(
+            try ChatID("cht-20260830T120000000Z-2ABC")
+        )
+
+        let catalogFeature = ApplicationCoordinatedLibraryCatalogFeature(
+            application: feature,
+            review: UnusedReviewFeature()
+        )
+        let result = await catalogFeature.send(
+            .moveToTrash(activation, [aggregate])
+        )
+
+        XCTAssertEqual(
+            result,
+            .mutation(
+                [
+                    LibraryAggregateMutationResult(
+                        aggregate: aggregate,
+                        outcome: .unavailable
+                    ),
+                ],
+                catalog: .unavailable
+            )
+        )
+        XCTAssertEqual(feature.admissionState, .idle)
+        let events = await trace.events
+        XCTAssertEqual(events, ["chat.catalog.prepare"])
+    }
+
+    func testStaleCatalogMutationDoesNotQuiesceTheReplacementChat()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: true, trace: trace)
+        let catalog = SelectionLibraryCatalogFeature(trace: trace)
+        let scope = LibraryScope(
+            libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+        )
+        let currentActivation = LibraryActivation(scope: scope, generation: 2)
+        let feature = DefaultApplicationCommandFeature(
+            library: ExactActivationLibraryFeature(
+                activation: currentActivation
+            ),
+            chat: chat,
+            libraryCatalog: catalog
+        )
+        let aggregate = LibraryAggregate.chat(
+            try ChatID("cht-20260830T120000000Z-2ABC")
+        )
+
+        let catalogFeature = ApplicationCoordinatedLibraryCatalogFeature(
+            application: feature,
+            review: UnusedReviewFeature()
+        )
+        let result = await catalogFeature.send(
+            .moveToTrash(
+                LibraryActivation(scope: scope, generation: 1),
+                [aggregate]
+            )
+        )
+
+        XCTAssertEqual(
+            result,
+            .mutation(
+                [
+                    LibraryAggregateMutationResult(
+                        aggregate: aggregate,
+                        outcome: .unavailable
+                    ),
+                ],
+                catalog: .unavailable
+            )
+        )
+        XCTAssertEqual(feature.admissionState, .idle)
+        let events = await trace.events
+        XCTAssertEqual(events, [])
+    }
+
+    func testSessionCatalogMutationCoordinatesEveryDependentLifecycleInOrder()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let chat = SelectionChatFeature(flushResult: true, trace: trace)
+        let catalog = SelectionLibraryCatalogFeature(trace: trace)
+        let processing = CatalogLifecycleProcessingProbe(trace: trace)
+        let review = CatalogLifecycleReviewProbe(trace: trace)
+        let activation = LibraryActivation(
+            scope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let feature = DefaultApplicationCommandFeature(
+            library: ExactActivationLibraryFeature(activation: activation),
+            chat: chat,
+            libraryCatalog: catalog,
+            sessionProcessing: processing
+        )
+        let aggregate = LibraryAggregate.session(
+            try SessionID("ses-20260830T120000000Z-2ABC")
+        )
+
+        let catalogFeature = ApplicationCoordinatedLibraryCatalogFeature(
+            application: feature,
+            review: review
+        )
+        let receipt = Task {
+            await catalogFeature.send(.moveToTrash(activation, [aggregate]))
+        }
+        for _ in 0..<100 where !feature.admissionState.isLibraryCatalogMutationPending {
+            await Task.yield()
+        }
+        XCTAssertTrue(feature.admissionState.isLibraryCatalogMutationPending)
+        XCTAssertFalse(
+            feature.isSessionProcessingCommandAdmitted(
+                .selectSession(
+                    SessionProcessingSelection(
+                        scope: activation.scope,
+                        sessionID: try SessionID(
+                            "ses-20260830T120100000Z-3CDE"
+                        )
+                    )
+                )
+            )
+        )
+        let result = await receipt.value
+
+        guard case let .mutation(results, _) = result else {
+            return XCTFail("expected coordinated mutation")
+        }
+        XCTAssertEqual(results.first?.outcome, .succeeded)
+        XCTAssertEqual(feature.admissionState, .idle)
+        let events = await trace.events
+        XCTAssertEqual(
+            events,
+            [
+                "processing.catalog.reserve",
+                "review.catalog.reserve",
+                "chat.catalog.prepare",
+                "catalog.mutate",
+                "processing.catalog.finish",
+                "review.catalog.finish",
+                "chat.catalog.reload",
+            ]
+        )
+    }
+
+    func testInexactPostWriteReloadInvalidatesSessionParticipantsInsteadOfRebinding()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let activation = LibraryActivation(
+            scope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let aggregate = LibraryAggregate.session(
+            try SessionID("ses-20260830T120000000Z-2ABC")
+        )
+        let processing = CatalogLifecycleProcessingProbe(trace: trace)
+        let review = CatalogLifecycleReviewProbe(trace: trace)
+        let feature = DefaultApplicationCommandFeature(
+            library: ExactActivationLibraryFeature(activation: activation),
+            chat: SelectionChatFeature(flushResult: true, trace: trace),
+            libraryCatalog: InexactReloadLibraryCatalogFeature(),
+            sessionProcessing: processing
+        )
+
+        let catalogFeature = ApplicationCoordinatedLibraryCatalogFeature(
+            application: feature,
+            review: review
+        )
+        _ = await catalogFeature.send(.moveToTrash(activation, [aggregate]))
+
+        let processingCompletions = await processing.completions
+        let reviewCompletions = await review.completions
+        XCTAssertEqual(processingCompletions, [.completed(.unavailable)])
+        XCTAssertEqual(reviewCompletions, [.completed(.unavailable)])
+        XCTAssertEqual(feature.admissionState, .idle)
+    }
+
+    func testBusySessionProcessingRejectsCatalogMutationBeforeOtherQuiescence()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let activation = LibraryActivation(
+            scope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let aggregate = LibraryAggregate.session(
+            try SessionID("ses-20260830T120000000Z-2ABC")
+        )
+        let feature = DefaultApplicationCommandFeature(
+            library: ExactActivationLibraryFeature(activation: activation),
+            chat: SelectionChatFeature(flushResult: true, trace: trace),
+            libraryCatalog: SelectionLibraryCatalogFeature(trace: trace),
+            sessionProcessing: CatalogLifecycleProcessingProbe(
+                trace: trace,
+                permitsReservation: false
+            )
+        )
+
+        let catalogFeature = ApplicationCoordinatedLibraryCatalogFeature(
+            application: feature,
+            review: CatalogLifecycleReviewProbe(trace: trace)
+        )
+        let result = await catalogFeature.send(
+            .moveToTrash(activation, [aggregate])
+        )
+
+        XCTAssertEqual(result, .mutationRefused([
+            LibraryAggregateMutationResult(
+                aggregate: aggregate,
+                outcome: .busy
+            ),
+        ]))
+        let events = await trace.events
+        XCTAssertEqual(events, ["processing.catalog.reserve"])
+    }
+
+    func testBusyReviewRollsBackProcessingReservationAndReleasesBoundary()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let activation = LibraryActivation(
+            scope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let aggregate = LibraryAggregate.session(
+            try SessionID("ses-20260830T120000000Z-2ABC")
+        )
+        let processing = CatalogLifecycleProcessingProbe(trace: trace)
+        let feature = DefaultApplicationCommandFeature(
+            library: ExactActivationLibraryFeature(activation: activation),
+            chat: SelectionChatFeature(flushResult: true, trace: trace),
+            libraryCatalog: SelectionLibraryCatalogFeature(trace: trace),
+            sessionProcessing: processing
+        )
+        let catalogFeature = ApplicationCoordinatedLibraryCatalogFeature(
+            application: feature,
+            review: CatalogLifecycleReviewProbe(
+                trace: trace,
+                permitsReservation: false
+            )
+        )
+
+        let result = await catalogFeature.send(
+            .moveToTrash(activation, [aggregate])
+        )
+
+        XCTAssertEqual(result, .mutationRefused([
+            LibraryAggregateMutationResult(
+                aggregate: aggregate,
+                outcome: .busy
+            ),
+        ]))
+        let processingCompletions = await processing.completions
+        let events = await trace.events
+        XCTAssertEqual(processingCompletions, [.aborted])
+        XCTAssertEqual(feature.admissionState, .idle)
+        XCTAssertEqual(
+            events,
+            [
+                "processing.catalog.reserve",
+                "review.catalog.reserve",
+                "processing.catalog.finish",
+            ]
+        )
+    }
+
+    func testChatPreparationFailureRollsBackSessionParticipantsInReverseOrder()
+        async throws
+    {
+        let trace = LibrarySelectionTrace()
+        let activation = LibraryActivation(
+            scope: LibraryScope(
+                libraryID: try LibraryID("lib-20260830T115900000Z-2ABC")
+            ),
+            generation: 1
+        )
+        let aggregate = LibraryAggregate.session(
+            try SessionID("ses-20260830T120000000Z-2ABC")
+        )
+        let processing = CatalogLifecycleProcessingProbe(trace: trace)
+        let review = CatalogLifecycleReviewProbe(trace: trace)
+        let feature = DefaultApplicationCommandFeature(
+            library: ExactActivationLibraryFeature(activation: activation),
+            chat: SelectionChatFeature(flushResult: false, trace: trace),
+            libraryCatalog: SelectionLibraryCatalogFeature(trace: trace),
+            sessionProcessing: processing
+        )
+        let catalogFeature = ApplicationCoordinatedLibraryCatalogFeature(
+            application: feature,
+            review: review
+        )
+
+        let result = await catalogFeature.send(
+            .moveToTrash(activation, [aggregate])
+        )
+
+        XCTAssertEqual(result, .mutation([
+            LibraryAggregateMutationResult(
+                aggregate: aggregate,
+                outcome: .unavailable
+            ),
+        ], catalog: .unavailable))
+        let processingCompletions = await processing.completions
+        let reviewCompletions = await review.completions
+        let events = await trace.events
+        XCTAssertEqual(processingCompletions, [.aborted])
+        XCTAssertEqual(reviewCompletions, [.aborted])
+        XCTAssertEqual(feature.admissionState, .idle)
+        XCTAssertEqual(
+            events,
+            [
+                "processing.catalog.reserve",
+                "review.catalog.reserve",
+                "chat.catalog.prepare",
+                "review.catalog.finish",
+                "processing.catalog.finish",
+            ]
+        )
+    }
+
     func testProcessingAuthorityRejectsLibrarySelectionBeforeChatOrRootMutation()
         async throws
     {
@@ -584,11 +1088,13 @@ final class ApplicationCommandFeatureTests: XCTestCase {
             ]
         )
         let processing = NavigationActivationProcessingProbe()
+        let review = NavigationReviewLifecycleProbe(trace: trace)
         let feature = DefaultApplicationCommandFeature(
             library: library,
             chat: chat,
             sessionProcessing: processing
         )
+        feature.installReviewLibraryNavigationLifecycle(review)
         let token = try XCTUnwrap(LibraryOpenRequestToken("queued_external"))
 
         let startup = feature.enqueue(LibrarySelectionIntent.start)
@@ -612,6 +1118,10 @@ final class ApplicationCommandFeatureTests: XCTestCase {
         await library.resumeNextCommand()
         await library.waitForCommandCount(2)
         XCTAssertTrue(feature.admissionState.isLibraryNavigationPending)
+        let reviewReservationCount = await review.reserveCallCount
+        let reviewRemainsReserved = await review.isReserved
+        XCTAssertEqual(reviewReservationCount, 1)
+        XCTAssertTrue(reviewRemainsReserved)
         await library.resumeNextCommand()
 
         let startupSucceeded = await startup.value
@@ -633,6 +1143,11 @@ final class ApplicationCommandFeatureTests: XCTestCase {
                     LibraryActivation(scope: externalScope, generation: 2)
                 ),
             ]
+        )
+        let reviewCompletions = await review.completions
+        XCTAssertEqual(
+            reviewCompletions,
+            [.activated(LibraryActivation(scope: externalScope, generation: 2))]
         )
     }
 
@@ -838,6 +1353,37 @@ private actor NavigationActivationProcessingProbe: SessionProcessingFeature {
     }
 }
 
+private actor NavigationReviewLifecycleProbe: ReviewLibraryNavigationLifecycle {
+    private let trace: LibrarySelectionTrace
+    private let permitsReservation: Bool
+    private(set) var isReserved = false
+    private(set) var reserveCallCount = 0
+    private(set) var completions: [LibraryCommandResult] = []
+
+    init(
+        trace: LibrarySelectionTrace,
+        permitsReservation: Bool = true
+    ) {
+        self.trace = trace
+        self.permitsReservation = permitsReservation
+    }
+
+    func reserveLibraryNavigation() async -> Bool {
+        reserveCallCount += 1
+        await trace.append("review.navigation.reserve")
+        guard permitsReservation, !isReserved else { return false }
+        isReserved = true
+        return true
+    }
+
+    func finishLibraryNavigation(_ result: LibraryCommandResult) async {
+        guard isReserved else { return }
+        completions.append(result)
+        isReserved = false
+        await trace.append("review.navigation.finish")
+    }
+}
+
 private actor LibrarySelectionTrace {
     private(set) var events: [String] = []
 
@@ -862,15 +1408,232 @@ private actor SelectionChatFeature: ChatFeature {
 
     var currentState: ChatFeatureState { ChatFeatureState() }
 
-    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+    func currentState(in context: ChatCommandContext) -> ChatFeatureState? { nil }
 
     func send(_ command: ChatCommand) async {
         commands.append(command)
     }
 
+    func prepareForLibraryCatalogMutation(
+        for activation: LibraryActivation
+    ) async -> Bool {
+        await trace.append("chat.catalog.prepare")
+        return flushResult
+    }
+
+    func reloadAfterLibraryCatalogMutation(
+        for activation: LibraryActivation
+    ) async -> Bool {
+        await trace.append("chat.catalog.reload")
+        return true
+    }
+
     func flushForOrderlyTermination() async -> Bool {
         await trace.append("chat.flush")
         return flushResult
+    }
+}
+
+private actor SelectionLibraryCatalogFeature:
+    LibraryCatalogFeature,
+    LibraryCatalogMutationFeature
+{
+    private let trace: LibrarySelectionTrace
+
+    init(trace: LibrarySelectionTrace) {
+        self.trace = trace
+    }
+
+    func send(
+        _ command: LibraryCatalogCommand
+    ) async -> LibraryCatalogCommandResult {
+        await trace.append("catalog.mutate")
+        switch command {
+        case let .moveToTrash(_, aggregates):
+            let ordered = aggregates.sorted()
+            return .mutation(
+                ordered.map {
+                    LibraryAggregateMutationResult(
+                        aggregate: $0,
+                        outcome: .succeeded
+                    )
+                },
+                catalog: .available(
+                    LibraryCatalogSnapshot(
+                        active: [],
+                        trash: ordered.map(librarySelectionCatalogRow)
+                    )
+                )
+            )
+        case .refresh, .restore:
+            return command.unavailableResult
+        }
+    }
+
+    func send(
+        _ command: LibraryCatalogCommand,
+        lifecycle: any LibraryCatalogMutationLifecycle
+    ) async -> LibraryCatalogCommandResult {
+        switch await lifecycle.prepareForLibraryCatalogMutation(command) {
+        case .prepared:
+            break
+        case .refused:
+            return command.refusedResult
+        case .unavailable:
+            return command.unavailableResult
+        }
+        let result = await send(command)
+        guard await lifecycle.reloadAfterLibraryCatalogMutation(
+            command,
+            result: result
+        ) else {
+            return command.unavailableResult
+        }
+        return result
+    }
+}
+
+private actor InexactReloadLibraryCatalogFeature:
+    LibraryCatalogFeature,
+    LibraryCatalogMutationFeature
+{
+    func send(
+        _ command: LibraryCatalogCommand
+    ) async -> LibraryCatalogCommandResult {
+        command.unavailableResult
+    }
+
+    func send(
+        _ command: LibraryCatalogCommand,
+        lifecycle: any LibraryCatalogMutationLifecycle
+    ) async -> LibraryCatalogCommandResult {
+        switch await lifecycle.prepareForLibraryCatalogMutation(command) {
+        case .prepared:
+            break
+        case .refused:
+            return command.refusedResult
+        case .unavailable:
+            return command.unavailableResult
+        }
+        let result = command.unavailableResult
+        let inexactCommand: LibraryCatalogCommand = switch command {
+        case let .moveToTrash(activation, aggregates):
+            .restore(activation, aggregates)
+        case let .restore(activation, aggregates):
+            .moveToTrash(activation, aggregates)
+        case .refresh:
+            command
+        }
+        _ = await lifecycle.reloadAfterLibraryCatalogMutation(
+            inexactCommand,
+            result: result
+        )
+        return result
+    }
+}
+
+private actor CatalogLifecycleProcessingProbe: SessionProcessingFeature {
+    nonisolated let states = AsyncStream<SessionProcessingFeatureState> {
+        $0.finish()
+    }
+
+    private let trace: LibrarySelectionTrace
+    private let permitsReservation: Bool
+    private var nextToken: UInt64 = 1
+    private(set) var completions: [LibraryCatalogSessionMutationCompletion] = []
+
+    init(
+        trace: LibrarySelectionTrace,
+        permitsReservation: Bool = true
+    ) {
+        self.trace = trace
+        self.permitsReservation = permitsReservation
+    }
+
+    var currentState: SessionProcessingFeatureState {
+        .unavailable(
+            SessionProcessingUnavailableSnapshot(
+                selection: nil,
+                reason: .noSession,
+                actions: []
+            )
+        )
+    }
+
+    func send(_ command: SessionProcessingCommand) async {}
+
+    func reserveLibraryNavigation() async -> Bool { false }
+
+    func finishLibraryNavigation(didMutateLibrary: Bool) async {}
+
+    func reserveLibraryCatalogSessionMutation(
+        _ mutation: LibraryCatalogSessionMutation
+    ) async -> LibraryCatalogSessionMutationLease? {
+        await trace.append("processing.catalog.reserve")
+        guard permitsReservation else { return nil }
+        let lease = LibraryCatalogSessionMutationLease(
+            token: nextToken,
+            mutation: mutation
+        )
+        nextToken += 1
+        return lease
+    }
+
+    func finishLibraryCatalogSessionMutation(
+        _ lease: LibraryCatalogSessionMutationLease,
+        completion: LibraryCatalogSessionMutationCompletion
+    ) async -> LibraryCatalogSessionMutationFinishResult {
+        completions.append(completion)
+        await trace.append("processing.catalog.finish")
+        return .consumed
+    }
+}
+
+private actor CatalogLifecycleReviewProbe: ReviewFeature {
+    nonisolated let states = AsyncStream<ReviewFeatureState> { $0.finish() }
+    private let trace: LibrarySelectionTrace
+    private let permitsReservation: Bool
+    private var nextToken: UInt64 = 1
+    private(set) var completions: [LibraryCatalogSessionMutationCompletion] = []
+
+    init(
+        trace: LibrarySelectionTrace,
+        permitsReservation: Bool = true
+    ) {
+        self.trace = trace
+        self.permitsReservation = permitsReservation
+    }
+
+    var currentState: ReviewFeatureState {
+        .unavailable(selection: nil, reason: .noSession)
+    }
+
+    func send(_ command: ReviewCommand) async {}
+
+    func reserveLibraryNavigation() async -> Bool { true }
+
+    func finishLibraryNavigation(_ result: LibraryCommandResult) async {}
+
+    func reserveLibraryCatalogSessionMutation(
+        _ mutation: LibraryCatalogSessionMutation
+    ) async -> LibraryCatalogSessionMutationLease? {
+        await trace.append("review.catalog.reserve")
+        guard permitsReservation else { return nil }
+        let lease = LibraryCatalogSessionMutationLease(
+            token: nextToken,
+            mutation: mutation
+        )
+        nextToken += 1
+        return lease
+    }
+
+    func finishLibraryCatalogSessionMutation(
+        _ lease: LibraryCatalogSessionMutationLease,
+        completion: LibraryCatalogSessionMutationCompletion
+    ) async -> LibraryCatalogSessionMutationFinishResult {
+        completions.append(completion)
+        await trace.append("review.catalog.finish")
+        return .consumed
     }
 }
 
@@ -890,7 +1653,7 @@ private actor SuspendedBoundaryChatFeature: ChatFeature {
 
     var currentState: ChatFeatureState { ChatFeatureState() }
 
-    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+    func currentState(in context: ChatCommandContext) -> ChatFeatureState? { nil }
 
     func send(_ command: ChatCommand) async {
         commands.append(command)
@@ -924,7 +1687,7 @@ private actor SuspendedNewChatPickerApplicationChatFeature: ChatFeature {
 
     var currentState: ChatFeatureState { ChatFeatureState() }
 
-    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+    func currentState(in context: ChatCommandContext) -> ChatFeatureState? { nil }
 
     func send(_ command: ChatCommand) async {
         commands.append(command)
@@ -974,7 +1737,7 @@ private actor SuspendedCoachApplicationChatFeature: ChatFeature {
 
     var currentState: ChatFeatureState { ChatFeatureState() }
 
-    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+    func currentState(in context: ChatCommandContext) -> ChatFeatureState? { nil }
 
     func send(_ command: ChatCommand) async {
         commands.append(command)
@@ -1015,7 +1778,7 @@ private actor SuspendedOrderedApplicationChatFeature: ChatFeature {
 
     var currentState: ChatFeatureState { ChatFeatureState() }
 
-    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+    func currentState(in context: ChatCommandContext) -> ChatFeatureState? { nil }
 
     func send(_ command: ChatCommand) async {
         commands.append(command)
@@ -1055,7 +1818,7 @@ private actor SuspendedCrossFeatureChatFeature: ChatFeature {
 
     var currentState: ChatFeatureState { ChatFeatureState() }
 
-    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+    func currentState(in context: ChatCommandContext) -> ChatFeatureState? { nil }
 
     func send(_ command: ChatCommand) async {
         commands.append(command)
@@ -1098,7 +1861,7 @@ private actor SuspendedTerminationChatFeature: ChatFeature {
 
     var currentState: ChatFeatureState { ChatFeatureState() }
 
-    func currentState(in scope: LibraryScope) -> ChatFeatureState? { nil }
+    func currentState(in context: ChatCommandContext) -> ChatFeatureState? { nil }
 
     func send(_ command: ChatCommand) async {
         commands.append(command)
@@ -1180,6 +1943,35 @@ private actor SelectionLibraryFeature: LibraryFeature {
             await trace.append("library.other")
             return .deactivated
         }
+    }
+}
+
+private actor ExactActivationLibraryFeature: LibraryFeature {
+    nonisolated let states = AsyncStream<LibraryFeatureState> { continuation in
+        continuation.finish()
+    }
+
+    private let activation: LibraryActivation
+
+    init(activation: LibraryActivation) {
+        self.activation = activation
+    }
+
+    var currentState: LibraryFeatureState {
+        LibraryFeatureState(
+            selection: .active(
+                ActiveLibrarySnapshot(
+                    libraryID: activation.scope.libraryID,
+                    preferences: .defaults,
+                    profile: .nullProfile(statementCount: 0),
+                    activationGeneration: activation.generation
+                )
+            )
+        )
+    }
+
+    func send(_ command: LibraryCommand) async -> LibraryCommandResult {
+        .noSelectionMutation
     }
 }
 
@@ -1283,5 +2075,31 @@ private actor BooleanReceiptProbe {
 
     func complete(_ result: Bool) {
         self.result = result
+    }
+}
+
+private func librarySelectionCatalogRow(
+    _ aggregate: LibraryAggregate
+) -> LibraryCatalogRow {
+    let instant = try! UTCInstant("2026-08-30T12:00:00.000Z")
+    switch aggregate {
+    case let .session(sessionID):
+        return .session(
+            sessionID,
+            LibrarySessionCatalogMetadata(
+                acquisition: .recorded,
+                createdAt: instant,
+                hasSelectedTranscript: true
+            )
+        )
+    case let .chat(chatID):
+        return .chat(
+            chatID,
+            LibraryChatCatalogMetadata(
+                title: .newChat,
+                createdAt: instant,
+                updatedAt: instant
+            )
+        )
     }
 }

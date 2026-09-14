@@ -11,9 +11,9 @@ schemas, examples, and readiness fixtures describe the same model.
    conservative context estimator against the exact serialized provider envelopes.
 1. **Boundaries and contracts:** create the Domain, Application, Contracts,
    Infrastructure, and Presentation targets plus a clean composition root. Compile
-   the TypeSpec-authored provider contract into checked-in JSON Schemas, add fake
-   adapters and fixtures, and keep provider DTOs separate from versioned persisted
-   records.
+   the TypeSpec-authored provider contract into checked-in JSON Schemas, add stable
+   fail-closed provider gateways plus test-only fixtures, and keep provider DTOs
+   separate from versioned persisted records.
 2. **Persistence kernel:** implement typed IDs, root-record schema migrations,
    sibling-partial writes, flush/install/compare-and-swap operations, staging
    reconciliation, one-main-window writer ownership, Library isolation, reference

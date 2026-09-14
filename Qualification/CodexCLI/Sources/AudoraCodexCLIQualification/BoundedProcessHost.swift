@@ -9,8 +9,11 @@ enum BoundedProcessStopReason: Equatable, Sendable {
     case timedOut
 }
 
-struct BoundedProcessRequest: Sendable {
+struct BoundedProcessRequest: Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible
+{
     let executableURL: URL
+    let executableArtifact: CodexCLIExecutableArtifact?
     let arguments: [String]
     let environment: [String: String]
     let workingDirectoryURL: URL
@@ -20,6 +23,40 @@ struct BoundedProcessRequest: Sendable {
     let timeoutSeconds: TimeInterval
     let cancelAfterSeconds: TimeInterval?
     let terminationGraceSeconds: TimeInterval
+
+    init(
+        executableURL: URL,
+        executableArtifact: CodexCLIExecutableArtifact? = nil,
+        arguments: [String],
+        environment: [String: String],
+        workingDirectoryURL: URL,
+        standardInput: Data,
+        standardOutputByteCeiling: Int,
+        standardErrorByteCeiling: Int,
+        timeoutSeconds: TimeInterval,
+        cancelAfterSeconds: TimeInterval?,
+        terminationGraceSeconds: TimeInterval
+    ) {
+        self.executableURL = executableURL
+        self.executableArtifact = executableArtifact
+        self.arguments = arguments
+        self.environment = environment
+        self.workingDirectoryURL = workingDirectoryURL
+        self.standardInput = standardInput
+        self.standardOutputByteCeiling = standardOutputByteCeiling
+        self.standardErrorByteCeiling = standardErrorByteCeiling
+        self.timeoutSeconds = timeoutSeconds
+        self.cancelAfterSeconds = cancelAfterSeconds
+        self.terminationGraceSeconds = terminationGraceSeconds
+    }
+
+    var description: String {
+        "BoundedProcessRequest(executable: \(executableURL.lastPathComponent), " +
+            "arguments: <redacted>, environment: <redacted>, " +
+            "standardInput: <redacted>)"
+    }
+
+    var debugDescription: String { description }
 }
 
 struct BoundedProcessResult: Sendable {
@@ -37,13 +74,19 @@ struct BoundedProcessResult: Sendable {
 
 struct BoundedProcessHost: Sendable {
     private let monotonicNanoseconds: @Sendable () -> UInt64
+    private let willSpawn: @Sendable () -> Void
+    private let didSpawnSuspended: @Sendable (pid_t) -> Void
 
     init(
         monotonicNanoseconds: @escaping @Sendable () -> UInt64 = {
             DispatchTime.now().uptimeNanoseconds
-        }
+        },
+        willSpawn: @escaping @Sendable () -> Void = {},
+        didSpawnSuspended: @escaping @Sendable (pid_t) -> Void = { _ in }
     ) {
         self.monotonicNanoseconds = monotonicNanoseconds
+        self.willSpawn = willSpawn
+        self.didSpawnSuspended = didSpawnSuspended
     }
 
     func run(_ request: BoundedProcessRequest) -> BoundedProcessResult {
@@ -59,7 +102,7 @@ struct BoundedProcessHost: Sendable {
         let inputPipe = Pipe()
         let outputPipe = Pipe()
         let errorPipe = Pipe()
-        guard let processID = spawn(
+        guard let spawnedProcess = spawn(
             request,
             standardInput: inputPipe.fileHandleForReading.fileDescriptor,
             standardOutput: outputPipe.fileHandleForWriting.fileDescriptor,
@@ -89,7 +132,35 @@ struct BoundedProcessHost: Sendable {
                 durationMilliseconds: elapsedMilliseconds(since: startedAt)
             )
         }
+        let processID = spawnedProcess.processID
         let processTreeProof = BoundedProcessTreeProof(processID: processID)
+
+        guard spawnedProcess.exactArtifactWasValidated else {
+            close(inputPipe)
+            close(outputPipe)
+            close(errorPipe)
+            var waitStatus: Int32?
+            let rootAndProcessGroupWereReaped = terminateRemainingProcessGroup(
+                processID,
+                waitStatus: &waitStatus,
+                graceSeconds: 0
+            )
+            processTreeProof.observePendingEvents()
+            return BoundedProcessResult(
+                launched: false,
+                standardOutput: Data(),
+                standardError: Data(),
+                terminationTrigger: nil,
+                stopReason: nil,
+                standardInputWasWritten: false,
+                exitedNormally: false,
+                exitStatus: -1,
+                // The child has never been resumed, so it cannot have forked;
+                // reaping the root and its empty process group is complete proof.
+                processGroupWasReaped: rootAndProcessGroupWereReaped,
+                durationMilliseconds: elapsedMilliseconds(since: startedAt)
+            )
+        }
 
         inputPipe.fileHandleForReading.closeFile()
         outputPipe.fileHandleForWriting.closeFile()
@@ -194,13 +265,22 @@ struct BoundedProcessHost: Sendable {
         )
     }
 
+    private struct SpawnedProcess {
+        let processID: pid_t
+        let exactArtifactWasValidated: Bool
+    }
+
     private func spawn(
         _ request: BoundedProcessRequest,
         standardInput: Int32,
         standardOutput: Int32,
         standardError: Int32,
         descriptorsClosedInChild: [Int32]
-    ) -> pid_t? {
+    ) -> SpawnedProcess? {
+        guard request.executableArtifact?.revalidate() != false else {
+            return nil
+        }
+        willSpawn()
         var fileActions: posix_spawn_file_actions_t?
         guard posix_spawn_file_actions_init(&fileActions) == 0 else {
             return nil
@@ -276,7 +356,13 @@ struct BoundedProcessHost: Sendable {
                 }
             }
         }
-        return result == 0 ? processID : nil
+        guard result == 0 else { return nil }
+        didSpawnSuspended(processID)
+        return SpawnedProcess(
+            processID: processID,
+            exactArtifactWasValidated: request.executableArtifact?
+                .revalidateLaunchedProcess(processID) != false
+        )
     }
 
     private func addWorkingDirectoryAction(

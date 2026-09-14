@@ -444,7 +444,7 @@ private actor DynamicCapacitySnapshotPort:
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        await acquireImmutableAuthorityLease(authority)
+        await acquireTestImmutableAuthorityLease(authority)
     }
 
     private func snapshot(
@@ -454,12 +454,15 @@ private actor DynamicCapacitySnapshotPort:
     ) -> CoachContextSnapshotOutcome {
         do {
             configurationGeneration += 1
+            let profileSnapshot = try currentProfileSnapshot()
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: profileSnapshot,
+                attachments: .empty
+            )
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object([
-                            "statements": .array([.string(profileText)]),
-                        ]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string("Synthetic memory"),
                             "sessionSummaries": .array([]),
@@ -483,7 +486,7 @@ private actor DynamicCapacitySnapshotPort:
                         policy: CoachProviderEstimationPolicy(
                             providerIdentifier: "synthetic-fixture-v1",
                             responseCollectorByteCeiling: 8_192,
-                            framing: CoachProviderFraming(),
+                            framing: .testZero,
                             attachmentProjectionPolicy:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
@@ -495,16 +498,39 @@ private actor DynamicCapacitySnapshotPort:
                         binding: binding,
                         contextGeneration: contextGeneration,
                         configurationGeneration: configurationGeneration,
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
             return .sourceUnavailable
         }
+    }
+
+    private func currentProfileSnapshot() throws -> ProfileSnapshot {
+        ProfileSnapshot(
+            revision: try ProfileRevision(
+                revisionID: ProfileRevisionID(
+                    "prf-20260914T120000000Z-2ABC"
+                ),
+                parentRevisionID: nil,
+                generation: contextGeneration,
+                statementGeneration: contextGeneration,
+                createdAt: UTCInstant("2026-09-14T12:00:00.000Z"),
+                statements: [
+                    try ProfileStatement(
+                        statementID: ProfileStatementID(
+                            "stm-20260914T120000000Z-3DEF"
+                        ),
+                        statementKind: .goal,
+                        wording: profileText,
+                        supportingSessionCount: 0,
+                        evidence: []
+                    ),
+                ]
+            )
+        )
     }
 }
 

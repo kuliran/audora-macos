@@ -544,7 +544,10 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
         async throws
     {
         try await withRecordedSession { root, receipt in
-            let revision = try transcriptRevision(for: receipt)
+            let revision = try transcriptRevision(
+                for: receipt,
+                externalProcessingAllowed: true
+            )
             let repository = PortableTranscriptRevisionRepository(
                 root: root,
                 libraryID: receipt.libraryID
@@ -585,7 +588,7 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
             let estimationPolicy = CoachProviderEstimationPolicy(
                 providerIdentifier: "attachment-privacy-fixture-v1",
                 responseCollectorByteCeiling: 8_192,
-                framing: CoachProviderFraming(),
+                framing: .testUnframed,
                 attachmentProjectionPolicy: projectionPolicy
             )
             let request = try CoachContextPlanner().estimate(
@@ -822,8 +825,9 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 return XCTFail("expected Review snapshot")
             }
             XCTAssertEqual(snapshot.selectedRevision, first)
+            let audioSource = try XCTUnwrap(snapshot.audioSource)
             let resolvedAudio = await workspace.resolveCanonicalAudio(
-                for: snapshot.audioSource
+                for: audioSource
             )
             XCTAssertEqual(
                 resolvedAudio,
@@ -859,6 +863,84 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
             XCTAssertEqual(reopened.selectedRevision, first)
             XCTAssertEqual(reopened.audioCapabilityID, snapshot.audioCapabilityID)
             XCTAssertEqual(reopened.revisionIDs, [first.revisionID, second.revisionID])
+        }
+    }
+
+    func testReviewReadPreservesVerifiedTranscriptWhenCanonicalAudioIsMissing()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            let wav = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/audio/audio.wav"
+            )
+            try FileManager.default.removeItem(at: wav)
+            let selection = ReviewSelection(
+                scope: LibraryScope(libraryID: receipt.libraryID),
+                sessionID: receipt.sessionID
+            )
+
+            guard case let .available(verified) =
+                repository.loadReviewSynchronously(for: selection)
+            else {
+                return XCTFail("missing audio must not hide a verified transcript")
+            }
+            XCTAssertEqual(verified.revision.selectedRevision, revision)
+            XCTAssertNil(verified.canonicalWAV)
+
+            let workspace = PortableReviewWorkspace(
+                scopes: StaticReviewScopeProvider(
+                    root: root,
+                    libraryID: receipt.libraryID
+                )
+            )
+            guard case let .available(snapshot) = await workspace.load(selection) else {
+                return XCTFail("Review must remain available without playback")
+            }
+            XCTAssertEqual(snapshot.selectedRevision, revision)
+            XCTAssertNil(snapshot.audioSource)
+        }
+    }
+
+    func testReviewReadPreservesVerifiedTranscriptWhenCanonicalAudioIsCorrupt()
+        async throws
+    {
+        try await withRecordedSession { root, receipt in
+            let revision = try transcriptRevision(for: receipt)
+            let repository = PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: receipt.libraryID
+            )
+            _ = try await repository.publishAndSelect(
+                revision,
+                expectedSelectedRevisionID: nil
+            )
+            let wav = root.appendingPathComponent(
+                "sessions/\(receipt.sessionID.rawValue)/audio/audio.wav"
+            )
+            var bytes = try Data(contentsOf: wav)
+            bytes[0] ^= 0xff
+            try bytes.write(to: wav)
+            let selection = ReviewSelection(
+                scope: LibraryScope(libraryID: receipt.libraryID),
+                sessionID: receipt.sessionID
+            )
+
+            guard case let .available(verified) =
+                repository.loadReviewSynchronously(for: selection)
+            else {
+                return XCTFail("corrupt audio must not hide a verified transcript")
+            }
+            XCTAssertEqual(verified.revision.selectedRevision, revision)
+            XCTAssertNil(verified.canonicalWAV)
         }
     }
 
@@ -2803,7 +2885,8 @@ private func transcriptRevision(
     for receipt: SessionSealedReceipt,
     revisionID: String = "trv-20260830T121000000Z-4FGH",
     word: String = "Hi",
-    lineText: String = "Hi."
+    lineText: String = "Hi.",
+    externalProcessingAllowed: Bool = false
 ) throws -> TranscriptRevision {
     try transcriptRevision(
         sessionID: receipt.sessionID,
@@ -2813,7 +2896,8 @@ private func transcriptRevision(
         audioFingerprint: receipt.fingerprint,
         revisionID: revisionID,
         word: word,
-        lineText: lineText
+        lineText: lineText,
+        externalProcessingAllowed: externalProcessingAllowed
     )
 }
 
@@ -2839,7 +2923,8 @@ private func transcriptRevision(
     audioFingerprint: AudioFingerprint,
     revisionID: String,
     word: String,
-    lineText: String
+    lineText: String,
+    externalProcessingAllowed: Bool = false
 ) throws -> TranscriptRevision {
     let timeRange = try SessionTimeRange(
         startMilliseconds: 0,
@@ -2851,7 +2936,7 @@ private func transcriptRevision(
         coveredArtifacts: [.transcriptRevision],
         privateLocalUseAllowed: true,
         privateExportAllowed: true,
-        externalProcessingAllowed: false,
+        externalProcessingAllowed: externalProcessingAllowed,
         publicDistributionAllowed: false,
         commercialUseAllowed: false,
         licenseReference: "pinned-license-reference",

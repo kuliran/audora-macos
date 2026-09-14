@@ -74,6 +74,13 @@ public final class ReviewPresentationModel: ObservableObject {
         send(.retranscribe)
     }
 
+    static func isRetranscriptionControlEnabled(
+        retranscriptionAvailable: Bool,
+        activity: ReviewActivity?
+    ) -> Bool {
+        retranscriptionAvailable && activity == nil
+    }
+
     public static func audioEventAccessibilityLabel(
         for event: TranscriptAudioEvent
     ) -> String {

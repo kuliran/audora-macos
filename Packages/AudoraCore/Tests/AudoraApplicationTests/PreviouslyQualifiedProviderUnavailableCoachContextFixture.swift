@@ -51,7 +51,7 @@ struct PreviouslyQualifiedProviderUnavailableSnapshotPort:
         guard authority == .configuration(generation: configurationGeneration) else {
             return .stale
         }
-        return .acquired(CoachContextAuthorityLease())
+        return .acquired(.testNoop)
     }
 }
 
@@ -109,7 +109,7 @@ private func previouslyQualifiedProviderUnavailableConfiguration()
         policy: CoachProviderEstimationPolicy(
             providerIdentifier: "previously-qualified-unavailable-v1",
             responseCollectorByteCeiling: 8_192,
-            framing: CoachProviderFraming(),
+            framing: .testZero,
             attachmentProjectionPolicy: try! CoachAttachmentProjectionPolicy(
                 maximumInlineTranscriptTokens: 64,
                 tokenEstimator: .utf8ByteUpperBound()
@@ -122,6 +122,8 @@ func previouslyQualifiedProviderUnavailableCoachContextFixture()
     -> DefaultCoachContextFeature
 {
     DefaultCoachContextFeature(
-        source: PreviouslyQualifiedProviderUnavailableSnapshotPort()
+        testSourceWithNoAttachments:
+            PreviouslyQualifiedProviderUnavailableSnapshotPort(),
+        configurationGeneration: 7
     )
 }

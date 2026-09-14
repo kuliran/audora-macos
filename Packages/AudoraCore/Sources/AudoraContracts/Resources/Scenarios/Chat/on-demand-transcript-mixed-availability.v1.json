@@ -87,6 +87,7 @@
     { "port": "pendingUserTurnIdGenerator", "effect": "next", "outcome": "ptu-20260830T120002000Z-5KMN" },
     { "port": "chatResponsePositionIdGenerator", "effect": "next", "outcome": "rsp-20260830T120002000Z-6PQR" },
     { "port": "chatStore", "effect": "lockPendingUserTurn", "outcome": "committed" },
+    { "port": "chatStore", "effect": "replacePendingUserTurn", "outcome": "committed" },
     { "port": "coachProvider", "effect": "cancelAndReap", "outcome": "reaped" },
     { "port": "chatStore", "effect": "replacePendingUserTurn", "outcome": "committed" }
   ],

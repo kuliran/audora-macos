@@ -27,6 +27,11 @@ enum LoadedImportedSession: Equatable, Sendable {
     case readOnly(sessionID: SessionID?)
 }
 
+private enum ImportedSessionAudioValidation: Equatable {
+    case completeEvidence
+    case manifestOnly
+}
+
 final class AudioImportStagingLocation: @unchecked Sendable {
     let root: URL
     let rootDescriptor: Int32
@@ -594,6 +599,22 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         )
     }
 
+    /// Reopens the exact imported Session and its hash-bound audio manifest
+    /// without requiring retained source or canonical playback bytes. Review
+    /// uses this only to verify immutable transcript metadata before attempting
+    /// playback evidence independently.
+    func openSessionManifest(
+        under sessionDescriptor: Int32,
+        sessionID: SessionID
+    ) throws -> LoadedImportedSession {
+        try loadSession(
+            components: [],
+            under: sessionDescriptor,
+            expectedSessionID: sessionID,
+            audioValidation: .manifestOnly
+        )
+    }
+
     /// Removes only bounded, exact v1 import publication trees. Anything that
     /// is unknown, too large to inspect, or carries a newer root version stays
     /// byte-identical for a newer Audora to understand.
@@ -900,7 +921,8 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
     private func loadSession(
         components: [String],
         under rootDescriptor: Int32,
-        expectedSessionID: SessionID
+        expectedSessionID: SessionID,
+        audioValidation: ImportedSessionAudioValidation = .completeEvidence
     ) throws -> LoadedImportedSession {
         let sessionData = try boundedFileData(
             components: components + ["session.json"],
@@ -943,26 +965,30 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         else {
             throw AudioImportFailure.candidateCorrupt
         }
-        let original = try fingerprint(
-            components: components + ["audio", audio.original.relativePath.components.last!],
-            under: rootDescriptor,
-            maximumBytes: audio.original.fingerprint.byteCount
-        )
-        let canonical = try fingerprint(
-            components: components + ["audio", "audio.wav"],
-            under: rootDescriptor,
-            maximumBytes: audio.canonical.fingerprint.byteCount
-        )
-        guard original == audio.original.fingerprint,
-              canonical == audio.canonical.fingerprint
-        else {
-            throw AudioImportFailure.candidateCorrupt
+        if audioValidation == .completeEvidence {
+            let original = try fingerprint(
+                components: components + [
+                    "audio", audio.original.relativePath.components.last!,
+                ],
+                under: rootDescriptor,
+                maximumBytes: audio.original.fingerprint.byteCount
+            )
+            let canonical = try fingerprint(
+                components: components + ["audio", "audio.wav"],
+                under: rootDescriptor,
+                maximumBytes: audio.canonical.fingerprint.byteCount
+            )
+            guard original == audio.original.fingerprint,
+                  canonical == audio.canonical.fingerprint
+            else {
+                throw AudioImportFailure.candidateCorrupt
+            }
+            try validateCanonicalWAV(
+                components: components + ["audio", "audio.wav"],
+                under: rootDescriptor,
+                expected: audio.canonical
+            )
         }
-        try validateCanonicalWAV(
-            components: components + ["audio", "audio.wav"],
-            under: rootDescriptor,
-            expected: audio.canonical
-        )
         do {
             return .readWrite(
                 try ImportedSession(

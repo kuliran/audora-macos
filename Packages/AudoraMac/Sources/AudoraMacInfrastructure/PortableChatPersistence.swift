@@ -1616,6 +1616,30 @@ public struct PortableChatPersistence: @unchecked Sendable {
         )
     }
 
+    /// Reuses the exact Library-wide Invocation namespace authority held by a
+    /// live provider task. Whole-Chat moves execute only while that namespace
+    /// is unowned, so an aggregate cannot leave active storage between request
+    /// preparation and terminal publication. This claims no recovery authority
+    /// and deliberately performs no interruption reconciliation.
+    func withChatAggregateTrashAuthority<Value>(
+        at libraryRoot: URL,
+        in scope: LibraryScope,
+        _ operation: (LibraryRootIdentity) -> Value
+    ) throws -> Value? {
+        guard let lease = try acquireInvocationRecoveryLease(
+            at: libraryRoot,
+            in: scope
+        ) else { return nil }
+        defer { lease.release() }
+        guard let authority = lease.authority() else { return nil }
+        return operation(
+            LibraryRootIdentity(
+                device: UInt64(truncatingIfNeeded: authority.root.device),
+                inode: UInt64(truncatingIfNeeded: authority.root.inode)
+            )
+        )
+    }
+
     private func acquireInvocationNamespaceLock(
         under rootDescriptor: Int32
     ) throws -> PortableInvocationNamespaceLock? {
@@ -14996,6 +15020,40 @@ public struct PortableChatPersistence: @unchecked Sendable {
     }
 }
 
+extension PortableChatPersistence {
+    /// Reuses the canonical strict Chat-manifest decoder for the lightweight
+    /// Library catalog projection. The caller owns the confined bounded read and
+    /// aggregate-directory lock.
+    func libraryCatalogRow(
+        fromChatManifest data: Data,
+        expectedChatID: ChatID
+    ) -> LibraryCatalogRow {
+        do {
+            let version = try schemaVersion(in: data)
+            if version > UInt64(Chat.schemaVersion) {
+                return .unavailable(.chat(expectedChatID), .newerSchema)
+            }
+            guard version == UInt64(Chat.schemaVersion) else {
+                return .unavailable(.chat(expectedChatID), .unsupportedSchema)
+            }
+            let chat = try decodeChat(data)
+            guard chat.id == expectedChatID else {
+                return .unavailable(.chat(expectedChatID), .corrupt)
+            }
+            return .chat(
+                expectedChatID,
+                LibraryChatCatalogMetadata(
+                    title: chat.title,
+                    createdAt: chat.createdAt,
+                    updatedAt: chat.updatedAt
+                )
+            )
+        } catch {
+            return .unavailable(.chat(expectedChatID), .corrupt)
+        }
+    }
+}
+
 public actor PortableChatStore: ChatStorePort {
     private let persistence: PortableChatPersistence
     private let workspace: PortableLibraryWorkspace
@@ -15043,13 +15101,6 @@ public actor PortableChatStore: ChatStorePort {
 
     public func create(_ commit: NewChatCommit) async -> ChatMutationOutcome {
         await createAuthorized(commit)
-    }
-
-    /// Test-support setup path. Product creation crosses the authorized commit
-    /// interface above; infrastructure tests use this only to seed later mutation
-    /// scenarios that do not exercise new-Chat confirmation.
-    func create(_ seed: NewChatSeed) async -> ChatMutationOutcome {
-        await createUnbound(seed)
     }
 
     private func createAuthorized(
@@ -15102,32 +15153,6 @@ public actor PortableChatStore: ChatStorePort {
         return outcome ?? .creationAuthorityChanged
     }
 
-    private func createUnbound(_ seed: NewChatSeed) async -> ChatMutationOutcome {
-        let result: ActiveLibraryOperationResult<ChatMutationOutcome> =
-            await workspace.performActiveReadWriteOperation(in: seed.library) { root in
-            do {
-                return ChatMutationOutcome.committed(try persistence.create(seed, at: root))
-            } catch PortableChatPersistenceError.collision {
-                return ChatMutationOutcome.collision
-            } catch PortableChatPersistenceError.attachmentUnavailable {
-                return ChatMutationOutcome.attachmentUnavailable
-            } catch let PortableChatPersistenceError.profileStatementGenerationChanged(current) {
-                return ChatMutationOutcome.profileStatementGenerationChanged(current)
-            } catch PortableChatPersistenceError.readOnlyLibrary {
-                return ChatMutationOutcome.readOnlyLibrary
-            } catch {
-                if let committed = try? persistence.reconcileCommittedCreate(seed, at: root) {
-                    return ChatMutationOutcome.committed(committed)
-                }
-                return ChatMutationOutcome.failed
-            }
-        }
-        switch result {
-        case let .performed(outcome): return outcome
-        case .readOnly: return ChatMutationOutcome.readOnlyLibrary
-        case .unavailable: return ChatMutationOutcome.failed
-        }
-    }
 
     public func rename(_ mutation: RenameChatMutation) async -> ChatMutationOutcome {
         let result: ActiveLibraryOperationResult<ChatMutationOutcome> =

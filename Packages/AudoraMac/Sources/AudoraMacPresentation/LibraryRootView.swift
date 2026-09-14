@@ -41,6 +41,7 @@ struct LibrarySessionLinkRouting {
 
 public struct LibraryRootView: View {
     @StateObject private var model: LibraryPresentationModel
+    @StateObject private var libraryCatalogModel: LibraryCatalogPresentationModel
     @StateObject private var audioImportModel: AudioImportPresentationModel
     @StateObject private var recordingModel: RecordingPresentationModel
     @ObservedObject private var chatDispatcher: ChatCommandDispatcher
@@ -52,6 +53,8 @@ public struct LibraryRootView: View {
 
     public init(
         feature: any LibraryFeature,
+        libraryCatalogFeature: any LibraryCatalogFeature,
+        libraryCatalogInvalidationSource: any LibraryCatalogInvalidationSource,
         audioImportFeature: any AudioImportFeature,
         recordingFeature: any RecordingFeature,
         sessionProcessingFeature: any ApplicationSessionProcessingFeature,
@@ -64,6 +67,12 @@ public struct LibraryRootView: View {
             wrappedValue: LibraryPresentationModel(
                 feature: feature,
                 librarySelection: librarySelectionDispatcher
+            )
+        )
+        _libraryCatalogModel = StateObject(
+            wrappedValue: LibraryCatalogPresentationModel(
+                feature: libraryCatalogFeature,
+                invalidationSource: libraryCatalogInvalidationSource
             )
         )
         _audioImportModel = StateObject(
@@ -86,104 +95,126 @@ public struct LibraryRootView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 18) {
-            switch model.snapshot?.selection {
-            case nil, .some(.awaitingBootstrap):
-                ProgressView("Preparing Audora…")
-                    .controlSize(.large)
+        ScrollView(.vertical) {
+            VStack(spacing: 18) {
+                switch model.snapshot?.selection {
+                case nil, .some(.awaitingBootstrap):
+                    ProgressView("Preparing Audora…")
+                        .controlSize(.large)
 
-            case let .some(.noLibrarySelected(recentAvailable)):
-                ContentUnavailableView(
-                    "No Library Selected",
-                    systemImage: "waveform",
-                    description: Text(
-                        "Create a portable Library or choose an existing one."
+                case let .some(.noLibrarySelected(recentAvailable)):
+                    ContentUnavailableView(
+                        "No Library Selected",
+                        systemImage: "waveform",
+                        description: Text(
+                            "Create a portable Library or choose an existing one."
+                        )
                     )
-                )
-                HStack {
-                    Button("Create Library") {
-                        librarySelectionDispatcher.enqueue(.create)
-                    }
-                    Button("Choose Library…") {
-                        librarySelectionDispatcher.enqueue(.chooseExisting)
-                    }
-                    if recentAvailable {
-                        Button("Reopen Recent") {
-                            librarySelectionDispatcher.enqueue(.reopenRecent)
+                    HStack {
+                        Button("Create Library") {
+                            librarySelectionDispatcher.enqueue(.create)
+                        }
+                        Button("Choose Library…") {
+                            librarySelectionDispatcher.enqueue(.chooseExisting)
+                        }
+                        if recentAvailable {
+                            Button("Reopen Recent") {
+                                librarySelectionDispatcher.enqueue(.reopenRecent)
+                            }
                         }
                     }
+                    .disabled(chatDispatcher.isChatBoundaryPending)
+
+                case let .some(.active(library)):
+                    let activeScope = LibraryScope(libraryID: library.libraryID)
+                    let activeActivation = LibraryActivation(
+                        scope: activeScope,
+                        generation: library.activationGeneration
+                    )
+                    let sessionLinkRouting = LibrarySessionLinkRouting(
+                        scope: activeScope,
+                        selectProcessing: sessionProcessingModel.selectSession,
+                        selectReview: reviewModel.selectSession,
+                        openReviewEvidence: reviewModel.openEvidence
+                    )
+                    Image(systemName: "waveform.circle.fill")
+                        .font(.system(size: 54))
+                        .foregroundStyle(.tint)
+                    Text("Library Ready")
+                        .font(.title2.weight(.semibold))
+                    Text(library.libraryID.rawValue)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    Text(profileDescription(library.profile))
+                        .foregroundStyle(.secondary)
+                    libraryActions
+                        .disabled(
+                            chatDispatcher.isChatBoundaryPending
+                                || libraryCatalogModel.isBusy
+                        )
+                    LibraryCatalogView(model: libraryCatalogModel)
+                        .id(
+                            LibraryActivationPresentationIdentity(activeActivation)
+                        )
+                        .disabled(chatDispatcher.isChatBoundaryPending)
+                    audioImportActions
+                        .disabled(
+                            !interactionAvailability.canUseAudioImportControls
+                                || chatDispatcher.isChatBoundaryPending
+                        )
+                    RecordingView(model: recordingModel)
+                        .disabled(
+                            !interactionAvailability.canUseRecordingControls
+                                || chatDispatcher.isChatBoundaryPending
+                        )
+                    SessionProcessingView(model: sessionProcessingModel)
+                        .disabled(
+                            chatDispatcher.isLibraryCatalogMutationPending
+                        )
+                    ReviewView(model: reviewModel)
+                        .disabled(
+                            chatDispatcher.isLibraryCatalogMutationPending
+                        )
+                    Divider()
+                    // ChatRootView applies the active boundary per control. Its
+                    // Stop action must remain enabled while the Send receipt owns
+                    // that same boundary.
+                    ChatRootView(
+                        dispatcher: chatDispatcher,
+                        activation: activeActivation,
+                        onOpenSession: sessionLinkRouting.openSession,
+                        onOpenEvidence: sessionLinkRouting.openEvidence
+                    )
+                    .id(LibraryActivationPresentationIdentity(activeActivation))
+                    .frame(minHeight: 480)
+
+                case .some(.readOnly):
+                    ContentUnavailableView(
+                        "Library Is Read-Only",
+                        systemImage: "lock.doc",
+                        description: Text(
+                            "This Library uses a newer schema. Audora will not modify it."
+                        )
+                    )
+                    libraryActions
+                        .disabled(chatDispatcher.isChatBoundaryPending)
                 }
-                .disabled(chatDispatcher.isChatBoundaryPending)
 
-            case let .some(.active(library)):
-                let activeScope = LibraryScope(libraryID: library.libraryID)
-                let sessionLinkRouting = LibrarySessionLinkRouting(
-                    scope: activeScope,
-                    selectProcessing: sessionProcessingModel.selectSession,
-                    selectReview: reviewModel.selectSession,
-                    openReviewEvidence: reviewModel.openEvidence
-                )
-                Image(systemName: "waveform.circle.fill")
-                    .font(.system(size: 54))
-                    .foregroundStyle(.tint)
-                Text("Library Ready")
-                    .font(.title2.weight(.semibold))
-                Text(library.libraryID.rawValue)
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-                Text(profileDescription(library.profile))
-                    .foregroundStyle(.secondary)
-                libraryActions
-                    .disabled(chatDispatcher.isChatBoundaryPending)
-                audioImportActions
-                    .disabled(
-                        !interactionAvailability.canUseAudioImportControls ||
-                            chatDispatcher.isChatBoundaryPending
-                    )
-                RecordingView(model: recordingModel)
-                    .disabled(
-                        !interactionAvailability.canUseRecordingControls ||
-                            chatDispatcher.isChatBoundaryPending
-                    )
-                SessionProcessingView(model: sessionProcessingModel)
-                ReviewView(model: reviewModel)
-                Divider()
-                // ChatRootView applies the active boundary per control. Its
-                // Stop action must remain enabled while the Send receipt owns
-                // that same boundary.
-                ChatRootView(
-                    dispatcher: chatDispatcher,
-                    scope: activeScope,
-                    onOpenSession: sessionLinkRouting.openSession,
-                    onOpenEvidence: sessionLinkRouting.openEvidence
-                )
-                .id(library.libraryID.rawValue)
+                if let notice = model.snapshot?.notice {
+                    Text(noticeText(notice))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Library notice: \(noticeText(notice))")
+                }
 
-            case .some(.readOnly):
-                ContentUnavailableView(
-                    "Library Is Read-Only",
-                    systemImage: "lock.doc",
-                    description: Text(
-                        "This Library uses a newer schema. Audora will not modify it."
-                    )
-                )
-                libraryActions
-                    .disabled(chatDispatcher.isChatBoundaryPending)
+                if let activity = model.snapshot?.activity {
+                    ProgressView(activityText(activity))
+                }
             }
-
-            if let notice = model.snapshot?.notice {
-                Text(noticeText(notice))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Library notice: \(noticeText(notice))")
-            }
-
-            if let activity = model.snapshot?.activity {
-                ProgressView(activityText(activity))
-            }
+            .frame(maxWidth: .infinity)
+            .padding(32)
         }
         .frame(minWidth: 720, minHeight: 720)
-        .padding(32)
         .disabled(
             model.snapshot?.activity != nil ||
                 chatDispatcher.isLibraryNavigationPending ||
@@ -207,9 +238,14 @@ public struct LibraryRootView: View {
         .task {
             await reviewModel.start()
         }
-        .onChange(of: activeLibraryID) {
+        .task {
+            await libraryCatalogModel.observeInvalidations()
+        }
+        .task(id: activeLibraryActivation) {
+            await libraryCatalogModel.activate(activeLibraryActivation)
+        }
+        .onChange(of: activeLibraryActivation) {
             audioImportModel.send(.clearResult)
-            reviewModel.clearSelection()
         }
         .onChange(of: model.snapshot?.selection, initial: true) { _, selection in
             switch selection {
@@ -293,9 +329,14 @@ public struct LibraryRootView: View {
         }
     }
 
-    private var activeLibraryID: String? {
-        guard case let .active(library) = model.snapshot?.selection else { return nil }
-        return library.libraryID.rawValue
+    private var activeLibraryActivation: LibraryActivation? {
+        guard case let .active(library) = model.snapshot?.selection,
+              library.activationGeneration > 0
+        else { return nil }
+        return LibraryActivation(
+            scope: LibraryScope(libraryID: library.libraryID),
+            generation: library.activationGeneration
+        )
     }
 
     private var processingSelection: SessionProcessingSelection? {
@@ -390,7 +431,7 @@ public struct LibraryRootView: View {
         case .sourceChanged: "The selected audio changed while it was being copied."
         case .libraryChanged: "The active Library changed before import completed."
         case .destinationCollision: "A Session with this identity already exists."
-        case .installedNeedsRefresh: "The Session was installed. Reopen the Library to refresh it."
+        case .installedNeedsRefresh: "The Session was installed, but verification could not complete."
         case .candidateCorrupt, .writeFailed, .unavailable: "Audio import could not be completed."
         }
     }

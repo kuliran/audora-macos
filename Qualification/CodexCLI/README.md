@@ -1,10 +1,11 @@
 # Codex CLI qualification spike
 
 This self-contained Swift package exercises the process and trust-boundary
-assumptions required by Audora's future Codex-backed `CoachProvider` adapter. It
-uses only the committed synthetic `CoachRequest` fixture and deliberately does
-not read a Library, a credential value, browser state, user configuration, or raw
-provider diagnostics.
+assumptions required by Audora's future Codex-backed `CoachProvider` adapter. Its
+credential-free preflight and deterministic tests use only committed synthetic
+data and deliberately do not read a Library, browser state, user configuration,
+or raw provider diagnostics. The currently unavailable `--execute` path accepts
+only an explicit process-scoped authorization value and does not forward it.
 
 This is a feasibility harness, not the production provider adapter. Reports keep
 behavioral case results separate from qualification decisions. `issueGateAccepted`
@@ -23,13 +24,12 @@ Requirements:
 
 No existing login is promised or required by the currently safe public path.
 On 12 September 2026, the locally installed CLI was probed only with isolated
-`--version` and help commands and reported `codex-cli 0.143.0`. That release
-cannot accept the required
-`tools.view_image=false` strict override. Its documented token input is a separate
-`login` command, while an ephemeral credential exists only in the process that
-received it, so it also has no verified nonpersistent path into the later `exec`
-process. Restoring the ordinary home would allow ambient global instruction files
-to be loaded and is not an acceptable workaround.
+`--version` and help commands and reported `codex-cli 0.143.0`. That recorded
+build did not accept the required `tools.view_image=false` strict override. Current
+Codex documentation defines same-process `CODEX_ACCESS_TOKEN` input, but that is
+not evidence that the recorded build accepts it or that the complete executable
+runtime is safe to authorize. Restoring the ordinary home would allow ambient
+global instruction files to be loaded and is not an acceptable workaround.
 
 Run deterministic tests:
 
@@ -38,40 +38,66 @@ cd Qualification/CodexCLI
 swift test
 ```
 
-When SwiftPM itself is already running inside a sandbox, its nested sandbox may
-need to be disabled and its build caches redirected to writable temporary
-directories:
-
-```sh
-SWIFTPM_MODULECACHE_OVERRIDE=/tmp/audora-codex-module-cache \
-CLANG_MODULE_CACHE_PATH=/tmp/audora-codex-clang-cache \
-swift test --disable-sandbox
-```
+When SwiftPM itself is already running inside a sandbox that prevents it from
+establishing its own package sandbox, run the suite from a development
+environment where SwiftPM's sandbox is supported. Do not disable either sandbox
+to make the qualification pass.
 
 Run the public compatibility check:
 
 ```sh
 swift run codex-cli-qualification \
+  --preflight \
   --codex /absolute/path/to/codex \
   --model gpt-5.4
 ```
 
-The bundled command performs only a bounded, isolated `--version` probe, emits a
-sanitized preflight report, and exits nonzero before any provider case can launch.
+Preflight is the default mode. The bundled command performs two bounded, isolated
+`--version` probes plus an executable identity read, emits a sanitized preflight
+report, and never launches a provider case. The two exact canonical identities
+must agree, including any `+build.metadata`; a base release and a fork are different
+builds. Credential-free preflight may identify a script launcher, but reports its
+entry-file hash as `unavailable`; such a launcher cannot be exact-build authority.
+Native hashing streams at most 512 MiB and rejects a file whose bytes or stable
+filesystem identity change while being read or between probes.
+
+For a native executable, both probes retain one open descriptor for the original
+vnode. The bounded process host revalidates both that descriptor and the original
+canonical path immediately before spawn, launches that original path without a
+copy, and verifies the suspended process reports the same path. Before resuming,
+it also reads the child's executable VM-region vnode metadata and requires an
+executable mapping of the pinned descriptor's exact device, inode, size, mode,
+owner, timestamps, and content hash. That mapped-vnode proof closes a
+swap-and-swap-back race that path text and a post-spawn path reread cannot close.
+macOS signing, quarantine, and other filesystem provenance therefore stay attached
+to the artifact the kernel opens. An in-place mutation or path replacement closes
+the attempt instead of silently probing or launching different bytes. The entry
+hash is still only informational evidence: it cannot by itself bind non-system
+dynamic libraries, runtime-loaded code, or helper executables.
 The report records `providerCasesLaunched: 0`, separate status for image-tool
 suppression and same-process ephemeral authorization, closed blocker codes, and
 the manual handoff actions below. Unknown future versions remain `unverified`;
 version/help output alone cannot prove that strict runtime configuration is
-accepted. The single-case launch surface and lower-level invocation runner are
-internal and exist only for deterministic process-fixture tests. No fabricated
-case result is emitted by the blocked public path.
+accepted. `--execute` is a mutually exclusive command mode and still requires an
+explicit `CODEX_ACCESS_TOKEN` in that same command process. It runs the same
+credential-free preflight first, but the public harness has no runtime-authority
+verifier and the compatibility matrix is empty, so it stops before any provider
+case. It never forwards or encodes the token while blocked. Execution remains
+unavailable until one complete, security-metadata-preserving runtime authority is
+implemented. The compatibility decision requires both a matching matrix entry
+and a live, module-sealed proof from that authority, bound to the exact CLI
+artifact and canonical version. Adding a version and entry-file hash can never
+permit a launch. No fabricated proof or case result exists in the production
+path.
 
-Fixture reports include only an allowlisted model identifier and a normalized
-CLI product/ASCII-numeric version; untrusted version build metadata is discarded,
-while malformed or prerelease identities become `unavailable`. They never emit
-the Coach Response or raw standard error. Decoding rejects unsupported report
-schemas, forged tool-surface evidence, and decisions that contradict the
-schema-two payload; schema-one reports decode with conservative false decisions.
+Public preflight reports include an allowlisted model-independent CLI identity:
+the canonical product/version including valid build metadata and a native
+entry-executable SHA-256 when available. Preserving both values prevents an
+unverified fork from inheriting a clean base version's recorded evidence, but
+does not authorize execution. Deterministic suite reports additionally record the
+allowlisted model and exercised limits. Malformed or prerelease identities become
+`unavailable`. Reports never emit the Coach Response, authorization, or raw
+standard error.
 
 The implementation follows the documented Codex non-interactive controls:
 `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, `--output-schema`, an
@@ -79,19 +105,24 @@ empty `--cd`, and inline configuration overrides. See the official
 [Codex non-interactive-mode reference](https://learn.chatgpt.com/docs/non-interactive-mode)
 and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 The [authentication reference](https://learn.chatgpt.com/docs/auth) documents
-ephemeral credential storage and stdin token login, while the
+same-process token input and ephemeral credential storage, while the
 [AGENTS.md reference](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
 documents that global instructions are loaded from `CODEX_HOME`.
 
 ## Confinement
 
-Each internal deterministic fixture case creates a unique temporary scope with
-three siblings:
+Each internal deterministic fixture case creates a unique private temporary scope
+with four siblings:
 
 - an empty `workspace/`, which is the CLI working directory; and
 - an empty `client-home/`, used for both `HOME` and `CODEX_HOME`; and
+- a dedicated `temporary/`, used as `TMPDIR`; and
 - `transport/`, containing only the synthetic response schema and a generated,
   text-only model catalog.
+
+The client home must still be empty after a fixture case, and removal of the whole
+scope must succeed before that case can return a report. Residual client state or
+cleanup failure is a closed start failure rather than a passing result.
 
 The process plan then applies these defenses:
 
@@ -99,11 +130,11 @@ The process plan then applies these defenses:
 | --- | --- |
 | User/project instructions | source `HOME`/`CODEX_HOME` are replaced by the empty per-case client home, so global `AGENTS.md` and `AGENTS.override.md` files are absent; `--ignore-user-config`, `--ignore-rules`, `skills.include_instructions=false`, an empty skill configuration, `tools.experimental_request_user_input={enabled=false}`, zero project-doc bytes, no fallback names or root markers, and an empty workspace add independent layers |
 | Rollout/history | `--ephemeral` and history persistence disabled |
-| Authentication | the dormant clean profile pins `cli_auth_credentials_store="ephemeral"`; no `auth.json` is copied or linked and no credential environment variable is inherited. The public path refuses because 0.143 has no verified way to deliver authorization to the same ephemeral `exec` process |
+| Authentication | the clean profile pins `cli_auth_credentials_store="ephemeral"`; no `auth.json` is copied or linked and ambient credential variables are dropped. The internal plan can carry only an explicitly constructed `CODEX_ACCESS_TOKEN` authorization value into the same provider process. The public `--execute` path currently has neither a verified matrix entry nor a complete runtime-authority proof, so it stops before building or launching that plan |
 | Shell and patch | shell/unified-exec features disabled; generated model metadata sets `shell_type` to `disabled` and has no apply-patch tool |
 | Browser, web, and generic model network | browser/app/web features disabled, top-level web search set to `disabled`, and generated model metadata advertises text-only input with no search support; only the Codex client itself can contact its provider |
 | Plugins and MCP | user config ignored, plugin/app/tool-suggestion features disabled, and empty plugin, marketplace, and MCP maps |
-| Environment | source `HOME` and `CODEX_HOME` never pass through; both are replaced with the fresh client-home path, while only `PATH`, temporary-directory, and locale values may be inherited; token/key/secret/browser/session variables are dropped |
+| Environment | source `HOME`, `CODEX_HOME`, `PATH`, and `TMPDIR` never pass through. Home values use the fresh client home, `TMPDIR` uses the dedicated private directory, `PATH` is pinned to system locations, and only locale values may be inherited; token/key/secret/browser/session variables are dropped |
 | Files and images | the dormant clean profile pins the currently documented `tools.view_image=false`; 0.143 is rejected by preflight before that unsupported override can reach provider execution. The model catalog is text-only, image-related features are disabled where supported, and emitted file, image, or executable-tool items fail the case |
 | Output | exactly one completed agent response in a strict UTF-8 JSONL and Markdown-only subset of `CoachResponse`; duplicate object keys are rejected recursively in both layers, and unknown item shapes, integer token use, event stream, response bytes, duration, and stderr inspection are bounded |
 
@@ -282,16 +313,30 @@ this spike into the application composition root.
    independently verified to accept `tools.view_image=false` with strict config.
    Do not infer support from `--version` or `--help`; those commands can return
    before runtime configuration is loaded.
-2. Require a documented mechanism that supplies an access token or API key to
-   that same `codex exec` process while
-   `cli_auth_credentials_store="ephemeral"`. A separate ephemeral `codex login`
-   process is insufficient because its in-memory credential ends when it exits.
-3. Add only that exact normalized CLI version to the source compatibility matrix,
-   preserving the fresh empty `HOME`/`CODEX_HOME`, every existing feature/tool
-   disable, and the bounded JSONL process host.
-4. Rerun the public preflight and confirm it permits launch before supplying a
-   qualification-only credential through the newly documented channel.
+2. Implement one runtime authority that keeps the descriptor-bound, no-copy launch,
+   preserves and validates macOS security metadata and code-signing state, and
+   binds every non-system dynamic dependency, runtime-loaded code location, and
+   helper executable. A raw byte copy is not acceptable because it drops
+   quarantine/provenance metadata; a Mach-O magic number and entry-file hash are
+   not proof of a self-contained runtime. Implement the existing
+   `CodexCLIQualificationRuntimeAuthority` seam so its proof retains or protects
+   those components and its revalidation closes when any component changes.
+3. Verify the exact build's documented same-process token mechanism with
+   `cli_auth_credentials_store="ephemeral"`, without copying a login store or
+   restoring an ordinary home.
+4. Keep the pinned system `PATH`, private `TMPDIR`, empty client home, explicit
+   residue rejection, successful scope removal, existing feature/tool disables,
+   and bounded JSONL process host inside that runtime authority.
+5. Only after those controls exist, add one `VerifiedRuntime` entry containing the
+   exact, non-normalized-away canonical CLI identity (including build metadata),
+   entry-executable SHA-256, and the proof's complete runtime-manifest identity.
+   Matrix membership without the matching live proof remains closed.
+6. Rerun `--preflight` without authorization and confirm that both probes agree
+   and it still reports zero launched cases. Enable `--execute` only after an
+   independent review proves that the descriptor-bound bytes receiving
+   `CODEX_ACCESS_TOKEN` are exactly the qualified runtime.
 
 Never copy or link `auth.json`, query a keyring, inherit an ordinary Codex home,
-or pass a credential through process arguments. Until both capabilities are
-verified, the preflight must continue to report zero launched provider cases.
+or pass a credential through process arguments. Until every capability above is
+verified, preflight must continue to report zero launched provider cases and the
+authorized execution path must remain unavailable.

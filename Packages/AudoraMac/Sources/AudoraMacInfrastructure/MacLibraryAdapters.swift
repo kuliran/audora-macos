@@ -298,9 +298,13 @@ public struct NSWorkspaceLibraryRevealer: LibraryRevealing {
     public init() {}
 
     @MainActor
-    public func reveal(_ url: URL) async -> Bool {
+    public func requestReveal(
+        _ url: URL
+    ) async -> LibraryRevealRequestDisposition {
+        guard url.isFileURL else { return .rejected }
         NSWorkspace.shared.activateFileViewerSelecting([url])
-        return true
+        // AppKit has no completion or visibility proof for this request.
+        return .accepted
     }
 }
 

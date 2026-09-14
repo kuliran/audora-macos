@@ -1,4 +1,4 @@
-@testable @_spi(CoachContextQualification) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(InvocationInfrastructure) import AudoraApplication
 import AudoraContracts
 import AudoraDomain
 import Foundation
@@ -293,8 +293,16 @@ final class CoachResponseValidationTests: XCTestCase {
         }
 
         let framing = CoachProviderFraming(
+            initialRequestPrefix: Data(),
+            initialRequestSuffix: Data(),
+            transcriptReadRequestPrefix: Data(),
+            transcriptReadRequestSuffix: Data(),
+            transcriptReadResponsePrefix: Data(),
+            transcriptReadResponseSuffix: Data(),
             minimumResponsePrefix: Data("P".utf8),
             minimumResponseSuffix: Data("S".utf8),
+            initialRequestHiddenTokens: 0,
+            transcriptReadExchangeHiddenTokens: 0,
             minimumResponseHiddenTokens: 3
         )
         let exactTokens = complete.body.count + 5
@@ -835,12 +843,72 @@ final class CoachResponseValidationTests: XCTestCase {
         CoachProviderCompleteResponse(body: Data(body.utf8))
     }
 
+    private func testEvidenceIndex(
+        wordIDs: [String],
+        audioEventIDs: [String],
+        audioEventIDsIneligibleForProfileSupport: Set<String> = [],
+        sessionID: SessionID? = nil,
+        transcriptRevisionID: TranscriptRevisionID? = nil,
+        displayLabel: String = "Fixture Session"
+    ) throws -> CoachResponseTranscriptEvidenceIndex {
+        let parsedWordIDs = wordIDs.compactMap(CoachResponseWordID.init)
+        let parsedAudioEventIDs = audioEventIDs.compactMap(
+            CoachResponseAudioEventID.init
+        )
+        let parsedIneligibleAudioEventIDs =
+            audioEventIDsIneligibleForProfileSupport.compactMap(
+                CoachResponseAudioEventID.init
+            )
+        guard parsedWordIDs.count == wordIDs.count,
+              parsedAudioEventIDs.count == audioEventIDs.count,
+              parsedIneligibleAudioEventIDs.count ==
+              audioEventIDsIneligibleForProfileSupport.count
+        else { throw CoachResponseValidationError.invalidPreparedContext }
+
+        let words = try parsedWordIDs.enumerated().map { index, id in
+            CoachResponseTranscriptEvidenceIndex.Word(
+                id: id,
+                durableID: try TranscriptWordID(
+                    String(format: "w%06d", index + 1)
+                ),
+                text: id.rawValue,
+                startMilliseconds: UInt64(index),
+                endMilliseconds: UInt64(index + 1)
+            )
+        }
+        let audioEvents = try parsedAudioEventIDs.enumerated().map { index, id in
+            CoachResponseTranscriptEvidenceIndex.AudioEvent(
+                id: id,
+                durableID: try AudioEventID(
+                    String(format: "a%06d", index + 1)
+                ),
+                trustedText: id.rawValue,
+                startMilliseconds: UInt64(index),
+                endMilliseconds: UInt64(index + 1)
+            )
+        }
+        return try CoachResponseTranscriptEvidenceIndex(
+            sessionID: try sessionID ?? SessionID(
+                "ses-20260830T110000000Z-1KMN"
+            ),
+            transcriptRevisionID: try transcriptRevisionID ?? TranscriptRevisionID(
+                "trv-20260830T111000000Z-1PQR"
+            ),
+            displayLabel: displayLabel,
+            words: words,
+            audioEvents: audioEvents,
+            audioEventIDsIneligibleForProfileSupport: Set(
+                parsedIneligibleAudioEventIDs
+            )
+        )
+    }
+
     private func context(
         trigger: CoachResponseTriggerPosition = .userMessage,
         responseTokens: Int = 1_000_000,
         collectorBytes: Int = 1_000_000,
         memoryTokens: Int = 1_000_000,
-        framing: CoachProviderFraming = CoachProviderFraming(),
+        framing: CoachProviderFraming = .testZero,
         secondAttachmentUsesFirstSession: Bool = false
     ) -> CoachResponseValidationContext {
         let first = try! ChatSessionAttachmentID("attachment-1")
@@ -851,13 +919,13 @@ final class CoachResponseValidationTests: XCTestCase {
         return try! CoachResponseValidationContext(
             triggerPosition: trigger,
             transcripts: [
-                first: try! CoachResponseTranscriptEvidenceIndex(
+                first: try! testEvidenceIndex(
                     wordIDs: ["w1", "w2", "w3"],
                     audioEventIDs: ["a1", "gap-1"],
                     audioEventIDsIneligibleForProfileSupport: ["gap-1"],
                     sessionID: firstSessionID
                 ),
-                second: try! CoachResponseTranscriptEvidenceIndex(
+                second: try! testEvidenceIndex(
                     wordIDs: ["x1", "x2"],
                     audioEventIDs: ["a2"],
                     sessionID: secondAttachmentUsesFirstSession
@@ -902,11 +970,11 @@ final class CoachResponseValidationTests: XCTestCase {
         return try! CoachResponseValidationContext(
             triggerPosition: trigger,
             transcripts: [
-                planning: try! CoachResponseTranscriptEvidenceIndex(
+                planning: try! testEvidenceIndex(
                     wordIDs: (1 ... 18).map { "word-\($0)" },
                     audioEventIDs: ["event-3"]
                 ),
-                demo: try! CoachResponseTranscriptEvidenceIndex(
+                demo: try! testEvidenceIndex(
                     wordIDs: (31 ... 34).map { "word-\($0)" },
                     audioEventIDs: [],
                     sessionID: SessionID("ses-20260831T110000000Z-2RST"),
@@ -928,7 +996,7 @@ final class CoachResponseValidationTests: XCTestCase {
                 responseReservedTokens: 1_000_000,
                 responseCollectorByteCeiling: 1_000_000,
                 coachMemoryMaxTokens: 1_000_000,
-                framing: CoachProviderFraming(),
+                framing: .testZero,
                 tokenEstimator: .utf8ByteUpperBound()
             )
         )

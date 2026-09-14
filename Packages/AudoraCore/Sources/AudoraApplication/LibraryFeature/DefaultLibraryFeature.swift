@@ -113,13 +113,13 @@ public actor DefaultLibraryFeature: LibraryFeature {
 
         case .reveal:
             guard hasSelectedLibrary else { return .noSelectionMutation }
-            return await performAction(activity: .revealing, close: false) {
+            return await performReveal {
                 await workspace.revealActiveLibrary()
             }
 
         case .close:
             guard hasSelectedLibrary else { return .noSelectionMutation }
-            return await performAction(activity: .closing, close: true) {
+            return await performClose {
                 await workspace.closeActiveLibrary()
             }
 
@@ -178,52 +178,60 @@ public actor DefaultLibraryFeature: LibraryFeature {
             return await replayQueuedExternalOpens() ?? .noSelectionMutation
         }
         let outcome = await operation()
-        await activityCoordinator.release(lease)
-        state = LibraryFeatureReducer.completeOpen(outcome, previous: previous)
-        publish(state)
         let result = commandResult(
             for: outcome,
             reservedActivationGeneration: reservedActivationGeneration
         )
+        let completedState = LibraryFeatureReducer.completeOpen(
+            outcome,
+            previous: previous,
+            activationGeneration: reservedActivationGeneration
+        )
+        await finishSelectionMutation(lease, result: result)
+        state = completedState
+        publish(state)
         return await replayQueuedExternalOpens() ?? result
     }
 
-    private func performAction(
-        activity: LibraryFeatureState.Activity,
-        close: Bool,
+    private func performReveal(
+        operation: () async -> LibraryRevealRequestOutcome
+    ) async -> LibraryCommandResult {
+        let previous = state.selection
+        state = LibraryFeatureReducer.begin(.revealing, from: state)
+        publish(state)
+        let outcome = await operation()
+        state = LibraryFeatureReducer.completeReveal(outcome, previous: previous)
+        publish(state)
+        return await replayQueuedExternalOpens() ?? .noSelectionMutation
+    }
+
+    private func performClose(
         operation: () async -> LibraryActionOutcome
     ) async -> LibraryCommandResult {
         let previous = state.selection
-        state = LibraryFeatureReducer.begin(activity, from: state)
+        state = LibraryFeatureReducer.begin(.closing, from: state)
         publish(state)
-        let lease: LibraryActivityLease?
-        if close {
-            guard let acquired = await activityCoordinator.acquireSelectionMutation() else {
-                state = LibraryFeatureState(
-                    selection: previous,
-                    notice: .libraryActivityInProgress
-                )
-                publish(state)
-                return await replayQueuedExternalOpens() ?? .noSelectionMutation
-            }
-            lease = acquired
-        } else {
-            lease = nil
+        guard let lease = await activityCoordinator.acquireSelectionMutation() else {
+            state = LibraryFeatureState(
+                selection: previous,
+                notice: .libraryActivityInProgress
+            )
+            publish(state)
+            return await replayQueuedExternalOpens() ?? .noSelectionMutation
         }
         let outcome = await operation()
-        if let lease {
-            await activityCoordinator.release(lease)
-        }
-        state = close
-            ? LibraryFeatureReducer.completeClose(outcome, previous: previous)
-            : LibraryFeatureReducer.completeReveal(outcome, previous: previous)
-        publish(state)
-        let result: LibraryCommandResult
-        if close, case .succeeded = outcome {
-            result = .deactivated
+        let completedState = LibraryFeatureReducer.completeClose(
+            outcome,
+            previous: previous
+        )
+        let result: LibraryCommandResult = if case .succeeded = outcome {
+            .deactivated
         } else {
-            result = .noSelectionMutation
+            .noSelectionMutation
         }
+        await finishSelectionMutation(lease, result: result)
+        state = completedState
+        publish(state)
         return await replayQueuedExternalOpens() ?? result
     }
 
@@ -248,13 +256,18 @@ public actor DefaultLibraryFeature: LibraryFeature {
                 continue
             }
             let outcome = await workspace.openExternalRequest(queued.token)
-            await activityCoordinator.release(lease)
-            state = LibraryFeatureReducer.completeOpen(outcome, previous: previous)
-            publish(state)
             let result = commandResult(
                 for: outcome,
                 reservedActivationGeneration: reservedActivationGeneration
             )
+            let completedState = LibraryFeatureReducer.completeOpen(
+                outcome,
+                previous: previous,
+                activationGeneration: reservedActivationGeneration
+            )
+            await finishSelectionMutation(lease, result: result)
+            state = completedState
+            publish(state)
             if result.didMutateSelection { latestMutation = result }
             queued.completion.resume(returning: result)
         }
@@ -284,6 +297,21 @@ public actor DefaultLibraryFeature: LibraryFeature {
         guard activationGeneration < .max else { return nil }
         activationGeneration += 1
         return activationGeneration
+    }
+
+    private func finishSelectionMutation(
+        _ lease: LibraryActivityLease,
+        result: LibraryCommandResult
+    ) async {
+        let update: LibrarySelectionAuthorityUpdate = switch result {
+        case let .activated(activation): .activate(activation)
+        case .deactivated: .deactivate
+        case .noSelectionMutation: .retain
+        }
+        await activityCoordinator.finishSelectionMutation(
+            lease,
+            authorityUpdate: update
+        )
     }
 
     private func addSubscriber(

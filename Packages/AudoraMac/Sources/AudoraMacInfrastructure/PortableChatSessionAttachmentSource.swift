@@ -4,7 +4,10 @@ import AudoraDomain
 /// Portable-library adapter for verified immutable transcript evidence. It does
 /// not estimate provider tokens or choose a delivery form.
 @_spi(CoachContextQualification)
-public actor PortableChatSessionAttachmentSource: ChatSessionAttachmentEvidenceSource {
+public actor PortableChatSessionAttachmentSource:
+    ChatSessionAttachmentEvidenceSource,
+    CoachEvidenceUsePolicySource
+{
     private let workspace: PortableLibraryWorkspace
 
     public init(workspace: PortableLibraryWorkspace) {
@@ -61,6 +64,27 @@ public actor PortableChatSessionAttachmentSource: ChatSessionAttachmentEvidenceS
             return .completedWithAuthority(authority)
         case .readOnly: return .readOnlyLibrary
         case .unavailable: return .failed
+        }
+    }
+
+    public func resolveUsePolicies(
+        for sources: [CoachEvidencePolicySourceIdentity],
+        in library: LibraryScope
+    ) async -> [CoachEvidenceUsePolicyResolution] {
+        guard !sources.isEmpty else { return [] }
+        let result: ActiveLibraryOperationResult<[
+            CoachEvidenceUsePolicyResolution
+        ]> = await workspace.performActiveReadWriteOperation(in: library) { root in
+            PortableTranscriptRevisionRepository(
+                root: root,
+                libraryID: library.libraryID
+            ).resolveCoachEvidenceUsePoliciesSynchronously(sources)
+        }
+        switch result {
+        case let .performed(resolutions):
+            return resolutions
+        case .readOnly, .unavailable:
+            return sources.map(CoachEvidenceUsePolicyResolution.unavailable)
         }
     }
 }

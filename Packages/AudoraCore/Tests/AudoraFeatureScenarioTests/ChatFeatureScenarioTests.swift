@@ -64,7 +64,14 @@ final class ChatFeatureScenarioTests: XCTestCase {
                     })?.resolutions ?? []
             )
             let baseCoachContext = DefaultCoachContextFeature(
-                source: coachContextSource
+                source: coachContextSource,
+                attachmentCapacityPreparer:
+                    ScenarioChatAttachmentCapacityPreparer(
+                        configuration: developmentScenarioConfigurationStamp,
+                        evidenceAuthority: developmentScenarioEvidenceAuthority
+                    ),
+                configurationAuthorityID:
+                    developmentScenarioConfigurationStamp.authorityID
             )
             let invocations: any ScenarioMeasuringInvocations =
                 try ScenarioFakeInvocationGateway(
@@ -1978,7 +1985,7 @@ private actor ScenarioInvocationAdmission: InvocationAdmissionPort {
     }
 }
 
-private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
+private actor ScenarioSyntheticProvider: CoachProvider {
     private let isAvailable: Bool
     private let returnsInvalidComplete: Bool
     private var events: [ChatDependencyEventDTO]
@@ -2003,10 +2010,20 @@ private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
         self.suspendFirstAttempt = suspendFirstAttempt
     }
 
-    func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome {
+    func health() async -> CoachProviderHealth {
+        isAvailable ? .available : .unavailable
+    }
+
+    func run(
+        request: CoachRequest,
+        execution: ProviderAttemptMetadata,
+        transcriptAccess: CoachTranscriptAccess?
+    ) async throws -> CoachProviderCompleteResponse {
         callCount += 1
-        guard isAvailable else { return .userRetryableFailure }
-        if let transcriptAccess = request.transcriptAccess {
+        guard isAvailable else {
+            throw CoachProviderRunError.userRetryableFailure
+        }
+        if let transcriptAccess {
             let result = await transcriptAccess.read(
                 transportRequestID: AttemptTranscriptTransportRequestID(
                     "scenario-read-1"
@@ -2026,22 +2043,20 @@ private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
                   object["transcripts"] == nil
             else {
                 XCTFail("on-demand scenario did not fail atomically")
-                return .userRetryableFailure
+                throw CoachProviderRunError.userRetryableFailure
             }
         }
         guard suspendFirstAttempt, callCount == 1 else {
             if returnsInvalidComplete {
-                return .complete(
-                    CoachProviderCompleteResponse(body: Data("{}".utf8))
-                )
+                return CoachProviderCompleteResponse(body: Data("{}".utf8))
             }
-            return .complete(markdown: "A complete **synthetic** Coach response.")
+            return .scenarioMarkdown("A complete **synthetic** Coach response.")
         }
         guard let event = consume(effect: "run"),
               event.outcome.rendered == "suspended"
         else {
             XCTFail("missing suspended Provider Attempt event")
-            return .userRetryableFailure
+            throw CoachProviderRunError.userRetryableFailure
         }
         await record(event)
         await withCheckedContinuation { continuation in
@@ -2051,7 +2066,7 @@ private actor ScenarioSyntheticProvider: SyntheticCoachProviderPort {
             attemptStartWaiters.removeAll(keepingCapacity: false)
             for waiter in waiters { waiter.resume() }
         }
-        return .complete(markdown: "A complete **synthetic** Coach response.")
+        return .scenarioMarkdown("A complete **synthetic** Coach response.")
     }
 
     func cancelAndReap(
@@ -2318,7 +2333,7 @@ private struct ScenarioBoundCoachContext: ChatCoachContextCoordinating {
             return .stale
         }
         guard !rejectsCreationLease else { return .stale }
-        return .acquired(CoachContextAuthorityLease())
+        return .acquired(.testNoop)
     }
 
     func quoteNewChat(
@@ -2470,7 +2485,7 @@ private func scenarioProviderUnavailableCapacityLowerBound()
             policy: CoachProviderEstimationPolicy(
                 providerIdentifier: "scenario-provider-unavailable-v1",
                 responseCollectorByteCeiling: 8_192,
-                framing: CoachProviderFraming(),
+                framing: .testZero,
                 attachmentProjectionPolicy: try! CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: .utf8ByteUpperBound()
@@ -2585,7 +2600,7 @@ private actor ScenarioCoachContextSnapshotPort:
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        await acquireImmutableAuthorityLease(authority)
+        await acquireTestImmutableAuthorityLease(authority)
     }
 
     func currentQualifiedConfiguration()
@@ -2615,7 +2630,7 @@ private actor ScenarioCoachContextSnapshotPort:
             policy: CoachProviderEstimationPolicy(
                 providerIdentifier: "synthetic-scenario-v1",
                 responseCollectorByteCeiling: 8_192,
-                framing: CoachProviderFraming(),
+                framing: .testZero,
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: .utf8ByteUpperBound()
@@ -2629,6 +2644,10 @@ private actor ScenarioCoachContextSnapshotPort:
         fits: Bool
     ) -> CoachContextSnapshotOutcome {
         do {
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+                attachments: request.attachments
+            )
             let transcriptBytes = fits ? 32 : 1_000
             let prepared = request.attachments.values.map { attachment in
                 PreparedCoachAttachment.inline(
@@ -2648,7 +2667,7 @@ private actor ScenarioCoachContextSnapshotPort:
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object(["statements": .array([])]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -2669,7 +2688,7 @@ private actor ScenarioCoachContextSnapshotPort:
                         policy: CoachProviderEstimationPolicy(
                             providerIdentifier: "synthetic-scenario-v1",
                             responseCollectorByteCeiling: 8_192,
-                            framing: CoachProviderFraming(),
+                            framing: .testZero,
                             attachmentProjectionPolicy:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
@@ -2685,11 +2704,9 @@ private actor ScenarioCoachContextSnapshotPort:
                         ),
                         contextGeneration: UInt64(pendingResolutionCount + 1),
                         configurationGeneration: UInt64(pendingResolutionCount + 1),
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -2701,6 +2718,10 @@ private actor ScenarioCoachContextSnapshotPort:
         for request: CoachContextNewChatQuoteRequest
     ) -> CoachContextSnapshotOutcome {
         do {
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+                attachments: request.attachments
+            )
             let rejectingEstimator = try CoachTokenEstimator(
                 identifier: "synthetic-invalid-context-v1",
                 mode: .exact,
@@ -2710,7 +2731,7 @@ private actor ScenarioCoachContextSnapshotPort:
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object(["statements": .array([])]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -2731,7 +2752,7 @@ private actor ScenarioCoachContextSnapshotPort:
                         policy: CoachProviderEstimationPolicy(
                             providerIdentifier: "synthetic-invalid-context-v1",
                             responseCollectorByteCeiling: 8_192,
-                            framing: CoachProviderFraming(),
+                            framing: .testZero,
                             attachmentProjectionPolicy:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
@@ -2747,11 +2768,9 @@ private actor ScenarioCoachContextSnapshotPort:
                         ),
                         contextGeneration: UInt64(pendingResolutionCount + 1),
                         configurationGeneration: UInt64(pendingResolutionCount + 1),
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -2780,10 +2799,14 @@ private actor ScenarioCoachContextSnapshotPort:
         contextWindow: Int
     ) -> CoachContextSnapshotOutcome {
         do {
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+                attachments: .empty
+            )
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object(["statements": .array([])]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -2805,7 +2828,7 @@ private actor ScenarioCoachContextSnapshotPort:
                         policy: CoachProviderEstimationPolicy(
                             providerIdentifier: "synthetic-scenario-v1",
                             responseCollectorByteCeiling: 8_192,
-                            framing: CoachProviderFraming(),
+                            framing: .testZero,
                             attachmentProjectionPolicy:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
@@ -2817,11 +2840,9 @@ private actor ScenarioCoachContextSnapshotPort:
                         binding: binding,
                         contextGeneration: UInt64(pendingResolutionCount + 1),
                         configurationGeneration: UInt64(pendingResolutionCount + 1),
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {

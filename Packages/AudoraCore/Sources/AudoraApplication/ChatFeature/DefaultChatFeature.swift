@@ -86,6 +86,27 @@ private struct UnavailableChatInvocations:
     ) async -> InvocationTryOutcome {
         .rejected(nil, .admissionUnavailable)
     }
+
+    func tryInvoke(
+        _ prepared: PreparedPendingCoachInvocation,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        .rejected(prepared.aggregate, .admissionUnavailable)
+    }
+
+    func tryInvoke(
+        _ request: PendingCoachInvocationRequest,
+        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
+    ) async -> InvocationTryOutcome {
+        .rejected(nil, .admissionUnavailable)
+    }
+
+    func stop(
+        _ request: StopCoachInvocationRequest,
+        authority: InvocationStopAuthority
+    ) async -> InvocationStopOutcome {
+        .noActiveInvocation
+    }
 }
 
 private enum DraftSaveDisposition: Equatable, Sendable {
@@ -169,6 +190,7 @@ public actor DefaultChatFeature: ChatFeature {
             SystemChatTransientNoticeScheduler(),
         admissionRefreshScheduler: any ChatAdmissionRefreshScheduling,
         invocations: any Invocations,
+        coachContext: DefaultCoachContextFeature,
         profileProposals: any ProfileProposalCoordinating =
             UnavailableProfileProposalCoordinator()
     ) {
@@ -183,57 +205,9 @@ public actor DefaultChatFeature: ChatFeature {
         self.autosaveScheduler = autosaveScheduler
         self.transientNoticeScheduler = transientNoticeScheduler
         self.admissionRefreshScheduler = admissionRefreshScheduler
-        let coachContext = DefaultCoachContextFeature()
         self.coachContext = coachContext
         self.invocations = invocations
         self.profileProposals = profileProposals
-        newChatCreation = NewChatCreationModule(
-            store: store,
-            profileReader: profileReader,
-            clock: clock,
-            chatIDGenerator: chatIDGenerator,
-            draftIDGenerator: draftIDGenerator,
-            memoryIDGenerator: memoryIDGenerator,
-            coachContext: coachContext
-        )
-    }
-
-    @_spi(CoachContextQualification)
-    public init(
-        store: any ChatStorePort,
-        profileReader: any ProfileStatementGenerationReading,
-        clock: any ChatClock,
-        chatIDGenerator: any ChatIDGenerator,
-        draftIDGenerator: any ChatDraftIDGenerator,
-        memoryIDGenerator: any CoachMemoryIDGenerator,
-        pendingUserTurnIDGenerator: any PendingUserTurnIDGenerator,
-        responsePositionIDGenerator: any ChatResponsePositionIDGenerator,
-        autosaveScheduler: any ChatAutosaveScheduling = SystemChatAutosaveScheduler(),
-        transientNoticeScheduler: any ChatTransientNoticeScheduling =
-            SystemChatTransientNoticeScheduler(),
-        admissionRefreshScheduler: any ChatAdmissionRefreshScheduling,
-        invocations: any Invocations,
-        attachmentEvidenceSource: any ChatSessionAttachmentEvidenceSource,
-        profileProposals: any ProfileProposalCoordinating =
-            UnavailableProfileProposalCoordinator()
-    ) {
-        self.store = store
-        self.profileReader = profileReader
-        self.clock = clock
-        self.chatIDGenerator = chatIDGenerator
-        self.draftIDGenerator = draftIDGenerator
-        self.memoryIDGenerator = memoryIDGenerator
-        self.pendingUserTurnIDGenerator = pendingUserTurnIDGenerator
-        self.responsePositionIDGenerator = responsePositionIDGenerator
-        self.autosaveScheduler = autosaveScheduler
-        self.transientNoticeScheduler = transientNoticeScheduler
-        self.admissionRefreshScheduler = admissionRefreshScheduler
-        self.invocations = invocations
-        self.profileProposals = profileProposals
-        let coachContext = DefaultCoachContextFeature(
-            attachmentEvidenceSource: attachmentEvidenceSource
-        )
-        self.coachContext = coachContext
         newChatCreation = NewChatCreationModule(
             store: store,
             profileReader: profileReader,
@@ -291,8 +265,8 @@ public actor DefaultChatFeature: ChatFeature {
 
     public var currentState: ChatFeatureState { state }
 
-    public func currentState(in scope: LibraryScope) -> ChatFeatureState? {
-        activeContext?.libraryScope == scope ? state : nil
+    public func currentState(in context: ChatCommandContext) -> ChatFeatureState? {
+        activeContext == context ? state : nil
     }
 
     public nonisolated var states: AsyncStream<ChatFeatureState> {
@@ -1591,6 +1565,68 @@ public actor DefaultChatFeature: ChatFeature {
             guard await flushSelectedDraft(in: activeContext) else { return false }
             if queuedActions.isEmpty, pendingStart == nil { return true }
         }
+    }
+
+    public func prepareForLibraryCatalogMutation(
+        for activation: LibraryActivation
+    ) async -> Bool {
+        let context = ChatCommandContext(
+            libraryScope: activation.scope,
+            generation: activation.generation
+        )
+        guard activeContext == nil || activeContext == context else {
+            return false
+        }
+        guard await flushForOrderlyTermination() else { return false }
+        return activeContext == nil || activeContext == context
+    }
+
+    public func reloadAfterLibraryCatalogMutation(
+        for activation: LibraryActivation
+    ) async -> Bool {
+        guard let context = activeContext else { return true }
+        let expectedContext = ChatCommandContext(
+            libraryScope: activation.scope,
+            generation: activation.generation
+        )
+        guard context == expectedContext,
+              requestedContext == context,
+              !operationInFlight,
+              queuedActions.isEmpty,
+              pendingStart == nil
+        else {
+            return false
+        }
+
+        let selectedChatID: ChatID? = switch state.selection {
+        case let .open(aggregate): aggregate.chat.id
+        case let .frozen(snapshot): snapshot.chatID
+        case .none, .opening: nil
+        }
+
+        operationInFlight = true
+        defer { finishOperation() }
+        admissionRefresh?.task.cancel()
+        admissionRefresh = nil
+        transientNoticeTimer?.task.cancel()
+        transientNoticeTimer = nil
+        newChatAttachmentFilterQuery = .empty
+        newChatAttachmentConfigurationStamp = nil
+        newChatConfirmation = nil
+        state = ChatFeatureState(
+            catalog: .loading,
+            filterQuery: state.filterQuery,
+            selection: .none,
+            newChatPicker: .closed,
+            openedAttachments: .notRequested
+        )
+        publish()
+        await start(in: context)
+        guard isCurrent(context) else { return false }
+        if let selectedChatID {
+            await open(selectedChatID, context: context)
+        }
+        return isCurrent(context)
     }
 
     private func retryUnreapedCoachInvocationsWithoutPresentation() async {

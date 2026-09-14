@@ -146,7 +146,9 @@ evidence.
 The executable Send slice crosses one Application-owned Invocation coordinator.
 It revalidates the locked Pending User Turn and exact prepared context, claims the
 machine-local Library rolling window, and durably installs one portable Invocation
-before its deterministic synthetic Provider can run. One stable Invocation may
+before the injected Provider can run. Production installs an empty qualification-
+gated provider gateway and therefore cannot report a Coach success; deterministic
+providers exist only in tests. One stable Invocation may
 install at most four durable Provider Attempts, waiting exactly 5, 10, and 15
 seconds before transient retries and requesting at most one materially shorter
 complete response after overflow. Each Attempt has fresh Provider and publication

@@ -107,6 +107,56 @@ final class QualificationHarnessTests: XCTestCase {
         XCTAssertTrue(report.passed)
     }
 
+    func testExplicitAuthorizationReachesTheSameEphemeralProviderProcess() throws {
+        let fixtureDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "audora-codex-same-process-authorization-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: fixtureDirectory,
+            withIntermediateDirectories: false
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
+
+        let executable = fixtureDirectory.appendingPathComponent("fake-codex")
+        let response = #"{"messageBlocks":[{"kind":"markdown","markdown":"Practice once."}]}"#
+        let responseEvent = try jsonString([
+            "type": "item.completed",
+            "item": ["type": "agent_message", "text": response],
+        ])
+        let usageEvent = try jsonString([
+            "type": "turn.completed",
+            "usage": ["output_tokens": 2],
+        ])
+        let script = """
+        #!/bin/sh
+        [ "$CODEX_ACCESS_TOKEN" = "test-placeholder" ] || exit 70
+        [ "$HOME" = "$CODEX_HOME" ] || exit 71
+        [ ! -e "$HOME/auth.json" ] || exit 72
+        while IFS= read -r _; do :; done
+        printf '%s\n' '\(responseEvent)' '\(usageEvent)'
+        """
+        try Data(script.utf8).write(to: executable, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path
+        )
+        let authorization = try XCTUnwrap(
+            CodexCLIQualificationExecutionAuthorization(
+                sourceEnvironment: ["CODEX_ACCESS_TOKEN": "test-placeholder"]
+            )
+        )
+
+        let report = try CodexCLIQualificationHarness().runCase(
+            .structuredResponse,
+            executableURL: executable,
+            model: "gpt-5.4",
+            authorization: authorization
+        )
+
+        XCTAssertTrue(report.passed)
+    }
+
     func testSuiteAlwaysRecordsCurrentExternalQualificationLimits() {
         let report = QualificationSuiteReport(
             cases: [],
@@ -115,20 +165,25 @@ final class QualificationHarnessTests: XCTestCase {
 
         XCTAssertFalse(report.fullyQualifiedForProduction)
         XCTAssertFalse(report.modelFacingToolSurfaceQualified)
-        XCTAssertEqual(report.externalLimitations.count, 4)
+        XCTAssertEqual(report.externalLimitations.count, 5)
         XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("max-output-token") }))
         XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("exact tokenizer") }))
         XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("tool allowlist") }))
-        XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("ViewImage") }))
         XCTAssertTrue(
             report.externalLimitations.contains(where: {
-                $0.contains("same-process ephemeral")
-                    && $0.contains("refuses before provider launch")
+                $0.contains("same-process CODEX_ACCESS_TOKEN")
+                    && $0.contains("clean isolated home")
+            })
+        )
+        XCTAssertTrue(
+            report.externalLimitations.contains(where: {
+                $0.contains("code-signing")
+                    && $0.contains("authorized execution remains unavailable")
             })
         )
     }
 
-    func testPublicSuiteReportsCodexCLI0143CapabilityBlockersBeforeProviderLaunch() throws {
+    func testPublicPreflightReportsCodexCLI0143CapabilityBlockersWithoutProviderLaunch() throws {
         let fixtureDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "audora-codex-public-refusal-\(UUID().uuidString)",
             isDirectory: true
@@ -158,42 +213,376 @@ final class QualificationHarnessTests: XCTestCase {
             ofItemAtPath: executable.path
         )
 
+        let report = try CodexCLIQualificationHarness().preflight(
+            executableURL: executable,
+            model: "gpt-5.4"
+        )
+        XCTAssertEqual(report.cliVersion, "codex-cli 0.143.0")
+        XCTAssertEqual(
+            report.executableSHA256,
+            "unavailable",
+            "a script launcher and its mutable adjacent dependencies are not exact-build authority"
+        )
+        XCTAssertEqual(report.providerCasesLaunched, 0)
+        XCTAssertFalse(report.providerLaunchPermitted)
+        XCTAssertEqual(report.viewImageDisableStatus, .unsupported)
+        XCTAssertEqual(report.ephemeralExecAuthorizationStatus, .unverified)
+        XCTAssertEqual(
+            report.blockers,
+            [
+                .viewImageDisableUnsupported,
+                .sameProcessEphemeralAuthorizationUnverified,
+                .executableRuntimeIdentityUnverified,
+            ]
+        )
+        XCTAssertEqual(
+            report.manualHandoff,
+            [
+                .installIndependentlyVerifiedCLI,
+                .provideDocumentedSameProcessEphemeralAuthorization,
+                .implementVerifiedExecutableRuntime,
+                .addExactVersionToCompatibilityMatrix,
+                .rerunPublicPreflight,
+            ]
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: versionProbeMarker.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: providerLaunchMarker.path))
+    }
+
+    func testPreflightRejectsDifferentExactVersionsAcrossItsTwoProbes() throws {
+        let executable = URL(fileURLWithPath: "/bin/echo")
+        var probeCount = 0
+        let harness = CodexCLIQualificationHarness(versionProbe: { _, artifact in
+            XCTAssertNotNil(artifact)
+            probeCount += 1
+            return probeCount == 1
+                ? "codex-cli 9.999.0"
+                : "codex-cli 9.999.0+fork"
+        })
+
+        let report = try harness.preflight(
+            executableURL: executable,
+            model: "gpt-5.4"
+        )
+
+        XCTAssertEqual(probeCount, 2)
+        XCTAssertEqual(report.cliVersion, "unavailable")
+        XCTAssertEqual(report.executableSHA256, "unavailable")
+        XCTAssertFalse(report.providerLaunchPermitted)
+    }
+
+    func testPreflightBindsTwoStableNativeProbesToOneEntryHash() throws {
+        var probeCount = 0
+        let harness = CodexCLIQualificationHarness(versionProbe: { _, artifact in
+            XCTAssertNotNil(artifact)
+            probeCount += 1
+            return "codex-cli 9.999.0+reviewed-build"
+        })
+
+        let report = try harness.preflight(
+            executableURL: URL(fileURLWithPath: "/bin/echo"),
+            model: "gpt-5.4"
+        )
+
+        XCTAssertEqual(probeCount, 2)
+        XCTAssertEqual(report.cliVersion, "codex-cli 9.999.0+reviewed-build")
+        XCTAssertEqual(report.executableSHA256.utf8.count, 64)
+        XCTAssertNotEqual(report.executableSHA256, "unavailable")
+        XCTAssertFalse(report.providerLaunchPermitted)
+    }
+
+    func testPreflightRejectsArtifactMutationBetweenVersionProbes() throws {
+        let fixtureDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "audora-codex-preflight-mutation-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: fixtureDirectory,
+            withIntermediateDirectories: false
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
+        let executable = fixtureDirectory.appendingPathComponent("codex")
+        try FileManager.default.copyItem(
+            at: URL(fileURLWithPath: "/bin/echo"),
+            to: executable
+        )
+        var probeCount = 0
+        var mutationError: Error?
+        let harness = CodexCLIQualificationHarness(versionProbe: { _, artifact in
+            probeCount += 1
+            if probeCount == 1, let artifact {
+                do {
+                    let handle = try FileHandle(forWritingTo: artifact.executableURL)
+                    try handle.seekToEnd()
+                    try handle.write(contentsOf: Data([0]))
+                    try handle.close()
+                } catch {
+                    mutationError = error
+                }
+            }
+            return "codex-cli 9.999.0"
+        })
+
+        let report = try harness.preflight(
+            executableURL: executable,
+            model: "gpt-5.4"
+        )
+
+        XCTAssertEqual(probeCount, 1)
+        XCTAssertNil(mutationError)
+        XCTAssertEqual(report.cliVersion, "unavailable")
+        XCTAssertEqual(report.executableSHA256, "unavailable")
+        XCTAssertFalse(report.providerLaunchPermitted)
+    }
+
+    func testFutureAllowlistingRequiresMatchingRuntimeAuthorityProof() throws {
+        XCTAssertTrue(
+            CodexCLIQualificationCompatibilityMatrix.verifiedRuntimes.isEmpty,
+            "shipping qualification must stay closed until a real runtime is reviewed"
+        )
+        let fixtureDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "audora-runtime-authority-proof-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: fixtureDirectory,
+            withIntermediateDirectories: false
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
+        let artifact = try XCTUnwrap(
+            CodexCLIExecutableArtifact(executableURL: URL(fileURLWithPath: "/bin/echo"))
+        )
+        let copiedExecutable = fixtureDirectory.appendingPathComponent("echo")
+        try FileManager.default.copyItem(
+            at: artifact.executableURL,
+            to: copiedExecutable
+        )
+        let sameBytesDifferentArtifact = try XCTUnwrap(
+            CodexCLIExecutableArtifact(executableURL: copiedExecutable)
+        )
+        XCTAssertEqual(
+            sameBytesDifferentArtifact.identity.sha256,
+            artifact.identity.sha256
+        )
+        XCTAssertNotEqual(sameBytesDifferentArtifact.identity, artifact.identity)
+        let runtimeIdentity = try XCTUnwrap(
+            CodexCLIQualificationRuntimeAuthorityIdentity(
+                manifestSHA256: String(repeating: "b", count: 64)
+            )
+        )
+        let approvedRuntime = CodexCLIQualificationCompatibilityMatrix.VerifiedRuntime(
+            cliVersion: "codex-cli 9.999.0",
+            executableSHA256: artifact.identity.sha256,
+            runtimeAuthorityIdentity: runtimeIdentity
+        )
+        let proof = CodexCLIQualificationRuntimeAuthorityProof(
+            runtimeIdentity: runtimeIdentity,
+            cliVersion: approvedRuntime.cliVersion,
+            executableIdentity: artifact.identity
+        )
+        let otherRuntimeIdentity = try XCTUnwrap(
+            CodexCLIQualificationRuntimeAuthorityIdentity(
+                manifestSHA256: String(repeating: "c", count: 64)
+            )
+        )
+        let otherRuntimeProof = CodexCLIQualificationRuntimeAuthorityProof(
+            runtimeIdentity: otherRuntimeIdentity,
+            cliVersion: approvedRuntime.cliVersion,
+            executableIdentity: artifact.identity
+        )
+
+        let entryOnly = CodexCLIQualificationPreflightReport(
+            cliVersion: approvedRuntime.cliVersion,
+            executableSHA256: approvedRuntime.executableSHA256,
+            executableIdentity: artifact.identity,
+            runtimeAuthorityProof: nil,
+            verifiedRuntimes: [approvedRuntime]
+        )
+        let exact = CodexCLIQualificationPreflightReport(
+            cliVersion: approvedRuntime.cliVersion,
+            executableSHA256: approvedRuntime.executableSHA256,
+            executableIdentity: artifact.identity,
+            runtimeAuthorityProof: proof,
+            verifiedRuntimes: [approvedRuntime]
+        )
+        let wrongRuntime = CodexCLIQualificationPreflightReport(
+            cliVersion: approvedRuntime.cliVersion,
+            executableSHA256: approvedRuntime.executableSHA256,
+            executableIdentity: artifact.identity,
+            runtimeAuthorityProof: otherRuntimeProof,
+            verifiedRuntimes: [approvedRuntime]
+        )
+        let wrongArtifact = CodexCLIQualificationPreflightReport(
+            cliVersion: approvedRuntime.cliVersion,
+            executableSHA256: approvedRuntime.executableSHA256,
+            executableIdentity: sameBytesDifferentArtifact.identity,
+            runtimeAuthorityProof: proof,
+            verifiedRuntimes: [approvedRuntime]
+        )
+        let fork = CodexCLIQualificationPreflightReport(
+            cliVersion: "codex-cli 9.999.0+fork",
+            executableSHA256: approvedRuntime.executableSHA256,
+            executableIdentity: artifact.identity,
+            runtimeAuthorityProof: proof,
+            verifiedRuntimes: [approvedRuntime]
+        )
+
+        XCTAssertFalse(entryOnly.providerLaunchPermitted)
+        XCTAssertTrue(entryOnly.blockers.contains(.executableRuntimeIdentityUnverified))
+        XCTAssertFalse(wrongRuntime.providerLaunchPermitted)
+        XCTAssertFalse(wrongArtifact.providerLaunchPermitted)
+        XCTAssertEqual(exact.viewImageDisableStatus, .verified)
+        XCTAssertTrue(exact.providerLaunchPermitted)
+        XCTAssertEqual(exact.blockers, [])
+        XCTAssertEqual(fork.viewImageDisableStatus, .unverified)
+        XCTAssertTrue(fork.blockers.contains(.cliVersionUnverified))
+        XCTAssertFalse(fork.providerLaunchPermitted)
+    }
+
+    func testHarnessRequiresRuntimeVerifierForAnAllowlistedRuntime() throws {
+        let executableURL = URL(fileURLWithPath: "/bin/echo")
+        let artifact = try XCTUnwrap(
+            CodexCLIExecutableArtifact(executableURL: executableURL)
+        )
+        let cliVersion = "codex-cli 9.999.0+reviewed-runtime"
+        let runtimeIdentity = try XCTUnwrap(
+            CodexCLIQualificationRuntimeAuthorityIdentity(
+                manifestSHA256: String(repeating: "d", count: 64)
+            )
+        )
+        let allowlist: Set<CodexCLIQualificationCompatibilityMatrix.VerifiedRuntime> = [
+            CodexCLIQualificationCompatibilityMatrix.VerifiedRuntime(
+                cliVersion: cliVersion,
+                executableSHA256: artifact.identity.sha256,
+                runtimeAuthorityIdentity: runtimeIdentity
+            ),
+        ]
+        let versionProbe: (URL, CodexCLIExecutableArtifact?) -> String = { _, _ in
+            cliVersion
+        }
+
+        let entryOnlyReport = try CodexCLIQualificationHarness(
+            versionProbe: versionProbe,
+            verifiedRuntimes: allowlist
+        ).preflight(executableURL: executableURL, model: "gpt-5.4")
+        let provedRuntimeReport = try CodexCLIQualificationHarness(
+            versionProbe: versionProbe,
+            runtimeAuthority: SyntheticRuntimeAuthority(identity: runtimeIdentity),
+            verifiedRuntimes: allowlist
+        ).preflight(executableURL: executableURL, model: "gpt-5.4")
+
+        XCTAssertFalse(entryOnlyReport.providerLaunchPermitted)
+        XCTAssertTrue(provedRuntimeReport.providerLaunchPermitted)
+    }
+
+    func testAuthorizedSuiteRunsOnlyPreflightAndCannotBypassTheEmptyMatrix() throws {
+        let fixtureDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "audora-codex-script-refusal-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: fixtureDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
+
+        let executable = fixtureDirectory.appendingPathComponent("codex-launcher")
+        let versionProbeMarker = fixtureDirectory.appendingPathComponent(
+            "version-probed"
+        )
+        let providerLaunchMarker = fixtureDirectory.appendingPathComponent(
+            "provider-launched"
+        )
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s' 'probed' > '\(versionProbeMarker.path)'
+          printf '%s\n' 'codex-cli 9.999.0'
+          exit 0
+        fi
+        printf '%s' 'launched' > '\(providerLaunchMarker.path)'
+        exit 0
+        """
+        try Data(script.utf8).write(to: executable, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path
+        )
+        let authorization = try XCTUnwrap(
+            CodexCLIQualificationExecutionAuthorization(
+                sourceEnvironment: ["CODEX_ACCESS_TOKEN": "test-placeholder"]
+            )
+        )
+
         XCTAssertThrowsError(
             try CodexCLIQualificationHarness().runSuite(
                 executableURL: executable,
-                model: "gpt-5.4"
+                model: "gpt-5.4",
+                authorization: authorization
             )
         ) { error in
-            guard case let .qualificationUnavailable(report) = error as? CodexCLIQualificationStartError else {
-                return XCTFail("Expected a sanitized qualification preflight report")
-            }
-            XCTAssertEqual(report.cliVersion, "codex-cli 0.143.0")
+            guard case let .qualificationUnavailable(report) = error
+                as? CodexCLIQualificationStartError
+            else { return XCTFail("expected a closed preflight decision") }
             XCTAssertEqual(report.providerCasesLaunched, 0)
             XCTAssertFalse(report.providerLaunchPermitted)
-            XCTAssertEqual(report.viewImageDisableStatus, .unsupported)
-            XCTAssertEqual(report.ephemeralExecAuthorizationStatus, .unsupported)
-            XCTAssertEqual(
-                report.blockers,
-                [
-                    .viewImageDisableUnsupported,
-                    .sameProcessEphemeralAuthorizationUnsupported,
-                ]
-            )
-            XCTAssertEqual(
-                report.manualHandoff,
-                [
-                    .installIndependentlyVerifiedCLI,
-                    .provideDocumentedSameProcessEphemeralAuthorization,
-                    .addExactVersionToCompatibilityMatrix,
-                    .rerunPublicPreflight,
-                ]
-            )
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: versionProbeMarker.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: providerLaunchMarker.path))
     }
 
-    func testPublicSuiteTreatsAnUnknownFutureCLIVersionAsUnverified() throws {
+    func testClientHomeResidueCannotPassQualification() throws {
+        let fixtureDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "audora-codex-client-residue-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: fixtureDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
+
+        let executable = fixtureDirectory.appendingPathComponent("fake-codex")
+        let response = #"{"messageBlocks":[{"kind":"markdown","markdown":"Practice once."}]}"#
+        let responseEvent = try jsonString([
+            "type": "item.completed",
+            "item": ["type": "agent_message", "text": response],
+        ])
+        let usageEvent = try jsonString([
+            "type": "turn.completed",
+            "usage": ["output_tokens": 2],
+        ])
+        let script = """
+        #!/bin/sh
+        printf '%s' 'unexpected-state' > "$HOME/retained-state"
+        while IFS= read -r _; do :; done
+        printf '%s\n' '\(responseEvent)' '\(usageEvent)'
+        """
+        try Data(script.utf8).write(to: executable, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path
+        )
+
+        XCTAssertThrowsError(
+            try CodexCLIQualificationHarness().runCase(
+                .structuredResponse,
+                executableURL: executable,
+                model: "gpt-5.4"
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CodexCLIQualificationStartError,
+                .ephemeralClientStateRetained
+            )
+        }
+    }
+
+    func testPublicPreflightTreatsAnUnknownFutureCLIVersionAsUnverified() throws {
         let fixtureDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "audora-codex-unverified-version-\(UUID().uuidString)",
             isDirectory: true
@@ -221,29 +610,24 @@ final class QualificationHarnessTests: XCTestCase {
             ofItemAtPath: executable.path
         )
 
-        XCTAssertThrowsError(
-            try CodexCLIQualificationHarness().runSuite(
-                executableURL: executable,
-                model: "gpt-5.4"
-            )
-        ) { error in
-            guard case let .qualificationUnavailable(report) = error as? CodexCLIQualificationStartError else {
-                return XCTFail("Expected a sanitized qualification preflight report")
-            }
-            XCTAssertEqual(report.cliVersion, "codex-cli 9.999.0")
-            XCTAssertEqual(report.providerCasesLaunched, 0)
-            XCTAssertFalse(report.providerLaunchPermitted)
-            XCTAssertEqual(report.viewImageDisableStatus, .unverified)
-            XCTAssertEqual(report.ephemeralExecAuthorizationStatus, .unverified)
-            XCTAssertEqual(
-                report.blockers,
-                [
-                    .cliVersionUnverified,
-                    .viewImageDisableUnverified,
-                    .sameProcessEphemeralAuthorizationUnverified,
-                ]
-            )
-        }
+        let report = try CodexCLIQualificationHarness().preflight(
+            executableURL: executable,
+            model: "gpt-5.4"
+        )
+        XCTAssertEqual(report.cliVersion, "codex-cli 9.999.0")
+        XCTAssertEqual(report.providerCasesLaunched, 0)
+        XCTAssertFalse(report.providerLaunchPermitted)
+        XCTAssertEqual(report.viewImageDisableStatus, .unverified)
+        XCTAssertEqual(report.ephemeralExecAuthorizationStatus, .unverified)
+        XCTAssertEqual(
+            report.blockers,
+            [
+                .cliVersionUnverified,
+                .viewImageDisableUnverified,
+                .sameProcessEphemeralAuthorizationUnverified,
+                .executableRuntimeIdentityUnverified,
+            ]
+        )
         XCTAssertFalse(FileManager.default.fileExists(atPath: providerLaunchMarker.path))
     }
 
@@ -370,7 +754,7 @@ final class QualificationHarnessTests: XCTestCase {
         )
     }
 
-    func testCLIVersionReportDropsUntrustedBuildMetadata() throws {
+    func testCLIVersionReportRetainsBuildMetadataForExactBuildMatching() throws {
         let fixtureDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "audora-codex-version-fixture-\(UUID().uuidString)",
             isDirectory: true
@@ -399,8 +783,7 @@ final class QualificationHarnessTests: XCTestCase {
             model: "gpt-5.4"
         )
 
-        XCTAssertEqual(report.cliVersion, "codex-cli 0.143.0")
-        XCTAssertFalse(String(describing: report).contains(privateMarker))
+        XCTAssertEqual(report.cliVersion, "codex-cli 0.143.0+\(privateMarker)")
     }
 
     func testCLIVersionReportRejectsNonASCIIDigits() throws {
@@ -634,7 +1017,9 @@ final class QualificationHarnessTests: XCTestCase {
 
     func testPreflightDecoderRejectsForgedProviderLaunchReadiness() throws {
         let report = CodexCLIQualificationPreflightReport(
-            cliVersion: "codex-cli 0.143.0"
+            cliVersion: "codex-cli 0.143.0",
+            executableIdentity: nil,
+            runtimeAuthorityProof: nil
         )
         let encoded = try JSONEncoder().encode(report)
         let original = try XCTUnwrap(
@@ -920,24 +1305,22 @@ final class QualificationHarnessTests: XCTestCase {
         }
     }
 
-    func testDirectReportConstructionDropsUntrustedCLIIdentity() throws {
-        let privateMarker = "synthetic-private-cli-build"
+    func testDirectReportConstructionKeepsCanonicalExactCLIIdentity() throws {
+        let buildMetadata = "synthetic-cli-build"
 
         let report = QualificationSuiteReport(
             cases: passingCaseReports(),
-            cliVersion: "codex-cli 0.143.0+\(privateMarker)",
+            cliVersion: "codex-cli 0.143.0+\(buildMetadata)",
             model: "gpt-5.4",
             limits: QualificationLimits()
         )
 
-        XCTAssertEqual(report.cliVersion, "unavailable")
+        XCTAssertEqual(report.cliVersion, "codex-cli 0.143.0+\(buildMetadata)")
         XCTAssertFalse(report.modelFacingToolSurfaceQualified)
         XCTAssertFalse(report.issueGateAccepted)
-        XCTAssertFalse(
-            String(
-                decoding: try JSONEncoder().encode(report),
-                as: UTF8.self
-            ).contains(privateMarker)
+        XCTAssertTrue(
+            String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
+                .contains(buildMetadata)
         )
 
         let privateModel = QualificationSuiteReport(
@@ -1044,5 +1427,33 @@ final class QualificationHarnessTests: XCTestCase {
                 durationMilliseconds: 1
             ),
         ]
+    }
+}
+
+private struct SyntheticRuntimeAuthority: CodexCLIQualificationRuntimeAuthority {
+    let identity: CodexCLIQualificationRuntimeAuthorityIdentity
+
+    func proveRuntime(
+        executableArtifact: CodexCLIExecutableArtifact,
+        cliVersion: String
+    ) -> CodexCLIQualificationRuntimeAuthorityProof? {
+        CodexCLIQualificationRuntimeAuthorityProof(
+            runtimeIdentity: identity,
+            cliVersion: cliVersion,
+            executableIdentity: executableArtifact.identity
+        )
+    }
+
+    func revalidate(
+        _ proof: CodexCLIQualificationRuntimeAuthorityProof,
+        executableArtifact: CodexCLIExecutableArtifact,
+        cliVersion: String
+    ) -> Bool {
+        proof.runtimeIdentity == identity
+            && proof.binds(
+                cliVersion: cliVersion,
+                executableArtifact: executableArtifact
+            )
+            && executableArtifact.revalidate()
     }
 }

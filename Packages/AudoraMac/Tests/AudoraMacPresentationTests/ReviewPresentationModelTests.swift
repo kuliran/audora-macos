@@ -114,6 +114,27 @@ final class ReviewPresentationModelTests: XCTestCase {
             ]
         )
     }
+
+    func testRetranscriptionControlRequiresVerifiedAudioAndIdleReview() {
+        XCTAssertFalse(
+            ReviewPresentationModel.isRetranscriptionControlEnabled(
+                retranscriptionAvailable: false,
+                activity: nil
+            )
+        )
+        XCTAssertTrue(
+            ReviewPresentationModel.isRetranscriptionControlEnabled(
+                retranscriptionAvailable: true,
+                activity: nil
+            )
+        )
+        XCTAssertFalse(
+            ReviewPresentationModel.isRetranscriptionControlEnabled(
+                retranscriptionAvailable: true,
+                activity: .retranscribing
+            )
+        )
+    }
 }
 
 private func contrastRatio(
@@ -187,6 +208,10 @@ private actor ScriptedReviewFeature: ReviewFeature {
     var currentState: ReviewFeatureState { state }
 
     func send(_ command: ReviewCommand) { commands.append(command) }
+
+    func reserveLibraryNavigation() async -> Bool { true }
+
+    func finishLibraryNavigation(_ result: LibraryCommandResult) async {}
 
     func recordedCommands() -> [ReviewCommand] { commands }
 

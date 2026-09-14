@@ -65,8 +65,13 @@ public protocol MachineLibraryLocatorStoring: Sendable {
     func save(_ locator: MachineLibraryLocator) async throws
 }
 
+public enum LibraryRevealRequestDisposition: Equatable, Sendable {
+    case accepted
+    case rejected
+}
+
 public protocol LibraryRevealing: Sendable {
-    func reveal(_ url: URL) async -> Bool
+    func requestReveal(_ url: URL) async -> LibraryRevealRequestDisposition
 }
 
 public actor PortableLibraryWorkspace: LibraryWorkspacePort {
@@ -392,13 +397,14 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         }
     }
 
-    public func revealActiveLibrary() async -> LibraryActionOutcome {
+    public func revealActiveLibrary() async -> LibraryRevealRequestOutcome {
         guard reserveOperation() else { return .failed(.revealFailed) }
         defer { operationInFlight = false }
         guard let activeScope else { return .failed(.revealFailed) }
-        return await revealer.reveal(activeScope.root)
-            ? .succeeded()
-            : .failed(.revealFailed)
+        switch await revealer.requestReveal(activeScope.root) {
+        case .accepted: return .accepted
+        case .rejected: return .failed(.revealFailed)
+        }
     }
 
     public func closeActiveLibrary() async -> LibraryActionOutcome {

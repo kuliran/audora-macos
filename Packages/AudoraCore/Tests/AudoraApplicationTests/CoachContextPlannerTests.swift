@@ -16,8 +16,17 @@ final class CoachContextPlannerTests: XCTestCase {
             implementation: { $0.count }
         )
         let framing = CoachProviderFraming(
+            initialRequestPrefix: Data(),
+            initialRequestSuffix: Data(),
+            transcriptReadRequestPrefix: Data(),
+            transcriptReadRequestSuffix: Data(),
+            transcriptReadResponsePrefix: Data(),
+            transcriptReadResponseSuffix: Data(),
+            minimumResponsePrefix: Data(),
+            minimumResponseSuffix: Data(),
             initialRequestHiddenTokens: 2,
-            transcriptReadExchangeHiddenTokens: 5
+            transcriptReadExchangeHiddenTokens: 5,
+            minimumResponseHiddenTokens: 0
         )
         let exactAuthority = AttemptTranscriptResponseBudgetAuthority(
             inputCeilingTokens: 11,
@@ -707,7 +716,7 @@ final class CoachContextPlannerTests: XCTestCase {
         let providerPolicy = CoachProviderEstimationPolicy(
             providerIdentifier: "non-default-threshold-fixture-v1",
             responseCollectorByteCeiling: 8_192,
-            framing: CoachProviderFraming(),
+            framing: .testZero,
             attachmentProjectionPolicy: atLimit
         )
 
@@ -783,6 +792,55 @@ final class CoachContextPlannerTests: XCTestCase {
             encodingObservation.measuredMaximums,
             [CoachContextInputLimits.maximumCanonicalValueUTF8Bytes]
         )
+        XCTAssertEqual(encodingObservation.serializationCount, 0)
+        XCTAssertEqual(estimatorObservation.values, [])
+    }
+
+    func testAttachmentProjectionRejectsExternalProcessingBeforeReadingProviderBytes()
+        throws
+    {
+        let encodingObservation = AttachmentEncodingObservation()
+        let estimatorObservation = AttachmentEstimatorObservation()
+        let encoder = BoundedCanonicalTranscriptEncoder(
+            measure: { _, maximumByteCount in
+                encodingObservation.recordMeasurement(maximumByteCount)
+                return 1
+            },
+            serialize: { _ in
+                encodingObservation.recordSerialization()
+                return Data("must-not-serialize".utf8)
+            }
+        )
+        let estimator = try CoachTokenEstimator(
+            identifier: "external-processing-gate-fixture-v1",
+            mode: .exact,
+            maximumUTF8BytesPerToken: 1,
+            implementation: { bytes in
+                estimatorObservation.record(bytes)
+                return bytes.count
+            }
+        )
+        let policy = try CoachAttachmentProjectionPolicy(
+            maximumInlineTranscriptTokens: 8,
+            tokenEstimator: estimator,
+            canonicalTranscriptEncoder: encoder
+        )
+        let evidence = ChatAttachmentEvidence(
+            displayLabel: "Policy-restricted Session",
+            revision: try manyShortWordRevision(
+                wordCount: 1,
+                externalProcessingAllowed: false
+            ),
+            revisionSHA256: coachContextFixtureRevisionSHA256
+        )
+
+        XCTAssertThrowsError(try policy.project(evidence: evidence)) { error in
+            XCTAssertEqual(
+                error as? CoachAttachmentProjectionError,
+                .externalProcessingDisallowed
+            )
+        }
+        XCTAssertEqual(encodingObservation.measuredMaximums, [])
         XCTAssertEqual(encodingObservation.serializationCount, 0)
         XCTAssertEqual(estimatorObservation.values, [])
     }
@@ -1084,8 +1142,11 @@ final class CoachContextPlannerTests: XCTestCase {
                     transcriptReadRequestSuffix: Data("</tool-call>".utf8),
                     transcriptReadResponsePrefix: Data("<tool-result>".utf8),
                     transcriptReadResponseSuffix: Data("</tool-result>".utf8),
+                    minimumResponsePrefix: Data(),
+                    minimumResponseSuffix: Data(),
                     initialRequestHiddenTokens: 0,
-                    transcriptReadExchangeHiddenTokens: 0
+                    transcriptReadExchangeHiddenTokens: 0,
+                    minimumResponseHiddenTokens: 0
                 ),
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
@@ -1098,7 +1159,8 @@ final class CoachContextPlannerTests: XCTestCase {
     private func manyShortWordRevision(
         wordCount: Int,
         sessionID: String = "ses-20260830T120000000Z-3DEF",
-        revisionID: String = "trv-20260830T121000000Z-4FGH"
+        revisionID: String = "trv-20260830T121000000Z-4FGH",
+        externalProcessingAllowed: Bool = true
     ) throws -> TranscriptRevision {
         let tokens = (0..<wordCount).map { "w\($0)" }
         let lineText = tokens.joined(separator: " ")
@@ -1131,7 +1193,7 @@ final class CoachContextPlannerTests: XCTestCase {
             coveredArtifacts: [.transcriptRevision],
             privateLocalUseAllowed: true,
             privateExportAllowed: true,
-            externalProcessingAllowed: false,
+            externalProcessingAllowed: externalProcessingAllowed,
             publicDistributionAllowed: false,
             commercialUseAllowed: false,
             licenseReference: "test-license",
@@ -1263,7 +1325,7 @@ private struct FixedAttachmentProjectionConfigurationAuthority:
                     policy: CoachProviderEstimationPolicy(
                         providerIdentifier: "fixed-attachment-projection-v1",
                         responseCollectorByteCeiling: 8_192,
-                        framing: CoachProviderFraming(),
+                        framing: .testZero,
                         attachmentProjectionPolicy: policy
                     )
                 ),

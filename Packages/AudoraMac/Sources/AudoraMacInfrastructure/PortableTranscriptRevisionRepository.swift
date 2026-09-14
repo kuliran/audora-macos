@@ -41,7 +41,7 @@ enum PortableSessionReviewRead: Sendable {
 struct PortableVerifiedReviewSession: Sendable {
     let revision: ReopenedTranscriptRevisionSnapshot
     let durationMilliseconds: UInt64
-    let canonicalWAV: Data
+    let canonicalWAV: Data?
     let annotationEvidence: SpeechAnnotationEvidence
 }
 
@@ -58,6 +58,7 @@ struct PortableChatAttachmentFingerprint: Equatable, Sendable {
 enum PortableChatAttachmentFingerprintAvailability: Equatable, Sendable {
     case available
     case unavailable
+    case externalProcessingDisallowed
 }
 
 private enum ChatAttachmentLockMode {
@@ -489,7 +490,7 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                 sessionID: selection.sessionID,
                 exclusive: false
             ) { authority in
-                let loaded = try loadSession(
+                let loaded = try loadSessionForReview(
                     sessionID: selection.sessionID,
                     sessionDescriptor: authority.sessionDescriptor
                 )
@@ -510,7 +511,7 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     under: transcriptsDescriptor
                 )
                 defer { Darwin.close(installed.authority.descriptor) }
-                let wav = try loadCanonicalWAV(
+                let wav = try? loadCanonicalWAV(
                     audio: loaded.audio,
                     under: authority.sessionDescriptor
                 )
@@ -614,6 +615,34 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
         return fingerprints
     }
 
+    /// Resolves only the engine-use policy for each exact Profile evidence
+    /// source. Missing, trashed, corrupt, or mismatched revisions remain bound to
+    /// their requested identity as unavailable; no neighboring revision may
+    /// substitute its policy.
+    func resolveCoachEvidenceUsePoliciesSynchronously(
+        _ sources: [CoachEvidencePolicySourceIdentity]
+    ) -> [CoachEvidenceUsePolicyResolution] {
+        sources.map { source in
+            switch loadChatAttachmentSynchronously(
+                sessionID: source.sessionID,
+                transcriptRevisionID: source.transcriptRevisionID
+            ) {
+            case let .available(evidence, _):
+                guard evidence.sessionID == source.sessionID,
+                      evidence.transcriptRevisionID == source.transcriptRevisionID
+                else {
+                    return .unavailable(source: source)
+                }
+                return .resolved(
+                    source: source,
+                    policy: evidence.revision.engine.usePolicy
+                )
+            case .unavailable:
+                return .unavailable(source: source)
+            }
+        }
+    }
+
     /// Binds final Chat attachment validation and its install linearization point
     /// to one already-open Library root. Shared Session locks are acquired in
     /// stable identifier order and remain held until `install` returns.
@@ -678,7 +707,10 @@ public struct PortableTranscriptRevisionRepository: TranscriptRevisionRepository
                     else {
                         return .unavailable
                     }
-                    return .available
+                    return evidence.revision.engine.usePolicy
+                        .externalProcessingAllowed
+                        ? .available
+                        : .externalProcessingDisallowed
                 }
             }
         ) {
@@ -1457,6 +1489,63 @@ private extension PortableTranscriptRevisionRepository {
         )
     }
 
+    /// Review verifies the selected immutable Transcript Revision against the
+    /// canonical audio manifest even when the canonical playback bytes can no
+    /// longer be reopened. All derivation and publication paths continue to use
+    /// `loadSession`, which requires complete audio evidence.
+    func loadSessionForReview(
+        sessionID: SessionID,
+        sessionDescriptor: Int32
+    ) throws -> LoadedSession {
+        let manifestData = try readConfined.boundedData(
+            named: "session.json",
+            under: sessionDescriptor,
+            maximumBytes: Self.maximumManifestBytes
+        )
+        let manifest = try decodeSessionManifest(
+            manifestData,
+            expectedSessionID: sessionID
+        )
+        let audio: TrustedSessionAudio
+        switch manifest {
+        case .recorded:
+            audio = try trustedRecordedAudio(
+                from: RecordingPersistence().loadValidatedSealedAudioManifest(
+                    under: sessionDescriptor
+                )
+            )
+        case .imported:
+            let reopened = try PortableAudioImportPersistence().openSessionManifest(
+                under: sessionDescriptor,
+                sessionID: sessionID
+            )
+            guard case let .readWrite(session) = reopened,
+                  session.transcriptRevisionIDs == manifest.transcriptRevisionIDs,
+                  session.selectedTranscriptRevision == manifest.selectedTranscriptRevision
+            else {
+                throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
+            }
+            let canonical = session.audio.canonical
+            let fingerprint = try AudioFingerprint(sha256: canonical.fingerprint.sha256)
+            audio = TrustedSessionAudio(
+                durationMilliseconds: session.durationMilliseconds,
+                audioFingerprint: fingerprint,
+                sourceFingerprints: session.audio.sources.map {
+                    TranscriptSourceFingerprint(
+                        audioSourceID: $0.audioSourceID,
+                        fingerprint: fingerprint
+                    )
+                },
+                unavailableIntervals: []
+            )
+        }
+        return LoadedSession(
+            manifestData: manifestData,
+            manifest: manifest,
+            audio: audio
+        )
+    }
+
     func loadCanonicalWAV(
         audio: TrustedSessionAudio,
         under sessionDescriptor: Int32
@@ -1744,42 +1833,49 @@ private extension PortableTranscriptRevisionRepository {
 
     func loadRecordedAudio(under sessionDescriptor: Int32) throws -> TrustedSessionAudio {
         do {
-            let audio = try RecordingPersistence().loadValidatedSealedAudio(
-                under: sessionDescriptor
-            )
-            let duration = try CanonicalAudioFormat.durationMilliseconds(
-                forFrameCount: audio.frameCount
-            )
-            return TrustedSessionAudio(
-                durationMilliseconds: duration,
-                audioFingerprint: audio.fingerprint,
-                sourceFingerprints: [
-                    TranscriptSourceFingerprint(
-                        audioSourceID: .microphone,
-                        fingerprint: audio.fingerprint
-                    ),
-                ],
-                unavailableIntervals: try audio.unavailableIntervals.map { interval in
-                    let sampleRate = UInt64(CanonicalAudioFormat.sampleRateHz)
-                    let start = interval.range.startFrame * 1_000 / sampleRate
-                    let end = min(
-                        (interval.range.endFrame * 1_000 + sampleRate - 1) /
-                            sampleRate,
-                        duration
-                    )
-                    return SpeechUnavailableInterval(
-                        timeRange: try SessionTimeRange(
-                            startMilliseconds: start,
-                            endMilliseconds: end,
-                            sessionDurationMilliseconds: duration
-                        ),
-                        reasons: interval.reasons
-                    )
-                }
+            return try trustedRecordedAudio(
+                from: RecordingPersistence().loadValidatedSealedAudio(
+                    under: sessionDescriptor
+                )
             )
         } catch {
             throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
         }
+    }
+
+    func trustedRecordedAudio(
+        from audio: SealedAudioAsset
+    ) throws -> TrustedSessionAudio {
+        let duration = try CanonicalAudioFormat.durationMilliseconds(
+            forFrameCount: audio.frameCount
+        )
+        return TrustedSessionAudio(
+            durationMilliseconds: duration,
+            audioFingerprint: audio.fingerprint,
+            sourceFingerprints: [
+                TranscriptSourceFingerprint(
+                    audioSourceID: .microphone,
+                    fingerprint: audio.fingerprint
+                ),
+            ],
+            unavailableIntervals: try audio.unavailableIntervals.map { interval in
+                let sampleRate = UInt64(CanonicalAudioFormat.sampleRateHz)
+                let start = interval.range.startFrame * 1_000 / sampleRate
+                let end = min(
+                    (interval.range.endFrame * 1_000 + sampleRate - 1) /
+                        sampleRate,
+                    duration
+                )
+                return SpeechUnavailableInterval(
+                    timeRange: try SessionTimeRange(
+                        startMilliseconds: start,
+                        endMilliseconds: end,
+                        sessionDurationMilliseconds: duration
+                    ),
+                    reasons: interval.reasons
+                )
+            }
+        )
     }
 
     func annotationEvidence(
@@ -2770,6 +2866,63 @@ private extension PortableTranscriptRevisionRepository {
             throw TranscriptRevisionRepositoryFailure.sessionIntegrityMismatch
         }
         return category
+    }
+}
+
+extension PortableTranscriptRevisionRepository {
+    /// Reuses the canonical strict Session-manifest decoder for the lightweight
+    /// Library catalog projection. The caller owns the confined bounded read and
+    /// aggregate-directory lock.
+    func libraryCatalogRow(
+        fromSessionManifest data: Data,
+        expectedSessionID: SessionID
+    ) -> LibraryCatalogRow {
+        do {
+            let version = try readConfined.schemaVersion(in: data)
+            if version > 1 {
+                return .unavailable(.session(expectedSessionID), .newerSchema)
+            }
+            guard version == 1 else {
+                return .unavailable(
+                    .session(expectedSessionID),
+                    .unsupportedSchema
+                )
+            }
+            let manifest = try decodeSessionManifest(
+                data,
+                expectedSessionID: expectedSessionID
+            )
+            switch manifest {
+            case let .recorded(dto, _, selected):
+                guard let createdAt = try? UTCInstant(dto.createdAt) else {
+                    return .unavailable(.session(expectedSessionID), .corrupt)
+                }
+                return .session(
+                    expectedSessionID,
+                    LibrarySessionCatalogMetadata(
+                        acquisition: .recorded,
+                        createdAt: createdAt,
+                        hasSelectedTranscript: selected != nil
+                    )
+                )
+            case let .imported(dto, _, selected):
+                guard let createdAt = try? UTCInstant(dto.createdAt) else {
+                    return .unavailable(.session(expectedSessionID), .corrupt)
+                }
+                return .session(
+                    expectedSessionID,
+                    LibrarySessionCatalogMetadata(
+                        acquisition: .imported,
+                        createdAt: createdAt,
+                        hasSelectedTranscript: selected != nil
+                    )
+                )
+            }
+        } catch TranscriptRevisionRepositoryFailure.unsupportedSchema {
+            return .unavailable(.session(expectedSessionID), .newerSchema)
+        } catch {
+            return .unavailable(.session(expectedSessionID), .corrupt)
+        }
     }
 }
 

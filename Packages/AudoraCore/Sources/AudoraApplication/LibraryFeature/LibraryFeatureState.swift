@@ -9,15 +9,30 @@ public struct ActiveLibrarySnapshot: Equatable, Sendable {
     public let libraryID: LibraryID
     public let preferences: LibraryPreferences
     public let profile: ProfileSummary
+    /// Process-local authority generation assigned by `LibraryFeature` after
+    /// this persisted snapshot becomes the active Library. Zero means the
+    /// snapshot has not crossed that activation boundary yet.
+    public let activationGeneration: UInt64
 
     public init(
         libraryID: LibraryID,
         preferences: LibraryPreferences,
-        profile: ProfileSummary
+        profile: ProfileSummary,
+        activationGeneration: UInt64 = 0
     ) {
         self.libraryID = libraryID
         self.preferences = preferences
         self.profile = profile
+        self.activationGeneration = activationGeneration
+    }
+
+    func activated(generation: UInt64) -> Self {
+        Self(
+            libraryID: libraryID,
+            preferences: preferences,
+            profile: profile,
+            activationGeneration: generation
+        )
     }
 }
 

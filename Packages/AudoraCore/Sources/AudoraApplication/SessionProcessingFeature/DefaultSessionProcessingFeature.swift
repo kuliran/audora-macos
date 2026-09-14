@@ -1,7 +1,9 @@
 import AudoraDomain
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
-public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
+public actor DefaultSessionProcessingFeature: SessionProcessingFeature,
+    SessionProcessingExactRetranscriptionFeature
+{
     private static let maximumIdentityAttempts = 16
     /// Bounds exact-winner rediscovery independently of inventory size. The
     /// monotonic Job graph normally settles sooner; exhaustion fails closed.
@@ -142,6 +144,8 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private let publisher: TranscriptRevisionPublisher
     private let clock: any SessionProcessingClock
     private let identifiers: any SessionProcessingIDGenerator
+    private let catalogMutationPublisher:
+        (any LibraryCatalogMutationCommitPublishing)?
 
     private var state: SessionProcessingFeatureState = .unavailable(
         SessionProcessingUnavailableSnapshot(
@@ -159,6 +163,9 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     private var pendingLibraryActivation: LibraryActivation?
     private var libraryNavigationReserved = false
     private var libraryNavigationActivation: LibraryActivation?
+    private var libraryCatalogSessionLease: LibraryCatalogSessionMutationLease?
+    private var libraryCatalogCapturedSelection: SessionProcessingSelection?
+    private var nextLibraryCatalogSessionLeaseToken: UInt64 = 1
     private var cancelledRunJobID: TranscriptionJobID?
     private var invalidCompletedJobs: [CompletedRecoveryKey: SessionProcessingJob]
         = [:]
@@ -187,7 +194,9 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         engine: any TranscriptionEngine,
         publisher: TranscriptRevisionPublisher,
         clock: any SessionProcessingClock,
-        identifiers: any SessionProcessingIDGenerator
+        identifiers: any SessionProcessingIDGenerator,
+        catalogMutationPublisher:
+            (any LibraryCatalogMutationCommitPublishing)? = nil
     ) {
         sourcePort = source
         self.runtime = runtime
@@ -198,6 +207,7 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         self.publisher = publisher
         self.clock = clock
         self.identifiers = identifiers
+        self.catalogMutationPublisher = catalogMutationPublisher
     }
 
     public var currentState: SessionProcessingFeatureState { state }
@@ -209,6 +219,10 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
     }
 
     public func send(_ requestedCommand: SessionProcessingCommand) async {
+        // Catalog mutation owns an exact two-phase fence. Even normally
+        // interruptible commands such as Select or Cancel must not enter while
+        // aggregate storage is between authoritative snapshots.
+        guard libraryCatalogSessionLease == nil else { return }
         guard let command = normalizedCommand(requestedCommand) else { return }
         if case let .activateLibraryAuthority(activation) = command,
            !observeLibraryActivation(activation)
@@ -235,6 +249,36 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             next = takePendingContextCommand()
         }
         commandInFlight = false
+    }
+
+    public func retranscribeExactly(
+        _ selection: SessionProcessingSelection
+    ) async -> SessionProcessingRetranscriptionResult {
+        guard libraryCatalogSessionLease == nil,
+              !libraryNavigationReserved,
+              !commandInFlight,
+              !cancellationFinalizationInFlight,
+              !state.ownsLibraryMutationAuthority
+        else { return .failed }
+
+        commandInFlight = true
+        await select(selection)
+
+        if exactSelectionCanStart(selection) {
+            await start()
+        } else if exactSelectionCanRetry(selection) {
+            await retry()
+        }
+
+        let result = exactRetranscriptionResult(for: selection)
+        if !cancellationFinalizationInFlight {
+            while let pending = takePendingContextCommand() {
+                await perform(pending)
+                guard !cancellationFinalizationInFlight else { break }
+            }
+        }
+        commandInFlight = false
+        return result
     }
 
     public func activateLibrary(_ activation: LibraryActivation) async {
@@ -264,6 +308,77 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         }
         libraryNavigationActivation = nil
         libraryNavigationReserved = false
+    }
+
+    public func reserveLibraryCatalogSessionMutation(
+        _ mutation: LibraryCatalogSessionMutation
+    ) async -> LibraryCatalogSessionMutationLease? {
+        guard libraryCatalogSessionLease == nil,
+              nextLibraryCatalogSessionLeaseToken > 0,
+              !libraryNavigationReserved,
+              !commandInFlight,
+              !cancellationFinalizationInFlight,
+              !state.ownsLibraryMutationAuthority,
+              latestLibraryActivation == mutation.activation,
+              libraryReconciliationFence == nil,
+              successfullyReconciledLibraryActivation == mutation.activation
+        else { return nil }
+
+        let lease = LibraryCatalogSessionMutationLease(
+            token: nextLibraryCatalogSessionLeaseToken,
+            mutation: mutation
+        )
+        nextLibraryCatalogSessionLeaseToken =
+            nextLibraryCatalogSessionLeaseToken == .max
+            ? 0
+            : nextLibraryCatalogSessionLeaseToken + 1
+        let capturedSelection: SessionProcessingSelection?
+        if let selection = lastSelection,
+           selection.scope == mutation.activation.scope,
+           mutation.sessionIDs.contains(selection.sessionID)
+        {
+            capturedSelection = selection
+        } else {
+            capturedSelection = nil
+        }
+
+        // Install the fence before clearing so actor reentrancy cannot admit a
+        // racing command through a source or state callback.
+        libraryCatalogSessionLease = lease
+        libraryCatalogCapturedSelection = capturedSelection
+        if capturedSelection != nil { clearSelection() }
+        return lease
+    }
+
+    public func finishLibraryCatalogSessionMutation(
+        _ lease: LibraryCatalogSessionMutationLease,
+        completion: LibraryCatalogSessionMutationCompletion
+    ) async -> LibraryCatalogSessionMutationFinishResult {
+        guard libraryCatalogSessionLease == lease else { return .notOwned }
+        let capturedSelection = libraryCatalogCapturedSelection
+        let activationIsCurrent = latestLibraryActivation == lease.mutation.activation
+
+        let shouldReload: Bool
+        switch completion {
+        case .aborted:
+            shouldReload = activationIsCurrent && capturedSelection != nil
+        case let .completed(.available(catalog)):
+            shouldReload = activationIsCurrent && capturedSelection.map { selection in
+                catalog.active.contains {
+                    $0.aggregate == .session(selection.sessionID)
+                }
+            } == true
+        case .completed(.readOnly), .completed(.unavailable),
+             .completed(.integrityMismatch):
+            shouldReload = false
+        }
+
+        if shouldReload, let capturedSelection {
+            await select(capturedSelection)
+        }
+        libraryCatalogCapturedSelection = nil
+        libraryCatalogSessionLease = nil
+        return activationIsCurrent ? .consumed : .consumedWithInvalidatedState
     }
 
     private func perform(_ command: SessionProcessingCommand) async {
@@ -1673,6 +1788,11 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             expectedSelectedRevisionID: job.expectedSelectedRevisionID
         ) {
         case let .published(reopened):
+            await publishCatalogMutation(
+                source: source,
+                revisionID: job.revisionID,
+                confirmation: .confirmed
+            )
             let completed = job.transitioning(to: .completed)
             let completionWrite = await jobs.transition(
                 completed,
@@ -1697,6 +1817,11 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             return .settled
         case let .rejected(failure):
             if failure == .installedNeedsRefresh {
+                await publishCatalogMutation(
+                    source: source,
+                    revisionID: job.revisionID,
+                    confirmation: .installedNeedsRefresh
+                )
                 // Repository contract: selection already switched, but its
                 // mandatory reopen could not complete. Never rewrite this
                 // validating Job to retryable failed; relaunch must prove and
@@ -1717,6 +1842,23 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
             }
             return await fail(job: job, expected: .validating, reason: reason)
         }
+    }
+
+    private func publishCatalogMutation(
+        source: SessionTranscriptionSource,
+        revisionID: TranscriptRevisionID,
+        confirmation: LibraryCatalogMutationConfirmation
+    ) async {
+        await catalogMutationPublisher?.publish(
+            LibraryCatalogMutationCommit(
+                expectedScope: source.selection.scope,
+                mutation: .selectedTranscript(
+                    sessionID: source.selection.sessionID,
+                    revisionID: revisionID
+                ),
+                confirmation: confirmation
+            )
+        )
     }
 
     private func completedRevisionMatches(
@@ -2111,6 +2253,57 @@ public actor DefaultSessionProcessingFeature: SessionProcessingFeature {
         case .unavailable, .preparing, .queued, .running, .cancelling,
              .validating, .failed, .cancelled, .interrupted, .recoveryRequired:
             false
+        }
+    }
+
+    private func exactSelectionCanStart(
+        _ selection: SessionProcessingSelection
+    ) -> Bool {
+        guard lastSelection == selection,
+              selectedSource?.selection == selection,
+              acceptsStartCommand
+        else { return false }
+        return switch state {
+        case let .ready(snapshot): snapshot.source.selection == selection
+        case let .completed(snapshot): snapshot.sessionID == selection.sessionID
+        case .unavailable, .preparing, .queued, .running, .cancelling,
+             .validating, .failed, .cancelled, .interrupted, .recoveryRequired:
+            false
+        }
+    }
+
+    private func exactSelectionCanRetry(
+        _ selection: SessionProcessingSelection
+    ) -> Bool {
+        guard lastSelection == selection,
+              selectedSource?.selection == selection,
+              advertisedRecoveryActions.contains(.retry)
+        else { return false }
+        return switch state {
+        case let .failed(snapshot):
+            snapshot.job.map { $0.sessionID == selection.sessionID } ?? true
+        case let .cancelled(snapshot), let .interrupted(snapshot):
+            snapshot.source.selection == selection
+                && snapshot.job.sessionID == selection.sessionID
+        case .unavailable, .ready, .preparing, .queued, .running, .cancelling,
+             .validating, .completed, .recoveryRequired:
+            false
+        }
+    }
+
+    private func exactRetranscriptionResult(
+        for selection: SessionProcessingSelection
+    ) -> SessionProcessingRetranscriptionResult {
+        switch state {
+        case let .completed(snapshot)
+            where lastSelection == selection
+                && snapshot.sessionID == selection.sessionID:
+            .completed
+        case .unavailable:
+            .unavailable
+        case .ready, .preparing, .queued, .running, .cancelling, .validating,
+             .completed, .failed, .cancelled, .interrupted, .recoveryRequired:
+            .failed
         }
     }
 

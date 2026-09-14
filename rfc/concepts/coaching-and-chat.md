@@ -7,21 +7,34 @@ one provider interface:
 
 ```swift
 protocol CoachProvider {
-    func descriptor() -> CoachProviderDescriptor
-    func health() async -> ProviderHealth
+    func health() async -> CoachProviderHealth
     func run(
         request: CoachRequest,
         execution: ProviderAttemptMetadata,
-        transcriptAccess: CoachTranscriptAccess
-    ) async throws -> CoachResponse
-    func cancel(attemptID: ProviderAttemptID) async
+        transcriptAccess: CoachTranscriptAccess?
+    ) async throws -> CoachProviderCompleteResponse
+    func cancelAndReap(
+        attemptID: CoachProviderAttemptID,
+        graceMilliseconds: Int64
+    ) async -> CoachProviderAttemptCancellationOutcome
 }
 ```
 
-The private build supplies one adapter: the ChatGPT-authenticated Codex CLI. A
-future provider must qualify against the same request, response, evidence, budget,
-and failure invariants before it becomes selectable. Presentation never invokes a
-provider or branches on its identity.
+The exact configuration binding includes the descriptor, provider/model/adapter
+identity, response-collector byte ceiling, every provider framing byte and hidden
+token allowance, inline-transcript threshold, and tokenizer identity and declared
+behavior. Context measurement freezes this whole binding into `CoachRequest`; the
+gateway rejects any unequal binding before request bytes or transcript capabilities
+reach a transport.
+
+Infrastructure qualification, rather than the transport itself, creates one
+immutable `QualifiedCoachProviderBundle` that binds that configuration to the exact
+admitted transport. Shipping composition currently installs an empty gateway and
+therefore fails closed. The intended version-one adapter is the
+ChatGPT-authenticated Codex CLI, but it cannot become selectable until qualification
+produces that bundle. A future provider plugs into the same bundle and must qualify
+against the same request, response, evidence, budget, cancellation, and failure
+invariants. Presentation never invokes a provider or branches on its identity.
 
 [`contracts.tsp`](../contracts/contracts.tsp) is the TypeSpec compilation entry
 point. The provider aggregate remains in `coach-provider.tsp`; app-only provider
@@ -44,12 +57,15 @@ Attempts, cancellation, and terminal failure creation. Chat, Proposal, and futur
 maintenance use cases submit stable entity IDs and an `InvocationIntent`; they do
 not duplicate these checks or construct provider DTOs.
 
-The #28 vertical slice implements `answerPendingUserTurn` with a bounded
-deterministic synthetic provider. It durably claims the rolling ledger, installs
-one portable Invocation, persists each fresh Provider Attempt before launch,
-retries transient failures on the 5/10/15-second schedule, permits at most one
-shorter complete repair, exposes exact process-live Stop authority for the current
-Attempt, and atomically publishes the two-message fake turn only while that
+The #28 vertical slice implements `answerPendingUserTurn` through the provider-
+neutral Application port. Production composition installs a qualification-gated
+gateway whose only executable input is a qualification-owned bundle; without one it
+fails closed, and deterministic transports exist only in tests. The coordinator
+durably claims the rolling ledger,
+installs one portable Invocation, persists each fresh Provider Attempt before
+launch, retries transient failures on the 5/10/15-second schedule, permits at most
+one shorter complete repair, exposes exact process-live Stop authority for the
+current Attempt, and atomically publishes the two-message turn only while that
 authority remains current. Its Attempt-scoped transcript broker serves one atomic,
 all-or-none on-demand read through fresh opaque handles and a hidden capability.
 It treats the complete provider result as opaque bytes until one whole-response

@@ -182,6 +182,38 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         XCTAssertNil(createdSeed)
     }
 
+    func testDeniedAttachmentBlocksWholeQuoteWithTypedPolicyReason() async throws {
+        let evidence = try attachmentEvidence(externalProcessingAllowed: false)
+        let attachment = ChatSessionAttachment(
+            attachmentID: try ChatSessionAttachmentID("policy-denied-session"),
+            sessionID: evidence.sessionID,
+            transcriptRevisionID: evidence.transcriptRevisionID
+        )
+        let attachments = try ChatAttachments(validating: [attachment])
+        let context = DefaultCoachContextFeature(
+            source: try KnownQualifiedProviderUnavailableCapacitySource(
+                contextWindow: 10_000
+            ),
+            attachmentEvidenceSource: AttachmentEvidenceSourceForFeature(
+                evidence: evidence
+            ),
+            configurationAuthorityID:
+                attachmentFeatureConfigurationStamp.authorityID
+        )
+        let request = try CoachContextNewChatQuoteRequest(
+            library: Self.scope,
+            attachments: attachments,
+            creationKind: .newChat
+        )
+
+        let outcome = await context.quoteNewChat(request)
+
+        XCTAssertEqual(
+            outcome,
+            .unavailable(.externalProcessingDisallowed)
+        )
+    }
+
     func testNewChatPreservesMissingQualifiedConfigurationAsSpecificRecovery()
         async throws
     {
@@ -543,7 +575,11 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
             source: source,
             store: store,
             coachContext: DefaultCoachContextFeature(
-                source: AttachmentCapacitySource(contextWindow: 20_000)
+                source: AttachmentCapacitySource(contextWindow: 20_000),
+                attachmentCapacityPreparer:
+                    AttachmentCapacityPreparerFixture(transcriptBytes: 32),
+                configurationAuthorityID:
+                    attachmentFeatureConfigurationStamp.authorityID
             )
         )
         await feature.send(.start(Self.context))
@@ -725,6 +761,10 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
                 attachmentSource: source,
                 base: DefaultCoachContextFeature(
                     source: capacity,
+                    attachmentCapacityPreparer:
+                        AttachmentCapacityPreparerFixture(
+                            transcriptBytes: 1_000
+                        ),
                     configurationAuthorityID:
                         attachmentFeatureConfigurationStamp.authorityID
                 )
@@ -761,7 +801,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         async throws
     {
         let evidence = try attachmentEvidence()
-        let authority = ChangingAttachmentConfigurationSource()
+        let authority = ChangingAttachmentConfigurationSource(evidence: evidence)
         let store = AttachmentChatStoreFixture()
         let feature = makeFeature(
             coordinatedContext: DefaultCoachContextFeature(
@@ -811,7 +851,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         )
         let coordinator = MismatchedAttachmentAuthorityFixture(
             attachmentSource: AttachmentSourceFixture(candidates: [candidate]),
-            base: previouslyQualifiedProviderUnavailableCoachContextFixture()
+            base: attachmentCapableProviderUnavailableCoachContextFixture()
         )
         let store = AttachmentChatStoreFixture()
         let feature = makeFeature(
@@ -881,7 +921,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
         source: any ChatSessionAttachmentSource,
         store: AttachmentChatStoreFixture = AttachmentChatStoreFixture(),
         coachContext: any CoachContextCoordinating =
-            previouslyQualifiedProviderUnavailableCoachContextFixture()
+            attachmentCapableProviderUnavailableCoachContextFixture()
     ) -> DefaultChatFeature {
         DefaultChatFeature(
             store: store,
@@ -946,7 +986,8 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
     }
 
     private func attachmentEvidence(
-        transcriptText: String = "hello"
+        transcriptText: String = "hello",
+        externalProcessingAllowed: Bool = true
     ) throws -> ChatAttachmentEvidence {
         let fingerprint = try AudioFingerprint(
             sha256: String(repeating: "a", count: 64)
@@ -961,7 +1002,7 @@ final class ChatSessionAttachmentFeatureTests: XCTestCase {
             coveredArtifacts: [.transcriptRevision],
             privateLocalUseAllowed: true,
             privateExportAllowed: true,
-            externalProcessingAllowed: false,
+            externalProcessingAllowed: externalProcessingAllowed,
             publicDistributionAllowed: false,
             commercialUseAllowed: false,
             licenseReference: "test-license",
@@ -1041,6 +1082,71 @@ private let attachmentFeatureEvidenceAuthority = ChatCreationEvidenceAuthority(
     testingValue: UUID(uuidString: "00000000-0000-0000-0000-000000000125")!
 )
 
+/// Test-only composition for picker scenarios that intentionally model a
+/// previously qualified provider outage while still preparing every exact
+/// selected attachment. The production default remains fail-closed.
+private func attachmentCapableProviderUnavailableCoachContextFixture()
+    -> DefaultCoachContextFeature
+{
+    let authorityID = attachmentFeatureConfigurationStamp.authorityID
+    return DefaultCoachContextFeature(
+        source: PreviouslyQualifiedProviderUnavailableSnapshotPort(),
+        attachmentCapacityPreparer: AttachmentCapacityPreparerFixture(
+            transcriptBytes: 32,
+            configuration: CoachContextConfigurationStamp(
+                authorityID: authorityID,
+                generation: 7
+            )
+        ),
+        configurationAuthorityID: authorityID
+    )
+}
+
+/// Exact capacity projection for the two focused tests whose snapshot source
+/// models selected attachment bytes directly. Every selected pin is represented
+/// in the prepared exchange; no attachment is accepted and then discarded.
+private struct AttachmentCapacityPreparerFixture:
+    ChatAttachmentCapacityPreparing
+{
+    let transcriptBytes: Int
+    let configuration: CoachContextConfigurationStamp
+
+    init(
+        transcriptBytes: Int,
+        configuration: CoachContextConfigurationStamp =
+            attachmentFeatureConfigurationStamp
+    ) {
+        self.transcriptBytes = transcriptBytes
+        self.configuration = configuration
+    }
+
+    func prepareCapacityAttachments(
+        _ attachments: ChatAttachments,
+        in library: LibraryScope
+    ) async -> ChatAttachmentCapacityPreparationOutcome {
+        let prepared = attachments.values.map { attachment in
+            PreparedCoachAttachment.inline(
+                requestValue: .object([
+                    "sessionAttachmentId": .string(
+                        attachment.attachmentID.rawValue
+                    ),
+                    "displayLabel": .string("Synthetic Session"),
+                    "transcript": .object([
+                        "text": .string(
+                            String(repeating: "x", count: transcriptBytes)
+                        ),
+                    ]),
+                ])
+            )
+        }
+        return .prepared(
+            prepared,
+            configuration: configuration,
+            evidenceAuthority: attachmentFeatureEvidenceAuthority
+        )
+    }
+}
+
 private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating {
     let attachmentSource: any ChatSessionAttachmentSource
     let base: any CoachContextCoordinating
@@ -1092,7 +1198,7 @@ private struct AttachmentBoundCoachContextFixture: ChatCoachContextCoordinating 
         guard authority.configuration == attachmentFeatureConfigurationStamp else {
             return .stale
         }
-        return .acquired(CoachContextAuthorityLease())
+        return .acquired(.testNoop)
     }
 
     func quoteNewChat(
@@ -1233,9 +1339,14 @@ private struct CapacityBoundCoachContextFixture: ChatCoachContextCoordinating {
 private actor ChangingAttachmentConfigurationSource:
     ProfileReconsiderationUnavailableCoachContextSnapshotPort
 {
+    private let evidence: ChatAttachmentEvidence
     private var configurationGeneration: UInt64 = 1
     private var activeLeaseID: UUID?
     private var advancementWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(evidence: ChatAttachmentEvidence) {
+        self.evidence = evidence
+    }
 
     func advanceConfiguration() async {
         if activeLeaseID != nil {
@@ -1263,48 +1374,26 @@ private actor ChangingAttachmentConfigurationSource:
     ) async -> CoachContextSnapshotOutcome {
         do {
             let policy = projectionPolicy()
-            let attachments = try request.attachments.values.map { attachment in
-                let handle = try PreparedCoachTranscriptHandle(
-                    "00000000-0000-0000-0000-000000000025"
-                )
-                if policy.maximumInlineTranscriptTokens == 15,
-                   configurationGeneration == 1
-                {
-                    return PreparedCoachAttachment.inline(
-                        requestValue: .object([
-                            "displayLabel": .string("Configuration rehearsal"),
-                            "kind": .string("inline"),
-                            "sessionAttachmentId": .string(
-                                attachment.attachmentID.rawValue
-                            ),
-                            "transcript": .object(["lines": .array([])]),
-                        ])
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+                attachments: request.attachments
+            )
+            let attachments = try request.attachments.values.enumerated().map {
+                index, attachment in
+                try policy.project(evidence: evidence).prepareAttachment(
+                    attachment: attachment,
+                    transcriptHandle: PreparedCoachTranscriptHandle(
+                        String(
+                            format: "00000000-0000-0000-0000-%012x",
+                            index + 1
+                        )
                     )
-                }
-                return PreparedCoachAttachment.onDemand(
-                    requestValue: .object([
-                        "displayLabel": .string("Configuration rehearsal"),
-                        "kind": .string("onDemand"),
-                        "sessionAttachmentId": .string(
-                            attachment.attachmentID.rawValue
-                        ),
-                        "sessionTranscriptHandle": .string(handle.rawValue),
-                    ]),
-                    sessionTranscriptHandle: handle,
-                    transcriptDisclosure: .object([
-                        "sessionAttachmentId": .string(
-                            attachment.attachmentID.rawValue
-                        ),
-                        "transcript": .object(["lines": .array([])]),
-                    ]),
-                    sourceAttachment: attachment,
-                    revisionSHA256: String(repeating: "1", count: 64)
                 )
             }
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object(["statements": .array([])]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -1321,11 +1410,9 @@ private actor ChangingAttachmentConfigurationSource:
                         ),
                         contextGeneration: 1,
                         configurationGeneration: configurationGeneration,
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -1409,7 +1496,7 @@ private actor ChangingAttachmentConfigurationSource:
                 providerIdentifier:
                     "configuration-(configurationGeneration)-fixture-v1",
                 responseCollectorByteCeiling: 8_192,
-                framing: CoachProviderFraming(),
+                framing: .testZero,
                 attachmentProjectionPolicy: policy
             )
         )
@@ -1516,7 +1603,7 @@ private actor MismatchedAttachmentAuthorityFixture:
         guard authority.configuration == (replaced ? replacementStamp : originalStamp) else {
             return .stale
         }
-        return .acquired(CoachContextAuthorityLease())
+        return .acquired(.testNoop)
     }
 
     func quoteNewChat(
@@ -1768,6 +1855,32 @@ private actor AttachmentCapacitySource:
     ) async -> CoachContextSnapshotOutcome {
         newChatResolutionCount += 1
         do {
+            let profileSnapshot = ProfileSnapshot(
+                revision: try ProfileRevision(
+                    revisionID: ProfileRevisionID(
+                        "prf-20260914T120000000Z-4GHJ"
+                    ),
+                    parentRevisionID: nil,
+                    generation: 1,
+                    statementGeneration: 1,
+                    createdAt: UTCInstant("2026-09-14T12:00:00.000Z"),
+                    statements: [
+                        try ProfileStatement(
+                            statementID: ProfileStatementID(
+                                "stm-20260914T120000000Z-5KMN"
+                            ),
+                            statementKind: .goal,
+                            wording: "Synthetic current Profile",
+                            supportingSessionCount: 0,
+                            evidence: []
+                        ),
+                    ]
+                )
+            )
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: profileSnapshot,
+                attachments: request.attachments
+            )
             let prepared = request.attachments.values.map { attachment in
                 PreparedCoachAttachment.inline(
                     requestValue: .object([
@@ -1782,14 +1895,7 @@ private actor AttachmentCapacitySource:
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object([
-                            "statements": .array([
-                                .object([
-                                    "id": .string("profile-statement-1"),
-                                    "wording": .string("Synthetic current Profile"),
-                                ]),
-                            ]),
-                        ]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -1810,7 +1916,7 @@ private actor AttachmentCapacitySource:
                         policy: CoachProviderEstimationPolicy(
                             providerIdentifier: "synthetic-fixture-v1",
                             responseCollectorByteCeiling: 8_192,
-                            framing: CoachProviderFraming(),
+                            framing: .testZero,
                             attachmentProjectionPolicy:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
@@ -1826,11 +1932,9 @@ private actor AttachmentCapacitySource:
                         ),
                         contextGeneration: contextGeneration,
                         configurationGeneration: 1,
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -1854,7 +1958,7 @@ private actor AttachmentCapacitySource:
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        await acquireImmutableAuthorityLease(authority)
+        await acquireTestImmutableAuthorityLease(authority)
     }
 }
 
@@ -1878,7 +1982,7 @@ private struct KnownQualifiedProviderUnavailableCapacitySource:
             policy: CoachProviderEstimationPolicy(
                 providerIdentifier: "previously-qualified-unavailable-v1",
                 responseCollectorByteCeiling: 8_192,
-                framing: CoachProviderFraming(),
+                framing: .testZero,
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: .utf8ByteUpperBound()
@@ -1928,6 +2032,6 @@ private struct KnownQualifiedProviderUnavailableCapacitySource:
         guard authority == .configuration(generation: configurationGeneration) else {
             return .stale
         }
-        return .acquired(CoachContextAuthorityLease())
+        return .acquired(.testNoop)
     }
 }

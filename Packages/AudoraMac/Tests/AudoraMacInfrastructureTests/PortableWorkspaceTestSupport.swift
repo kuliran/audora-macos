@@ -1,6 +1,6 @@
-@_spi(InvocationInfrastructure) import AudoraApplication
+@_spi(ChatCreationAuthorityTesting) @_spi(CoachContextQualification) @_spi(InvocationInfrastructure) import AudoraApplication
 import AudoraDomain
-@testable @_spi(InvocationInfrastructure) import AudoraMacInfrastructure
+@testable @_spi(CoachContextQualification) @_spi(InvocationInfrastructure) import AudoraMacInfrastructure
 import Foundation
 
 func withTemporaryParent(
@@ -47,6 +47,31 @@ func makeChatSeed(
     )
 }
 
+/// Creates setup state for persistence mutation scenarios through the same
+/// evidence-authorized product command used by Chat creation.
+func createAuthorizedChatForPersistenceScenario(
+    _ seed: NewChatSeed,
+    store: PortableChatStore,
+    workspace: PortableLibraryWorkspace
+) async -> ChatMutationOutcome {
+    let traversal = await PortableChatSessionAttachmentSource(
+        workspace: workspace
+    ).forEachResolvedEvidence(
+        seed.aggregate.chat.attachments,
+        in: seed.library
+    ) { _ in }
+    switch traversal {
+    case let .completedWithAuthority(authority):
+        return await store.create(
+            NewChatCommit(seed: seed, evidenceAuthority: authority)
+        )
+    case .readOnlyLibrary:
+        return .readOnlyLibrary
+    case .completed, .failed:
+        return .failed
+    }
+}
+
 func installRecordedChatAttachmentFixture(
     at root: URL,
     in scope: LibraryScope,
@@ -54,7 +79,8 @@ func installRecordedChatAttachmentFixture(
     recordingID: String = "rec-20260830T120000000Z-2ABC",
     sessionID: String = "ses-20260830T120000000Z-3DEF",
     revisionID: String = "trv-20260830T121000000Z-4FGH",
-    jobID: String = "job-20260830T120500000Z-5GHJ"
+    jobID: String = "job-20260830T120500000Z-5GHJ",
+    externalProcessingAllowed: Bool = true
 ) async throws -> ChatSessionAttachment {
     let instant = try UTCInstant("2026-08-30T12:00:00.000Z")
     let request = MicrophoneRecordingRequest(
@@ -83,7 +109,8 @@ func installRecordedChatAttachmentFixture(
     let revision = try makeFixtureTranscriptRevision(
         for: receipt,
         revisionID: revisionID,
-        jobID: jobID
+        jobID: jobID,
+        externalProcessingAllowed: externalProcessingAllowed
     )
     _ = try await PortableTranscriptRevisionRepository(
         root: root,
@@ -102,7 +129,8 @@ func installRecordedChatAttachmentFixture(
 private func makeFixtureTranscriptRevision(
     for receipt: SessionSealedReceipt,
     revisionID: String,
-    jobID: String
+    jobID: String,
+    externalProcessingAllowed: Bool
 ) throws -> TranscriptRevision {
     let range = try SessionTimeRange(
         startMilliseconds: 0,
@@ -114,7 +142,7 @@ private func makeFixtureTranscriptRevision(
         coveredArtifacts: [.transcriptRevision],
         privateLocalUseAllowed: true,
         privateExportAllowed: true,
-        externalProcessingAllowed: false,
+        externalProcessingAllowed: externalProcessingAllowed,
         publicDistributionAllowed: false,
         commercialUseAllowed: false,
         licenseReference: "fixture-license",
@@ -327,10 +355,15 @@ actor MemoryLocatorStore: MachineLibraryLocatorStoring {
 }
 
 actor RecordingRevealer: LibraryRevealing {
+    private let disposition: LibraryRevealRequestDisposition
     private(set) var revealedNames: [String] = []
 
-    func reveal(_ url: URL) async -> Bool {
+    init(disposition: LibraryRevealRequestDisposition = .accepted) {
+        self.disposition = disposition
+    }
+
+    func requestReveal(_ url: URL) async -> LibraryRevealRequestDisposition {
         revealedNames.append(url.lastPathComponent)
-        return true
+        return disposition
     }
 }

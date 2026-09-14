@@ -29,7 +29,7 @@ enum QualificationCLIIdentity {
         else {
             return unavailable
         }
-        return "\(components[0]) \(versionAndMetadata[0])"
+        return "\(components[0]) \(components[1])"
     }
 
     private static func isCanonicalVersion(_ value: String) -> Bool {
@@ -41,7 +41,18 @@ enum QualificationCLIIdentity {
         )
         return components.count == 2
             && ["codex", "codex-cli"].contains(String(components[0]))
-            && isNumericVersion(components[1])
+            && isCanonicalVersionComponent(components[1])
+    }
+
+    private static func isCanonicalVersionComponent(_ value: Substring) -> Bool {
+        let versionAndMetadata = value.split(
+            separator: "+",
+            omittingEmptySubsequences: false
+        )
+        return (versionAndMetadata.count == 1
+            || (versionAndMetadata.count == 2
+                && isValidBuildMetadata(versionAndMetadata[1])))
+            && isNumericVersion(versionAndMetadata[0])
     }
 
     private static func isNumericVersion(_ value: Substring) -> Bool {
@@ -397,8 +408,9 @@ public struct QualificationSuiteReport: Codable, Equatable, Sendable {
         externalLimitations = [
             "The qualified Codex CLI surface does not expose a provider-side max-output-token setting; the spike verifies reported usage and enforces a local byte collector ceiling.",
             "The shipping Codex CLI/model pair has no pinned exact tokenizer or documented complete model-framing count; the synthetic model-catalog context values are harness inputs, not a qualified context-window claim.",
-            "Codex CLI 0.143 always registers a model-facing ViewImage filesystem tool when an environment is present, exposes no supported removal switch, and omits image-view items from JSONL; therefore the exact production tool allowlist is not qualified.",
-            "Codex CLI 0.143 loads global instructions from CODEX_HOME, cannot disable view_image, and exposes token input only through a separate login process; a fresh isolated home therefore has no verified same-process ephemeral exec authorization path, so public qualification refuses before provider launch.",
+            "The recorded Codex CLI 0.143 probe did not establish an exact model-facing tool allowlist for an independently verified build; current configuration documentation alone is not runtime qualification.",
+            "Current Codex documentation defines same-process CODEX_ACCESS_TOKEN input, but no exact executable/runtime pair has been authorized and exercised from a clean isolated home.",
+            "An entry-executable hash does not bind macOS code-signing or quarantine state, non-system dynamic libraries, runtime-loaded code, or helper executables; authorized execution remains unavailable until one complete runtime authority preserves and verifies those controls.",
         ]
     }
 

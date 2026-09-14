@@ -598,7 +598,7 @@ public struct SessionProcessingJobInventory: Equatable, Sendable {
         reconciliationID: SessionProcessingReconciliationID,
         scope: LibraryScope,
         jobs: [SessionProcessingJob],
-        isComplete: Bool = true
+        isComplete: Bool
     ) {
         self.reconciliationID = reconciliationID
         self.scope = scope
@@ -732,6 +732,15 @@ public enum SessionProcessingFeatureState: Equatable, Sendable {
     /// Issue #16 owns deterministic reconciliation of these nonterminal jobs.
     /// Issue #15 only exposes the durable seam without inventing a transition.
     case recoveryRequired(SessionProcessingJob)
+}
+
+/// Terminal result of one exact-selection retranscription operation. A
+/// successful value means the same Session selected by the caller produced the
+/// completed durable Revision before pending context changes were replayed.
+public enum SessionProcessingRetranscriptionResult: Equatable, Sendable {
+    case completed
+    case unavailable
+    case failed
 }
 
 public enum SessionProcessingCommand: Equatable, Sendable {

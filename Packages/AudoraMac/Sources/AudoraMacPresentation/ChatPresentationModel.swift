@@ -86,8 +86,6 @@ struct ChatUnreadResponseTracker: Equatable {
 
 @MainActor
 public final class ChatPresentationModel: ObservableObject {
-    private static var lastIssuedCommandGeneration: UInt64 = 0
-
     @Published public private(set) var snapshot = ChatFeatureState()
     private(set) var unreadChatIDs: Set<ChatID> = []
     @Published public var filterText = ""
@@ -96,7 +94,7 @@ public final class ChatPresentationModel: ObservableObject {
     private let feature: any ApplicationCommandFeature
     private let dispatcher: ChatCommandDispatcher
     private let announcements: any AccessibilityAnnouncementPosting
-    private var startedLibrary: LibraryID?
+    private var startedActivation: LibraryActivation?
     private var commandContext: ChatCommandContext?
     private var projectedStateContext: ChatCommandContext?
     private var stateConsumer: Task<Void, Never>?
@@ -113,11 +111,14 @@ public final class ChatPresentationModel: ObservableObject {
         self.announcements = announcements ?? SystemAccessibilityAnnouncementPoster()
     }
 
-    public func start(in scope: LibraryScope) async {
+    public func start(in activation: LibraryActivation) async {
         guard !Task.isCancelled else { return }
-        guard startedLibrary != scope.libraryID else { return }
-        startedLibrary = scope.libraryID
-        let context = Self.issueCommandContext(for: scope)
+        guard startedActivation != activation else { return }
+        startedActivation = activation
+        let context = ChatCommandContext(
+            libraryScope: activation.scope,
+            generation: activation.generation
+        )
         commandContext = context
 
         stateConsumer?.cancel()
@@ -141,7 +142,9 @@ public final class ChatPresentationModel: ObservableObject {
             while !Task.isCancelled, let next = await states.next() {
                 guard context == commandContext else { return }
                 if projectedStateContext != context {
-                    guard await feature.currentChatState(in: scope) == next else { continue }
+                    guard await feature.currentChatState(in: context) == next else {
+                        continue
+                    }
                     guard context == commandContext, !Task.isCancelled else { return }
                     projectedStateContext = context
                 }
@@ -156,7 +159,7 @@ public final class ChatPresentationModel: ObservableObject {
                 consumer.cancel()
                 return
             }
-            if let current = await feature.currentChatState(in: scope) {
+            if let current = await feature.currentChatState(in: context) {
                 guard context == commandContext, !Task.isCancelled else {
                     consumer.cancel()
                     return
@@ -213,17 +216,6 @@ public final class ChatPresentationModel: ObservableObject {
         snapshot.indicators(
             for: row,
             isUnread: unreadChatIDs.contains(row.chatID)
-        )
-    }
-
-    private static func issueCommandContext(
-        for scope: LibraryScope
-    ) -> ChatCommandContext {
-        precondition(lastIssuedCommandGeneration < UInt64.max)
-        lastIssuedCommandGeneration += 1
-        return ChatCommandContext(
-            libraryScope: scope,
-            generation: lastIssuedCommandGeneration
         )
     }
 

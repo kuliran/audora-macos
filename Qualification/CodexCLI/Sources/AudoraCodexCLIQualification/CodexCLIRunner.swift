@@ -16,12 +16,14 @@ struct CodexCLIRunner: Sendable {
 
     func run(
         plan: CodexInvocationPlan,
+        executableArtifact: CodexCLIExecutableArtifact? = nil,
         limits: QualificationLimits = QualificationLimits(),
         control: CodexRunControl = CodexRunControl()
     ) -> CodexRunOutcome {
         let process = BoundedProcessHost().run(
             BoundedProcessRequest(
                 executableURL: plan.executableURL,
+                executableArtifact: executableArtifact,
                 arguments: plan.arguments,
                 environment: plan.environment,
                 workingDirectoryURL: plan.workingDirectoryURL,

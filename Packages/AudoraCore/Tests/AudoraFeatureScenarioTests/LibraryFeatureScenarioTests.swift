@@ -39,7 +39,7 @@ final class LibraryFeatureScenarioTests: XCTestCase {
             }
             let initial = await feature.currentState
             XCTAssertEqual(
-                initial,
+                initial.withoutProcessLocalActivation,
                 scenario.initialState.applicationState,
                 scenario.scenarioID
             )
@@ -50,7 +50,7 @@ final class LibraryFeatureScenarioTests: XCTestCase {
 
             let final = await feature.currentState
             XCTAssertEqual(
-                final,
+                final.withoutProcessLocalActivation,
                 scenario.expectedState.applicationState,
                 scenario.scenarioID
             )
@@ -85,6 +85,25 @@ final class LibraryFeatureScenarioTests: XCTestCase {
                     from: JSONSerialization.data(withJSONObject: object)
                 )
             )
+        )
+    }
+}
+
+private extension LibraryFeatureState {
+    /// Portable scenario contracts intentionally omit process-local activation
+    /// generations; focused Application tests verify that authority separately.
+    var withoutProcessLocalActivation: Self {
+        guard case let .active(snapshot) = selection else { return self }
+        return Self(
+            selection: .active(
+                ActiveLibrarySnapshot(
+                    libraryID: snapshot.libraryID,
+                    preferences: snapshot.preferences,
+                    profile: snapshot.profile
+                )
+            ),
+            activity: activity,
+            notice: notice
         )
     }
 }
@@ -354,8 +373,16 @@ private actor ScenarioWorkspace: LibraryWorkspacePort {
         await open(effect: "reopenRecentLibrary")
     }
 
-    func revealActiveLibrary() async -> LibraryActionOutcome {
-        await action(effect: "revealActiveLibrary")
+    func revealActiveLibrary() async -> LibraryRevealRequestOutcome {
+        guard let event = await recorder.consume(
+            port: "libraryWorkspace",
+            effect: "revealActiveLibrary"
+        ) else {
+            return .failed(.revealFailed)
+        }
+        return event.outcome == "succeeded"
+            ? .accepted
+            : .failed(event.notice ?? .revealFailed)
     }
 
     func closeActiveLibrary() async -> LibraryActionOutcome {

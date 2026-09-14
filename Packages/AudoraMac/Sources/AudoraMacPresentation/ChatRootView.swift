@@ -4,6 +4,16 @@ import AppKit
 import Foundation
 import SwiftUI
 
+struct LibraryActivationPresentationIdentity: Hashable {
+    let libraryID: LibraryID
+    let generation: UInt64
+
+    init(_ activation: LibraryActivation) {
+        libraryID = activation.scope.libraryID
+        generation = activation.generation
+    }
+}
+
 struct ChatRenameEditorTaskID: Hashable {
     let chatID: ChatID
     let manifestRevision: UInt64
@@ -946,19 +956,19 @@ public struct ChatRootView: View {
     @StateObject private var model: ChatPresentationModel
     @ObservedObject private var dispatcher: ChatCommandDispatcher
     @State private var renameTitle = ""
-    private let scope: LibraryScope
+    private let activation: LibraryActivation
     private let onOpenSession: (SessionID) -> Void
     private let onOpenEvidence: (EvidenceReference) -> Void
 
     public init(
         dispatcher: ChatCommandDispatcher,
-        scope: LibraryScope,
+        activation: LibraryActivation,
         onOpenSession: @escaping (SessionID) -> Void = { _ in },
         onOpenEvidence: @escaping (EvidenceReference) -> Void = { _ in }
     ) {
         _model = StateObject(wrappedValue: ChatPresentationModel(dispatcher: dispatcher))
         _dispatcher = ObservedObject(wrappedValue: dispatcher)
-        self.scope = scope
+        self.activation = activation
         self.onOpenSession = onOpenSession
         self.onOpenEvidence = onOpenEvidence
     }
@@ -1027,7 +1037,9 @@ public struct ChatRootView: View {
                     )
             }
         }
-        .task { await model.start(in: scope) }
+        .task(id: LibraryActivationPresentationIdentity(activation)) {
+            await model.start(in: activation)
+        }
         .sheet(isPresented: newChatSheetIsPresented) {
             newChatSheet
         }
@@ -1955,22 +1967,12 @@ public struct ChatRootView: View {
             Text("Choose any number of Sessions. The exact selected transcript revisions stay pinned to this Chat.")
                 .foregroundStyle(.secondary)
 
-            TextField(
-                "Search Sessions",
-                text: Binding(
-                    get: { model.newChatAttachmentFilterText },
-                    set: { model.updateNewChatAttachmentFilter($0) }
-                )
-            )
-            .textFieldStyle(.roundedBorder)
-            .accessibilityLabel("Search Sessions for New Chat")
-            .disabled(!newChatSheetInteractionPresentation.allowsControlInteraction)
-
             switch model.snapshot.newChatPicker {
             case .closed:
                 EmptyView()
             case .loading:
                 VStack {
+                    newChatSearchField
                     ProgressView("Loading Sessions…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     HStack {
@@ -1982,6 +1984,7 @@ public struct ChatRootView: View {
                 }
             case .failed:
                 VStack {
+                    newChatSearchField
                     ContentUnavailableView(
                         "Sessions Unavailable",
                         systemImage: "exclamationmark.bubble"
@@ -1994,44 +1997,35 @@ public struct ChatRootView: View {
                     }
                 }
             case let .ready(picker):
-                if picker.visibleRows.isEmpty {
-                    ContentUnavailableView(
-                        picker.allRows.isEmpty ? "No Sessions" : "No Matching Sessions",
-                        systemImage: "waveform"
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    List(picker.visibleRows) { row in
-                        Button {
-                            model.performNewChatAttachmentPickerAction(.toggle(row.id))
-                        } label: {
-                            HStack(alignment: .top, spacing: 12) {
-                                Image(
-                                    systemName: picker.selectedAttachmentIDs.contains(row.id)
-                                        ? "checkmark.circle.fill"
-                                        : "circle"
-                                )
-                                .accessibilityHidden(true)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(row.displayLabel)
-                                    HStack(spacing: 12) {
-                                        Text(Self.durationText(row.durationMilliseconds))
-                                        Text("~\(row.approximateTranscriptTokens) tokens")
-                                        Text(row.delivery == .inline ? "Inline" : "On demand")
-                                    }
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(
-                            "\(picker.selectedAttachmentIDs.contains(row.id) ? "Selected" : "Not selected"), \(row.displayLabel), \(Self.durationText(row.durationMilliseconds)), approximately \(row.approximateTranscriptTokens) transcript tokens, \(row.delivery == .inline ? "inline" : "on demand")"
+                SessionMultiSelectionShell(
+                    searchText: Binding(
+                        get: { model.newChatAttachmentFilterText },
+                        set: { model.updateNewChatAttachmentFilter($0) }
+                    ),
+                    searchAccessibilityLabel: "Search Sessions for New Chat",
+                    rows: picker.visibleRows.map { row in
+                        SessionMultiSelectionRow(
+                            id: row.id,
+                            title: row.displayLabel,
+                            metadata: "\(Self.durationText(row.durationMilliseconds)) · " +
+                                "~\(row.approximateTranscriptTokens) tokens · " +
+                                (row.delivery == .inline ? "Inline" : "On demand"),
+                            accessibilityLabel:
+                                "\(row.displayLabel), " +
+                                "\(Self.durationText(row.durationMilliseconds)), " +
+                                "approximately \(row.approximateTranscriptTokens) " +
+                                "transcript tokens, " +
+                                (row.delivery == .inline ? "inline" : "on demand")
                         )
-                    }
-                    .disabled(!newChatSheetInteractionPresentation.allowsControlInteraction)
+                    },
+                    hasAnyRows: !picker.allRows.isEmpty,
+                    selectedIDs: picker.selectedAttachmentIDs,
+                    controlsEnabled:
+                        newChatSheetInteractionPresentation.allowsControlInteraction
+                ) { attachmentID in
+                    model.performNewChatAttachmentPickerAction(
+                        .toggle(attachmentID)
+                    )
                 }
 
                 creationQuote(picker)
@@ -2097,6 +2091,19 @@ public struct ChatRootView: View {
         .interactiveDismissDisabled(
             newChatSheetInteractionPresentation.preventsInteractiveDismissal
         )
+    }
+
+    private var newChatSearchField: some View {
+        TextField(
+            "Search Sessions",
+            text: Binding(
+                get: { model.newChatAttachmentFilterText },
+                set: { model.updateNewChatAttachmentFilter($0) }
+            )
+        )
+        .textFieldStyle(.roundedBorder)
+        .accessibilityLabel("Search Sessions for New Chat")
+        .disabled(!newChatSheetInteractionPresentation.allowsControlInteraction)
     }
 
     private var newChatSheetInteractionPresentation: NewChatSheetInteractionPresentation {
@@ -2217,6 +2224,8 @@ public struct ChatRootView: View {
         case .inTrash: "in Trash"
         case .corrupt: "corrupt"
         case .unsupportedSchema: "requires a newer Audora version"
+        case .externalProcessingDisallowed:
+            "not permitted for external Coach processing"
         }
     }
 
@@ -2246,9 +2255,9 @@ public struct ChatRootView: View {
             ProgressView()
                 .controlSize(.small)
                 .accessibilityLabel("Estimating context capacity")
-        case .unavailable:
-            HStack(spacing: 4) {
-                Text("Capacity unavailable")
+        case let .unavailable(reason):
+            VStack(alignment: .leading, spacing: 4) {
+                Text(CoachContextUnavailablePresentation.recoveryText(for: reason))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("Refresh") { model.refreshContextQuote() }

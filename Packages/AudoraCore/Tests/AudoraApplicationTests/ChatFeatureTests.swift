@@ -369,8 +369,8 @@ final class ChatFeatureTests: XCTestCase {
         await feature.send(.start(Self.secondContext))
         await feature.send(.start(Self.context))
 
-        let currentSecondState = await feature.currentState(in: Self.secondScope)
-        let staleFirstState = await feature.currentState(in: Self.scope)
+        let currentSecondState = await feature.currentState(in: Self.secondContext)
+        let staleFirstState = await feature.currentState(in: Self.context)
         XCTAssertNotNil(currentSecondState)
         XCTAssertNil(staleFirstState)
         let loadedScopes = await store.loadedScopes
@@ -463,7 +463,8 @@ final class ChatFeatureTests: XCTestCase {
             coachContext: ChatFeatureBoundCoachContextFixture(
                 attachmentSource: EmptyChatAttachmentSource(),
                 base: DefaultCoachContextFeature(
-                    source: source,
+                    testSourceWithNoAttachments: source,
+                    configurationGeneration: 1,
                     configurationAuthorityID:
                         chatFeatureConfigurationStamp.authorityID
                 )
@@ -512,7 +513,8 @@ final class ChatFeatureTests: XCTestCase {
             coachContext: ChatFeatureBoundCoachContextFixture(
                 attachmentSource: EmptyChatAttachmentSource(),
                 base: DefaultCoachContextFeature(
-                    source: source,
+                    testSourceWithNoAttachments: source,
+                    configurationGeneration: 1,
                     configurationAuthorityID:
                         chatFeatureConfigurationStamp.authorityID
                 )
@@ -700,7 +702,9 @@ final class ChatFeatureTests: XCTestCase {
     func testConfigurationCannotAdvanceAcrossSuspendedCreateCommit() async throws {
         let coordinator = AdvancingConfigurationChatContextFixture(
             base: DefaultCoachContextFeature(
-                source: AlwaysFitCoachContextSnapshotPort()
+                testSourceWithNoAttachments:
+                    AlwaysFitCoachContextSnapshotPort(),
+                configurationGeneration: 1
             )
         )
         let store = SuspendedCreateStore(coordinator: coordinator)
@@ -1592,6 +1596,92 @@ final class ChatFeatureTests: XCTestCase {
         XCTAssertNil(state.notice)
         let calls = await store.calls
         XCTAssertEqual(calls, [.loadCatalog, .load, .saveDraft, .rename])
+    }
+
+    func testCatalogMutationPreparationFlushesDraftAndReloadClosesMovedChat()
+        async throws
+    {
+        let original = try Self.aggregate()
+        let store = RecordingChatStore(catalog: [.available(original)])
+        let scheduler = ControlledChatAutosaveScheduler()
+        let feature = makeFeature(store: store, autosaveScheduler: scheduler)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, original.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                original.chat.id,
+                original.chat.draft.draftID,
+                text: "Keep this Draft before moving the Chat."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+
+        let prepared = await feature.prepareForLibraryCatalogMutation(
+            for: LibraryActivation(scope: Self.scope, generation: 1)
+        )
+        await store.enqueueCatalog([])
+        await store.enqueueLoad(.missing)
+        let reloaded = await feature.reloadAfterLibraryCatalogMutation(
+            for: LibraryActivation(scope: Self.scope, generation: 1)
+        )
+
+        XCTAssertTrue(prepared)
+        XCTAssertTrue(reloaded)
+        let savedDrafts = await store.savedDrafts
+        XCTAssertEqual(savedDrafts.count, 1)
+        XCTAssertEqual(
+            savedDrafts.first?.replacement.text,
+            "Keep this Draft before moving the Chat."
+        )
+        let state = await feature.currentState
+        XCTAssertEqual(state.selection, .none)
+        XCTAssertEqual(try Self.rows(in: state).allRows, [])
+        let calls = await store.calls
+        XCTAssertEqual(
+            calls,
+            [.loadCatalog, .load, .saveDraft, .loadCatalog, .load]
+        )
+    }
+
+    func testCatalogMutationRejectsReplacementActivationBeforeFlushingOldContext()
+        async throws
+    {
+        let original = try Self.aggregate()
+        let store = RecordingChatStore(catalog: [.available(original)])
+        let scheduler = ControlledChatAutosaveScheduler()
+        let feature = makeFeature(store: store, autosaveScheduler: scheduler)
+        await feature.send(.start(Self.context))
+        await feature.send(.open(Self.context, original.chat.id))
+        await feature.send(
+            .editDraft(
+                Self.context,
+                original.chat.id,
+                original.chat.draft.draftID,
+                text: "This belongs only to activation 1."
+            )
+        )
+        await scheduler.waitUntilScheduled()
+        let replacement = LibraryActivation(scope: Self.scope, generation: 2)
+
+        let prepared = await feature.prepareForLibraryCatalogMutation(
+            for: replacement
+        )
+        let reloaded = await feature.reloadAfterLibraryCatalogMutation(
+            for: replacement
+        )
+
+        let savedDrafts = await store.savedDrafts
+        let calls = await store.calls
+        let state = await feature.currentState
+        XCTAssertFalse(prepared)
+        XCTAssertFalse(reloaded)
+        XCTAssertEqual(savedDrafts, [])
+        XCTAssertEqual(calls, [.loadCatalog, .load])
+        XCTAssertEqual(
+            Self.openAggregate(in: state)?.chat.id,
+            original.chat.id
+        )
     }
 
     func testFilterIsPureCaseAndDiacriticInsensitive() async throws {
@@ -2495,9 +2585,9 @@ final class ChatFeatureTests: XCTestCase {
         await gateway.resumeAdmissionRefresh()
         await sending
 
-        let oldContextState = await feature.currentState(in: Self.scope)
+        let oldContextState = await feature.currentState(in: Self.context)
         let replacementContextState = await feature.currentState(
-            in: Self.secondScope
+            in: Self.secondContext
         )
         XCTAssertNil(oldContextState)
         XCTAssertNotNil(replacementContextState)
@@ -3637,8 +3727,8 @@ final class ChatFeatureTests: XCTestCase {
         let stateWhileSaveIsPending = await feature.currentState
         XCTAssertEqual(Self.openAggregate(in: stateWhileSaveIsPending)?.chat.id,
                        aggregate.chat.id)
-        let oldScopedState = await feature.currentState(in: Self.scope)
-        let prematureNewState = await feature.currentState(in: Self.secondScope)
+        let oldScopedState = await feature.currentState(in: Self.context)
+        let prematureNewState = await feature.currentState(in: Self.secondContext)
         let loadedBeforeResume = await store.loadedScopes
         XCTAssertNotNil(oldScopedState)
         XCTAssertNil(prematureNewState)
@@ -5946,7 +6036,9 @@ final class ChatFeatureTests: XCTestCase {
         coachContext: any ChatCoachContextCoordinating = ChatFeatureBoundCoachContextFixture(
             attachmentSource: EmptyChatAttachmentSource(),
             base: DefaultCoachContextFeature(
-                source: AlwaysFitCoachContextSnapshotPort(),
+                testSourceWithNoAttachments:
+                    AlwaysFitCoachContextSnapshotPort(),
+                configurationGeneration: 1,
                 configurationAuthorityID:
                     chatFeatureConfigurationStamp.authorityID
             )
@@ -8413,10 +8505,14 @@ private struct AlwaysFitCoachContextSnapshotPort:
         _ request: CoachContextNewChatQuoteRequest
     ) async -> CoachContextSnapshotOutcome {
         do {
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+                attachments: request.attachments
+            )
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object(["statements": .array([])]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -8433,11 +8529,9 @@ private struct AlwaysFitCoachContextSnapshotPort:
                         ),
                         contextGeneration: 1,
                         configurationGeneration: 1,
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -8482,7 +8576,7 @@ private struct AlwaysFitCoachContextSnapshotPort:
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        await acquireImmutableAuthorityLease(authority)
+        await acquireTestImmutableAuthorityLease(authority)
     }
 
     private func snapshot(
@@ -8490,10 +8584,14 @@ private struct AlwaysFitCoachContextSnapshotPort:
         binding: CoachContextSnapshotBinding
     ) -> CoachContextSnapshotOutcome {
         do {
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+                attachments: .empty
+            )
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object(["statements": .array([])]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -8506,11 +8604,9 @@ private struct AlwaysFitCoachContextSnapshotPort:
                         binding: binding,
                         contextGeneration: 1,
                         configurationGeneration: 1,
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -8532,7 +8628,7 @@ private struct AlwaysFitCoachContextSnapshotPort:
             policy: CoachProviderEstimationPolicy(
                 providerIdentifier: "synthetic-chat-feature-v1",
                 responseCollectorByteCeiling: 8_192,
-                framing: CoachProviderFraming(),
+                framing: .testZero,
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: .utf8ByteUpperBound()
@@ -8574,12 +8670,15 @@ private actor GrowingNewChatProfileSnapshotPort:
         _ request: CoachContextNewChatQuoteRequest
     ) async -> CoachContextSnapshotOutcome {
         do {
+            let profileSnapshot = try currentProfileSnapshot()
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: profileSnapshot,
+                attachments: request.attachments
+            )
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object([
-                            "statements": .array([.string(profileText)]),
-                        ]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string(""),
                             "sessionSummaries": .array([]),
@@ -8596,11 +8695,9 @@ private actor GrowingNewChatProfileSnapshotPort:
                         ),
                         contextGeneration: contextGeneration,
                         configurationGeneration: configurationGeneration,
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -8668,6 +8765,31 @@ private actor GrowingNewChatProfileSnapshotPort:
         }
     }
 
+    private func currentProfileSnapshot() throws -> ProfileSnapshot {
+        ProfileSnapshot(
+            revision: try ProfileRevision(
+                revisionID: ProfileRevisionID(
+                    "prf-20260914T120000000Z-6PQR"
+                ),
+                parentRevisionID: nil,
+                generation: contextGeneration,
+                statementGeneration: contextGeneration,
+                createdAt: UTCInstant("2026-09-14T12:00:00.000Z"),
+                statements: [
+                    try ProfileStatement(
+                        statementID: ProfileStatementID(
+                            "stm-20260914T120000000Z-7STV"
+                        ),
+                        statementKind: .goal,
+                        wording: profileText,
+                        supportingSessionCount: 0,
+                        evidence: []
+                    ),
+                ]
+            )
+        )
+    }
+
     private func configuration() throws -> CoachContextConfiguration {
         try CoachContextConfiguration(
             descriptor: CoachProviderDescriptor(
@@ -8682,7 +8804,7 @@ private actor GrowingNewChatProfileSnapshotPort:
             policy: CoachProviderEstimationPolicy(
                 providerIdentifier: "growing-profile-fixture-v1",
                 responseCollectorByteCeiling: 8_192,
-                framing: CoachProviderFraming(),
+                framing: .testZero,
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: .utf8ByteUpperBound()

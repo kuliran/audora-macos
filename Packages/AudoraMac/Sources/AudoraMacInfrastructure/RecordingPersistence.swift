@@ -1605,12 +1605,9 @@ private extension RecordingPersistence {
             under: sessionDescriptor
         )
         defer { Darwin.close(audioDescriptor) }
-        let manifestData = try readBoundedRegular(
-            named: "audio.json",
-            under: audioDescriptor,
-            maximumBytes: 1_048_576
+        let audio = try decodeValidatedSealedAudioManifest(
+            underAudioDescriptor: audioDescriptor
         )
-        let dto = try decodeAndValidateAudioManifest(manifestData)
         let wavDescriptor = try openRegular(
             named: "audio.wav",
             under: audioDescriptor,
@@ -1619,15 +1616,44 @@ private extension RecordingPersistence {
         defer { Darwin.close(wavDescriptor) }
         guard validateCanonicalWAV(
             descriptor: wavDescriptor,
-            frameCount: dto.frameCount
+            frameCount: audio.frameCount
         ),
             try sha256OfRegular(
                 descriptor: wavDescriptor,
                 maximumBytes: CanonicalRecordingLimits.maximumFrames * 2 + 44
-            ) == dto.canonicalSha256
+            ) == audio.fingerprint.sha256
         else {
             throw RecordingPersistenceError.invalidStaging
         }
+        return audio
+    }
+
+    /// Reopens and validates the sealed Recording audio manifest without
+    /// requiring the canonical WAV to remain playable. Review uses this
+    /// metadata to verify an immutable Transcript Revision before independently
+    /// attempting to reopen playback evidence.
+    func loadValidatedSealedAudioManifestWithinFile(
+        under sessionDescriptor: Int32
+    ) throws -> SealedAudioAsset {
+        let audioDescriptor = try openDirectory(
+            components: ["audio"],
+            under: sessionDescriptor
+        )
+        defer { Darwin.close(audioDescriptor) }
+        return try decodeValidatedSealedAudioManifest(
+            underAudioDescriptor: audioDescriptor
+        )
+    }
+
+    func decodeValidatedSealedAudioManifest(
+        underAudioDescriptor audioDescriptor: Int32
+    ) throws -> SealedAudioAsset {
+        let manifestData = try readBoundedRegular(
+            named: "audio.json",
+            under: audioDescriptor,
+            maximumBytes: 1_048_576
+        )
+        let dto = try decodeAndValidateAudioManifest(manifestData)
         return try SealedAudioAsset(
             source: .microphone,
             format: .versionOne,
@@ -2221,6 +2247,14 @@ extension RecordingPersistence {
     /// Shared descriptor-confined Recording audio trust boundary.
     func loadValidatedSealedAudio(under sessionDescriptor: Int32) throws -> SealedAudioAsset {
         try loadValidatedSealedAudioWithinFile(under: sessionDescriptor)
+    }
+
+    /// Shared descriptor-confined Recording manifest boundary for degraded
+    /// transcript Review when canonical playback evidence is unavailable.
+    func loadValidatedSealedAudioManifest(
+        under sessionDescriptor: Int32
+    ) throws -> SealedAudioAsset {
+        try loadValidatedSealedAudioManifestWithinFile(under: sessionDescriptor)
     }
 }
 

@@ -383,6 +383,10 @@ struct CoachContextConfiguration: Sendable {
     let descriptor: CoachProviderDescriptor
     let policy: CoachProviderEstimationPolicy
 
+    var providerBinding: CoachProviderConfigurationBinding {
+        CoachProviderConfigurationBinding(descriptor: descriptor, policy: policy)
+    }
+
     init(
         descriptor: CoachProviderDescriptor,
         policy: CoachProviderEstimationPolicy

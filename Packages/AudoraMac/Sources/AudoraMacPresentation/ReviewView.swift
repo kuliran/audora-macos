@@ -80,13 +80,13 @@ public struct ReviewView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 10) {
                 Button {
-                    snapshot.playback.status == .playing
+                    snapshot.playback?.status == .playing
                         ? model.pause()
                         : model.play()
                 } label: {
                     Label(
-                        snapshot.playback.status == .playing ? "Pause" : "Play",
-                        systemImage: snapshot.playback.status == .playing
+                        snapshot.playback?.status == .playing ? "Pause" : "Play",
+                        systemImage: snapshot.playback?.status == .playing
                             ? "pause.fill"
                             : "play.fill"
                     )
@@ -101,19 +101,27 @@ public struct ReviewView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Canonical audio")
                         .font(.caption.weight(.semibold))
-                    Text(
-                        "\(format(snapshot.playback.positionMilliseconds)) / " +
-                            format(snapshot.playback.durationMilliseconds)
-                    )
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    if let playback = snapshot.playback {
+                        Text(
+                            "\(format(playback.positionMilliseconds)) / " +
+                                format(playback.durationMilliseconds)
+                        )
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    } else {
+                        Text("Unavailable")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
-                ProgressView(
-                    value: Double(snapshot.playback.positionMilliseconds),
-                    total: Double(snapshot.playback.durationMilliseconds)
-                )
-                .accessibilityLabel("Playback position")
+                if let playback = snapshot.playback {
+                    ProgressView(
+                        value: Double(playback.positionMilliseconds),
+                        total: Double(playback.durationMilliseconds)
+                    )
+                    .accessibilityLabel("Playback position")
+                }
 
                 Spacer(minLength: 8)
 
@@ -155,7 +163,19 @@ public struct ReviewView: View {
                 .disabled(snapshot.activity != nil)
 
                 Button("Retranscribe") { model.retranscribe() }
-                    .disabled(snapshot.activity != nil)
+                    .disabled(
+                        !ReviewPresentationModel.isRetranscriptionControlEnabled(
+                            retranscriptionAvailable:
+                                snapshot.retranscriptionAvailable,
+                            activity: snapshot.activity
+                        )
+                    )
+                    .accessibilityHint(
+                        snapshot.retranscriptionAvailable
+                            ? ""
+                            : "Canonical audio is unavailable; the preserved " +
+                                "transcript cannot be retranscribed."
+                    )
             }
 
             if let activity = snapshot.activity {
@@ -173,7 +193,8 @@ public struct ReviewView: View {
                 activeWordID: snapshot.activeWordID,
                 evidenceHighlight: snapshot.evidenceHighlight,
                 annotations: snapshot.annotations,
-                allowsSeeking: snapshot.activity == nil
+                allowsSeeking: snapshot.activity == nil &&
+                    snapshot.playbackAvailable
             ) { lineID, utf8ByteOffset in
                 model.seek(lineID: lineID, utf8ByteOffset: utf8ByteOffset)
             }

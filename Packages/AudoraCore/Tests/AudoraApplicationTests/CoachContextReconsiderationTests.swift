@@ -1,4 +1,4 @@
-@testable @_spi(CoachContextQualification) import AudoraApplication
+@testable @_spi(CoachContextQualification) @_spi(InvocationInfrastructure) import AudoraApplication
 import AudoraDomain
 import XCTest
 
@@ -565,6 +565,10 @@ private actor ReconsiderContextSnapshotPort: CoachContextSnapshotPort {
                 reconsidering: request,
                 attachments: prepared
             )
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: request.basis.latestProfile,
+                attachments: attachments
+            )
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: input,
@@ -573,8 +577,9 @@ private actor ReconsiderContextSnapshotPort: CoachContextSnapshotPort {
                         binding: request.snapshotBinding,
                         contextGeneration: 11,
                         configurationGeneration: 7,
-                        profile: request.basis.latestProfile.provenance
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -590,7 +595,7 @@ private actor ReconsiderContextSnapshotPort: CoachContextSnapshotPort {
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        await acquireImmutableAuthorityLease(authority)
+        await acquireTestImmutableAuthorityLease(authority)
     }
 
     private static let configuration = try! CoachContextConfiguration(
@@ -606,7 +611,7 @@ private actor ReconsiderContextSnapshotPort: CoachContextSnapshotPort {
         policy: CoachProviderEstimationPolicy(
             providerIdentifier: "synthetic-reconsider-v1",
             responseCollectorByteCeiling: 100_000,
-            framing: CoachProviderFraming(),
+            framing: .testZero,
             attachmentProjectionPolicy: try! CoachAttachmentProjectionPolicy(
                 maximumInlineTranscriptTokens: 100_000,
                 tokenEstimator: .utf8ByteUpperBound()

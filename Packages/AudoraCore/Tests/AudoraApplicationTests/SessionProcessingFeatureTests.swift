@@ -33,6 +33,7 @@ final class SessionProcessingFeatureTests: XCTestCase {
         let model = ModelProbe(.ready)
         let jobs = JobProbe()
         let revisions = RevisionProbe()
+        let catalogMutations = SessionCatalogMutationRecorder()
         let engine = EngineProbe(
             result: .success(
                 VerifiedTranscriptionCandidate(
@@ -53,7 +54,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
             identifiers: FixedProcessingIdentifiers(
                 jobID: fixture.jobID,
                 revisionID: fixture.revisionID
-            )
+            ),
+            catalogMutationPublisher: catalogMutations
         )
 
         await feature.send(.selectSession(fixture.selection))
@@ -72,6 +74,82 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(engineRequests.count, 1)
         XCTAssertEqual(publishCount, 1)
         XCTAssertEqual(selectedRevisionID, fixture.revisionID)
+        let commits = await catalogMutations.commits
+        XCTAssertEqual(
+            commits,
+            [
+                LibraryCatalogMutationCommit(
+                    expectedScope: fixture.selection.scope,
+                    mutation: .selectedTranscript(
+                        sessionID: fixture.selection.sessionID,
+                        revisionID: fixture.revisionID
+                    ),
+                    confirmation: .confirmed
+                ),
+            ]
+        )
+    }
+
+    func testExactRetranscriptionCannotBeRedirectedByInterleavingSelection()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let otherSelection = SessionProcessingSelection(
+            scope: fixture.selection.scope,
+            sessionID: try SessionID("ses-20260830T120200000Z-3DEF")
+        )
+        let otherSource = SessionTranscriptionSource(
+            selection: otherSelection,
+            audioCapabilityID: try SessionTranscriptionAudioCapabilityID(
+                "cap-other-synthetic-source"
+            ),
+            durationMilliseconds: fixture.source.durationMilliseconds,
+            audioFingerprint: fixture.source.audioFingerprint,
+            sourceFingerprints: fixture.source.sourceFingerprints,
+            expectedSelectedRevisionID: nil
+        )
+        let source = SuspendedSelectionSourceProbe(
+            first: fixture.source,
+            second: otherSource
+        )
+        let engine = EngineProbe(
+            result: .success(
+                VerifiedTranscriptionCandidate(
+                    candidate: fixture.candidate,
+                    artifactFingerprint: fixture.candidateFingerprint
+                )
+            )
+        )
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: JobProbe(),
+            engine: engine,
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+
+        let retranscription = Task {
+            await feature.retranscribeExactly(fixture.selection)
+        }
+        await source.waitUntilFirstLoadStarts()
+        await feature.send(.selectSession(otherSelection))
+        await source.releaseFirstLoad()
+
+        let result = await retranscription.value
+        XCTAssertEqual(result, .completed)
+        let requests = await engine.requests
+        XCTAssertEqual(requests.map(\.selection), [fixture.selection])
+        guard case let .ready(ready) = await feature.currentState else {
+            return XCTFail("expected the interleaving selection to replay after completion")
+        }
+        XCTAssertEqual(ready.source.selection, otherSelection)
     }
 
     func testLoadingIsIndeterminateAndWindowProgressNeverRegressesWhileETAMayRise()
@@ -602,7 +680,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: activationScope,
-                    jobs: [abandoned]
+                    jobs: [abandoned],
+                    isComplete: true
                 )
             )
         )
@@ -682,7 +761,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: activationScope,
-                    jobs: [abandoned]
+                    jobs: [abandoned],
+                    isComplete: true
                 )
             ),
             failingCancellationRequestCount: 1
@@ -962,7 +1042,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: [queued]
+                        jobs: [queued],
+                        isComplete: true
                     )
                 ),
                 tracksLatestWrites: true
@@ -1007,6 +1088,106 @@ final class SessionProcessingFeatureTests: XCTestCase {
         XCTAssertEqual(snapshot.reason, .jobIndexUnavailable)
         let reserved = await feature.reserveLibraryNavigation()
         XCTAssertFalse(reserved)
+    }
+
+    func testCatalogSessionLeaseClearsTargetAndRebindsOnlyFromAuthoritativeCatalog()
+        async throws
+    {
+        let fixture = try ProcessingFixture()
+        let activation = LibraryActivation(
+            scope: fixture.selection.scope,
+            generation: 1
+        )
+        let reconciliationID = try SessionProcessingReconciliationID(
+            "reconcile-catalog-session-lease"
+        )
+        let source = SourceProbe(.available(fixture.source))
+        let feature = DefaultSessionProcessingFeature(
+            source: source,
+            runtime: RuntimeProbe(.qualified(fixture.profile)),
+            model: ModelProbe(.ready),
+            acoustics: AcousticProbe(fixture.evidence),
+            jobs: JobProbe(
+                inventoryResult: .available(
+                    SessionProcessingJobInventory(
+                        reconciliationID: reconciliationID,
+                        scope: fixture.selection.scope,
+                        jobs: [],
+                        isComplete: true
+                    )
+                )
+            ),
+            engine: EngineProbe(result: .failure(.launchFailed)),
+            publisher: TranscriptRevisionPublisher(repository: RevisionProbe()),
+            clock: FixedProcessingClock(fixture.createdAt),
+            identifiers: FixedProcessingIdentifiers(
+                jobID: fixture.jobID,
+                revisionID: fixture.revisionID
+            )
+        )
+        await feature.activateLibrary(activation)
+        await feature.send(.selectSession(fixture.selection))
+        let mutation = LibraryCatalogSessionMutation(
+            activation: activation,
+            sessionIDs: [fixture.selection.sessionID]
+        )
+
+        let reservedAbortLease = await feature
+            .reserveLibraryCatalogSessionMutation(mutation)
+        let abortLease = try XCTUnwrap(reservedAbortLease)
+        guard case let .unavailable(cleared) = await feature.currentState else {
+            return XCTFail("reservation must clear targeted processing state")
+        }
+        XCTAssertNil(cleared.selection)
+        await feature.send(.selectSession(fixture.selection))
+        guard case .unavailable = await feature.currentState else {
+            return XCTFail("racing Select must remain fenced")
+        }
+        let didAbort = await feature.finishLibraryCatalogSessionMutation(
+            abortLease,
+            completion: .aborted
+        )
+        XCTAssertEqual(didAbort, .consumed)
+        let repeatedAbort = await feature.finishLibraryCatalogSessionMutation(
+            abortLease,
+            completion: .aborted
+        )
+        XCTAssertEqual(repeatedAbort, .notOwned)
+        guard case let .ready(restored) = await feature.currentState else {
+            return XCTFail("an aborted mutation must rebind the prior Session")
+        }
+        XCTAssertEqual(restored.source.selection, fixture.selection)
+
+        let reservedMoveLease = await feature
+            .reserveLibraryCatalogSessionMutation(mutation)
+        let moveLease = try XCTUnwrap(reservedMoveLease)
+        let didFinishMove = await feature.finishLibraryCatalogSessionMutation(
+            moveLease,
+            completion: .completed(
+                .available(
+                    LibraryCatalogSnapshot(
+                        active: [],
+                        trash: [
+                            .session(
+                                fixture.selection.sessionID,
+                                LibrarySessionCatalogMetadata(
+                                    acquisition: .recorded,
+                                    createdAt: try UTCInstant(
+                                        "2026-08-30T12:00:00.000Z"
+                                    ),
+                                    hasSelectedTranscript: true
+                                )
+                            ),
+                        ]
+                    )
+                )
+            )
+        )
+        XCTAssertEqual(didFinishMove, .consumed)
+        guard case let .unavailable(moved) = await feature.currentState else {
+            return XCTFail("a moved Session must not retain processing state")
+        }
+        XCTAssertNil(moved.selection)
     }
 
     func testMissingModelCanBePreparedThenStartedWithoutChangingEngine() async throws {
@@ -1588,7 +1769,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     scope: fixture.selection.scope,
                     // Deliberately reverse Session order: recovered routing must
                     // not depend on repository inventory order.
-                    jobs: [secondJob, firstJob]
+                    jobs: [secondJob, firstJob],
+                    isComplete: true
                 )
             )
         )
@@ -1680,7 +1862,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: [recoveredJob]
+                        jobs: [recoveredJob],
+                        isComplete: true
                     )
                 )
             ),
@@ -1734,7 +1917,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: [running, newer]
+                        jobs: [running, newer],
+                        isComplete: true
                     )
                 )
             )
@@ -1813,7 +1997,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: fixture.selection.scope,
-                    jobs: [olderRunning, completed]
+                    jobs: [olderRunning, completed],
+                    isComplete: true
                 )
             )
         )
@@ -1892,7 +2077,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: [running]
+                        jobs: [running],
+                        isComplete: true
                     )
                 ),
                 tracksLatestWrites: true
@@ -2017,7 +2203,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: []
+                        jobs: [],
+                        isComplete: true
                     )
                 ),
             ]
@@ -2064,7 +2251,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: []
+                        jobs: [],
+                        isComplete: true
                     )
                 ),
             ]
@@ -2119,7 +2307,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: []
+                        jobs: [],
+                        isComplete: true
                     )
                 ),
             ]
@@ -2229,7 +2418,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                             "reconcile-library-block-after-clear"
                         ),
                         scope: fixture.selection.scope,
-                        jobs: []
+                        jobs: [],
+                        isComplete: true
                     )
                 ),
             ]
@@ -2337,7 +2527,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: []
+                        jobs: [],
+                        isComplete: true
                     )
                 ),
                 .integrityMismatch,
@@ -2553,7 +2744,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: fixture.selection.scope,
-                    jobs: []
+                    jobs: [],
+                    isComplete: true
                 )
             ),
             secondResult: .integrityMismatch
@@ -2609,7 +2801,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: []
+                        jobs: [],
+                        isComplete: true
                     )
                 ),
                 .unavailable,
@@ -2725,7 +2918,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: fixture.selection.scope,
-                    jobs: [validating]
+                    jobs: [validating],
+                    isComplete: true
                 )
             )
         )
@@ -3225,7 +3419,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: fixture.selection.scope,
-                    jobs: [running]
+                    jobs: [running],
+                    isComplete: true
                 )
             )
         )
@@ -3283,7 +3478,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: fixture.selection.scope,
-                    jobs: [validRunning, conflictingRunning, conflictingFailed]
+                    jobs: [validRunning, conflictingRunning, conflictingFailed],
+                    isComplete: true
                 )
             )
         )
@@ -3535,7 +3731,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: fixture.selection.scope,
-                    jobs: [validRunning] + Array(repeating: terminal, count: 10_000)
+                    jobs: [validRunning] + Array(repeating: terminal, count: 10_000),
+                    isComplete: true
                 )
             )
         )
@@ -3595,7 +3792,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: fixture.selection.scope,
-                    jobs: [validating]
+                    jobs: [validating],
+                    isComplete: true
                 )
             )
         )
@@ -3661,7 +3859,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: [validating]
+                        jobs: [validating],
+                        isComplete: true
                     )
                 )
             )
@@ -3731,7 +3930,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: fixture.selection.scope,
-                    jobs: [completed] + otherTerminalJobs
+                    jobs: [completed] + otherTerminalJobs,
+                    isComplete: true
                 )
             )
         )
@@ -3809,7 +4009,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: [job]
+                        jobs: [job],
+                        isComplete: true
                     )
                 )
             )
@@ -4251,7 +4452,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                 SessionProcessingJobInventory(
                     reconciliationID: reconciliationID,
                     scope: fixture.selection.scope,
-                    jobs: [completed]
+                    jobs: [completed],
+                    isComplete: true
                 )
             )
         )
@@ -4360,7 +4562,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
                     SessionProcessingJobInventory(
                         reconciliationID: reconciliationID,
                         scope: fixture.selection.scope,
-                        jobs: [legacyJob]
+                        jobs: [legacyJob],
+                        isComplete: true
                     )
                 )
             ),
@@ -5202,6 +5405,7 @@ final class SessionProcessingFeatureTests: XCTestCase {
             .available(fixture.source),
             .available(refreshedSource),
         ])
+        let catalogMutations = SessionCatalogMutationRecorder()
         let jobs = JobProbe(tracksLatestWrites: true)
         let revisions = InstalledNeedsRefreshRevisionProbe()
         let engine = EngineProbe(
@@ -5224,7 +5428,8 @@ final class SessionProcessingFeatureTests: XCTestCase {
             identifiers: FixedProcessingIdentifiers(
                 jobID: fixture.jobID,
                 revisionID: fixture.revisionID
-            )
+            ),
+            catalogMutationPublisher: catalogMutations
         )
 
         await feature.send(.selectSession(fixture.selection))
@@ -5234,6 +5439,20 @@ final class SessionProcessingFeatureTests: XCTestCase {
         }
         XCTAssertEqual(authoritative.state, .validating)
         XCTAssertEqual(authoritative.jobID, fixture.jobID)
+        let commits = await catalogMutations.commits
+        XCTAssertEqual(
+            commits,
+            [
+                LibraryCatalogMutationCommit(
+                    expectedScope: fixture.selection.scope,
+                    mutation: .selectedTranscript(
+                        sessionID: fixture.selection.sessionID,
+                        revisionID: fixture.revisionID
+                    ),
+                    confirmation: .installedNeedsRefresh
+                ),
+            ]
+        )
 
         // Recovery authority is not a retranscription affordance. A stale or
         // programmatic Retry must remain inert until a fresh sealed-source read.
@@ -5892,7 +6111,8 @@ private actor ActivationTransitionProbe: SessionProcessingJobPort {
             SessionProcessingJobInventory(
                 reconciliationID: reconciliationID,
                 scope: scope,
-                jobs: [inventoried]
+                jobs: [inventoried],
+                isComplete: true
             )
         )
     }
@@ -5969,7 +6189,8 @@ private actor ActivationWinnerProbe: SessionProcessingJobPort {
             SessionProcessingJobInventory(
                 reconciliationID: reconciliationID,
                 scope: scope,
-                jobs: [inventoried]
+                jobs: [inventoried],
+                isComplete: true
             )
         )
     }
@@ -6021,7 +6242,9 @@ private actor ActivationWinnerProbe: SessionProcessingJobPort {
     }
 }
 
-private actor SequencedInventoryJobProbe: SessionProcessingJobPort {
+private actor SequencedInventoryJobProbe:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     private var inventoryResults: [SessionProcessingJobInventoryResult]
     private var current: SessionProcessingJob?
 
@@ -6072,7 +6295,9 @@ private actor SequencedInventoryJobProbe: SessionProcessingJobPort {
     }
 }
 
-private actor SupersededInventoryFailureJobProbe: SessionProcessingJobPort {
+private actor SupersededInventoryFailureJobProbe:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     private let scope: LibraryScope
     private let firstResult: SessionProcessingJobInventoryResult
     private let secondResult: SessionProcessingJobInventoryResult
@@ -6094,7 +6319,8 @@ private actor SupersededInventoryFailureJobProbe: SessionProcessingJobPort {
             SessionProcessingJobInventory(
                 reconciliationID: reconciliationID,
                 scope: scope,
-                jobs: []
+                jobs: [],
+                isComplete: true
             )
         )
     }
@@ -6161,7 +6387,9 @@ private actor SupersededInventoryFailureJobProbe: SessionProcessingJobPort {
     }
 }
 
-private actor SuspendedInventoryResultJobProbe: SessionProcessingJobPort {
+private actor SuspendedInventoryResultJobProbe:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     private let scope: LibraryScope
     private let result: SessionProcessingJobInventoryResult
     private var inventoryContinuation: CheckedContinuation<Void, Never>?
@@ -6220,7 +6448,9 @@ private actor SuspendedInventoryResultJobProbe: SessionProcessingJobPort {
     }
 }
 
-private actor SuspendedActivationGenerationJobProbe: SessionProcessingJobPort {
+private actor SuspendedActivationGenerationJobProbe:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     private let scope: LibraryScope
     private let firstReconciliationID: SessionProcessingReconciliationID
     private let secondReconciliationID: SessionProcessingReconciliationID
@@ -6259,7 +6489,8 @@ private actor SuspendedActivationGenerationJobProbe: SessionProcessingJobPort {
                 SessionProcessingJobInventory(
                     reconciliationID: firstReconciliationID,
                     scope: scope,
-                    jobs: []
+                    jobs: [],
+                    isComplete: true
                 )
             )
         case 2:
@@ -6269,7 +6500,8 @@ private actor SuspendedActivationGenerationJobProbe: SessionProcessingJobPort {
                 SessionProcessingJobInventory(
                     reconciliationID: secondReconciliationID,
                     scope: scope,
-                    jobs: []
+                    jobs: [],
+                    isComplete: true
                 )
             )
         default:
@@ -6425,7 +6657,9 @@ private actor JobProbe: SessionProcessingJobPort {
     }
 }
 
-private actor DurableActivationJobProbe: SessionProcessingJobPort {
+private actor DurableActivationJobProbe:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     private let scope: LibraryScope
     private let reconciliationID: SessionProcessingReconciliationID
     private var durable: SessionProcessingJob
@@ -6449,7 +6683,8 @@ private actor DurableActivationJobProbe: SessionProcessingJobPort {
             SessionProcessingJobInventory(
                 reconciliationID: reconciliationID,
                 scope: scope,
-                jobs: [durable]
+                jobs: [durable],
+                isComplete: true
             )
         )
     }
@@ -6491,7 +6726,9 @@ private actor DurableActivationJobProbe: SessionProcessingJobPort {
     }
 }
 
-private actor NestedValidationWinnerJobProbe: SessionProcessingJobPort {
+private actor NestedValidationWinnerJobProbe:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     private var durable: SessionProcessingJob
     private let winner: SessionProcessingJob
     private(set) var exactLoadCount = 0
@@ -6534,7 +6771,9 @@ private actor NestedValidationWinnerJobProbe: SessionProcessingJobPort {
     }
 }
 
-private actor NestedControlWinnerJobProbe: SessionProcessingJobPort {
+private actor NestedControlWinnerJobProbe:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     private var exact: SessionProcessingJob
     private var exactWinners: [SessionProcessingJob]
     private let ambientLatest: SessionProcessingJob
@@ -6607,7 +6846,9 @@ private actor NestedControlWinnerJobProbe: SessionProcessingJobPort {
     }
 }
 
-private actor CancellationFinalWinnerJobProbe: SessionProcessingJobPort {
+private actor CancellationFinalWinnerJobProbe:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     private var durable: SessionProcessingJob?
     private let exactWinner: SessionProcessingJob
     private let ambientLatest: SessionProcessingJob
@@ -6663,7 +6904,9 @@ private actor CancellationFinalWinnerJobProbe: SessionProcessingJobPort {
     }
 }
 
-private actor CandidateWinsCancellationJobProbe: SessionProcessingJobPort {
+private actor CandidateWinsCancellationJobProbe:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     private var durable: SessionProcessingJob?
     private let newerLatest: SessionProcessingJob?
     private let validationWinner: SessionProcessingJob?
@@ -6749,7 +6992,9 @@ private actor CandidateWinsCancellationJobProbe: SessionProcessingJobPort {
     }
 }
 
-private actor FailureCancellationRaceJobProbe: SessionProcessingJobPort {
+private actor FailureCancellationRaceJobProbe:
+    SessionProcessingJobPortWithoutRetainedReconciliationLease
+{
     private let order: FailureCancellationRaceOrder
     private let newerLatest: SessionProcessingJob
     private var durable: SessionProcessingJob?
@@ -7537,6 +7782,16 @@ private actor InstalledNeedsRefreshRevisionProbe: TranscriptRevisionRepository {
 
     func select(_ revision: TranscriptRevision) {
         selected = revision
+    }
+}
+
+private actor SessionCatalogMutationRecorder:
+    LibraryCatalogMutationCommitPublishing
+{
+    private(set) var commits: [LibraryCatalogMutationCommit] = []
+
+    func publish(_ commit: LibraryCatalogMutationCommit) {
+        commits.append(commit)
     }
 }
 

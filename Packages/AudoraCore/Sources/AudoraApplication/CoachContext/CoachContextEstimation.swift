@@ -330,17 +330,17 @@ public struct CoachProviderFraming: Equatable, Sendable {
     public let minimumResponseHiddenTokens: Int
 
     public init(
-        initialRequestPrefix: Data = Data(),
-        initialRequestSuffix: Data = Data(),
-        transcriptReadRequestPrefix: Data = Data(),
-        transcriptReadRequestSuffix: Data = Data(),
-        transcriptReadResponsePrefix: Data = Data(),
-        transcriptReadResponseSuffix: Data = Data(),
-        minimumResponsePrefix: Data = Data(),
-        minimumResponseSuffix: Data = Data(),
-        initialRequestHiddenTokens: Int = 0,
-        transcriptReadExchangeHiddenTokens: Int = 0,
-        minimumResponseHiddenTokens: Int = 0
+        initialRequestPrefix: Data,
+        initialRequestSuffix: Data,
+        transcriptReadRequestPrefix: Data,
+        transcriptReadRequestSuffix: Data,
+        transcriptReadResponsePrefix: Data,
+        transcriptReadResponseSuffix: Data,
+        minimumResponsePrefix: Data,
+        minimumResponseSuffix: Data,
+        initialRequestHiddenTokens: Int,
+        transcriptReadExchangeHiddenTokens: Int,
+        minimumResponseHiddenTokens: Int
     ) {
         self.initialRequestPrefix = initialRequestPrefix
         self.initialRequestSuffix = initialRequestSuffix
@@ -377,6 +377,41 @@ public struct CoachProviderEstimationPolicy: Sendable {
         self.responseCollectorByteCeiling = responseCollectorByteCeiling
         self.framing = framing
         self.attachmentProjectionPolicy = attachmentProjectionPolicy
+    }
+}
+
+/// Immutable provider/model configuration that must match at both context
+/// measurement and transport launch.
+///
+/// The estimator implementation is represented by its qualified identifier and
+/// declared behavior. Qualification owns the invariant that an identifier is
+/// never reused for different tokenizer behavior. Provider identity likewise
+/// names the exact qualified model/adapter build, not merely a product family.
+@_spi(CoachContextQualification)
+public struct CoachProviderConfigurationBinding: Equatable, Sendable {
+    public let descriptor: CoachProviderDescriptor
+    public let providerIdentifier: String
+    public let responseCollectorByteCeiling: Int
+    public let framing: CoachProviderFraming
+    public let maximumInlineTranscriptTokens: Int
+    public let estimatorIdentifier: String
+    public let estimatorMode: CoachTokenEstimateMode
+    public let estimatorMaximumUTF8BytesPerToken: Int
+
+    public init(
+        descriptor: CoachProviderDescriptor,
+        policy: CoachProviderEstimationPolicy
+    ) {
+        self.descriptor = descriptor
+        providerIdentifier = policy.providerIdentifier
+        responseCollectorByteCeiling = policy.responseCollectorByteCeiling
+        framing = policy.framing
+        maximumInlineTranscriptTokens =
+            policy.attachmentProjectionPolicy.maximumInlineTranscriptTokens
+        estimatorIdentifier = policy.tokenEstimator.identifier
+        estimatorMode = policy.tokenEstimator.mode
+        estimatorMaximumUTF8BytesPerToken =
+            policy.tokenEstimator.maximumUTF8BytesPerToken
     }
 }
 

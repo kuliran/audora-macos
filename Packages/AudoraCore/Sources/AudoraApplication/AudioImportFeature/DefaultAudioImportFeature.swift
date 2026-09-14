@@ -9,6 +9,8 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
     private let sessionIDGenerator: any SessionIDGenerator
     private let policy: AudioImportPolicy
     private let activityCoordinator: any LibraryActivityCoordinating
+    private let catalogMutationPublisher:
+        (any LibraryCatalogMutationCommitPublishing)?
     private var state = AudioImportFeatureState(status: .idle)
     private var operationTask: Task<Void, Never>?
     private var operationGeneration: UInt64 = 0
@@ -20,13 +22,16 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
         clock: any LibraryClock,
         sessionIDGenerator: any SessionIDGenerator,
         policy: AudioImportPolicy = .versionOne,
-        activityCoordinator: any LibraryActivityCoordinating
+        activityCoordinator: any LibraryActivityCoordinating,
+        catalogMutationPublisher:
+            (any LibraryCatalogMutationCommitPublishing)? = nil
     ) {
         self.port = port
         self.clock = clock
         self.sessionIDGenerator = sessionIDGenerator
         self.policy = policy
         self.activityCoordinator = activityCoordinator
+        self.catalogMutationPublisher = catalogMutationPublisher
     }
 
     public var currentState: AudioImportFeatureState { state }
@@ -78,6 +83,7 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
         var stagedID: AudioStagingID?
         var selectedToken: AudioSelectionToken?
         var installStarted = false
+        var installCandidate: ValidatedImportedSession?
         do {
             let selection = await port.choose()
             switch selection {
@@ -171,10 +177,17 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
 
                 transitionIfCurrent(to: .installing, generation: generation)
                 installStarted = true
+                installCandidate = validated
                 let reopened = try await port.install(validated)
 
                 // Directory installation is the authority boundary. A cancel that
                 // races with a successful reopened result cannot erase the Session.
+                // Bind the catalog event while this lease still excludes Library
+                // navigation, then expose the terminal state and release authority.
+                await publishCatalogMutation(
+                    for: validated,
+                    confirmation: .confirmed
+                )
                 await complete(
                     generation: generation,
                     status: .succeeded(reopened),
@@ -190,12 +203,20 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
                 await port.discard(stagedID)
             }
             let terminal: AudioImportFailure
+            var catalogMutationConfirmation: LibraryCatalogMutationConfirmation?
             if installStarted, failure == .installedNeedsRefresh {
                 terminal = .installedNeedsRefresh
+                catalogMutationConfirmation = .installedNeedsRefresh
             } else if Task.isCancelled {
                 terminal = .cancelled
             } else {
                 terminal = failure
+            }
+            if let installCandidate, let catalogMutationConfirmation {
+                await publishCatalogMutation(
+                    for: installCandidate,
+                    confirmation: catalogMutationConfirmation
+                )
             }
             await complete(
                 generation: generation,
@@ -203,6 +224,21 @@ public actor DefaultAudioImportFeature: AudioImportFeature {
                 releasing: activityLease
             )
         }
+    }
+
+    private func publishCatalogMutation(
+        for candidate: ValidatedImportedSession,
+        confirmation: LibraryCatalogMutationConfirmation
+    ) async {
+        await catalogMutationPublisher?.publish(
+            LibraryCatalogMutationCommit(
+                expectedScope: LibraryScope(
+                    libraryID: candidate.stagedCandidate.scope.libraryID
+                ),
+                mutation: .importedSession(candidate.session.sessionID),
+                confirmation: confirmation
+            )
+        )
     }
 
     private func complete(

@@ -46,7 +46,10 @@ final class CoachContextFeatureTests: XCTestCase {
         let source = RecordingCoachContextSnapshotPort(
             configuration: try fixtureConfiguration()
         )
-        let feature = DefaultCoachContextFeature(source: source)
+        let feature = DefaultCoachContextFeature(
+            testSourceWithNoAttachments: source,
+            configurationGeneration: 1
+        )
         let request = try CoachContextNewChatQuoteRequest(
             library: Self.scope,
             attachments: .empty,
@@ -69,6 +72,57 @@ final class CoachContextFeatureTests: XCTestCase {
         )
         let triggers = await source.resolvedTriggers
         XCTAssertEqual(triggers, [.chatCreation(request.creation)])
+    }
+
+    func testEmptyOnlyCapacityFixtureRejectsSelectedEvidenceBeforeResolution()
+        async throws
+    {
+        let source = RecordingCoachContextSnapshotPort(
+            configuration: try fixtureConfiguration()
+        )
+        let feature = DefaultCoachContextFeature(
+            testSourceWithNoAttachments: source,
+            configurationGeneration: 1
+        )
+        let attachment = ChatSessionAttachment(
+            attachmentID: try ChatSessionAttachmentID("attachment-000001"),
+            sessionID: try SessionID("ses-20260830T110000000Z-5JKM"),
+            transcriptRevisionID: try TranscriptRevisionID(
+                "trv-20260830T113000000Z-6NPQ"
+            )
+        )
+        let request = try CoachContextNewChatQuoteRequest(
+            library: Self.scope,
+            attachments: ChatAttachments(validating: [attachment]),
+            creationKind: .newChat
+        )
+
+        let outcome = await feature.quoteNewChat(request)
+
+        XCTAssertEqual(outcome, .unavailable(.invalidContext))
+        let requests = await source.requests
+        XCTAssertEqual(requests, [])
+    }
+
+    func testEmptyOnlyCapacityFixtureRejectsConfigurationStampDrift()
+        async throws
+    {
+        let source = RecordingCoachContextSnapshotPort(
+            configuration: try fixtureConfiguration()
+        )
+        let feature = DefaultCoachContextFeature(
+            testSourceWithNoAttachments: source,
+            configurationGeneration: 2
+        )
+        let request = try CoachContextNewChatQuoteRequest(
+            library: Self.scope,
+            attachments: .empty,
+            creationKind: .newChat
+        )
+
+        let outcome = await feature.quoteNewChat(request)
+
+        XCTAssertEqual(outcome, .unavailable(.staleState))
     }
 
     func testProviderUnavailableExceptionRequiresExplicitKnownCurrentConfiguration()
@@ -311,6 +365,167 @@ final class CoachContextFeatureTests: XCTestCase {
         XCTAssertEqual(intent.suggestedAttachments, aggregate.chat.attachments)
     }
 
+    func testResolvedSnapshotRejectsCanonicalProfileThatDoesNotMatchTypedProjection()
+        throws
+    {
+        let aggregate = try fixtureAggregate()
+        let profileProjection = CoachProfileContextProjection(
+            snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+            attachments: .empty
+        )
+        let mismatchedInput = try CoachContextQuoteInput(
+            profile: .object([
+                "statements": .array([.string("Forged Profile value")]),
+            ]),
+            memory: .object([:]),
+            history: [],
+            currentDraft: aggregate.chat.draft.text
+        )
+
+        XCTAssertThrowsError(
+            try CoachContextResolvedSnapshot(
+                input: mismatchedInput,
+                configuration: fixtureConfiguration(),
+                authority: CoachContextSnapshotAuthority(
+                    binding: .chat(
+                        library: Self.scope,
+                        chatID: aggregate.chat.id,
+                        draftID: aggregate.chat.draft.draftID,
+                        draftVersion: aggregate.chat.draft.version
+                    ),
+                    contextGeneration: 1,
+                    configurationGeneration: 1,
+                    profile: profileProjection.provenance
+                ),
+                profileProjection: profileProjection
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CoachContextResolvedSnapshotError,
+                .profileProjectionMismatch
+            )
+        }
+    }
+
+    func testResolvedSnapshotRejectsAuthorityProvenanceThatDoesNotMatchProjection()
+        throws
+    {
+        let aggregate = try fixtureAggregate()
+        let profileProjection = CoachProfileContextProjection(
+            snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+            attachments: .empty
+        )
+        let input = try CoachContextQuoteInput(
+            profile: profileProjection.value,
+            memory: .object([:]),
+            history: [],
+            currentDraft: aggregate.chat.draft.text
+        )
+
+        XCTAssertThrowsError(
+            try CoachContextResolvedSnapshot(
+                input: input,
+                configuration: fixtureConfiguration(),
+                authority: CoachContextSnapshotAuthority(
+                    binding: .chat(
+                        library: Self.scope,
+                        chatID: aggregate.chat.id,
+                        draftID: aggregate.chat.draft.draftID,
+                        draftVersion: aggregate.chat.draft.version
+                    ),
+                    contextGeneration: 1,
+                    configurationGeneration: 1,
+                    profile: CoachProfileProvenance(
+                        revisionID: nil,
+                        statementGeneration: 1
+                    )
+                ),
+                profileProjection: profileProjection
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CoachContextResolvedSnapshotError,
+                .profileProjectionMismatch
+            )
+        }
+    }
+
+    func testDeniedProfileEvidenceBlocksWholePreparationBeforeProviderRequestPlanning()
+        async throws
+    {
+        let aggregate = try fixtureAggregate()
+        let profile = try profileWithEvidence()
+        let estimation = CoachEstimationObservation()
+        let policySource = RecordingCoachEvidencePolicySource(mode: .denied)
+        let source = PolicyBoundCoachContextSnapshotPort(
+            configuration: try fixtureConfiguration(
+                tokenEstimator: try CoachTokenEstimator(
+                    identifier: "profile-policy-gate-fixture-v1",
+                    mode: .exact,
+                    maximumUTF8BytesPerToken: 1,
+                    implementation: { bytes in
+                        estimation.record(bytes)
+                        return bytes.count
+                    }
+                )
+            ),
+            profile: profile
+        )
+        let feature = DefaultCoachContextFeature(
+            source: source,
+            evidenceUsePolicySource: policySource
+        )
+        let pending = PendingUserTurn(
+            id: try PendingUserTurnID("ptu-20260830T120001000Z-5KMN"),
+            draftID: aggregate.chat.draft.draftID,
+            draftVersion: aggregate.chat.draft.version,
+            responsePositionID: try ChatResponsePositionID(
+                "rsp-20260830T120001000Z-6PQR"
+            )
+        )
+        let request = try CoachContextPendingTurnRequest(
+            library: Self.scope,
+            chatID: aggregate.chat.id,
+            draft: aggregate.chat.draft,
+            pendingUserTurn: pending
+        )
+
+        let outcome = await feature.preparePendingUserTurn(request)
+
+        XCTAssertEqual(outcome, .unavailable(.externalProcessingDisallowed))
+        XCTAssertEqual(estimation.values, [])
+        let requestedSources = await policySource.requestedSources
+        XCTAssertEqual(
+            requestedSources,
+            CoachProfileEvidenceObligations(profile: profile).sources
+        )
+    }
+
+    func testUnresolvableProfileEvidenceFailsClosedWithTypedReason() async throws {
+        let aggregate = try fixtureAggregate()
+        let profile = try profileWithEvidence()
+        let policySource = RecordingCoachEvidencePolicySource(mode: .unavailable)
+        let feature = DefaultCoachContextFeature(
+            source: PolicyBoundCoachContextSnapshotPort(
+                configuration: try fixtureConfiguration(),
+                profile: profile
+            ),
+            evidenceUsePolicySource: policySource
+        )
+        let request = CoachContextChatQuoteRequest(
+            library: Self.scope,
+            chatID: aggregate.chat.id,
+            draft: aggregate.chat.draft
+        )
+
+        let outcome = await feature.quoteChat(request)
+
+        XCTAssertEqual(
+            outcome,
+            .unavailable(.externalProcessingPolicyUnavailable)
+        )
+    }
+
     private static let scope = LibraryScope(
         libraryID: try! LibraryID("lib-20260830T115900000Z-2ABC")
     )
@@ -332,7 +547,8 @@ final class CoachContextFeatureTests: XCTestCase {
     }
 
     private func fixtureConfiguration(
-        contextWindow: Int = 10_000
+        contextWindow: Int = 10_000,
+        tokenEstimator: CoachTokenEstimator = .utf8ByteUpperBound()
     ) throws -> CoachContextConfiguration {
         try CoachContextConfiguration(
             descriptor: CoachProviderDescriptor(
@@ -347,10 +563,184 @@ final class CoachContextFeatureTests: XCTestCase {
             policy: CoachProviderEstimationPolicy(
                 providerIdentifier: "synthetic-fixture-v1",
                 responseCollectorByteCeiling: 8_192,
-                framing: CoachProviderFraming(),
+                framing: .testZero,
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
-                    tokenEstimator: .utf8ByteUpperBound()
+                    tokenEstimator: tokenEstimator
+                )
+            )
+        )
+    }
+
+    private func profileWithEvidence() throws -> ProfileSnapshot {
+        let evidence = try EvidenceReference(
+            sessionID: SessionID("ses-20260830T110000000Z-5KMN"),
+            transcriptRevisionID: TranscriptRevisionID(
+                "trv-20260830T111000000Z-6PQR"
+            ),
+            target: .wordRange(
+                startWordID: TranscriptWordID("w000000"),
+                endWordID: TranscriptWordID("w000000")
+            ),
+            display: EvidenceReferenceDisplay(
+                sessionLabel: "Policy-bound Session",
+                trustedText: "hello",
+                startMilliseconds: 0,
+                endMilliseconds: 100
+            )
+        )
+        let statement = try ProfileStatement(
+            statementID: ProfileStatementID("stm-20260830T115900000Z-7STV"),
+            statementKind: .speakingObservation,
+            wording: "A complete policy-bound statement.",
+            supportingSessionCount: 1,
+            evidence: [evidence]
+        )
+        return ProfileSnapshot(
+            revision: try ProfileRevision(
+                revisionID: ProfileRevisionID("prf-20260830T115900000Z-8WXY"),
+                parentRevisionID: nil,
+                generation: 1,
+                statementGeneration: 1,
+                createdAt: UTCInstant("2026-08-30T11:59:00.000Z"),
+                statements: [statement]
+            )
+        )
+    }
+}
+
+private final class CoachEstimationObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [Data] = []
+
+    var values: [Data] { lock.withLock { recorded } }
+
+    func record(_ value: Data) {
+        lock.withLock { recorded.append(value) }
+    }
+}
+
+private actor RecordingCoachEvidencePolicySource: CoachEvidenceUsePolicySource {
+    enum Mode { case denied, unavailable }
+
+    let mode: Mode
+    private(set) var requestedSources: [CoachEvidencePolicySourceIdentity] = []
+
+    init(mode: Mode) { self.mode = mode }
+
+    func resolveUsePolicies(
+        for sources: [CoachEvidencePolicySourceIdentity],
+        in library: LibraryScope
+    ) async -> [CoachEvidenceUsePolicyResolution] {
+        requestedSources = sources
+        return sources.map { source in
+            switch mode {
+            case .denied:
+                .resolved(source: source, policy: Self.deniedPolicy)
+            case .unavailable:
+                .unavailable(source: source)
+            }
+        }
+    }
+
+    private static let deniedPolicy = try! EngineUsePolicy(
+        policyID: "profile-policy-denied-v1",
+        coveredArtifacts: [.transcriptRevision],
+        privateLocalUseAllowed: true,
+        privateExportAllowed: true,
+        externalProcessingAllowed: false,
+        publicDistributionAllowed: false,
+        commercialUseAllowed: false,
+        licenseReference: "test-license",
+        licenseSHA256: String(repeating: "b", count: 64)
+    )
+}
+
+private actor PolicyBoundCoachContextSnapshotPort:
+    ProfileReconsiderationUnavailableCoachContextSnapshotPort
+{
+    let configuration: CoachContextConfiguration
+    let profile: ProfileSnapshot
+
+    init(configuration: CoachContextConfiguration, profile: ProfileSnapshot) {
+        self.configuration = configuration
+        self.profile = profile
+    }
+
+    func resolveNewChat(
+        _ request: CoachContextNewChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome { .sourceUnavailable }
+
+    func resolveChat(
+        _ request: CoachContextChatQuoteRequest
+    ) async -> CoachContextSnapshotOutcome {
+        snapshot(
+            input: try? CoachContextQuoteInput(
+                profile: CoachContextProfileProjector(attachments: .empty)
+                    .profile(profile),
+                memory: .object([:]),
+                history: [],
+                currentDraft: request.draft.text
+            ),
+            binding: .chat(
+                library: request.library,
+                chatID: request.chatID,
+                draftID: request.draft.draftID,
+                draftVersion: request.draft.version
+            )
+        )
+    }
+
+    func resolvePendingUserTurn(
+        _ request: CoachContextPendingTurnRequest
+    ) async -> CoachContextSnapshotOutcome {
+        snapshot(
+            input: try? CoachContextQuoteInput(
+                profile: CoachContextProfileProjector(attachments: .empty)
+                    .profile(profile),
+                memory: .object([:]),
+                history: [],
+                currentDraft: request.draft.text
+            ),
+            binding: .pending(
+                library: request.library,
+                chatID: request.chatID,
+                draftID: request.draft.draftID,
+                draftVersion: request.draft.version,
+                pendingUserTurnID: request.pendingUserTurn.id,
+                responsePositionID: request.pendingUserTurn.responsePositionID
+            )
+        )
+    }
+
+    func isCurrent(_ authority: CoachContextSnapshotAuthority) async -> Bool {
+        true
+    }
+
+    func acquireAuthorityLease(
+        _ authority: CoachContextSourceLeaseAuthority
+    ) async -> CoachContextAuthorityLeaseOutcome {
+        await acquireTestImmutableAuthorityLease(authority)
+    }
+
+    private func snapshot(
+        input: CoachContextQuoteInput?,
+        binding: CoachContextSnapshotBinding
+    ) -> CoachContextSnapshotOutcome {
+        guard let input else { return .sourceUnavailable }
+        return .resolved(
+            try! CoachContextResolvedSnapshot(
+                input: input,
+                configuration: configuration,
+                authority: CoachContextSnapshotAuthority(
+                    binding: binding,
+                    contextGeneration: 1,
+                    configurationGeneration: 1,
+                    profile: profile.provenance
+                ),
+                profileProjection: CoachProfileContextProjection(
+                    snapshot: profile,
+                    attachments: .empty
                 )
             )
         )
@@ -411,8 +801,9 @@ private actor RecordingCoachContextSnapshotPort:
     ) async -> CoachContextSnapshotOutcome {
         requests.append(.newChat(request))
         do {
+            let profileProjection = Self.profileProjection
             let input = try CoachContextQuoteInput(
-                profile: Self.profile,
+                profile: profileProjection.value,
                 memory: Self.memory,
                 creation: request.creation
             )
@@ -429,11 +820,9 @@ private actor RecordingCoachContextSnapshotPort:
                         ),
                         contextGeneration: 1,
                         configurationGeneration: 1,
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -480,7 +869,7 @@ private actor RecordingCoachContextSnapshotPort:
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        await acquireImmutableAuthorityLease(authority)
+        await acquireTestImmutableAuthorityLease(authority)
     }
 
     private func snapshot(
@@ -488,8 +877,9 @@ private actor RecordingCoachContextSnapshotPort:
         binding: CoachContextSnapshotBinding
     ) -> CoachContextSnapshotOutcome {
         do {
+            let profileProjection = Self.profileProjection
             let input = try CoachContextQuoteInput(
-                profile: Self.profile,
+                profile: profileProjection.value,
                 memory: Self.memory,
                 history: [.user(text: "Earlier")],
                 currentDraft: draft.text
@@ -503,11 +893,9 @@ private actor RecordingCoachContextSnapshotPort:
                         binding: binding,
                         contextGeneration: 1,
                         configurationGeneration: 1,
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -515,9 +903,10 @@ private actor RecordingCoachContextSnapshotPort:
         }
     }
 
-    private static let profile = CanonicalJSONValue.object([
-        "statements": .array([]),
-    ])
+    private static let profileProjection = CoachProfileContextProjection(
+        snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+        attachments: .empty
+    )
     private static let memory = CanonicalJSONValue.object([
         "generalNotes": .string("Remember"),
         "sessionSummaries": .array([]),
@@ -558,10 +947,14 @@ private actor SuspendingAuthoritySnapshotPort:
         currentDraft = request.draft
         measuredDrafts.append(request.draft)
         do {
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+                attachments: .empty
+            )
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object(["statements": .array([])]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string("Same serialized context"),
                             "sessionSummaries": .array([]),
@@ -581,11 +974,9 @@ private actor SuspendingAuthoritySnapshotPort:
                         ),
                         contextGeneration: contextGeneration,
                         configurationGeneration: configurationGeneration,
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -608,7 +999,7 @@ private actor SuspendingAuthoritySnapshotPort:
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        await acquireImmutableAuthorityLease(authority)
+        await acquireTestImmutableAuthorityLease(authority)
     }
 
     func waitUntilValidationStarts() async {
@@ -662,10 +1053,14 @@ private actor WrongBindingSnapshotPort:
         _ request: CoachContextPendingTurnRequest
     ) async -> CoachContextSnapshotOutcome {
         do {
+            let profileProjection = CoachProfileContextProjection(
+                snapshot: ProfileSnapshot(nullAtStatementGeneration: 0),
+                attachments: .empty
+            )
             return .resolved(
                 try CoachContextResolvedSnapshot(
                     input: CoachContextQuoteInput(
-                        profile: .object(["statements": .array([])]),
+                        profile: profileProjection.value,
                         memory: .object([
                             "generalNotes": .string("Same serialized context"),
                             "sessionSummaries": .array([]),
@@ -685,11 +1080,9 @@ private actor WrongBindingSnapshotPort:
                         ),
                         contextGeneration: 99,
                         configurationGeneration: 99,
-                        profile: CoachProfileProvenance(
-                            revisionID: nil,
-                            statementGeneration: 0
-                        )
-                    )
+                        profile: profileProjection.provenance
+                    ),
+                    profileProjection: profileProjection
                 )
             )
         } catch {
@@ -705,6 +1098,6 @@ private actor WrongBindingSnapshotPort:
     func acquireAuthorityLease(
         _ authority: CoachContextSourceLeaseAuthority
     ) async -> CoachContextAuthorityLeaseOutcome {
-        await acquireImmutableAuthorityLease(authority)
+        await acquireTestImmutableAuthorityLease(authority)
     }
 }

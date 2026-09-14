@@ -5,6 +5,59 @@ import Foundation
 import XCTest
 
 final class PortableSessionProcessingWorkspaceTests: XCTestCase {
+    func testEmptyAcousticQualificationGatewayFailsClosed() async throws {
+        let profile = try qualifiedProfile()
+        let gateway = QualificationGatedSessionAcousticEvidence()
+
+        let result = await gateway.resolve(
+            for: try acousticSource(),
+            profile: profile
+        )
+
+        XCTAssertEqual(result, .unavailable)
+    }
+
+    func testAcousticQualificationGatewayRejectsMismatchedProfileWithoutResolving()
+        async throws
+    {
+        let admittedProfile = try qualifiedProfile()
+        let requestedProfile = try qualifiedProfile(version: 2)
+        let resolver = RecordingWorkspaceAcoustics()
+        let gateway = QualificationGatedSessionAcousticEvidence(
+            qualifiedBundle: QualifiedTranscriptionProviderBundle(
+                profile: admittedProfile,
+                workerHost: QualificationGatedTranscriptionWorkerHost(),
+                acousticEvidence: resolver
+            )
+        )
+
+        let result = await gateway.resolve(
+            for: try acousticSource(),
+            profile: requestedProfile
+        )
+
+        XCTAssertEqual(result, .unavailable)
+        let resolutionCount = await resolver.resolutionCountValue()
+        XCTAssertEqual(resolutionCount, 0)
+    }
+
+    func testAcousticQualificationGatewayDelegatesMatchingProfile() async throws {
+        let profile = try qualifiedProfile()
+        let resolver = RecordingWorkspaceAcoustics()
+        let gateway = QualificationGatedSessionAcousticEvidence(
+            qualifiedBundle: QualifiedTranscriptionProviderBundle(
+                profile: profile,
+                workerHost: QualificationGatedTranscriptionWorkerHost(),
+                acousticEvidence: resolver
+            )
+        )
+
+        _ = await gateway.resolve(for: try acousticSource(), profile: profile)
+
+        let resolutionCount = await resolver.resolutionCountValue()
+        XCTAssertEqual(resolutionCount, 1)
+    }
+
     func testExactJobLookupKeepsOriginalWhenNewerSameSessionJobExists()
         async throws
     {
@@ -367,7 +420,13 @@ final class PortableSessionProcessingWorkspaceTests: XCTestCase {
         return try persistence.install(publication, using: handle)
     }
 
-    private func qualifiedProfile() throws -> QualifiedTranscriptionProfile {
+    private func qualifiedProfile(
+        version: Int = 1
+    ) throws -> QualifiedTranscriptionProfile {
+        let profileID = "synthetic-qualified-v\(version)"
+        let runtimeIdentity = "synthetic-runtime-v\(version)"
+        let modelRevision = "model-revision-v\(version)"
+        let compatibilityPatchID = "synthetic-progress-patch-v\(version)"
         let policy = try EngineUsePolicy(
             policyID: "synthetic-evaluation-v1",
             coveredArtifacts: [.transcriptRevision],
@@ -380,16 +439,22 @@ final class PortableSessionProcessingWorkspaceTests: XCTestCase {
             licenseSHA256: String(repeating: "2", count: 64)
         )
         let qualification = try TranscriptEngineQualification(
-            qualificationProfileID: "synthetic-qualified-v1",
-            engineLockSHA256: String(repeating: "6", count: 64),
-            runtimeIdentity: "synthetic-runtime-v1",
-            runtimeLockSHA256: String(repeating: "4", count: 64),
-            compatibilityPatchID: "synthetic-progress-patch-v1"
+            qualificationProfileID: profileID,
+            engineLockSHA256: String(
+                repeating: version == 1 ? "6" : "7",
+                count: 64
+            ),
+            runtimeIdentity: runtimeIdentity,
+            runtimeLockSHA256: String(
+                repeating: version == 1 ? "4" : "5",
+                count: 64
+            ),
+            compatibilityPatchID: compatibilityPatchID
         )
         let provenance = try TranscriptEngineProvenance(
             provider: "crisperwhisper",
             model: "small",
-            revision: "model-revision-v1",
+            revision: modelRevision,
             language: "en",
             mode: "verbatim",
             decodingOptionsSHA256: String(repeating: "3", count: 64),
@@ -397,13 +462,39 @@ final class PortableSessionProcessingWorkspaceTests: XCTestCase {
             usePolicy: policy
         )
         return try QualifiedTranscriptionProfile(
-            profileID: "synthetic-qualified-v1",
+            profileID: profileID,
             protocolVersion: 1,
-            runtimeVersion: "synthetic-runtime-v1",
-            packageLockSHA256: String(repeating: "4", count: 64),
-            modelRevision: "model-revision-v1",
-            compatibilityPatchID: "synthetic-progress-patch-v1",
+            runtimeVersion: runtimeIdentity,
+            packageLockSHA256: qualification.runtimeLockSHA256,
+            modelRevision: modelRevision,
+            compatibilityPatchID: compatibilityPatchID,
             engine: provenance
+        )
+    }
+
+    private func acousticSource() throws -> SessionTranscriptionSource {
+        let fingerprint = try AudioFingerprint(
+            sha256: String(repeating: "a", count: 64)
+        )
+        return SessionTranscriptionSource(
+            selection: SessionProcessingSelection(
+                scope: LibraryScope(
+                    libraryID: try LibraryID("lib-20260830T120000000Z-0ABC")
+                ),
+                sessionID: try SessionID("ses-20260830T120100000Z-2CDE")
+            ),
+            audioCapabilityID: try SessionTranscriptionAudioCapabilityID(
+                "cap-acoustic-gateway-test"
+            ),
+            durationMilliseconds: 2_000,
+            audioFingerprint: fingerprint,
+            sourceFingerprints: [
+                TranscriptSourceFingerprint(
+                    audioSourceID: try AudioSourceID("src-0001"),
+                    fingerprint: fingerprint
+                ),
+            ],
+            expectedSelectedRevisionID: nil
         )
     }
 }
@@ -496,6 +587,20 @@ private struct WorkspaceAcoustics: SessionAcousticEvidencePort {
             )
         )
     }
+}
+
+private actor RecordingWorkspaceAcoustics: SessionAcousticEvidencePort {
+    private var resolutionCount = 0
+
+    func resolve(
+        for source: SessionTranscriptionSource,
+        profile: QualifiedTranscriptionProfile
+    ) async -> SessionAcousticEvidenceResolution {
+        resolutionCount += 1
+        return .unavailable
+    }
+
+    func resolutionCountValue() -> Int { resolutionCount }
 }
 
 private actor WorkspaceFailingEngine: TranscriptionEngine {

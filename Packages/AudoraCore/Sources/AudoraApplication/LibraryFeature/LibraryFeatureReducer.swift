@@ -10,13 +10,19 @@ enum LibraryFeatureReducer {
 
     static func completeOpen(
         _ outcome: LibraryOpenOutcome,
-        previous: LibraryFeatureState.Selection
+        previous: LibraryFeatureState.Selection,
+        activationGeneration: UInt64
     ) -> LibraryFeatureState {
         switch outcome {
         case let .noLibrarySelected(recentAvailable):
             LibraryFeatureState(selection: .noLibrarySelected(recentAvailable: recentAvailable))
         case let .opened(snapshot, notice):
-            LibraryFeatureState(selection: .active(snapshot), notice: notice)
+            LibraryFeatureState(
+                selection: .active(
+                    snapshot.activated(generation: activationGeneration)
+                ),
+                notice: notice
+            )
         case let .readOnly(snapshot, reason, notice):
             LibraryFeatureState(selection: .readOnly(snapshot, reason: reason), notice: notice)
         case .cancelled:
@@ -30,11 +36,11 @@ enum LibraryFeatureReducer {
     }
 
     static func completeReveal(
-        _ outcome: LibraryActionOutcome,
+        _ outcome: LibraryRevealRequestOutcome,
         previous: LibraryFeatureState.Selection
     ) -> LibraryFeatureState {
         switch outcome {
-        case .succeeded:
+        case .accepted:
             LibraryFeatureState(selection: previous)
         case let .failed(notice):
             LibraryFeatureState(selection: previous, notice: notice)

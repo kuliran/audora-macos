@@ -11,6 +11,9 @@ struct AudoraApp: App {
 
     private let workspace: PortableLibraryWorkspace
     private let feature: DefaultLibraryFeature
+    private let libraryCatalogFeature: ApplicationCoordinatedLibraryCatalogFeature
+    private let libraryCatalogInvalidationSource:
+        ApplicationLibraryCatalogInvalidationSource
     private let audioImportFeature: DefaultAudioImportFeature
     private let recordingFeature: DefaultRecordingFeature
     private let reviewFeature: DefaultReviewFeature
@@ -36,6 +39,13 @@ struct AudoraApp: App {
             idGenerator: RandomLibraryIDGenerator(),
             activityCoordinator: activityCoordinator
         )
+        let aggregateCatalog = DefaultLibraryCatalogFeature(
+            port: PortableLibraryAggregateTrashStore(activeLibrary: workspace),
+            activityCoordinator: activityCoordinator
+        )
+        let catalogMutationEvents = ApplicationLibraryCatalogMutationEventBroker(
+            library: feature
+        )
         let recordingCapture = AVFoundationAudioCaptureAdapter(
             roots: workspace,
             sources: AVFoundationMicrophoneInputSourceFactory()
@@ -55,17 +65,18 @@ struct AudoraApp: App {
             source: processingWorkspace,
             runtime: transcriptionRuntime,
             model: transcriptionModel,
-            acoustics: QualificationBlockedSessionAcousticEvidence(),
+            acoustics: QualificationGatedSessionAcousticEvidence(),
             jobs: processingWorkspace,
             engine: ConfinedJSONLTranscriptionEngine(
-                host: QualificationBlockedTranscriptionWorkerHost(),
+                host: QualificationGatedTranscriptionWorkerHost(),
                 audio: processingWorkspace,
                 runtime: transcriptionRuntime,
                 model: transcriptionModel
             ),
             publisher: TranscriptRevisionPublisher(repository: processingWorkspace),
             clock: SystemLibraryClock(),
-            identifiers: RandomSessionProcessingIDGenerator()
+            identifiers: RandomSessionProcessingIDGenerator(),
+            catalogMutationPublisher: catalogMutationEvents
         )
         let reviewWorkspace = PortableReviewWorkspace(scopes: workspace)
         let audioImportWorkspace = PortableAudioImportWorkspace(
@@ -77,7 +88,8 @@ struct AudoraApp: App {
             port: audioImportWorkspace,
             clock: SystemLibraryClock(),
             sessionIDGenerator: RandomSessionIDGenerator(),
-            activityCoordinator: activityCoordinator
+            activityCoordinator: activityCoordinator,
+            catalogMutationPublisher: catalogMutationEvents
         )
         let chatIdentityGenerator = RandomChatIdentityGenerator()
         let retryDiagnostics = MachineInvocationRetryDiagnosticsFactory.live()
@@ -93,12 +105,17 @@ struct AudoraApp: App {
         let attachmentEvidenceSource = PortableChatSessionAttachmentSource(
             workspace: workspace
         )
+        let coachContext = DefaultCoachContextFeature(
+            attachmentEvidenceSource: attachmentEvidenceSource
+        )
         let invocations = DefaultInvocations(
             persistence: PortableInvocationStore(
                 persistence: chatPersistence,
                 workspace: workspace
             ),
             admission: MachineInvocationAdmissionFactory.live(),
+            provider: QualificationGatedCoachProvider(),
+            coachContext: coachContext,
             clock: SystemLibraryClock(),
             identities: RandomInvocationIdentityGenerator(),
             memoryIDGenerator: chatIdentityGenerator,
@@ -122,7 +139,7 @@ struct AudoraApp: App {
             responsePositionIDGenerator: chatIdentityGenerator,
             admissionRefreshScheduler: SystemChatAdmissionRefreshScheduler(),
             invocations: invocations,
-            attachmentEvidenceSource: attachmentEvidenceSource,
+            coachContext: coachContext,
             profileProposals: PortableProfileProposalCoordinator(
                 persistence: chatPersistence,
                 workspace: workspace
@@ -131,8 +148,16 @@ struct AudoraApp: App {
         let applicationCommands = DefaultApplicationCommandFeature(
             library: feature,
             chat: chatFeature,
+            libraryCatalog: aggregateCatalog,
             sessionProcessing: sessionProcessingFeature
         )
+        let libraryCatalogInvalidationSource =
+            ApplicationLibraryCatalogInvalidationSource(
+                library: feature,
+                catalogMutations: catalogMutationEvents.events,
+                recordingSeals: recordingFeature.sealedSessions,
+                chatStates: applicationCommands.chatStates
+            )
         let reviewFeature = DefaultReviewFeature(
             sessions: reviewWorkspace,
             playback: AVFoundationReviewPlaybackAdapter(resolver: reviewWorkspace),
@@ -140,6 +165,11 @@ struct AudoraApp: App {
                 feature: applicationCommands
             ),
             annotationVisibility: workspace
+        )
+        applicationCommands.installReviewLibraryNavigationLifecycle(reviewFeature)
+        let libraryCatalogFeature = ApplicationCoordinatedLibraryCatalogFeature(
+            application: applicationCommands,
+            review: reviewFeature
         )
         let chatDispatcher = ChatCommandDispatcher(feature: applicationCommands)
         let librarySelectionDispatcher = LibrarySelectionCommandDispatcher(
@@ -150,6 +180,8 @@ struct AudoraApp: App {
         )
         self.workspace = workspace
         self.feature = feature
+        self.libraryCatalogFeature = libraryCatalogFeature
+        self.libraryCatalogInvalidationSource = libraryCatalogInvalidationSource
         self.audioImportFeature = audioImportFeature
         self.recordingFeature = recordingFeature
         self.reviewFeature = reviewFeature
@@ -170,6 +202,9 @@ struct AudoraApp: App {
         Window("Audora", id: "library") {
             LibraryRootView(
                 feature: feature,
+                libraryCatalogFeature: libraryCatalogFeature,
+                libraryCatalogInvalidationSource:
+                    libraryCatalogInvalidationSource,
                 audioImportFeature: audioImportFeature,
                 recordingFeature: recordingFeature,
                 sessionProcessingFeature: applicationCommands,

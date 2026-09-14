@@ -42,26 +42,62 @@ final class CodexInvocationPlanTests: XCTestCase {
 
     func testEnvironmentAllowlistDropsCredentialAndBrowserVariables() {
         let clientHome = URL(fileURLWithPath: "/synthetic/isolated-client-home")
+        let temporaryDirectory = URL(fileURLWithPath: "/synthetic/isolated-temporary")
         let result = CodexInvocationPlanBuilder.allowlistedEnvironment(
             from: [
                 "HOME": "/synthetic/source-home-that-must-not-pass",
                 "CODEX_HOME": "/synthetic/source-codex-home-that-must-not-pass",
                 "PATH": "/synthetic/bin",
+                "TMPDIR": "/synthetic/source-temporary-that-must-not-pass",
                 "OPENAI_API_KEY": "placeholder-that-must-not-pass",
                 "BROWSER_PROFILE": "/synthetic/browser",
                 "SESSION_TOKEN": "placeholder-that-must-not-pass",
             ],
-            clientHomeURL: clientHome
+            clientHomeURL: clientHome,
+            temporaryDirectoryURL: temporaryDirectory
         )
 
         XCTAssertEqual(result["HOME"], clientHome.path)
         XCTAssertEqual(result["CODEX_HOME"], clientHome.path)
-        XCTAssertEqual(result["PATH"], "/synthetic/bin")
+        XCTAssertEqual(result["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
+        XCTAssertEqual(result["TMPDIR"], temporaryDirectory.path)
         XCTAssertNil(result["OPENAI_API_KEY"])
         XCTAssertNil(result["BROWSER_PROFILE"])
         XCTAssertNil(result["SESSION_TOKEN"])
         XCTAssertEqual(result["CI"], "1")
         XCTAssertEqual(result["TERM"], "dumb")
+    }
+
+    func testExplicitEphemeralAuthorizationIsTheOnlyCredentialForwarded() throws {
+        let clientHome = URL(fileURLWithPath: "/synthetic/isolated-client-home")
+        let temporaryDirectory = URL(fileURLWithPath: "/synthetic/isolated-temporary")
+        let authorization = try XCTUnwrap(
+            CodexCLIQualificationExecutionAuthorization(
+                sourceEnvironment: ["CODEX_ACCESS_TOKEN": "placeholder-ephemeral-token"]
+            )
+        )
+        let result = CodexInvocationPlanBuilder.allowlistedEnvironment(
+            from: [
+                "OPENAI_API_KEY": "must-not-pass",
+                "SESSION_TOKEN": "must-not-pass",
+            ],
+            clientHomeURL: clientHome,
+            temporaryDirectoryURL: temporaryDirectory,
+            authorization: authorization
+        )
+
+        XCTAssertEqual(result["CODEX_ACCESS_TOKEN"], "placeholder-ephemeral-token")
+        XCTAssertNil(result["OPENAI_API_KEY"])
+        XCTAssertNil(result["SESSION_TOKEN"])
+        XCTAssertFalse(String(describing: authorization).contains("placeholder"))
+        XCTAssertFalse(String(reflecting: authorization).contains("placeholder"))
+
+        let plan = try makePlan(
+            authorization: authorization,
+            sourceEnvironment: ["OPENAI_API_KEY": "must-not-pass"]
+        )
+        XCTAssertFalse(String(describing: plan).contains("placeholder"))
+        XCTAssertFalse(String(reflecting: plan).contains("placeholder"))
     }
 
     func testModelCatalogDisablesExecutableAndImageCapabilities() throws {
@@ -114,17 +150,21 @@ final class CodexInvocationPlanTests: XCTestCase {
 
     private func makePlan(
         executableURL: URL = URL(fileURLWithPath: "/synthetic/codex"),
-        model: String = "gpt-5.4"
+        model: String = "gpt-5.4",
+        authorization: CodexCLIQualificationExecutionAuthorization? = nil,
+        sourceEnvironment: [String: String] = [:]
     ) throws -> CodexInvocationPlan {
         try CodexInvocationPlanBuilder().build(
             executableURL: executableURL,
             model: model,
             workspaceURL: URL(fileURLWithPath: "/synthetic/workspace"),
             clientHomeURL: URL(fileURLWithPath: "/synthetic/client-home"),
+            temporaryDirectoryURL: URL(fileURLWithPath: "/synthetic/temporary"),
             responseSchemaURL: URL(fileURLWithPath: "/synthetic/response-schema.json"),
             modelCatalogURL: URL(fileURLWithPath: "/synthetic/model-catalog.json"),
             syntheticRequest: Data("{\"profile\":{}}".utf8),
-            sourceEnvironment: [:]
+            authorization: authorization,
+            sourceEnvironment: sourceEnvironment
         )
     }
 }

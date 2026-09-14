@@ -639,27 +639,6 @@ public extension Invocations {
     ) async -> InvocationAdmissionAvailability {
         .unavailable
     }
-
-    func tryInvoke(
-        _ prepared: PreparedPendingCoachInvocation,
-        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
-    ) async -> InvocationTryOutcome {
-        await tryInvoke(prepared)
-    }
-
-    func tryInvoke(
-        _ request: PendingCoachInvocationRequest,
-        observingStopAuthority observer: @escaping InvocationStopAuthorityObserver
-    ) async -> InvocationTryOutcome {
-        await tryInvoke(request)
-    }
-
-    func stop(
-        _ request: StopCoachInvocationRequest,
-        authority: InvocationStopAuthority
-    ) async -> InvocationStopOutcome {
-        .noActiveInvocation
-    }
 }
 
 public extension ProfileReconsiderationUnavailableInvocations {
@@ -2302,8 +2281,9 @@ private final class ProviderAttemptTranscriptReadGate: @unchecked Sendable {
     }
 }
 
-struct ProviderAttemptTranscriptAccess: Sendable {
-    let handles: [PreparedCoachTranscriptHandle]
+@_spi(InvocationInfrastructure)
+public struct CoachTranscriptAccess: Sendable {
+    public let handles: [CoachProviderTranscriptHandle]
 
     private let capability: AttemptTranscriptAccessCapability
     private let broker: AttemptTranscriptAccessBroker
@@ -2329,10 +2309,10 @@ struct ProviderAttemptTranscriptAccess: Sendable {
 
     /// The provider can request one typed nonempty subset. Capability material
     /// never becomes model-visible or printable.
-    func read(
-        transportRequestID: AttemptTranscriptTransportRequestID,
-        handles: [PreparedCoachTranscriptHandle]
-    ) async -> AttemptTranscriptAccessResult {
+    public func read(
+        transportRequestID: CoachTranscriptRequestID,
+        handles: [CoachProviderTranscriptHandle]
+    ) async -> CoachTranscriptReadResult {
         await read(
             transportRequestID: transportRequestID,
             handles: handles,
@@ -2438,76 +2418,13 @@ struct ProviderAttemptTranscriptAccess: Sendable {
     }
 }
 
-enum CoachProviderAttemptControl: Equatable, Sendable {
-    case standard
-    case shorterRepair(instruction: String)
-}
+typealias ProviderAttemptTranscriptAccess = CoachTranscriptAccess
 
 enum CoachProviderAttemptOutcome: Equatable, Sendable {
     case complete(CoachProviderCompleteResponse)
     case autoRetryableFailure
     case userRetryableFailure
     case responseOverflow
-
-    /// Convenience for deterministic provider doubles. The coordinator still
-    /// receives opaque JSON bytes and applies the complete response validator.
-    static func complete(markdown: String) -> Self {
-        .complete(.singleMarkdown(markdown))
-    }
-}
-
-enum CoachProviderAttemptCancellationOutcome: Equatable, Sendable {
-    case reaped
-    case alreadyAbsent
-    case unableToConfirm
-}
-
-struct SyntheticCoachProviderRequest: Sendable {
-    let attemptID: CoachProviderAttemptID
-    let attemptOrdinal: UInt8
-    let attemptKind: CoachProviderAttemptKind
-    let providerIdempotencyValue: ProviderIdempotencyValue
-    let exchange: AttemptBoundCoachExchange
-    let transcriptAccess: ProviderAttemptTranscriptAccess?
-    let outputTokenCeiling: Int
-    let pinnedInstruction: String
-    let control: CoachProviderAttemptControl
-}
-
-protocol SyntheticCoachProviderPort: Sendable {
-    func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome
-
-    /// Idempotently requests cooperative cancellation, then force-terminates
-    /// and reaps the exact Attempt within the supplied grace bound. Success is
-    /// returned only after process absence is proven.
-    func cancelAndReap(
-        attemptID: CoachProviderAttemptID,
-        graceMilliseconds: Int64
-    ) async -> CoachProviderAttemptCancellationOutcome
-}
-
-extension SyntheticCoachProviderPort {
-    func cancelAndReap(
-        attemptID: CoachProviderAttemptID,
-        graceMilliseconds: Int64
-    ) async -> CoachProviderAttemptCancellationOutcome {
-        .unableToConfirm
-    }
-}
-
-struct DeterministicSyntheticCoachProvider: SyntheticCoachProviderPort {
-    static let markdown = "This is a complete synthetic coaching response."
-
-    func run(_ request: SyntheticCoachProviderRequest) async -> CoachProviderAttemptOutcome {
-        .complete(markdown: Self.markdown)
-    }
-
-    func cancelAndReap(
-        attemptID: CoachProviderAttemptID,
-        graceMilliseconds: Int64
-    ) async -> CoachProviderAttemptCancellationOutcome {
-        .alreadyAbsent
-    }
 }
 
 @_spi(InvocationInfrastructure)
@@ -2915,9 +2832,40 @@ public actor DefaultInvocations: Invocations {
             base + " " + shorterRepairInstruction
         }
     }
+
+    private static func runProvider(
+        _ provider: any CoachProvider,
+        request: CoachRequest,
+        execution: ProviderAttemptMetadata,
+        transcriptAccess: CoachTranscriptAccess?
+    ) async -> CoachProviderAttemptOutcome {
+        do {
+            return .complete(
+                try await provider.run(
+                    request: request,
+                    execution: execution,
+                    transcriptAccess: transcriptAccess
+                )
+            )
+        } catch let error as CoachProviderRunError {
+            return switch error {
+            case .autoRetryableFailure:
+                .autoRetryableFailure
+            case .userRetryableFailure:
+                .userRetryableFailure
+            case .responseOverflow:
+                .responseOverflow
+            }
+        } catch {
+            // Adapters must normalize known failures. Unknown conditions remain
+            // bounded and user-retryable without exposing transport details.
+            return .userRetryableFailure
+        }
+    }
+
     private let persistence: any InvocationPersistencePort
     private let admission: any InvocationAdmissionPort
-    private let provider: any SyntheticCoachProviderPort
+    private let provider: any CoachProvider
     private let coachContext: any CoachContextCoordinating
     private let clock: any ChatClock
     private let identities: any InvocationIdentityGenerating
@@ -2955,7 +2903,7 @@ public actor DefaultInvocations: Invocations {
     init(
         persistence: any InvocationPersistencePort,
         admission: any InvocationAdmissionPort,
-        provider: any SyntheticCoachProviderPort,
+        provider: any CoachProvider,
         coachContext: any CoachContextCoordinating,
         clock: any ChatClock,
         identities: any InvocationIdentityGenerating,
@@ -2964,7 +2912,7 @@ public actor DefaultInvocations: Invocations {
         retryDiagnostics: any InvocationRetryDiagnostics =
             DiscardingInvocationRetryDiagnostics(),
         retryTiming: any InvocationRetryTiming = ContinuousInvocationRetryTiming(),
-        transcriptAvailability: AttemptTranscriptAvailabilitySource = .allAvailable
+        transcriptAvailability: AttemptTranscriptAvailabilitySource
     ) {
         self.persistence = persistence
         self.admission = admission
@@ -2979,26 +2927,27 @@ public actor DefaultInvocations: Invocations {
         self.transcriptAvailability = transcriptAvailability
     }
 
-    /// Production composition seam. Exact preparation and the synthetic provider
-    /// remain behind this coordinator; Infrastructure supplies only durable
+    /// Production composition seam. Application retains exact preparation and
+    /// publication; Infrastructure supplies the provider adapter plus durable
     /// persistence, admission, time, and stable identities.
     @_spi(InvocationInfrastructure)
     public init(
         persistence: any InvocationPersistencePort,
         admission: any InvocationAdmissionPort,
+        provider: any CoachProvider,
+        coachContext: DefaultCoachContextFeature,
         clock: any ChatClock,
         identities: any InvocationIdentityGenerating,
         memoryIDGenerator: any CoachMemoryIDGenerator,
         retrySleeper: any InvocationRetrySleeping = TaskInvocationRetrySleeper(),
-        retryDiagnostics: any InvocationRetryDiagnostics =
-            DiscardingInvocationRetryDiagnostics(),
+        retryDiagnostics: any InvocationRetryDiagnostics,
         retryTiming: any InvocationRetryTiming = ContinuousInvocationRetryTiming(),
         transcriptAvailability: AttemptTranscriptAvailabilitySource
     ) {
         self.persistence = persistence
         self.admission = admission
-        provider = DeterministicSyntheticCoachProvider()
-        coachContext = DefaultCoachContextFeature()
+        self.provider = provider
+        self.coachContext = coachContext
         self.clock = clock
         self.identities = identities
         self.memoryIDGenerator = memoryIDGenerator
@@ -4443,21 +4392,28 @@ public actor DefaultInvocations: Invocations {
             case .shorterRepair:
                 .shorterRepair(instruction: Self.shorterRepairInstruction)
             }
-            let providerRequest = SyntheticCoachProviderRequest(
+            let providerRequest = CoachRequest(
+                body: attemptExchange.request,
+                outputTokenCeiling: prepared.quote.reservedResponseTokens,
+                pinnedInstruction: pinnedInstruction,
+                providerBinding: prepared.providerBinding
+            )
+            let execution = ProviderAttemptMetadata(
                 attemptID: attempt.id,
                 attemptOrdinal: attempt.ordinal,
                 attemptKind: attempt.kind,
                 providerIdempotencyValue:
                     transportAuthority.providerIdempotencyValue,
-                exchange: attemptExchange,
-                transcriptAccess: transcriptAccess,
-                outputTokenCeiling: prepared.quote.reservedResponseTokens,
-                pinnedInstruction: pinnedInstruction,
                 control: control
             )
             let provider = self.provider
             let providerTask = Task {
-                let result = await provider.run(providerRequest)
+                let result = await Self.runProvider(
+                    provider,
+                    request: providerRequest,
+                    execution: execution,
+                    transcriptAccess: transcriptAccess
+                )
                 await completion.complete(.provider(result))
             }
             let stopAuthority = ProfileReconsiderationInvocationStopAuthority(
@@ -5551,21 +5507,28 @@ public actor DefaultInvocations: Invocations {
                     startedAt: attemptStartedAt
                 )
             }
-            let providerRequest = SyntheticCoachProviderRequest(
+            let providerRequest = CoachRequest(
+                body: attemptExchange.request,
+                outputTokenCeiling: outputTokenCeiling,
+                pinnedInstruction: pinnedInstruction,
+                providerBinding: prepared.providerBinding
+            )
+            let execution = ProviderAttemptMetadata(
                 attemptID: attempt.id,
                 attemptOrdinal: attempt.ordinal,
                 attemptKind: attempt.kind,
                 providerIdempotencyValue:
                     transportAuthority.providerIdempotencyValue,
-                exchange: attemptExchange,
-                transcriptAccess: transcriptAccess,
-                outputTokenCeiling: outputTokenCeiling,
-                pinnedInstruction: pinnedInstruction,
                 control: control
             )
             let provider = self.provider
             let providerTask = Task {
-                let outcome = await provider.run(providerRequest)
+                let outcome = await Self.runProvider(
+                    provider,
+                    request: providerRequest,
+                    execution: execution,
+                    transcriptAccess: transcriptAccess
+                )
                 await providerCompletion.complete(.provider(outcome))
             }
             let stopAuthority = InvocationStopAuthority(

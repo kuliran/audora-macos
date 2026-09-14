@@ -58,6 +58,11 @@
       "effect": "lockPendingUserTurn",
       "outcome": "committed"
     },
+    {
+      "port": "chatStore",
+      "effect": "replacePendingUserTurn",
+      "outcome": "committed"
+    },
     { "port": "coachProvider", "effect": "run", "outcome": "suspended" },
     { "port": "coachProvider", "effect": "cancelAndReap", "outcome": "reaped" },
     {

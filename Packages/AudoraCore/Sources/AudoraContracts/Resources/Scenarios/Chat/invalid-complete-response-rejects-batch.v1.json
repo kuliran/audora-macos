@@ -86,6 +86,11 @@
       "port": "chatStore",
       "effect": "replacePendingUserTurn",
       "outcome": "committed"
+    },
+    {
+      "port": "chatStore",
+      "effect": "replacePendingUserTurn",
+      "outcome": "committed"
     }
   ],
   "expectedState": {

@@ -39,8 +39,7 @@ public struct ReviewSessionSnapshot: Equatable, Sendable {
     public let selection: ReviewSelection
     public let revisionIDs: [TranscriptRevisionID]
     public let selectedRevision: TranscriptRevision
-    public let audioCapabilityID: ReviewAudioCapabilityID
-    public let canonicalAudioDurationMilliseconds: UInt64
+    public let audioSource: ReviewAudioSource?
     public let annotationEvidence: SpeechAnnotationEvidence
 
     public init(
@@ -51,22 +50,48 @@ public struct ReviewSessionSnapshot: Equatable, Sendable {
         canonicalAudioDurationMilliseconds: UInt64,
         annotationEvidence: SpeechAnnotationEvidence = .none
     ) throws {
-        guard canonicalAudioDurationMilliseconds > 0,
-              canonicalAudioDurationMilliseconds <= 2_700_000
-        else { throw ReviewSnapshotError.invalidDuration }
+        try self.init(
+            selection: selection,
+            revisionIDs: revisionIDs,
+            selectedRevision: selectedRevision,
+            audioSource: ReviewAudioSource(
+                selection: selection,
+                audioCapabilityID: audioCapabilityID,
+                durationMilliseconds: canonicalAudioDurationMilliseconds
+            ),
+            annotationEvidence: annotationEvidence
+        )
+    }
+
+    /// Creates a transcript-authoritative snapshot. `audioSource` is absent
+    /// when canonical audio cannot be verified; the immutable transcript and
+    /// annotations remain reviewable without inventing playback authority.
+    public init(
+        selection: ReviewSelection,
+        revisionIDs: [TranscriptRevisionID],
+        selectedRevision: TranscriptRevision,
+        audioSource: ReviewAudioSource?,
+        annotationEvidence: SpeechAnnotationEvidence = .none
+    ) throws {
         guard !revisionIDs.isEmpty,
               revisionIDs.count <= TranscriptRevisionLimits.maximumSessionRevisionCount,
               Set(revisionIDs).count == revisionIDs.count
         else { throw ReviewSnapshotError.invalidRevisionInventory }
         guard selectedRevision.sessionID == selection.sessionID,
-              selectedRevision.durationMilliseconds == canonicalAudioDurationMilliseconds,
               revisionIDs.contains(selectedRevision.revisionID)
         else { throw ReviewSnapshotError.inconsistentSelectedRevision }
+        if let audioSource {
+            guard audioSource.selection == selection,
+                  audioSource.durationMilliseconds > 0,
+                  audioSource.durationMilliseconds <= 2_700_000,
+                  selectedRevision.durationMilliseconds ==
+                    audioSource.durationMilliseconds
+            else { throw ReviewSnapshotError.invalidDuration }
+        }
         self.selection = selection
         self.revisionIDs = revisionIDs
         self.selectedRevision = selectedRevision
-        self.audioCapabilityID = audioCapabilityID
-        self.canonicalAudioDurationMilliseconds = canonicalAudioDurationMilliseconds
+        self.audioSource = audioSource
         self.annotationEvidence = annotationEvidence
     }
 
@@ -74,12 +99,8 @@ public struct ReviewSessionSnapshot: Equatable, Sendable {
         selectedRevision.revisionID
     }
 
-    public var audioSource: ReviewAudioSource {
-        ReviewAudioSource(
-            selection: selection,
-            audioCapabilityID: audioCapabilityID,
-            durationMilliseconds: canonicalAudioDurationMilliseconds
-        )
+    public var audioCapabilityID: ReviewAudioCapabilityID? {
+        audioSource?.audioCapabilityID
     }
 }
 
@@ -182,8 +203,10 @@ public struct ReviewReadySnapshot: Equatable, Sendable {
     public let selection: ReviewSelection
     public let revisionIDs: [TranscriptRevisionID]
     public let selectedRevision: TranscriptRevision
-    public let playback: ReviewPlaybackSnapshot
-    public let playbackAvailable: Bool
+    public let playback: ReviewPlaybackSnapshot?
+    /// Retranscription authority comes from verified canonical audio evidence,
+    /// independently of whether the playback adapter can currently open it.
+    public let retranscriptionAvailable: Bool
     public let activeWordID: TranscriptWordID?
     public let evidenceHighlight: ReviewEvidenceHighlight?
     public let annotations: ReviewAnnotations
@@ -194,8 +217,8 @@ public struct ReviewReadySnapshot: Equatable, Sendable {
         selection: ReviewSelection,
         revisionIDs: [TranscriptRevisionID],
         selectedRevision: TranscriptRevision,
-        playback: ReviewPlaybackSnapshot,
-        playbackAvailable: Bool = true,
+        playback: ReviewPlaybackSnapshot?,
+        retranscriptionAvailable: Bool,
         activeWordID: TranscriptWordID?,
         evidenceHighlight: ReviewEvidenceHighlight? = nil,
         annotations: ReviewAnnotations,
@@ -206,7 +229,7 @@ public struct ReviewReadySnapshot: Equatable, Sendable {
         self.revisionIDs = revisionIDs
         self.selectedRevision = selectedRevision
         self.playback = playback
-        self.playbackAvailable = playbackAvailable
+        self.retranscriptionAvailable = retranscriptionAvailable
         self.activeWordID = activeWordID
         self.evidenceHighlight = evidenceHighlight
         self.annotations = annotations
@@ -217,6 +240,8 @@ public struct ReviewReadySnapshot: Equatable, Sendable {
     public var selectedRevisionID: TranscriptRevisionID {
         selectedRevision.revisionID
     }
+
+    public var playbackAvailable: Bool { playback != nil }
 }
 
 public enum ReviewUnavailableReason: Equatable, Sendable {
@@ -233,6 +258,9 @@ public enum ReviewFeatureState: Equatable, Sendable {
 }
 
 public enum ReviewCommand: Equatable, Sendable {
+    /// Process-local Library authority used to reject same-ID replacement
+    /// roots at mutation boundaries.
+    case activateLibraryAuthority(LibraryActivation?)
     case selectSession(ReviewSelection)
     case openEvidence(scope: LibraryScope, reference: EvidenceReference)
     case clearSelection
@@ -249,7 +277,21 @@ public enum ReviewCommand: Equatable, Sendable {
 }
 
 @available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
-public protocol ReviewFeature: Sendable {
+public protocol ReviewLibraryNavigationLifecycle: Sendable {
+    /// Fences Review ingress and revokes the selected Session's playback
+    /// authority before Library storage can change.
+    func reserveLibraryNavigation() async -> Bool
+
+    /// Reconciles Review with the exact result produced by the Library
+    /// mutation before the Application navigation boundary reopens.
+    func finishLibraryNavigation(_ result: LibraryCommandResult) async
+}
+
+@available(macOS 10.15, iOS 13, tvOS 13, watchOS 6, *)
+public protocol ReviewFeature:
+    LibraryCatalogSessionLifecycle,
+    ReviewLibraryNavigationLifecycle
+{
     var currentState: ReviewFeatureState { get async }
     var states: AsyncStream<ReviewFeatureState> { get }
     func send(_ command: ReviewCommand) async

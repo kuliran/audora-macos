@@ -18,43 +18,10 @@ public struct SessionProcessingReviewRetranscriber: ReviewRetranscriptionPort {
             scope: selection.scope,
             sessionID: selection.sessionID
         )
-        guard await feature.send(.selectSession(processingSelection)) else {
-            return .failed
-        }
-        guard let selectedState = await feature.currentSessionProcessingState()
-        else {
-            return .unavailable
-        }
-        let launchCommand: SessionProcessingCommand
-        switch selectedState {
-        case .ready, .completed:
-            launchCommand = .start
-        case let .failed(snapshot):
-            guard snapshot.actions.contains(.retry) else { return .failed }
-            launchCommand = .retry
-        case let .cancelled(snapshot), let .interrupted(snapshot):
-            guard snapshot.actions.contains(.retry) else { return .failed }
-            launchCommand = .retry
-        case .unavailable:
-            return .unavailable
-        case .preparing, .queued, .running, .cancelling, .validating,
-             .recoveryRequired:
-            return .failed
-        }
-
-        guard await feature.send(launchCommand) else { return .failed }
-        guard let completedState = await feature.currentSessionProcessingState()
-        else {
-            return .unavailable
-        }
-        switch completedState {
-        case let .completed(snapshot) where snapshot.sessionID == selection.sessionID:
-            return .completed
-        case .unavailable:
-            return .unavailable
-        case .ready, .preparing, .queued, .running, .cancelling, .validating,
-             .completed, .failed, .cancelled, .interrupted, .recoveryRequired:
-            return .failed
+        return switch await feature.retranscribeExactly(processingSelection) {
+        case .completed: .completed
+        case .unavailable: .unavailable
+        case .failed: .failed
         }
     }
 }

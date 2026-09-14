@@ -2,8 +2,14 @@ import AudoraCodexCLIQualification
 import Foundation
 
 private struct Options {
+    enum Mode {
+        case preflight
+        case execute
+    }
+
     var executablePath = "/opt/homebrew/bin/codex"
     var model = "gpt-5.4"
+    var mode = Mode.preflight
 }
 
 private enum ArgumentError: Error {
@@ -12,6 +18,7 @@ private enum ArgumentError: Error {
 
 private func parseOptions(_ arguments: [String]) throws -> Options {
     var options = Options()
+    var explicitMode: Options.Mode?
     var index = 0
     while index < arguments.count {
         switch arguments[index] {
@@ -23,6 +30,16 @@ private func parseOptions(_ arguments: [String]) throws -> Options {
             guard index + 1 < arguments.count else { throw ArgumentError.invalid }
             options.model = arguments[index + 1]
             index += 2
+        case "--preflight":
+            guard explicitMode == nil else { throw ArgumentError.invalid }
+            explicitMode = .preflight
+            options.mode = .preflight
+            index += 1
+        case "--execute":
+            guard explicitMode == nil else { throw ArgumentError.invalid }
+            explicitMode = .execute
+            options.mode = .execute
+            index += 1
         case "--help", "-h":
             printUsage()
             exit(0)
@@ -35,7 +52,8 @@ private func parseOptions(_ arguments: [String]) throws -> Options {
 
 private func printUsage() {
     print(
-        "Usage: codex-cli-qualification [--codex /absolute/path] [--model allowlisted-model]"
+        "Usage: codex-cli-qualification [--preflight | --execute] " +
+            "[--codex /absolute/path] [--model allowlisted-model]"
     )
 }
 
@@ -53,18 +71,33 @@ do {
     guard options.executablePath.hasPrefix("/") else { throw ArgumentError.invalid }
 
     let harness = CodexCLIQualificationHarness()
-    let report = try harness.runSuite(
-        executableURL: URL(fileURLWithPath: options.executablePath),
-        model: options.model
-    )
-
-    guard writeJSON(report) else { throw ArgumentError.invalid }
-
-    let commandSucceeded = QualificationCommandExitPolicy.succeeded(
-        report: report,
-        ranFullSuite: true
-    )
-    exit(commandSucceeded ? 0 : 1)
+    let executableURL = URL(fileURLWithPath: options.executablePath)
+    switch options.mode {
+    case .preflight:
+        let report = try harness.preflight(
+            executableURL: executableURL,
+            model: options.model
+        )
+        guard writeJSON(report) else { throw ArgumentError.invalid }
+        exit(report.providerLaunchPermitted ? 0 : 1)
+    case .execute:
+        guard let authorization = CodexCLIQualificationExecutionAuthorization()
+        else {
+            throw CodexCLIQualificationStartError
+                .sameProcessAuthorizationUnavailable
+        }
+        let report = try harness.runSuite(
+            executableURL: executableURL,
+            model: options.model,
+            authorization: authorization
+        )
+        guard writeJSON(report) else { throw ArgumentError.invalid }
+        let commandSucceeded = QualificationCommandExitPolicy.succeeded(
+            report: report,
+            ranFullSuite: true
+        )
+        exit(commandSucceeded ? 0 : 1)
+    }
 } catch let error as CodexCLIQualificationStartError {
     if case let .qualificationUnavailable(report) = error, writeJSON(report) {
         FileHandle.standardError.write(

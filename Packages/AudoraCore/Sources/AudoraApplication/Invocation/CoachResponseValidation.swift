@@ -1,31 +1,6 @@
 import AudoraDomain
 import Foundation
 
-/// Complete provider bytes. The value is intentionally opaque until the
-/// Application validates the whole response batch.
-struct CoachProviderCompleteResponse: Equatable, Sendable {
-    let body: Data
-
-    init(body: Data) {
-        self.body = body
-    }
-
-    static func singleMarkdown(_ markdown: String) -> Self {
-        CoachProviderCompleteResponse(
-            body: CanonicalJSON.serialize(
-                .object([
-                    "messageBlocks": .array([
-                        .object([
-                            "kind": .string("markdown"),
-                            "markdown": .string(markdown),
-                        ]),
-                    ]),
-                ])
-            )
-        )
-    }
-}
-
 /// Qualified, frozen response limits paired with the exact request admission.
 /// Equality compares qualification identity rather than the estimator closure.
 struct CoachResponseValidationAuthority: Equatable, Sendable {
@@ -331,73 +306,6 @@ struct CoachResponseTranscriptEvidenceIndex: Equatable, Sendable {
     let wordPositions: [CoachResponseWordID: Int]
     let audioEventIDs: Set<CoachResponseAudioEventID>
     let audioEventIDsIneligibleForProfileSupport: Set<CoachResponseAudioEventID>
-
-    init(
-        wordIDs: [String],
-        audioEventIDs: [String],
-        audioEventIDsIneligibleForProfileSupport: Set<String> = [],
-        sessionID: SessionID = try! SessionID(
-            "ses-20260830T110000000Z-1KMN"
-        ),
-        transcriptRevisionID: TranscriptRevisionID = try! TranscriptRevisionID(
-            "trv-20260830T111000000Z-1PQR"
-        ),
-        displayLabel: String = "Synthetic Session"
-    ) throws {
-        let parsedWordIDs = wordIDs.compactMap(CoachResponseWordID.init)
-        let parsedAudioEventIDs = audioEventIDs.compactMap(
-            CoachResponseAudioEventID.init
-        )
-        let parsedIneligibleAudioEventIDs =
-            audioEventIDsIneligibleForProfileSupport.compactMap(
-                CoachResponseAudioEventID.init
-            )
-        guard parsedWordIDs.count == wordIDs.count,
-              parsedAudioEventIDs.count == audioEventIDs.count,
-              parsedIneligibleAudioEventIDs.count ==
-              audioEventIDsIneligibleForProfileSupport.count,
-              Set(parsedWordIDs).count == parsedWordIDs.count,
-              Set(parsedAudioEventIDs).count == parsedAudioEventIDs.count,
-              Set(parsedIneligibleAudioEventIDs).isSubset(
-                  of: Set(parsedAudioEventIDs)
-              )
-        else { throw CoachResponseValidationError.invalidPreparedContext }
-        self.sessionID = sessionID
-        self.transcriptRevisionID = transcriptRevisionID
-        self.displayLabel = displayLabel
-        words = parsedWordIDs.enumerated().map { index, id in
-            Word(
-                id: id,
-                durableID: try! TranscriptWordID(
-                    String(format: "w%06d", index + 1)
-                ),
-                text: id.rawValue,
-                startMilliseconds: UInt64(index),
-                endMilliseconds: UInt64(index + 1)
-            )
-        }
-        wordPositions = Dictionary(uniqueKeysWithValues: words.enumerated().map {
-            ($0.element.id, $0.offset)
-        })
-        audioEvents = Dictionary(uniqueKeysWithValues: parsedAudioEventIDs.enumerated()
-            .map { index, id in
-                (
-                    id,
-                    AudioEvent(
-                        id: id,
-                        durableID: try! AudioEventID(
-                            String(format: "a%06d", index + 1)
-                        ),
-                        trustedText: id.rawValue,
-                        startMilliseconds: UInt64(index),
-                        endMilliseconds: UInt64(index + 1)
-                    )
-                )
-            })
-        self.audioEventIDs = Set(parsedAudioEventIDs)
-        self.audioEventIDsIneligibleForProfileSupport =
-            Set(parsedIneligibleAudioEventIDs)
-    }
 
     init(
         sessionID: SessionID,
