@@ -26,6 +26,23 @@ as `audora-avfoundation` version 1: stereo is mixed as `(left + right) / 2` in
 normal/max-quality/normal-prime settings, and quantization multiplies by 32,768,
 rounds ties away from zero, then saturates to the signed-16 range.
 
+An eligible WAV already has that decoded representation and instead records the
+identity pipeline `audora-compatible-pcm-wav` version 1. Eligibility requires a
+little-endian `RIFF`/`WAVE` whose declared RIFF length covers the whole file,
+exactly one 16-byte PCM format chunk with encoding tag 1, mono 16 kHz, 16 bits per
+sample, block alignment 2 and byte rate 32,000, followed by exactly one nonempty,
+even-sized direct `data` chunk. Chunk lengths and RIFF padding must be complete.
+Every `LIST` chunk has a four-byte list type; short `LIST` payloads and extended
+`fmt ` payloads bypass this deliberately narrow path.
+`wavl`, `slnt`, `plst`, `smpl`, multiple data chunks, extensible/non-PCM
+formats, RF64/RIFX, unsupported channels/rates/depths, and malformed layouts are
+ineligible. Other
+optional chunks are metadata: Audora records the selected container fingerprint
+but does not copy those chunks into the canonical artifact.
+Eligibility examines at most 4,096 top-level chunks with cancellation checked
+between chunks. A larger inventory is not rejected as media; it bypasses this
+bounded fast path and uses the ordinary decoder with byte-exact retention.
+
 At a declared unavailable microphone discontinuity, version one may reset that
 same converter instance without changing its format, settings, or pipeline
 version. Before reset it completes the current 4,096-frame input batch and one
@@ -48,8 +65,10 @@ container's rounded duration to decide the final boundary.
 
 For imports:
 
-1. Copy the original byte-for-byte into the Session's partial audio directory;
-   version one retains it for the life of the Session.
+1. Copy the original byte-for-byte into the Session's partial audio directory.
+   The external source is opened read-only and never renamed, hard-linked, or
+   mutated; descriptor streaming works identically when source and Library are
+   on different filesystems.
 2. Open that retained copy through the Library's anchored, no-follow descriptor
    capability and inspect and decode from that same file identity; pathname
    replacement cannot redirect the decoder after validation.
@@ -57,14 +76,50 @@ For imports:
    decodeability.
 4. Reject inputs longer than 45 minutes, unsupported channel layouts, and files
    with more than two channels explicitly.
-5. Decode and deterministically downmix mono or stereo input once to the canonical
-   mono WAV.
+5. For an eligible compatible PCM WAV, copy its direct PCM payload behind the
+   strict 44-byte canonical header, or rename the already strict staged copy,
+   then remove only the staged original. This stores one artifact. For all other
+   input, decode and deterministically downmix once to canonical mono while
+   retaining the byte-exact original.
 6. Apply container edits and codec priming/trailing trims, normalize the first
    presented sample to canonical frame zero, and reject discontinuous presented
    sample buffers instead of silently compressing or extending the timeline.
 7. Validate duration and readable frames.
 8. Revalidate the authoritative Library root and atomically commit the Session
    with its owned Audio Asset.
+
+The compatible path is chosen only after the full source has been copied,
+fingerprinted, flushed, and parsed from its anchored staged descriptor. Until
+`session.json` is installed, both a partially written canonical file and any
+not-yet-removed staged original remain disposable recovery state. The persisted
+schema-v2 manifest points both artifact roles at the real `audio/audio.wav`
+fingerprint and stores the discarded selected-container fingerprint separately as
+provenance. Schema-v1 two-artifact Sessions remain valid and are never migrated.
+
+The storage measurement for an eligible source of `S` bytes and `F` PCM frames is
+one `44 + 2F` byte artifact instead of `S + 44 + 2F`; the final saving is exactly
+`S` bytes, excluding the small manifest delta. A strict canonical source takes
+one staged copy plus a same-directory rename and no decode or PCM rewrite. An
+eligible source with optional chunks takes one staged copy, one bounded RIFF scan,
+and one PCM payload copy, while skipping AVFoundation decode, float conversion,
+resampling, and requantization. The ordinary descriptor-copy acquisition is also
+the portable fallback; no APFS clone or mutable hard link is part of correctness.
+Capacity admission reserves the two bounded manifests for strict canonical input;
+it reserves one additional canonical WAV only when PCM must be copied out of an
+eligible container with optional chunks.
+
+The reproducible ten-minute synthetic comparison in
+[`Qualification/AudioImport/RESULTS.md`](../../Qualification/AudioImport/RESULTS.md)
+measured both final storage and fsync-inclusive import time before selecting this
+contract. The one-artifact path reduced allocated bytes by 50% for strict input
+and 51% for input with a 1 MiB metadata chunk. Median strict import time fell from
+86.445 ms to 63.578 ms; the conservative optional-chunk comparison fell from
+82.961 ms to 64.014 ms. The timed production persistence transaction includes
+staging, fingerprints, parsing, manifests, validation, install, and final reopen;
+the retained-original comparator copies compatible PCM directly rather than
+charging historical decoder work. These timings are diagnostic, not release
+thresholds; the portable storage reduction without a measured time regression
+supports the single-artifact choice.
 
 Transcription and playback both use the canonical timeline. This avoids M4A codec
 priming/edit-list offsets causing the transcript to appear ahead of playback.

@@ -5,6 +5,32 @@ import Foundation
 import XCTest
 
 final class QualificationGatedCoachProviderTests: XCTestCase {
+    func testProviderBoundaryValuesNeverPrintContentOrAttemptAuthority() throws {
+        let request = CoachRequest(
+            body: Data("private user and transcript content".utf8),
+            outputTokenCeiling: 512,
+            pinnedInstruction: "private pinned instruction",
+            providerBinding: qualifiedBinding(descriptor: Self.descriptor)
+        )
+        let execution = try Self.execution
+        let response = CoachProviderCompleteResponse(
+            body: Data("private provider output".utf8)
+        )
+
+        XCTAssertEqual(String(describing: request), "<redacted Coach request>")
+        XCTAssertEqual(String(reflecting: request), request.description)
+        XCTAssertEqual(
+            String(describing: execution),
+            "<redacted provider Attempt metadata>"
+        )
+        XCTAssertEqual(String(reflecting: execution), execution.description)
+        XCTAssertEqual(
+            String(describing: response),
+            "<redacted Coach provider response>"
+        )
+        XCTAssertEqual(String(reflecting: response), response.description)
+    }
+
     func testEmptyGatewayFailsClosedWithoutLaunchingAProvider() async throws {
         let gateway = QualificationGatedCoachProvider()
 

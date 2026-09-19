@@ -142,6 +142,67 @@ final class ImportedSessionTests: XCTestCase {
         )
     }
 
+    func testCanonicalizedPCMSeparatesSelectedContainerProvenanceFromRealArtifact() throws {
+        let canonicalFingerprint = try AudioArtifactFingerprint(
+            byteCount: 46,
+            sha256: fixtureHash
+        )
+        let selectedContainerFingerprint = try AudioArtifactFingerprint(
+            byteCount: 80,
+            sha256: String(repeating: "b", count: 64)
+        )
+        let originalRole = try OriginalAudioArtifact(
+            relativePath: LibraryRelativePath("audio/audio.wav"),
+            container: .wav,
+            fingerprint: canonicalFingerprint,
+            decodedCodec: .linearPCM,
+            sourceSampleRateHz: 16_000,
+            sourceChannelCount: 1,
+            retention: .canonicalizedPCM,
+            sourceFingerprint: selectedContainerFingerprint
+        )
+        let canonical = try CanonicalAudioArtifact(
+            relativePath: LibraryRelativePath("audio/audio.wav"),
+            fingerprint: canonicalFingerprint,
+            frameCount: 1,
+            durationMilliseconds: 1
+        )
+        let source = try SessionAudioSource(
+            audioSourceID: .microphone,
+            role: .microphone,
+            timelineOffsetMilliseconds: 0
+        )
+        let asset = try ImportedAudioAsset(
+            original: originalRole,
+            canonical: canonical,
+            sources: [source],
+            normalization: .compatiblePCMWAVV1
+        )
+
+        XCTAssertEqual(asset.original.fingerprint, canonicalFingerprint)
+        XCTAssertEqual(asset.original.sourceFingerprint, selectedContainerFingerprint)
+        XCTAssertThrowsError(
+            try ImportedAudioAsset(
+                original: originalRole,
+                canonical: canonical,
+                sources: [source],
+                normalization: .v1
+            )
+        )
+        XCTAssertThrowsError(
+            try OriginalAudioArtifact(
+                relativePath: LibraryRelativePath("audio/audio.wav"),
+                container: .wav,
+                fingerprint: canonicalFingerprint,
+                decodedCodec: .linearPCM,
+                sourceSampleRateHz: 48_000,
+                sourceChannelCount: 1,
+                retention: .canonicalizedPCM,
+                sourceFingerprint: selectedContainerFingerprint
+            )
+        )
+    }
+
     func testCanonicalTimeRangeCannotEscapeSessionTimeline() throws {
         let expected = try CanonicalTimeRange(
             startMilliseconds: 100,

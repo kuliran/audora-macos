@@ -42,6 +42,15 @@ public enum DecodedAudioCodec: String, Equatable, Sendable {
     case linearPCM
 }
 
+/// Describes whether the selected source container is still present as a
+/// separate Session-owned artifact. Canonicalized PCM provenance deliberately
+/// keeps the selected source fingerprint and format metadata without retaining
+/// its container bytes a second time.
+public enum OriginalAudioRetention: String, Equatable, Sendable {
+    case byteExact
+    case canonicalizedPCM
+}
+
 public struct AudioArtifactFingerprint: Equatable, Sendable {
     public let byteCount: UInt64
     public let sha256: String
@@ -68,9 +77,14 @@ public struct OriginalAudioArtifact: Equatable, Sendable {
     public let relativePath: LibraryRelativePath
     public let container: ImportedAudioContainer
     public let fingerprint: AudioArtifactFingerprint
+    /// Fingerprint of the bytes selected by the Speaker. This equals
+    /// `fingerprint` when those bytes are retained. For canonicalized PCM it is
+    /// provenance only; `fingerprint` continues to describe `relativePath`.
+    public let sourceFingerprint: AudioArtifactFingerprint
     public let decodedCodec: DecodedAudioCodec
     public let sourceSampleRateHz: UInt32
     public let sourceChannelCount: UInt32
+    public let retention: OriginalAudioRetention
 
     public init(
         relativePath: LibraryRelativePath,
@@ -78,10 +92,24 @@ public struct OriginalAudioArtifact: Equatable, Sendable {
         fingerprint: AudioArtifactFingerprint,
         decodedCodec: DecodedAudioCodec,
         sourceSampleRateHz: UInt32,
-        sourceChannelCount: UInt32
+        sourceChannelCount: UInt32,
+        retention: OriginalAudioRetention = .byteExact,
+        sourceFingerprint: AudioArtifactFingerprint? = nil
     ) throws {
-        guard relativePath.description == "audio/original.\(container.rawValue)" else {
-            throw ImportedSessionValidationError.invalidOriginalPath
+        switch retention {
+        case .byteExact:
+            guard relativePath.description == "audio/original.\(container.rawValue)" else {
+                throw ImportedSessionValidationError.invalidOriginalPath
+            }
+        case .canonicalizedPCM:
+            guard relativePath.description == "audio/audio.wav",
+                  container == .wav,
+                  decodedCodec == .linearPCM,
+                  sourceSampleRateHz == CanonicalAudioFormat.sampleRateHz,
+                  sourceChannelCount == CanonicalAudioFormat.channelCount
+            else {
+                throw ImportedSessionValidationError.invalidOriginalPath
+            }
         }
         guard (8_000...192_000).contains(sourceSampleRateHz),
               sourceChannelCount == 1 || sourceChannelCount == 2
@@ -97,9 +125,11 @@ public struct OriginalAudioArtifact: Equatable, Sendable {
         self.relativePath = relativePath
         self.container = container
         self.fingerprint = fingerprint
+        self.sourceFingerprint = sourceFingerprint ?? fingerprint
         self.decodedCodec = decodedCodec
         self.sourceSampleRateHz = sourceSampleRateHz
         self.sourceChannelCount = sourceChannelCount
+        self.retention = retention
     }
 }
 
@@ -171,6 +201,14 @@ public struct AudioNormalizationProvenance: Equatable, Sendable {
         quantizerVersion: "s16-round-away-saturate-v1"
     )!
 
+    public static let compatiblePCMWAVV1 = AudioNormalizationProvenance(
+        algorithmID: "audora-compatible-pcm-wav",
+        algorithmVersion: 1,
+        stereoRule: "identity-mono",
+        resamplerVersion: "identity-16000hz",
+        quantizerVersion: "identity-s16le"
+    )!
+
     public let algorithmID: String
     public let algorithmVersion: UInt32
     public let stereoRule: String
@@ -184,12 +222,17 @@ public struct AudioNormalizationProvenance: Equatable, Sendable {
         resamplerVersion: String,
         quantizerVersion: String
     ) {
-        guard algorithmID == "audora-avfoundation",
-              algorithmVersion == 1,
-              stereoRule == "arithmeticMean",
-              resamplerVersion == "av-audio-converter-normal-max-normal-prime-v1",
-              quantizerVersion == "s16-round-away-saturate-v1"
-        else {
+        let isAVFoundationV1 = algorithmID == "audora-avfoundation" &&
+            algorithmVersion == 1 &&
+            stereoRule == "arithmeticMean" &&
+            resamplerVersion == "av-audio-converter-normal-max-normal-prime-v1" &&
+            quantizerVersion == "s16-round-away-saturate-v1"
+        let isCompatiblePCMWAVV1 = algorithmID == "audora-compatible-pcm-wav" &&
+            algorithmVersion == 1 &&
+            stereoRule == "identity-mono" &&
+            resamplerVersion == "identity-16000hz" &&
+            quantizerVersion == "identity-s16le"
+        guard isAVFoundationV1 || isCompatiblePCMWAVV1 else {
             return nil
         }
         self.algorithmID = algorithmID
@@ -214,6 +257,20 @@ public struct ImportedAudioAsset: Equatable, Sendable {
     ) throws {
         guard sources.count == 1, sources.first?.audioSourceID == .microphone else {
             throw ImportedSessionValidationError.invalidSource
+        }
+        if original.retention == .canonicalizedPCM {
+            guard original.relativePath == canonical.relativePath,
+                  original.fingerprint == canonical.fingerprint,
+                  normalization == .compatiblePCMWAVV1
+            else {
+                throw ImportedSessionValidationError.invalidSource
+            }
+        } else {
+            guard original.sourceFingerprint == original.fingerprint,
+                  normalization == .v1
+            else {
+                throw ImportedSessionValidationError.invalidSource
+            }
         }
         self.original = original
         self.canonical = canonical

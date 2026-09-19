@@ -327,6 +327,252 @@ final class PortableAudioImportPersistenceTests: XCTestCase {
         }
     }
 
+    func testCompatibleCanonicalizationNeverOverwritesAPlantedDestination() throws {
+        try withTemporaryParent { parent in
+            let cases: [(label: String, source: Data, plantedName: String)] = [
+                (
+                    "strict",
+                    compatiblePCMWAV(samples: [1, 2, 3]),
+                    "audio.wav"
+                ),
+                (
+                    "optional-chunk",
+                    compatiblePCMWAV(samples: [1, 2, 3], includesMetadata: true),
+                    ".original.wav.canonicalizing"
+                ),
+            ]
+            let plantedBytes = Data("do-not-replace".utf8)
+
+            for (index, item) in cases.enumerated() {
+                let root = parent.appendingPathComponent("Collision-\(index).audoralibrary")
+                try createLibrary(at: root)
+                let persistence = PortableAudioImportPersistence()
+                let location = try persistence.begin(
+                    root: root,
+                    stagingID: AudioStagingID("staging_collision_\(index)")!,
+                    seed: importedSeed(),
+                    container: .wav
+                )
+                defer {
+                    persistence.discard(location)
+                    location.close()
+                }
+                let source = parent.appendingPathComponent("collision-\(index).wav")
+                try item.source.write(to: source)
+                defer { try? FileManager.default.removeItem(at: source) }
+                let sourceFingerprint = try persistence.copySource(
+                    from: source,
+                    into: location,
+                    maximumBytes: 1_024 * 1_024
+                )
+                let description = try XCTUnwrap(
+                    persistence.inspectCompatiblePCMWAV(
+                        in: location,
+                        expected: sourceFingerprint,
+                        maximumFrameCount: 1_000
+                    )
+                )
+                let planted = location.originalURL.deletingLastPathComponent()
+                    .appendingPathComponent(item.plantedName)
+                try plantedBytes.write(to: planted)
+
+                XCTAssertThrowsError(
+                    try persistence.canonicalizeCompatiblePCMWAV(
+                        description,
+                        in: location,
+                        expectedSource: sourceFingerprint
+                    ),
+                    item.label
+                ) { error in
+                    XCTAssertEqual(error as? AudioImportFailure, .destinationCollision)
+                }
+                XCTAssertEqual(try Data(contentsOf: planted), plantedBytes, item.label)
+                XCTAssertEqual(try Data(contentsOf: location.originalURL), item.source, item.label)
+            }
+        }
+    }
+
+    func testCompatibleCanonicalizationRejectsCanonicalMutationAfterDescriptorCopy() throws {
+        try withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Synthetic.audoralibrary")
+            try createLibrary(at: root)
+            let seed = try importedSeed()
+            let stagingID = AudioStagingID("staging_canonical_mutation")!
+            let canonicalPath = root.appendingPathComponent(
+                "staging/publications/\(stagingID.rawValue)/" +
+                    "\(seed.sessionID.rawValue)/audio/audio.wav"
+            ).path
+            let persistence = PortableAudioImportPersistence { point in
+                guard point == .afterCanonicalWrite else { return }
+                let descriptor = Darwin.open(
+                    canonicalPath,
+                    O_WRONLY | O_NOFOLLOW | O_CLOEXEC
+                )
+                guard descriptor >= 0 else { throw AudioImportFailure.writeFailed }
+                defer { Darwin.close(descriptor) }
+                var replacement: UInt8 = 0x7F
+                guard Darwin.pwrite(descriptor, &replacement, 1, 44) == 1,
+                      Darwin.fsync(descriptor) == 0
+                else {
+                    throw AudioImportFailure.writeFailed
+                }
+            }
+            let location = try persistence.begin(
+                root: root,
+                stagingID: stagingID,
+                seed: seed,
+                container: .wav
+            )
+            defer {
+                persistence.discard(location)
+                location.close()
+            }
+            let sourceBytes = compatiblePCMWAV(
+                samples: [Int16.min, 0, Int16.max],
+                includesMetadata: true
+            )
+            let source = parent.appendingPathComponent("canonical-mutation.wav")
+            try sourceBytes.write(to: source)
+            defer { try? FileManager.default.removeItem(at: source) }
+            let sourceFingerprint = try persistence.copySource(
+                from: source,
+                into: location,
+                maximumBytes: 1_024 * 1_024
+            )
+            let description = try XCTUnwrap(
+                persistence.inspectCompatiblePCMWAV(
+                    in: location,
+                    expected: sourceFingerprint,
+                    maximumFrameCount: 1_000
+                )
+            )
+
+            XCTAssertThrowsError(
+                try persistence.canonicalizeCompatiblePCMWAV(
+                    description,
+                    in: location,
+                    expectedSource: sourceFingerprint
+                )
+            ) { error in
+                XCTAssertEqual(error as? AudioImportFailure, .candidateCorrupt)
+            }
+            XCTAssertEqual(try Data(contentsOf: source), sourceBytes)
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: root.appendingPathComponent("sessions").path
+                ),
+                []
+            )
+        }
+    }
+
+    func testRelaunchReclaimsSchemaV2PublicationInterruptedAfterCanonicalizingRename() throws {
+        try withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Synthetic.audoralibrary")
+            try createLibrary(at: root)
+            let sourceBytes = compatiblePCMWAV(
+                samples: [Int16.min, 0, Int16.max],
+                includesMetadata: true
+            )
+            let source = parent.appendingPathComponent("canonicalizing-crash.wav")
+            try sourceBytes.write(to: source)
+            defer { try? FileManager.default.removeItem(at: source) }
+            let persistence = PortableAudioImportPersistence { point in
+                if point == .afterCanonicalizingSourceRename {
+                    throw AudioImportFailure.writeFailed
+                }
+            }
+            let location = try persistence.begin(
+                root: root,
+                stagingID: AudioStagingID(
+                    "audio_staging_0123456789ABCDEF0123456789ABCDEF"
+                )!,
+                seed: importedSeed(),
+                container: .wav
+            )
+            var locationClosed = false
+            defer {
+                if !locationClosed {
+                    persistence.discard(location)
+                    location.close()
+                }
+            }
+            let sourceFingerprint = try persistence.copySource(
+                from: source,
+                into: location,
+                maximumBytes: 1_024 * 1_024
+            )
+            let description = try XCTUnwrap(
+                persistence.inspectCompatiblePCMWAV(
+                    in: location,
+                    expected: sourceFingerprint,
+                    maximumFrameCount: 1_000
+                )
+            )
+
+            XCTAssertThrowsError(
+                try persistence.canonicalizeCompatiblePCMWAV(
+                    description,
+                    in: location,
+                    expectedSource: sourceFingerprint
+                )
+            ) { error in
+                XCTAssertEqual(error as? AudioImportFailure, .writeFailed)
+            }
+
+            let canonicalByteCount = UInt64(44) + description.dataByteCount
+            let canonicalFingerprint = try persistence.fingerprint(
+                components: location.stagedSessionComponents + ["audio", "audio.wav"],
+                under: location,
+                maximumBytes: canonicalByteCount
+            )
+            let normalized = CanonicalNormalizationResult(
+                frameCount: description.frameCount,
+                durationMilliseconds: try CanonicalAudioFormat.durationMilliseconds(
+                    forFrameCount: description.frameCount
+                ),
+                byteCount: canonicalByteCount
+            )
+            let session = try makeCanonicalizedImportedSession(
+                source: sourceFingerprint,
+                canonical: canonicalFingerprint,
+                normalized: normalized
+            )
+            _ = try persistence.writeManifests(for: session, in: location)
+            let audioDirectory = location.originalURL.deletingLastPathComponent()
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(atPath: audioDirectory.path).sorted(),
+                [".original.wav.canonicalizing", "audio.json", "audio.wav"]
+            )
+            let audioManifest = try XCTUnwrap(
+                String(
+                    data: Data(contentsOf: audioDirectory.appendingPathComponent("audio.json")),
+                    encoding: .utf8
+                )
+            )
+            XCTAssertTrue(audioManifest.contains(#""schemaVersion":2"#))
+            XCTAssertEqual(try Data(contentsOf: source), sourceBytes)
+
+            location.close()
+            locationClosed = true
+            guard case .readWrite = try PortableLibraryPersistence().open(at: root) else {
+                return XCTFail("supported Library did not reopen read-write")
+            }
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: root.appendingPathComponent("staging/publications").path
+                ),
+                []
+            )
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: root.appendingPathComponent("sessions").path
+                ),
+                []
+            )
+        }
+    }
+
     func testSourceDescriptorRejectsFIFOAndSymlinkWithoutBlockingOrFollowing() throws {
         try withTemporaryParent { parent in
             let root = parent.appendingPathComponent("Synthetic.audoralibrary")
@@ -578,7 +824,7 @@ final class PortableAudioImportPersistenceTests: XCTestCase {
                 .appendingPathComponent(prepared.session.sessionID.rawValue)
             let audioManifest = sessionRoot.appendingPathComponent("audio/audio.json")
             let newer = Data(
-                #"{"futurePortableField":"preserve","schemaVersion":2}"#.utf8
+                #"{"futurePortableField":"preserve","schemaVersion":3}"#.utf8
             )
             try newer.write(to: audioManifest)
             let sessionManifest = sessionRoot.appendingPathComponent("session.json")
@@ -974,6 +1220,46 @@ final class PortableAudioImportPersistenceTests: XCTestCase {
         )
     }
 
+    private func makeCanonicalizedImportedSession(
+        source: AudioArtifactFingerprint,
+        canonical: AudioArtifactFingerprint,
+        normalized: CanonicalNormalizationResult
+    ) throws -> ImportedSession {
+        let audio = try ImportedAudioAsset(
+            original: OriginalAudioArtifact(
+                relativePath: LibraryRelativePath("audio/audio.wav"),
+                container: .wav,
+                fingerprint: canonical,
+                decodedCodec: .linearPCM,
+                sourceSampleRateHz: CanonicalAudioFormat.sampleRateHz,
+                sourceChannelCount: CanonicalAudioFormat.channelCount,
+                retention: .canonicalizedPCM,
+                sourceFingerprint: source
+            ),
+            canonical: CanonicalAudioArtifact(
+                relativePath: LibraryRelativePath("audio/audio.wav"),
+                fingerprint: canonical,
+                frameCount: normalized.frameCount,
+                durationMilliseconds: normalized.durationMilliseconds
+            ),
+            sources: [
+                try SessionAudioSource(
+                    audioSourceID: .microphone,
+                    role: .microphone,
+                    timelineOffsetMilliseconds: 0
+                ),
+            ],
+            normalization: .compatiblePCMWAVV1
+        )
+        return try ImportedSession(
+            sessionID: importedSeed().sessionID,
+            createdAt: importedSeed().createdAt,
+            durationMilliseconds: normalized.durationMilliseconds,
+            audioManifestSHA256: String(repeating: "0", count: 64),
+            audio: audio
+        )
+    }
+
     private func withFreshStaging(
         _ body: (
             URL,
@@ -1030,6 +1316,47 @@ final class PortableAudioImportPersistenceTests: XCTestCase {
 
     private func syntheticSourceWAV() -> Data {
         Data("RIFF\u{4}\0\0\0WAVEsynthetic-source".utf8)
+    }
+
+    private func compatiblePCMWAV(
+        samples: [Int16],
+        includesMetadata: Bool = false
+    ) -> Data {
+        var bytes = [UInt8]()
+        bytes.append(contentsOf: "RIFF".utf8)
+        appendLittleEndian(UInt32(0), to: &bytes)
+        bytes.append(contentsOf: "WAVEfmt ".utf8)
+        appendLittleEndian(UInt32(16), to: &bytes)
+        appendLittleEndian(UInt16(1), to: &bytes)
+        appendLittleEndian(UInt16(1), to: &bytes)
+        appendLittleEndian(UInt32(16_000), to: &bytes)
+        appendLittleEndian(UInt32(32_000), to: &bytes)
+        appendLittleEndian(UInt16(2), to: &bytes)
+        appendLittleEndian(UInt16(16), to: &bytes)
+        if includesMetadata {
+            bytes.append(contentsOf: "JUNK".utf8)
+            appendLittleEndian(UInt32(4), to: &bytes)
+            bytes.append(contentsOf: [0x41, 0x42, 0x43, 0x44])
+        }
+        bytes.append(contentsOf: "data".utf8)
+        appendLittleEndian(UInt32(samples.count * 2), to: &bytes)
+        for sample in samples {
+            appendLittleEndian(UInt16(bitPattern: sample), to: &bytes)
+        }
+        let riffSize = UInt32(bytes.count - 8)
+        bytes[4] = UInt8(truncatingIfNeeded: riffSize)
+        bytes[5] = UInt8(truncatingIfNeeded: riffSize >> 8)
+        bytes[6] = UInt8(truncatingIfNeeded: riffSize >> 16)
+        bytes[7] = UInt8(truncatingIfNeeded: riffSize >> 24)
+        return Data(bytes)
+    }
+
+    private func appendLittleEndian<T: FixedWidthInteger>(
+        _ value: T,
+        to bytes: inout [UInt8]
+    ) {
+        var little = value.littleEndian
+        withUnsafeBytes(of: &little) { bytes.append(contentsOf: $0) }
     }
 
     private func sha256Hex(_ data: Data) -> String {

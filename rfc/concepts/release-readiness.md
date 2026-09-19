@@ -17,7 +17,9 @@ execution profile.
 - Recording shows persistent five-minute and one-minute warnings, stops and seals
   at 45:00, and explains the automatic stop after the transition.
 - Imported M4A playback and transcript timestamps share one canonical timeline.
-  Import retains the original file and canonical normalized artifact.
+  M4A and noncanonical WAV retain the byte-exact original and canonical normalized
+  artifact; an eligible compatible PCM WAV retains one canonical artifact plus
+  separate selected-container fingerprint provenance.
 - Mono and stereo fixtures produce the documented deterministic mono timeline;
   files over 45 minutes fail before Session publication.
 - One main Library window exists. A second open request focuses it rather than

@@ -12,46 +12,15 @@
     "description": "Closed union of every persisted Session audio-manifest variant.",
     "$defs": {
         "ImportedAudioManifest": {
-            "type": "object",
-            "properties": {
-                "schemaVersion": {
-                    "type": "number",
-                    "const": 1
+            "anyOf": [
+                {
+                    "$ref": "#/$defs/RetainedImportedAudioManifest"
                 },
-                "acquisitionKind": {
-                    "type": "string",
-                    "const": "imported"
-                },
-                "original": {
-                    "$ref": "#/$defs/OriginalAudioArtifact"
-                },
-                "canonical": {
-                    "$ref": "#/$defs/CanonicalAudioArtifact"
-                },
-                "sources": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/$defs/ImportedAudioSource"
-                    },
-                    "minItems": 1,
-                    "maxItems": 1
-                },
-                "normalization": {
-                    "$ref": "#/$defs/AudioNormalization"
+                {
+                    "$ref": "#/$defs/CanonicalizedPCMImportedAudioManifest"
                 }
-            },
-            "required": [
-                "schemaVersion",
-                "acquisitionKind",
-                "original",
-                "canonical",
-                "sources",
-                "normalization"
             ],
-            "unevaluatedProperties": {
-                "not": {}
-            },
-            "description": "Audio imported from a user-selected portable source file."
+            "description": "Versioned imported-audio layouts."
         },
         "MicrophoneAudioManifest": {
             "type": "object",
@@ -98,6 +67,151 @@
                 "not": {}
             },
             "description": "Session-owned canonical microphone Audio Asset metadata."
+        },
+        "RetainedImportedAudioManifest": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 1
+                },
+                "acquisitionKind": {
+                    "type": "string",
+                    "const": "imported"
+                },
+                "original": {
+                    "$ref": "#/$defs/OriginalAudioArtifact"
+                },
+                "canonical": {
+                    "$ref": "#/$defs/CanonicalAudioArtifact"
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ImportedAudioSource"
+                    },
+                    "minItems": 1,
+                    "maxItems": 1
+                },
+                "normalization": {
+                    "$ref": "#/$defs/AudioNormalization"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "acquisitionKind",
+                "original",
+                "canonical",
+                "sources",
+                "normalization"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "Audio imported from a user-selected portable source file."
+        },
+        "CanonicalizedPCMImportedAudioManifest": {
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "number",
+                    "const": 2
+                },
+                "acquisitionKind": {
+                    "type": "string",
+                    "const": "imported"
+                },
+                "original": {
+                    "$ref": "#/$defs/CanonicalizedPCMSourceProvenance"
+                },
+                "canonical": {
+                    "$ref": "#/$defs/CanonicalAudioArtifact"
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/ImportedAudioSource"
+                    },
+                    "minItems": 1,
+                    "maxItems": 1
+                },
+                "normalization": {
+                    "$ref": "#/$defs/CompatiblePCMWAVNormalization"
+                }
+            },
+            "required": [
+                "schemaVersion",
+                "acquisitionKind",
+                "original",
+                "canonical",
+                "sources",
+                "normalization"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            },
+            "description": "A compatible PCM WAV whose selected container was replaced inside staging\nby the one strict canonical artifact. `original` describes that real path;\n`sourceByteCount` and `sourceSha256` are provenance for the discarded\nselected container and never claim that those bytes remain addressable."
+        },
+        "CanonicalAudioFormat": {
+            "type": "object",
+            "properties": {
+                "sampleRateHz": {
+                    "type": "number",
+                    "const": 16000
+                },
+                "channelCount": {
+                    "type": "number",
+                    "const": 1
+                },
+                "encoding": {
+                    "type": "string",
+                    "const": "pcmS16LE"
+                }
+            },
+            "required": [
+                "sampleRateHz",
+                "channelCount",
+                "encoding"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
+        },
+        "PositiveRecordingFrameCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 43200000
+        },
+        "Sha256Hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+        },
+        "UnavailableInterval": {
+            "type": "object",
+            "properties": {
+                "startFrame": {
+                    "$ref": "#/$defs/RecordingFrameOffset"
+                },
+                "endFrame": {
+                    "$ref": "#/$defs/PositiveRecordingFrameCount"
+                },
+                "reasons": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/$defs/UnavailableReason"
+                    },
+                    "minItems": 1,
+                    "maxItems": 2
+                }
+            },
+            "required": [
+                "startFrame",
+                "endFrame",
+                "reasons"
+            ],
+            "unevaluatedProperties": {
+                "not": {}
+            }
         },
         "OriginalAudioArtifact": {
             "anyOf": [
@@ -227,66 +341,108 @@
                 "not": {}
             }
         },
-        "CanonicalAudioFormat": {
+        "CanonicalizedPCMSourceProvenance": {
             "type": "object",
             "properties": {
-                "sampleRateHz": {
+                "relativePath": {
+                    "type": "string",
+                    "const": "audio/audio.wav"
+                },
+                "container": {
+                    "type": "string",
+                    "const": "wav"
+                },
+                "byteCount": {
+                    "$ref": "#/$defs/PositiveByteCount"
+                },
+                "sha256": {
+                    "$ref": "#/$defs/Sha256Hex"
+                },
+                "decodedCodec": {
+                    "type": "string",
+                    "const": "linearPCM"
+                },
+                "sourceSampleRateHz": {
                     "type": "number",
                     "const": 16000
                 },
-                "channelCount": {
+                "sourceChannelCount": {
                     "type": "number",
                     "const": 1
                 },
-                "encoding": {
+                "retention": {
                     "type": "string",
-                    "const": "pcmS16LE"
+                    "const": "canonicalizedPCM"
+                },
+                "sourceByteCount": {
+                    "$ref": "#/$defs/PositiveByteCount"
+                },
+                "sourceSha256": {
+                    "$ref": "#/$defs/Sha256Hex"
                 }
             },
             "required": [
-                "sampleRateHz",
-                "channelCount",
-                "encoding"
+                "relativePath",
+                "container",
+                "byteCount",
+                "sha256",
+                "decodedCodec",
+                "sourceSampleRateHz",
+                "sourceChannelCount",
+                "retention",
+                "sourceByteCount",
+                "sourceSha256"
             ],
             "unevaluatedProperties": {
                 "not": {}
             }
         },
-        "PositiveRecordingFrameCount": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 43200000
-        },
-        "Sha256Hex": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{64}$"
-        },
-        "UnavailableInterval": {
+        "CompatiblePCMWAVNormalization": {
             "type": "object",
             "properties": {
-                "startFrame": {
-                    "$ref": "#/$defs/RecordingFrameOffset"
+                "algorithmId": {
+                    "type": "string",
+                    "const": "audora-compatible-pcm-wav"
                 },
-                "endFrame": {
-                    "$ref": "#/$defs/PositiveRecordingFrameCount"
+                "algorithmVersion": {
+                    "type": "number",
+                    "const": 1
                 },
-                "reasons": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/$defs/UnavailableReason"
-                    },
-                    "minItems": 1,
-                    "maxItems": 2
+                "stereoRule": {
+                    "type": "string",
+                    "const": "identity-mono"
+                },
+                "resamplerVersion": {
+                    "type": "string",
+                    "const": "identity-16000hz"
+                },
+                "quantizerVersion": {
+                    "type": "string",
+                    "const": "identity-s16le"
                 }
             },
             "required": [
-                "startFrame",
-                "endFrame",
-                "reasons"
+                "algorithmId",
+                "algorithmVersion",
+                "stereoRule",
+                "resamplerVersion",
+                "quantizerVersion"
             ],
             "unevaluatedProperties": {
                 "not": {}
             }
+        },
+        "RecordingFrameOffset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 43200000
+        },
+        "UnavailableReason": {
+            "type": "string",
+            "enum": [
+                "muted",
+                "captureGap"
+            ]
         },
         "WAVOriginalAudioArtifact": {
             "type": "object",
@@ -395,18 +551,6 @@
         "AudioSourceId": {
             "type": "string",
             "pattern": "^src-0001$"
-        },
-        "RecordingFrameOffset": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 43200000
-        },
-        "UnavailableReason": {
-            "type": "string",
-            "enum": [
-                "muted",
-                "captureGap"
-            ]
         },
         "OriginalAudioArtifactBase": {
             "type": "object",

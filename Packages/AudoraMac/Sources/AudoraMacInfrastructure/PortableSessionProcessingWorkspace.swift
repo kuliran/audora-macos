@@ -13,11 +13,19 @@ public enum ConfinedCanonicalAudioInputError: Error, Equatable, Sendable {
 /// canonical WAV. No filesystem path survives construction, so an execution
 /// host can bind this exact open description as `input/audio.wav` without
 /// rediscovering Session state from ambient identifiers.
-public final class ConfinedCanonicalAudioInput: @unchecked Sendable, Equatable {
+public final class ConfinedCanonicalAudioInput:
+    @unchecked Sendable,
+    Equatable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public let capabilityID: SessionTranscriptionAudioCapabilityID
     public let fingerprint: AudioFingerprint
     public let byteCount: UInt64
     private let descriptor: Int32
+
+    public var description: String { "<redacted confined canonical audio>" }
+    public var debugDescription: String { description }
 
     init(
         copyingVerifiedCanonicalWAV data: Data,

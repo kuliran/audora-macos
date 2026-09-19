@@ -300,6 +300,361 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
         }
     }
 
+    func testCopiedSameIDLibraryGetsFreshMachineAuthorityAndRevokesSourceScopes()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let original = parent.appendingPathComponent("Original.audoralibrary")
+            let copied = parent.appendingPathComponent("Copied.audoralibrary")
+            let authority = try PortableLibraryPersistence().create(
+                at: original,
+                seed: makeSeed()
+            )
+            try FileManager.default.copyItem(at: original, to: copied)
+            let bookmarks = SyntheticBookmarks()
+            let locatorStore = MemoryLocatorStore()
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [original, copied]),
+                bookmarks: bookmarks,
+                access: RecordingAccessGrantor(),
+                locatorStore: locatorStore,
+                revealer: RecordingRevealer()
+            )
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+
+            let originalOpen = await workspace.chooseLibrary()
+            XCTAssertEqual(originalOpen, .opened(authority.snapshot))
+            let acquiredProcessing = await workspace.acquireSessionProcessingScope(
+                for: scope
+            )
+            let sourceProcessing = try XCTUnwrap(acquiredProcessing)
+            let acquiredImport = await workspace.acquireAudioImportScope()
+            let sourceImport = try XCTUnwrap(acquiredImport)
+
+            let copiedOpen = await workspace.chooseLibrary()
+            XCTAssertEqual(copiedOpen, .opened(authority.snapshot))
+
+            let processingStillCurrent = await workspace
+                .isCurrentSessionProcessingScope(sourceProcessing.identity)
+            let importStillCurrent = await workspace
+                .isCurrentAudioImportScope(sourceImport.identity)
+            let recordingRoot = await workspace.recordingRoot(for: scope)
+            XCTAssertFalse(processingStillCurrent)
+            XCTAssertFalse(importStillCurrent)
+            XCTAssertEqual(
+                recordingRoot?.standardizedFileURL,
+                copied.standardizedFileURL
+            )
+            let loadedLocator = try await locatorStore.load()
+            let locator = try XCTUnwrap(loadedLocator)
+            XCTAssertEqual(locator.expectedLibraryID, authority.manifest.libraryID)
+            XCTAssertEqual(
+                try bookmarks.resolveBookmark(locator.bookmark).url.standardizedFileURL,
+                copied.standardizedFileURL
+            )
+            sourceImport.release()
+        }
+    }
+
+    func testRootSwappedDuringBookmarkCreationDoesNotPersistOrReviveAuthority()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Selected.audoralibrary")
+            let displaced = parent.appendingPathComponent(
+                "Displaced.audoralibrary"
+            )
+            let replacement = parent.appendingPathComponent(
+                "Replacement.audoralibrary"
+            )
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: makeSeed()
+            )
+            try FileManager.default.copyItem(at: root, to: replacement)
+            let locatorStore = MemoryLocatorStore()
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: RootSwappingBookmarks(
+                    selected: root,
+                    displaced: displaced,
+                    replacement: replacement,
+                    swapOnMakeCall: 2
+                ),
+                access: RecordingAccessGrantor(),
+                locatorStore: locatorStore,
+                revealer: RecordingRevealer()
+            )
+
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+            let open = await workspace.chooseLibrary()
+            XCTAssertEqual(open, .opened(authority.snapshot))
+            let acquiredProcessing = await workspace
+                .acquireSessionProcessingScope(for: scope)
+            let issuedProcessing = try XCTUnwrap(acquiredProcessing)
+            let acquiredImport = await workspace.acquireAudioImportScope()
+            let issuedImport = try XCTUnwrap(acquiredImport)
+
+            let close = await workspace.closeActiveLibrary()
+            let saveCount = await locatorStore.saveCount
+
+            XCTAssertEqual(close, .failed(.closeFailed))
+            XCTAssertEqual(saveCount, 1)
+
+            try FileManager.default.moveItem(at: root, to: replacement)
+            try FileManager.default.moveItem(at: displaced, to: root)
+            let processingRevived = await workspace
+                .isCurrentSessionProcessingScope(
+                    issuedProcessing.identity
+                )
+            let importRevived = await workspace.isCurrentAudioImportScope(
+                issuedImport.identity
+            )
+            XCTAssertFalse(processingRevived)
+            XCTAssertFalse(importRevived)
+            issuedImport.release()
+        }
+    }
+
+    func testSamePathReplacementRevokesAllCachedFilesystemAuthorities()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Selected.audoralibrary")
+            let moved = parent.appendingPathComponent("Moved.audoralibrary")
+            let seed = try makeSeed()
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: seed
+            )
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+            _ = await workspace.chooseLibrary()
+            let acquiredProcessing = await workspace.acquireSessionProcessingScope(
+                for: scope
+            )
+            let processing = try XCTUnwrap(acquiredProcessing)
+            let acquiredImport = await workspace.acquireAudioImportScope()
+            let audioImport = try XCTUnwrap(acquiredImport)
+
+            try FileManager.default.moveItem(at: root, to: moved)
+            _ = try PortableLibraryPersistence().create(at: root, seed: seed)
+
+            let generic = await workspace.performActiveReadWriteOperation(
+                in: scope
+            ) { _ in true }
+            guard case .unavailable = generic else {
+                return XCTFail("replacement inherited generic write authority")
+            }
+            let recordingRoot = await workspace.recordingRoot(for: scope)
+            let replacementImport = await workspace.acquireAudioImportScope()
+            let replacementProcessing = await workspace
+                .acquireSessionProcessingScope(for: scope)
+            let importStillCurrent = await workspace
+                .isCurrentAudioImportScope(audioImport.identity)
+            let processingStillCurrent = await workspace
+                .isCurrentSessionProcessingScope(processing.identity)
+            XCTAssertNil(recordingRoot)
+            XCTAssertNil(replacementImport)
+            XCTAssertNil(replacementProcessing)
+            XCTAssertFalse(importStillCurrent)
+            XCTAssertFalse(processingStillCurrent)
+            let close = await workspace.closeActiveLibrary()
+            XCTAssertEqual(close, .succeeded(recentAvailable: false))
+            audioImport.release()
+        }
+    }
+
+    func testObservedSamePathReplacementDoesNotLetIssuedScopesRevive()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Selected.audoralibrary")
+            let original = parent.appendingPathComponent("Original.audoralibrary")
+            let replacement = parent.appendingPathComponent(
+                "Replacement.audoralibrary"
+            )
+            let seed = try makeSeed()
+            let authority = try PortableLibraryPersistence().create(
+                at: root,
+                seed: seed
+            )
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+            _ = await workspace.chooseLibrary()
+            let acquiredProcessing = await workspace
+                .acquireSessionProcessingScope(for: scope)
+            let issuedProcessing = try XCTUnwrap(acquiredProcessing)
+            let acquiredImport = await workspace.acquireAudioImportScope()
+            let issuedImport = try XCTUnwrap(acquiredImport)
+
+            try FileManager.default.moveItem(at: root, to: original)
+            _ = try PortableLibraryPersistence().create(at: root, seed: seed)
+            let currentDuringReplacement = await workspace
+                .isCurrentSessionProcessingScope(
+                    issuedProcessing.identity
+                )
+            XCTAssertFalse(currentDuringReplacement)
+
+            try FileManager.default.moveItem(at: root, to: replacement)
+            try FileManager.default.moveItem(at: original, to: root)
+
+            let processingRevived = await workspace
+                .isCurrentSessionProcessingScope(
+                    issuedProcessing.identity
+                )
+            let importRevived = await workspace.isCurrentAudioImportScope(
+                issuedImport.identity
+            )
+            XCTAssertFalse(processingRevived)
+            XCTAssertFalse(importRevived)
+            let replacementProcessing = await workspace
+                .acquireSessionProcessingScope(for: scope)
+            XCTAssertNotNil(replacementProcessing)
+            issuedImport.release()
+        }
+    }
+
+    func testNewerRootInstalledAfterActivationRevokesWritesUntilExplicitReopen()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Evolving.audoralibrary")
+            let persistence = PortableLibraryPersistence()
+            let authority = try persistence.create(at: root, seed: makeSeed())
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root, root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(),
+                revealer: RecordingRevealer()
+            )
+            let scope = LibraryScope(libraryID: authority.manifest.libraryID)
+            _ = await workspace.chooseLibrary()
+            let preferencesURL = root.appendingPathComponent("preferences.json")
+            let newer = Data(
+                #"{"annotationsVisible":false,"future":"preserve","language":"en","playbackRate":1.25,"schemaVersion":2}"#.utf8
+            )
+            try newer.write(to: preferencesURL)
+
+            let first = await workspace.performActiveReadWriteOperation(
+                in: scope
+            ) { _ in true }
+            guard case .readOnly = first else {
+                return XCTFail("newer root retained write authority")
+            }
+            let recordingRoot = await workspace.recordingRoot(for: scope)
+            let audioImport = await workspace.acquireAudioImportScope()
+            let processing = await workspace.acquireSessionProcessingScope(
+                for: scope
+            )
+            XCTAssertNil(recordingRoot)
+            XCTAssertNil(audioImport)
+            XCTAssertNil(processing)
+            XCTAssertEqual(try Data(contentsOf: preferencesURL), newer)
+
+            try persistence.encodePreferences(authority.preferences).write(
+                to: preferencesURL
+            )
+            let downgraded = await workspace.performActiveReadWriteOperation(
+                in: scope
+            ) { _ in true }
+            guard case .readOnly = downgraded else {
+                return XCTFail("external downgrade silently restored write authority")
+            }
+            let downgradedAnnotationRead = await workspace.annotationsVisible(
+                in: scope
+            )
+            let downgradedAnnotationWrite = await workspace.setAnnotationsVisible(
+                false,
+                in: scope
+            )
+            XCTAssertNil(downgradedAnnotationRead)
+            XCTAssertEqual(downgradedAnnotationWrite, .unavailable)
+
+            let explicitReopen = await workspace.chooseLibrary()
+            XCTAssertEqual(explicitReopen, .opened(authority.snapshot))
+            let reopened = await workspace.performActiveReadWriteOperation(
+                in: scope
+            ) { _ in true }
+            guard case let .performed(value) = reopened else {
+                return XCTFail("explicit supported reopen did not restore authority")
+            }
+            XCTAssertTrue(value)
+        }
+    }
+
+    func testReadOnlyActivationRejectsInPlaceDifferentLibraryReplacement()
+        async throws
+    {
+        try await withTemporaryParent { parent in
+            let root = parent.appendingPathComponent("Selected.audoralibrary")
+            let other = parent.appendingPathComponent("Other.audoralibrary")
+            let persistence = PortableLibraryPersistence()
+            let selectedAuthority = try persistence.create(
+                at: root,
+                seed: makeSeed()
+            )
+            _ = try persistence.create(
+                at: other,
+                seed: makeSeed(id: "lib-20260830T121000000Z-3DEF")
+            )
+            try Data(
+                #"{"annotationsVisible":false,"future":"preserve","language":"en","playbackRate":1.25,"schemaVersion":2}"#.utf8
+            ).write(to: root.appendingPathComponent("preferences.json"))
+            let locatorStore = MemoryLocatorStore()
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(existing: [root]),
+                bookmarks: SyntheticBookmarks(),
+                access: RecordingAccessGrantor(),
+                locatorStore: locatorStore,
+                revealer: RecordingRevealer()
+            )
+            let open = await workspace.chooseLibrary()
+            XCTAssertEqual(
+                open,
+                .readOnly(
+                    ReadOnlyLibrarySnapshot(
+                        libraryID: selectedAuthority.manifest.libraryID
+                    ),
+                    reason: .newerSchema
+                )
+            )
+
+            for relativePath in [
+                "library.json",
+                "preferences.json",
+                "profile/head.json",
+            ] {
+                let replacement = try Data(
+                    contentsOf: other.appendingPathComponent(relativePath)
+                )
+                try replacement.write(
+                    to: root.appendingPathComponent(relativePath),
+                    options: .atomic
+                )
+            }
+
+            let close = await workspace.closeActiveLibrary()
+            let saveCount = await locatorStore.saveCount
+
+            XCTAssertEqual(close, .succeeded(recentAvailable: false))
+            XCTAssertEqual(saveCount, 1)
+        }
+    }
+
     func testSuccessfulSwitchAcquiresCandidateBeforeReleasingOldLease() async throws {
         try await withTwoLibraries { first, second, firstAuthority, secondAuthority in
             let access = RecordingAccessGrantor()
@@ -392,6 +747,36 @@ final class PortableLibraryWorkspaceTests: XCTestCase {
             XCTAssertEqual(
                 Array(access.events.suffix(2)),
                 ["acquire:Second.audoralibrary", "release:Second.audoralibrary"]
+            )
+        }
+    }
+
+    func testBookmarkIdentityMismatchDoesNotReconcileCandidateStaging()
+        async throws
+    {
+        try await withTwoLibraries { _, second, firstAuthority, _ in
+            let abandonedImport = try makeRecognizedAbandonedAudioImportTree(
+                in: second
+            )
+            let bookmarks = SyntheticBookmarks()
+            let locator = MachineLibraryLocator(
+                expectedLibraryID: firstAuthority.manifest.libraryID,
+                restoreOnLaunch: true,
+                bookmark: try bookmarks.makeBookmark(for: second)
+            )
+            let workspace = PortableLibraryWorkspace(
+                locations: QueueLocations(),
+                bookmarks: bookmarks,
+                access: RecordingAccessGrantor(),
+                locatorStore: MemoryLocatorStore(value: locator),
+                revealer: RecordingRevealer()
+            )
+
+            let outcome = await workspace.restoreActiveLibrary()
+
+            XCTAssertEqual(outcome, .failed(.identityMismatch))
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: abandonedImport.path)
             )
         }
     }
@@ -1719,5 +2104,48 @@ private struct FailingLocatorStore: MachineLibraryLocatorStoring {
     func load() async throws -> MachineLibraryLocator? { nil }
     func save(_ locator: MachineLibraryLocator) async throws {
         throw CocoaError(.fileWriteUnknown)
+    }
+}
+
+private final class RootSwappingBookmarks: LibraryBookmarking, @unchecked Sendable {
+    private let selected: URL
+    private let displaced: URL
+    private let replacement: URL
+    private let lock = NSLock()
+    private let swapOnMakeCall: Int
+    private var makeCallCount = 0
+    private let bookmark = Data([0xA5])
+
+    init(
+        selected: URL,
+        displaced: URL,
+        replacement: URL,
+        swapOnMakeCall: Int = 1
+    ) {
+        self.selected = selected
+        self.displaced = displaced
+        self.replacement = replacement
+        self.swapOnMakeCall = swapOnMakeCall
+    }
+
+    func makeBookmark(for url: URL) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        guard url.standardizedFileURL == selected.standardizedFileURL else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        makeCallCount += 1
+        if makeCallCount == swapOnMakeCall {
+            try FileManager.default.moveItem(at: selected, to: displaced)
+            try FileManager.default.moveItem(at: replacement, to: selected)
+        }
+        return bookmark
+    }
+
+    func resolveBookmark(_ bookmark: Data) throws -> LibraryBookmarkResolution {
+        guard bookmark == self.bookmark else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return LibraryBookmarkResolution(url: selected, isStale: false)
     }
 }

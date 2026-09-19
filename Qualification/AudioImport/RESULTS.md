@@ -1,5 +1,40 @@
 # Audio import qualification results
 
+## 2026-09-19 compatible-WAV storage decision
+
+Command:
+
+```sh
+Qualification/AudioImport/run-compatible-wav-benchmark.sh
+```
+
+Environment: macOS 26.6.2 (25G83), arm64, Apple Swift 6.4. The deterministic
+fixture is ten minutes of mono 16 kHz signed-16 PCM (19,200,000 PCM bytes). The
+optional-chunk fixture adds a 1 MiB `JUNK` chunk. Results are medians of five
+interleaved measured imports after one warmup. The timed transaction uses
+production persistence for staging, source copy/fingerprinting, compatibility
+inspection, canonicalization, manifests, staged validation, atomic installation,
+and final reopen. Compilation, Library creation, and fixture generation are
+outside the timed region. The retained-original comparator follows the same
+production persistence boundaries and performs a conservative direct compatible
+PCM copy instead of charging the old path for AVFoundation decode.
+
+| Path | Median import ms | Final Session logical bytes | Final Session allocated bytes |
+|---|---:|---:|---:|
+| strict / two artifacts | 86.445 | 38,401,200 | 38,412,288 |
+| strict / one artifact | 63.578 | 19,201,257 | 19,210,240 |
+| optional chunks / two artifacts | 82.961 | 39,449,784 | 39,460,864 |
+| optional chunks / one artifact | 64.014 | 19,201,257 | 19,210,240 |
+
+The one-artifact choice cut strict-WAV final Session allocation by 50% and median
+production persistence time by 26%. For the metadata-bearing fixture it cut
+allocation by 51% and time by 23%. The comparator is deliberately conservative:
+both alternatives inspect compatibility and copy PCM directly, so it does not
+credit the chosen path for avoiding historical AVFoundation decode and
+requantization. Timing is host and filesystem dependent and is not a release
+threshold; the repeatable storage reduction with no measured import-time
+regression is the decision evidence.
+
 ## 2026-08-30 implementation run
 
 - TypeSpec 1.15 compilation and generated-schema comparison: passed using the

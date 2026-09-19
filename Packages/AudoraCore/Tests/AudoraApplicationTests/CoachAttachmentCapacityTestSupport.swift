@@ -43,7 +43,8 @@ extension DefaultCoachContextFeature {
     init(
         testSourceWithNoAttachments source: any CoachContextSnapshotPort,
         configurationGeneration: UInt64,
-        configurationAuthorityID: UUID = UUID()
+        configurationAuthorityID: UUID = UUID(),
+        evidenceUsePolicySource: (any CoachEvidenceUsePolicySource)? = nil
     ) {
         self.init(
             source: source,
@@ -51,6 +52,7 @@ extension DefaultCoachContextFeature {
                 configurationAuthorityID: configurationAuthorityID,
                 configurationGeneration: configurationGeneration
             ),
+            evidenceUsePolicySource: evidenceUsePolicySource,
             configurationAuthorityID: configurationAuthorityID
         )
     }

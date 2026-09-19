@@ -83,6 +83,9 @@ public struct StagedAudioCandidate: Equatable, Sendable {
     public let decodedCodec: String
     public let sourceSampleRateHz: UInt32
     public let sourceChannelCount: UInt32
+    public let originalRetention: String
+    public let sourceByteCount: UInt64
+    public let sourceSHA256: String
     public let canonicalRelativePath: String
     public let canonicalByteCount: UInt64
     public let canonicalSHA256: String
@@ -132,7 +135,10 @@ public struct StagedAudioCandidate: Equatable, Sendable {
         normalizationAlgorithmVersion: UInt32,
         stereoRule: String,
         resamplerVersion: String,
-        quantizerVersion: String
+        quantizerVersion: String,
+        originalRetention: String = OriginalAudioRetention.byteExact.rawValue,
+        sourceByteCount: UInt64? = nil,
+        sourceSHA256: String? = nil
     ) {
         self.stagingID = stagingID
         self.scope = scope
@@ -146,6 +152,9 @@ public struct StagedAudioCandidate: Equatable, Sendable {
         self.decodedCodec = decodedCodec
         self.sourceSampleRateHz = sourceSampleRateHz
         self.sourceChannelCount = sourceChannelCount
+        self.originalRetention = originalRetention
+        self.sourceByteCount = sourceByteCount ?? originalByteCount
+        self.sourceSHA256 = sourceSHA256 ?? originalSHA256
         self.canonicalRelativePath = canonicalRelativePath
         self.canonicalByteCount = canonicalByteCount
         self.canonicalSHA256 = canonicalSHA256

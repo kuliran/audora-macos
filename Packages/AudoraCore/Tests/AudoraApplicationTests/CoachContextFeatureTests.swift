@@ -501,6 +501,37 @@ final class CoachContextFeatureTests: XCTestCase {
         )
     }
 
+    func testDeniedProfileEvidenceBlocksNewChatBeforeProviderRequestPlanning()
+        async throws
+    {
+        let profile = try profileWithEvidence()
+        let policySource = RecordingCoachEvidencePolicySource(mode: .denied)
+        let authorityID = UUID()
+        let feature = DefaultCoachContextFeature(
+            testSourceWithNoAttachments: PolicyBoundCoachContextSnapshotPort(
+                configuration: try fixtureConfiguration(),
+                profile: profile
+            ),
+            configurationGeneration: 1,
+            configurationAuthorityID: authorityID,
+            evidenceUsePolicySource: policySource
+        )
+        let request = try CoachContextNewChatQuoteRequest(
+            library: Self.scope,
+            attachments: .empty,
+            creationKind: .newChat
+        )
+
+        let outcome = await feature.quoteNewChat(request)
+
+        XCTAssertEqual(outcome, .unavailable(.externalProcessingDisallowed))
+        let requestedSources = await policySource.requestedSources
+        XCTAssertEqual(
+            requestedSources,
+            CoachProfileEvidenceObligations(profile: profile).sources
+        )
+    }
+
     func testUnresolvableProfileEvidenceFailsClosedWithTypedReason() async throws {
         let aggregate = try fixtureAggregate()
         let profile = try profileWithEvidence()
@@ -669,7 +700,21 @@ private actor PolicyBoundCoachContextSnapshotPort:
 
     func resolveNewChat(
         _ request: CoachContextNewChatQuoteRequest
-    ) async -> CoachContextSnapshotOutcome { .sourceUnavailable }
+    ) async -> CoachContextSnapshotOutcome {
+        snapshot(
+            input: try? CoachContextQuoteInput(
+                profile: CoachContextProfileProjector(attachments: .empty)
+                    .profile(profile),
+                memory: .object([:]),
+                creation: request.creation
+            ),
+            binding: .newChat(
+                library: request.library,
+                attachments: request.attachments,
+                creation: request.creation
+            )
+        )
+    }
 
     func resolveChat(
         _ request: CoachContextChatQuoteRequest

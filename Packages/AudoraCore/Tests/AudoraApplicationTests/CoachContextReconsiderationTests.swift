@@ -81,6 +81,35 @@ final class CoachContextReconsiderationTests: XCTestCase {
         XCTAssertEqual(observedRequests, [request])
     }
 
+    func testReconsiderBlocksWhenActiveProfileEvidenceDisallowsExternalProcessing()
+        async throws
+    {
+        let fixture = try makeFixture(activeEvidenceIsCovered: true)
+        let source = ReconsiderContextSnapshotPort(
+            attachments: fixture.attachments
+        )
+        let policySource = DeniedReconsiderEvidencePolicySource()
+        let feature = DefaultCoachContextFeature(
+            source: source,
+            evidenceUsePolicySource: policySource
+        )
+        let request = try CoachContextReconsiderRequest(
+            library: Self.library,
+            aggregate: fixture.aggregate,
+            basis: fixture.basis
+        )
+
+        let outcome = await feature.prepareReconsider(request)
+
+        XCTAssertEqual(outcome, .unavailable(.externalProcessingDisallowed))
+        let expected = CoachProfileEvidenceObligations(
+            profile: fixture.basis.latestProfile
+        ).sources
+        XCTAssertFalse(expected.isEmpty)
+        let requestedSources = await policySource.requestedSources
+        XCTAssertEqual(requestedSources, expected)
+    }
+
     func testTriggerProjectsCompletePreviousBasisWithoutInventingProviderIDs()
         throws
     {
@@ -304,7 +333,9 @@ final class CoachContextReconsiderationTests: XCTestCase {
         let active: ProfileStatement
     }
 
-    private func makeFixture() throws -> Fixture {
+    private func makeFixture(
+        activeEvidenceIsCovered: Bool = false
+    ) throws -> Fixture {
         let firstEvidence = try evidence(
             session: "ses-20260909T070000000Z-1ABC",
             revision: "trv-20260909T070100000Z-2DEF",
@@ -354,7 +385,7 @@ final class CoachContextReconsiderationTests: XCTestCase {
             id: "stm-20260909T090150000Z-7ABC",
             kind: .goal,
             wording: "Pause before each conclusion.",
-            evidence: []
+            evidence: activeEvidenceIsCovered ? [firstEvidence] : []
         )
         let base = try revision(
             id: "prf-20260909T090200000Z-7VWX",
@@ -495,6 +526,34 @@ final class CoachContextReconsiderationTests: XCTestCase {
 
     private static let library = LibraryScope(
         libraryID: try! LibraryID("lib-20260909T080000000Z-1ABC")
+    )
+}
+
+private actor DeniedReconsiderEvidencePolicySource:
+    CoachEvidenceUsePolicySource
+{
+    private(set) var requestedSources: [CoachEvidencePolicySourceIdentity] = []
+
+    func resolveUsePolicies(
+        for sources: [CoachEvidencePolicySourceIdentity],
+        in library: LibraryScope
+    ) async -> [CoachEvidenceUsePolicyResolution] {
+        requestedSources = sources
+        return sources.map { source in
+            .resolved(source: source, policy: Self.policy)
+        }
+    }
+
+    private static let policy = try! EngineUsePolicy(
+        policyID: "reconsider-policy-denied-v1",
+        coveredArtifacts: [.transcriptRevision],
+        privateLocalUseAllowed: true,
+        privateExportAllowed: true,
+        externalProcessingAllowed: false,
+        publicDistributionAllowed: false,
+        commercialUseAllowed: false,
+        licenseReference: "test-license",
+        licenseSHA256: String(repeating: "4", count: 64)
     )
 }
 

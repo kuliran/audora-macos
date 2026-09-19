@@ -104,7 +104,7 @@ Retry/Discard publication failure when the local write fails.
 | Language | English transcription and English-specific annotation rules |
 | UI | Native SwiftUI/AppKit application; no browser shell or embedded web UI |
 | Capture | One mono microphone recording with Record, Stop, and microphone mute |
-| Import | One mono or stereo M4A/WAV retained in original form and deterministically normalized to canonical mono |
+| Import | One mono or stereo M4A/WAV deterministically normalized to canonical mono; byte-exact source containers are retained except eligible canonical-format PCM WAV, whose source provenance is recorded while one canonical artifact is stored |
 | Duration | At most 45 minutes per recording or imported file |
 | Transcription | Post-recording, local verbatim engine; CrisperWhisper Small/MPS is the provisional evaluation candidate |
 | Worker | App-supervised local process behind a transport-neutral port; first profile uses versioned JSON Lines over anonymous pipes |
@@ -565,9 +565,17 @@ relationship after sealing. A Session owns its Audio Asset by containment rather
 than by an independent audio ID. Other relationships use explicit IDs and
 relative paths; timestamps are not relationships.
 
-For imported media, version one retains the original file as evidence and also
-creates a canonical mono WAV for playback, analysis, and timestamps. This uses
-more disk space but avoids making a destructive format conversion part of import.
+For imported media, version one normally retains the byte-exact original file as
+evidence and also creates a canonical mono WAV for playback, analysis, and
+timestamps. The sole exception is a structurally valid RIFF/WAVE with one direct,
+gap-free mono 16 kHz signed-16 little-endian PCM data chunk. Audora first copies
+the external source into Session staging, records that selected container's
+fingerprint and format provenance, writes or renames one strict canonical WAV,
+and removes only the staged duplicate. Optional RIFF chunks and embedded metadata
+are deliberately discarded for this eligible form. The Speaker's external file
+is never written, linked, or renamed. Other WAV and every M4A retain separate
+original and canonical artifacts, and legacy two-artifact Sessions reopen without
+rewrite.
 
 Microphone capture declares its physical format before the first event and uses a
 bounded, loss-aware relay: muted callbacks retain timing only, and any unavailable

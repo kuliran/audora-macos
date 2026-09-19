@@ -281,27 +281,41 @@ final class ContractResourcesTests: XCTestCase {
         XCTAssertEqual(intent["chatId"] as? String, proposal["chatId"] as? String)
     }
 
-    func testAudioAndSessionSchemasExposeOnlyTheFourClosedVariants() throws {
+    func testAudioAndSessionSchemasExposeOnlyClosedVariants() throws {
         let audioRoot = try jsonObject(.audioManifestSchema)
         let audioDefinitions = try XCTUnwrap(audioRoot["$defs"] as? [String: Any])
         XCTAssertEqual(
             try rootUnionReferences(in: audioRoot),
             ["ImportedAudioManifest", "MicrophoneAudioManifest"]
         )
-        for name in ["ImportedAudioManifest", "MicrophoneAudioManifest"] {
+        XCTAssertEqual(
+            try unionReferences("ImportedAudioManifest", in: audioDefinitions),
+            ["RetainedImportedAudioManifest", "CanonicalizedPCMImportedAudioManifest"]
+        )
+        for name in [
+            "RetainedImportedAudioManifest",
+            "CanonicalizedPCMImportedAudioManifest",
+            "MicrophoneAudioManifest",
+        ] {
             let schema = try XCTUnwrap(audioDefinitions[name] as? [String: Any])
             XCTAssertNotNil(schema["unevaluatedProperties"], name)
         }
-        let importedAudioProperties = try schemaProperties(
-            "ImportedAudioManifest",
+        let retainedAudioProperties = try schemaProperties(
+            "RetainedImportedAudioManifest",
+            in: audioDefinitions
+        )
+        let canonicalizedAudioProperties = try schemaProperties(
+            "CanonicalizedPCMImportedAudioManifest",
             in: audioDefinitions
         )
         let microphoneAudioProperties = try schemaProperties(
             "MicrophoneAudioManifest",
             in: audioDefinitions
         )
-        XCTAssertNotNil(importedAudioProperties["acquisitionKind"])
-        XCTAssertNil(importedAudioProperties["sourceKind"])
+        XCTAssertNotNil(retainedAudioProperties["acquisitionKind"])
+        XCTAssertNil(retainedAudioProperties["sourceKind"])
+        XCTAssertNotNil(canonicalizedAudioProperties["acquisitionKind"])
+        XCTAssertNil(canonicalizedAudioProperties["sourceKind"])
         XCTAssertNotNil(microphoneAudioProperties["sourceKind"])
         XCTAssertNil(microphoneAudioProperties["acquisitionKind"])
 

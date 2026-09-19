@@ -75,6 +75,460 @@ final class PortableAudioImportWorkspaceTests: XCTestCase {
         }
     }
 
+    func testStrictCanonicalWAVStoresOneArtifactWithoutCallingDecoder() async throws {
+        let samples: [Int16] = [0, 1, -1, 12_345, -12_345]
+        let sourceBytes = compatiblePCMWAV(samples: samples)
+        try await withFixture(sourceBytes: sourceBytes) { fixture in
+            let workspace = fixture.makeWorkspace(decoder: decoderThatMustNotRun())
+            guard case let .selected(token, scope) = await workspace.choose() else {
+                return XCTFail("selection failed")
+            }
+            let seed = try fixture.seed(scope: scope)
+            let reservation = try await workspace.reserveSessionID(
+                seed.sessionID,
+                for: token,
+                in: scope
+            )
+            XCTAssertEqual(reservation, .reserved)
+            let candidate = try await workspace.prepare(
+                token,
+                seed: seed,
+                policy: .versionOne,
+                progress: { _ in }
+            )
+            let validated = try AudioImportCandidateValidator.validate(
+                candidate,
+                expectedSeed: seed,
+                policy: .versionOne
+            )
+            let snapshot = try await workspace.install(validated)
+            let audioDirectory = fixture.root.appendingPathComponent(
+                "sessions/\(snapshot.session.sessionID.rawValue)/audio"
+            )
+
+            XCTAssertEqual(candidate.originalRetention, "canonicalizedPCM")
+            XCTAssertEqual(candidate.originalRelativePath, "audio/audio.wav")
+            XCTAssertEqual(candidate.originalSHA256, candidate.canonicalSHA256)
+            XCTAssertEqual(candidate.sourceSHA256, candidate.canonicalSHA256)
+            XCTAssertEqual(candidate.canonicalFrameCount, UInt64(samples.count))
+            XCTAssertEqual(candidate.canonicalDurationMilliseconds, 1)
+            XCTAssertEqual(
+                try Data(contentsOf: audioDirectory.appendingPathComponent("audio.wav")),
+                sourceBytes
+            )
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: audioDirectory.appendingPathComponent("original.wav").path
+                )
+            )
+            XCTAssertEqual(try Data(contentsOf: fixture.sources[0]), sourceBytes)
+
+            let sourceAttributes = try FileManager.default.attributesOfItem(
+                atPath: fixture.sources[0].path
+            )
+            let ownedAttributes = try FileManager.default.attributesOfItem(
+                atPath: audioDirectory.appendingPathComponent("audio.wav").path
+            )
+            XCTAssertNotEqual(
+                sourceAttributes[.systemFileNumber] as? NSNumber,
+                ownedAttributes[.systemFileNumber] as? NSNumber,
+                "the Library artifact must be an ordinary owned copy, never a hard link"
+            )
+        }
+    }
+
+    func testCompatiblePCMWithExtraChunksDiscardsMetadataButPreservesPCMAndHash() async throws {
+        let samples: [Int16] = [Int16.min, -7, 0, 7, Int16.max]
+        let strict = compatiblePCMWAV(samples: samples)
+        let withMetadata = compatiblePCMWAV(samples: samples, includesMetadata: true)
+        var canonicalHashes: [String] = []
+
+        for sourceBytes in [strict, withMetadata] {
+            try await withFixture(sourceBytes: sourceBytes) { fixture in
+                let workspace = fixture.makeWorkspace(decoder: decoderThatMustNotRun())
+                guard case let .selected(token, scope) = await workspace.choose() else {
+                    return XCTFail("selection failed")
+                }
+                let seed = try fixture.seed(scope: scope)
+                _ = try await workspace.reserveSessionID(seed.sessionID, for: token, in: scope)
+                let candidate = try await workspace.prepare(
+                    token,
+                    seed: seed,
+                    policy: .versionOne,
+                    progress: { _ in }
+                )
+                let validated = try AudioImportCandidateValidator.validate(
+                    candidate,
+                    expectedSeed: seed,
+                    policy: .versionOne
+                )
+                let snapshot = try await workspace.install(validated)
+                let audioDirectory = fixture.root.appendingPathComponent(
+                    "sessions/\(snapshot.session.sessionID.rawValue)/audio"
+                )
+                canonicalHashes.append(candidate.canonicalSHA256)
+                XCTAssertEqual(candidate.originalRetention, "canonicalizedPCM")
+                XCTAssertEqual(candidate.originalSHA256, candidate.canonicalSHA256)
+                XCTAssertEqual(candidate.sourceByteCount, UInt64(sourceBytes.count))
+                if sourceBytes == withMetadata {
+                    XCTAssertNotEqual(candidate.sourceSHA256, candidate.canonicalSHA256)
+                }
+                XCTAssertEqual(try Data(contentsOf: fixture.sources[0]), sourceBytes)
+                XCTAssertEqual(
+                    try Data(contentsOf: audioDirectory.appendingPathComponent("audio.wav")),
+                    strict
+                )
+                XCTAssertFalse(
+                    FileManager.default.fileExists(
+                        atPath: audioDirectory.appendingPathComponent("original.wav").path
+                    )
+                )
+            }
+        }
+        XCTAssertEqual(canonicalHashes.count, 2)
+        XCTAssertEqual(canonicalHashes[0], canonicalHashes[1])
+    }
+
+    func testCompatiblePCMPrecommitFaultRemovesStagingAndLeavesExternalSourceUntouched() async throws {
+        let sourceBytes = compatiblePCMWAV(samples: [1, 2, 3], includesMetadata: true)
+        try await withFixture(sourceBytes: sourceBytes) { fixture in
+            let persistence = PortableAudioImportPersistence { point in
+                if point == .afterCanonicalWrite { throw AudioImportFailure.writeFailed }
+            }
+            let workspace = fixture.makeWorkspace(
+                decoder: decoderThatMustNotRun(),
+                persistence: persistence
+            )
+            guard case let .selected(token, scope) = await workspace.choose() else {
+                return XCTFail("selection failed")
+            }
+            let seed = try fixture.seed(scope: scope)
+            _ = try await workspace.reserveSessionID(seed.sessionID, for: token, in: scope)
+            await XCTAssertThrowsErrorAsyncMac(
+                try await workspace.prepare(
+                    token,
+                    seed: seed,
+                    policy: .versionOne,
+                    progress: { _ in }
+                )
+            ) { error in
+                XCTAssertEqual(error as? AudioImportFailure, .writeFailed)
+            }
+            XCTAssertEqual(try Data(contentsOf: fixture.sources[0]), sourceBytes)
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: fixture.root.appendingPathComponent("sessions").path
+                ),
+                []
+            )
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: fixture.root.appendingPathComponent("staging/publications").path
+                ),
+                []
+            )
+        }
+    }
+
+    func testCompatiblePCMRejectsStagedSourceReplacementDuringNormalizing() async throws {
+        let sourceBytes = compatiblePCMWAV(samples: [1, 2, 3])
+        let replacementBytes = compatiblePCMWAV(samples: [4, 5, 6])
+        try await withFixture(sourceBytes: sourceBytes) { fixture in
+            let workspace = fixture.makeWorkspace(decoder: decoderThatMustNotRun())
+            guard case let .selected(token, scope) = await workspace.choose() else {
+                return XCTFail("selection failed")
+            }
+            let seed = try fixture.seed(scope: scope)
+            _ = try await workspace.reserveSessionID(seed.sessionID, for: token, in: scope)
+            let replacementEvents = LockedAudioEvents()
+
+            await XCTAssertThrowsErrorAsyncMac(
+                try await workspace.prepare(
+                    token,
+                    seed: seed,
+                    policy: .versionOne
+                ) { phase in
+                    guard phase == .normalizing,
+                          let transaction = try? FileManager.default.contentsOfDirectory(
+                              atPath: fixture.root.appendingPathComponent(
+                                  "staging/publications"
+                              ).path
+                          ).first
+                    else {
+                        return
+                    }
+                    let stagedOriginal = fixture.root.appendingPathComponent(
+                        "staging/publications/\(transaction)/" +
+                            "\(seed.sessionID.rawValue)/audio/original.wav"
+                    )
+                    do {
+                        try FileManager.default.removeItem(at: stagedOriginal)
+                        try replacementBytes.write(to: stagedOriginal)
+                        replacementEvents.append("replaced")
+                    } catch {
+                        replacementEvents.append("replacement-failed")
+                    }
+                }
+            ) { error in
+                XCTAssertEqual(error as? AudioImportFailure, .candidateCorrupt)
+            }
+
+            XCTAssertEqual(replacementEvents.snapshot(), ["replaced"])
+            XCTAssertEqual(try Data(contentsOf: fixture.sources[0]), sourceBytes)
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: fixture.root.appendingPathComponent("sessions").path
+                ),
+                []
+            )
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(
+                    atPath: fixture.root.appendingPathComponent("staging/publications").path
+                ),
+                []
+            )
+        }
+    }
+
+    func testCompatiblePCMWithExcessiveChunkInventoryUsesOrdinaryDecoder() async throws {
+        let sourceBytes = compatiblePCMWAV(
+            samples: [7],
+            repeatedMetadataChunkCount:
+                PortableAudioImportPersistence.maximumCompatiblePCMWAVChunks
+        )
+        try await withFixture(sourceBytes: sourceBytes) { fixture in
+            let workspace = fixture.makeWorkspace(
+                decoder: ScriptedPCMDecoder(
+                    inspected: InspectedAudio(
+                        codec: .linearPCM,
+                        sampleRateHz: 16_000,
+                        channelCount: 1,
+                        metadataDurationSeconds: 0.001
+                    ),
+                    chunks: [
+                        DecodedPCMChunk(
+                            interleavedSamples: [0],
+                            frameCount: 1,
+                            channelCount: 1,
+                            sampleRateHz: 16_000
+                        ),
+                    ]
+                )
+            )
+            guard case let .selected(token, scope) = await workspace.choose() else {
+                return XCTFail("selection failed")
+            }
+            let seed = try fixture.seed(scope: scope)
+            _ = try await workspace.reserveSessionID(seed.sessionID, for: token, in: scope)
+            let candidate = try await workspace.prepare(
+                token,
+                seed: seed,
+                policy: .versionOne,
+                progress: { _ in }
+            )
+
+            XCTAssertEqual(candidate.originalRetention, "byteExact")
+            XCTAssertEqual(candidate.originalRelativePath, "audio/original.wav")
+            await workspace.discard(candidate.stagingID)
+        }
+    }
+
+    func testMalformedListAndExtendedFormatWAVUseOrdinaryDecoder() async throws {
+        let sources = [
+            compatiblePCMWAV(samples: [7], includesShortList: true),
+            compatiblePCMWAV(samples: [7], formatExtension: [0, 0]),
+        ]
+        for sourceBytes in sources {
+            try await withFixture(sourceBytes: sourceBytes) { fixture in
+                let workspace = fixture.makeWorkspace(
+                    decoder: ScriptedPCMDecoder(
+                        inspected: InspectedAudio(
+                            codec: .linearPCM,
+                            sampleRateHz: 16_000,
+                            channelCount: 1,
+                            metadataDurationSeconds: 0.001
+                        ),
+                        chunks: [
+                            DecodedPCMChunk(
+                                interleavedSamples: [0],
+                                frameCount: 1,
+                                channelCount: 1,
+                                sampleRateHz: 16_000
+                            ),
+                        ]
+                    )
+                )
+                guard case let .selected(token, scope) = await workspace.choose() else {
+                    return XCTFail("selection failed")
+                }
+                let seed = try fixture.seed(scope: scope)
+                _ = try await workspace.reserveSessionID(
+                    seed.sessionID,
+                    for: token,
+                    in: scope
+                )
+                let candidate = try await workspace.prepare(
+                    token,
+                    seed: seed,
+                    policy: .versionOne,
+                    progress: { _ in }
+                )
+
+                XCTAssertEqual(candidate.originalRetention, "byteExact")
+                XCTAssertEqual(candidate.originalRelativePath, "audio/original.wav")
+                await workspace.discard(candidate.stagingID)
+            }
+        }
+    }
+
+    func testStrictCanonicalCapacityReservesManifestsButNotASecondWAV() async throws {
+        let samples: [Int16] = [1, 2, 3]
+        let strict = compatiblePCMWAV(samples: samples)
+        let withMetadata = compatiblePCMWAV(samples: samples, includesMetadata: true)
+        let manifestReservation = 2 * UInt64(
+            PortableAudioImportPersistence.maximumManifestBytes
+        )
+        let capacityBetweenRequirements = manifestReservation + UInt64(strict.count) - 1
+
+        for (sourceBytes, shouldSucceed) in [(strict, true), (withMetadata, false)] {
+            try await withFixture(sourceBytes: sourceBytes) { fixture in
+                let workspace = fixture.makeWorkspace(
+                    decoder: decoderThatMustNotRun(),
+                    persistence: PortableAudioImportPersistence(
+                        capacity: { _ in .available(capacityBetweenRequirements) }
+                    )
+                )
+                guard case let .selected(token, scope) = await workspace.choose() else {
+                    return XCTFail("selection failed")
+                }
+                let seed = try fixture.seed(scope: scope)
+                _ = try await workspace.reserveSessionID(
+                    seed.sessionID,
+                    for: token,
+                    in: scope
+                )
+                if shouldSucceed {
+                    let candidate = try await workspace.prepare(
+                        token,
+                        seed: seed,
+                        policy: .versionOne,
+                        progress: { _ in }
+                    )
+                    XCTAssertEqual(candidate.originalRetention, "canonicalizedPCM")
+                    await workspace.discard(candidate.stagingID)
+                } else {
+                    await XCTAssertThrowsErrorAsyncMac(
+                        try await workspace.prepare(
+                            token,
+                            seed: seed,
+                            policy: .versionOne,
+                            progress: { _ in }
+                        )
+                    ) { error in
+                        XCTAssertEqual(error as? AudioImportFailure, .insufficientSpace)
+                    }
+                }
+            }
+        }
+    }
+
+    func testM4AAndNoncanonicalWAVKeepByteExactOriginalArtifact() async throws {
+        let m4a = Data([0, 0, 0, 16]) + Data("ftypM4A synthetic".utf8)
+        let cases: [(String, Data, InspectedAudio)] = [
+            (
+                "wav",
+                Data("RIFF\u{4}\0\0\0WAVEnoncanonical".utf8),
+                InspectedAudio(
+                    codec: .linearPCM,
+                    sampleRateHz: 16_000,
+                    channelCount: 2,
+                    metadataDurationSeconds: 0.001
+                )
+            ),
+            (
+                "wav",
+                compatiblePCMWAV(samples: [0], presentationChunk: "smpl"),
+                InspectedAudio(
+                    codec: .linearPCM,
+                    sampleRateHz: 16_000,
+                    channelCount: 1,
+                    metadataDurationSeconds: 0.001
+                )
+            ),
+            (
+                "wav",
+                Data("RIFX\0\0\0\u{4}WAVEbig-endian".utf8),
+                InspectedAudio(
+                    codec: .linearPCM,
+                    sampleRateHz: 16_000,
+                    channelCount: 1,
+                    metadataDurationSeconds: 0.001
+                )
+            ),
+            (
+                "wav",
+                Data([
+                    0x52, 0x46, 0x36, 0x34,
+                    0xFF, 0xFF, 0xFF, 0xFF,
+                    0x57, 0x41, 0x56, 0x45,
+                ]) + Data("large-wave".utf8),
+                InspectedAudio(
+                    codec: .linearPCM,
+                    sampleRateHz: 16_000,
+                    channelCount: 1,
+                    metadataDurationSeconds: 0.001
+                )
+            ),
+            (
+                "m4a",
+                m4a,
+                InspectedAudio(
+                    codec: .aacLC,
+                    sampleRateHz: 16_000,
+                    channelCount: 1,
+                    metadataDurationSeconds: 0.001
+                )
+            ),
+        ]
+
+        for (sourceExtension, sourceBytes, inspected) in cases {
+            try await withFixture(
+                sourceExtension: sourceExtension,
+                sourceBytes: sourceBytes
+            ) { fixture in
+                let workspace = fixture.makeWorkspace(
+                    decoder: ScriptedPCMDecoder(
+                        inspected: inspected,
+                        chunks: [
+                            DecodedPCMChunk(
+                                interleavedSamples: inspected.channelCount == 1
+                                    ? [0]
+                                    : [0, 0],
+                                frameCount: 1,
+                                channelCount: Int(inspected.channelCount),
+                                sampleRateHz: inspected.sampleRateHz
+                            ),
+                        ]
+                    )
+                )
+                guard case let .selected(token, scope) = await workspace.choose() else {
+                    return XCTFail("selection failed")
+                }
+                let seed = try fixture.seed(scope: scope)
+                _ = try await workspace.reserveSessionID(seed.sessionID, for: token, in: scope)
+                let candidate = try await workspace.prepare(
+                    token,
+                    seed: seed,
+                    policy: .versionOne,
+                    progress: { _ in }
+                )
+                XCTAssertEqual(candidate.originalRetention, "byteExact")
+                XCTAssertEqual(candidate.originalRelativePath, "audio/original.\(sourceExtension)")
+                XCTAssertEqual(candidate.sourceSHA256, candidate.originalSHA256)
+            }
+        }
+    }
+
     func testSelectionCancellationAndRepeatedSelectionKeepNoMoreThanOneCapability() async throws {
         try await withFixture(sourceCount: 2) { fixture in
             let workspace = fixture.makeWorkspace(decoder: ScriptedPCMDecoder.empty)
@@ -543,6 +997,7 @@ private func withFixture(
     sourceCount: Int = 1,
     sourceExtension: String = "wav",
     cancelSelection: Bool = false,
+    sourceBytes requestedSourceBytes: Data? = nil,
     _ body: (WorkspaceFixture) async throws -> Void
 ) async throws {
     let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -568,7 +1023,8 @@ private func withFixture(
             )
         )
     )
-    let sourceBytes = Data("RIFF\u{4}\0\0\0WAVEworkspace-source".utf8)
+    let sourceBytes = requestedSourceBytes ??
+        Data("RIFF\u{4}\0\0\0WAVEworkspace-source".utf8)
     var sources: [URL] = []
     for index in 0..<sourceCount {
         let source = parent.appendingPathComponent("source-\(index).\(sourceExtension)")
@@ -794,6 +1250,86 @@ private struct ScriptedPCMDecoder: AudioPCMDecoding {
         if let decodeFailure { throw decodeFailure }
         for chunk in chunks { try consume(chunk) }
     }
+}
+
+private func decoderThatMustNotRun() -> ScriptedPCMDecoder {
+    ScriptedPCMDecoder(
+        inspected: InspectedAudio(
+            codec: .linearPCM,
+            sampleRateHz: 16_000,
+            channelCount: 1,
+            metadataDurationSeconds: 0.001
+        ),
+        chunks: [],
+        inspectFailure: .decodeFailed,
+        decodeFailure: .decodeFailed
+    )
+}
+
+private func compatiblePCMWAV(
+    samples: [Int16],
+    includesMetadata: Bool = false,
+    presentationChunk: String? = nil,
+    repeatedMetadataChunkCount: Int = 0,
+    includesShortList: Bool = false,
+    formatExtension: [UInt8] = []
+) -> Data {
+    var bytes = [UInt8]()
+    bytes.append(contentsOf: "RIFF".utf8)
+    appendLittleEndian(UInt32(0), to: &bytes)
+    bytes.append(contentsOf: "WAVEfmt ".utf8)
+    appendLittleEndian(UInt32(16 + formatExtension.count), to: &bytes)
+    appendLittleEndian(UInt16(1), to: &bytes)
+    appendLittleEndian(UInt16(1), to: &bytes)
+    appendLittleEndian(UInt32(16_000), to: &bytes)
+    appendLittleEndian(UInt32(32_000), to: &bytes)
+    appendLittleEndian(UInt16(2), to: &bytes)
+    appendLittleEndian(UInt16(16), to: &bytes)
+    bytes.append(contentsOf: formatExtension)
+    if !formatExtension.count.isMultiple(of: 2) {
+        bytes.append(0)
+    }
+    if includesMetadata {
+        bytes.append(contentsOf: "JUNK".utf8)
+        appendLittleEndian(UInt32(3), to: &bytes)
+        bytes.append(contentsOf: [0x41, 0x42, 0x43, 0])
+        bytes.append(contentsOf: "LIST".utf8)
+        appendLittleEndian(UInt32(4), to: &bytes)
+        bytes.append(contentsOf: "INFO".utf8)
+    }
+    if includesShortList {
+        bytes.append(contentsOf: "LIST".utf8)
+        appendLittleEndian(UInt32(2), to: &bytes)
+        bytes.append(contentsOf: "IN".utf8)
+    }
+    if let presentationChunk {
+        precondition(presentationChunk.utf8.count == 4)
+        bytes.append(contentsOf: presentationChunk.utf8)
+        appendLittleEndian(UInt32(0), to: &bytes)
+    }
+    for _ in 0..<repeatedMetadataChunkCount {
+        bytes.append(contentsOf: "JUNK".utf8)
+        appendLittleEndian(UInt32(0), to: &bytes)
+    }
+    bytes.append(contentsOf: "data".utf8)
+    appendLittleEndian(UInt32(samples.count * 2), to: &bytes)
+    for sample in samples {
+        appendLittleEndian(UInt16(bitPattern: sample), to: &bytes)
+    }
+    let riffSize = UInt32(bytes.count - 8)
+    bytes[4] = UInt8(truncatingIfNeeded: riffSize)
+    bytes[5] = UInt8(truncatingIfNeeded: riffSize >> 8)
+    bytes[6] = UInt8(truncatingIfNeeded: riffSize >> 16)
+    bytes[7] = UInt8(truncatingIfNeeded: riffSize >> 24)
+    return Data(bytes)
+}
+
+private func appendLittleEndian<T: FixedWidthInteger>(
+    _ value: T,
+    to bytes: inout [UInt8]
+) {
+    var little = value.littleEndian
+    withUnsafeBytes(of: &little) { bytes.append(contentsOf: $0) }
 }
 
 private func XCTAssertThrowsErrorAsyncMac<Result>(

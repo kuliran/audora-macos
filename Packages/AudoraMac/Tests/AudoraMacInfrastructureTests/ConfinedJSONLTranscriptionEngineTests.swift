@@ -96,6 +96,11 @@ final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
         )
         let invocations = await host.invocations
         let invocation = try XCTUnwrap(invocations.first)
+        XCTAssertEqual(
+            String(describing: invocation),
+            "<redacted transcription worker invocation>"
+        )
+        XCTAssertEqual(String(reflecting: invocation), invocation.description)
         XCTAssertEqual(invocation.networkAccess, .disabled)
         XCTAssertEqual(invocation.profile, fixture.profile)
         XCTAssertEqual(
@@ -104,6 +109,19 @@ final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
         )
         let executions = await host.executions
         let execution = try XCTUnwrap(executions.first)
+        XCTAssertEqual(
+            String(describing: execution),
+            "<redacted transcription worker execution>"
+        )
+        XCTAssertEqual(String(reflecting: execution), execution.description)
+        XCTAssertEqual(
+            String(describing: execution.canonicalAudio),
+            "<redacted confined canonical audio>"
+        )
+        XCTAssertEqual(
+            String(reflecting: execution.canonicalAudio),
+            execution.canonicalAudio.description
+        )
         XCTAssertEqual(
             execution.canonicalAudio.capabilityID,
             fixture.request.audioCapabilityID
@@ -124,8 +142,75 @@ final class ConfinedJSONLTranscriptionEngineTests: XCTestCase {
         let request = try XCTUnwrap(
             JSONSerialization.jsonObject(with: execution.requestJSON) as? [String: Any]
         )
+        XCTAssertEqual(
+            Set(request.keys),
+            Set([
+                "engine", "durationMs", "jobId", "networkAccess", "options",
+                "qualification", "qualificationProfileId", "revisionId",
+                "sessionId", "sources", "type", "v",
+            ])
+        )
         XCTAssertEqual(request["jobId"] as? String, fixture.request.jobID.rawValue)
         XCTAssertEqual(request["qualificationProfileId"] as? String, fixture.profile.profileID)
+        let engineObject = try XCTUnwrap(request["engine"] as? [String: Any])
+        XCTAssertEqual(
+            Set(engineObject.keys),
+            Set(["model", "provider", "revision"])
+        )
+        let qualification = try XCTUnwrap(
+            request["qualification"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(qualification.keys),
+            Set([
+                "compatibilityPatchId", "engineLockSha256", "runtimeIdentity",
+                "runtimeLockSha256", "schemaVersion",
+            ])
+        )
+        let options = try XCTUnwrap(request["options"] as? [String: Any])
+        XCTAssertEqual(
+            Set(options.keys),
+            Set(["language", "mode", "wordTimestamps"])
+        )
+        let sources = try XCTUnwrap(request["sources"] as? [[String: Any]])
+        let source = try XCTUnwrap(sources.first)
+        XCTAssertEqual(sources.count, 1)
+        XCTAssertEqual(
+            Set(source.keys),
+            Set(["audioSourceId", "path", "role", "timelineOffsetMs"])
+        )
+        XCTAssertEqual(source["path"] as? String, "input/audio.wav")
+        XCTAssertFalse((source["path"] as? String)?.hasPrefix("/") ?? true)
+        let wireText = String(decoding: execution.requestJSON, as: UTF8.self)
+            .lowercased()
+        for forbidden in [
+            "rawaudio", "credential", "embedding", "librarypath",
+            "machineconfiguration",
+        ] {
+            XCTAssertFalse(wireText.contains(forbidden), forbidden)
+        }
+        let capturedArtifact = ConfinedTranscriptionWorkerArtifact(
+            relativePath: "result.json",
+            data: artifact
+        )
+        let capturedResult = ConfinedTranscriptionWorkerResult(
+            stdoutLines: [Data("private worker output".utf8)],
+            candidateArtifact: capturedArtifact,
+            exitStatus: 0
+        )
+        XCTAssertEqual(
+            String(describing: capturedArtifact),
+            "<redacted transcription worker artifact>"
+        )
+        XCTAssertEqual(
+            String(reflecting: capturedArtifact),
+            capturedArtifact.description
+        )
+        XCTAssertEqual(
+            String(describing: capturedResult),
+            "<redacted transcription worker result>"
+        )
+        XCTAssertEqual(String(reflecting: capturedResult), capturedResult.description)
         let closeCount = await host.closeCount
         XCTAssertEqual(closeCount, 1)
     }

@@ -212,57 +212,97 @@ public actor PortableAudioImportWorkspace: AudioImportPort {
             try await requireCurrent(selection.library.identity)
 
             await progress(.inspecting)
-            let ownedSource = try persistence.openOriginalForDecoding(
+            let inspected: InspectedAudio
+            let normalized: CanonicalNormalizationResult
+            let canonicalFingerprint: AudioArtifactFingerprint
+            let retention: OriginalAudioRetention
+            let normalization: AudioNormalizationProvenance
+            if let compatible = try persistence.inspectCompatiblePCMWAV(
                 in: created,
-                expected: originalFingerprint
-            )
-            let inspectedSource = try await decoder.inspect(
-                ownedSource,
-                container: container
-            )
-            let inspected = inspectedSource.description
-            guard inspected.metadataDurationSeconds.isFinite,
-                  inspected.metadataDurationSeconds > 0
-            else {
-                throw AudioImportFailure.malformedMedia
-            }
-            let maximumSeconds = Double(policy.maximumCanonicalFrames) /
-                Double(CanonicalAudioFormat.sampleRateHz)
-            guard inspected.metadataDurationSeconds <= maximumSeconds + 1 else {
-                throw AudioImportFailure.durationExceeded
-            }
-            try requireCapacity(for: inspected, policy: policy, location: created)
-            try await requireCurrent(selection.library.identity)
-
-            await progress(.normalizing)
-            let canonicalDescriptor = try persistence.createCanonicalDescriptor(in: created)
-            let normalizer = try StreamingCanonicalAudioNormalizer(
-                description: inspected,
-                destinationDescriptor: canonicalDescriptor,
+                expected: originalFingerprint,
                 maximumFrameCount: policy.maximumCanonicalFrames
-            )
-            try await decoder.decode(inspectedSource) { chunk in
-                try normalizer.consume(chunk)
-            }
-            let normalized = try normalizer.finish()
-            try persistence.didFinishCanonicalWrite(in: created)
-            try await requireCurrent(selection.library.identity)
+            ) {
+                inspected = InspectedAudio(
+                    codec: .linearPCM,
+                    sampleRateHz: CanonicalAudioFormat.sampleRateHz,
+                    channelCount: CanonicalAudioFormat.channelCount,
+                    metadataDurationSeconds: Double(compatible.frameCount) /
+                        Double(CanonicalAudioFormat.sampleRateHz)
+                )
+                try requireCapacity(
+                    forCanonicalFrameCount: compatible.frameCount,
+                    needsCanonicalCopy: !compatible.isStrictCanonical,
+                    location: created
+                )
+                try await requireCurrent(selection.library.identity)
+                await progress(.normalizing)
+                let canonicalized = try persistence.canonicalizeCompatiblePCMWAV(
+                    compatible,
+                    in: created,
+                    expectedSource: originalFingerprint
+                )
+                normalized = canonicalized.normalization
+                canonicalFingerprint = canonicalized.fingerprint
+                retention = .canonicalizedPCM
+                normalization = .compatiblePCMWAVV1
+            } else {
+                let ownedSource = try persistence.openOriginalForDecoding(
+                    in: created,
+                    expected: originalFingerprint
+                )
+                let inspectedSource = try await decoder.inspect(
+                    ownedSource,
+                    container: container
+                )
+                inspected = inspectedSource.description
+                guard inspected.metadataDurationSeconds.isFinite,
+                      inspected.metadataDurationSeconds > 0
+                else {
+                    throw AudioImportFailure.malformedMedia
+                }
+                let maximumSeconds = Double(policy.maximumCanonicalFrames) /
+                    Double(CanonicalAudioFormat.sampleRateHz)
+                guard inspected.metadataDurationSeconds <= maximumSeconds + 1 else {
+                    throw AudioImportFailure.durationExceeded
+                }
+                try requireCapacity(for: inspected, policy: policy, location: created)
+                try await requireCurrent(selection.library.identity)
 
-            let canonicalFingerprint = try persistence.fingerprint(
-                components: created.stagedSessionComponents + ["audio", "audio.wav"],
-                under: created,
-                maximumBytes: normalized.byteCount
-            )
-            guard canonicalFingerprint.byteCount == normalized.byteCount else {
-                throw AudioImportFailure.candidateCorrupt
+                await progress(.normalizing)
+                let canonicalDescriptor = try persistence.createCanonicalDescriptor(in: created)
+                let normalizer = try StreamingCanonicalAudioNormalizer(
+                    description: inspected,
+                    destinationDescriptor: canonicalDescriptor,
+                    maximumFrameCount: policy.maximumCanonicalFrames
+                )
+                try await decoder.decode(inspectedSource) { chunk in
+                    try normalizer.consume(chunk)
+                }
+                normalized = try normalizer.finish()
+                try persistence.didFinishCanonicalWrite(in: created)
+                try await requireCurrent(selection.library.identity)
+
+                canonicalFingerprint = try persistence.fingerprint(
+                    components: created.stagedSessionComponents + ["audio", "audio.wav"],
+                    under: created,
+                    maximumBytes: normalized.byteCount
+                )
+                guard canonicalFingerprint.byteCount == normalized.byteCount else {
+                    throw AudioImportFailure.candidateCorrupt
+                }
+                retention = .byteExact
+                normalization = .v1
             }
+            try await requireCurrent(selection.library.identity)
 
             let audio = try makeAudioAsset(
                 container: container,
                 inspected: inspected,
                 originalFingerprint: originalFingerprint,
                 canonicalFingerprint: canonicalFingerprint,
-                normalized: normalized
+                normalized: normalized,
+                retention: retention,
+                normalization: normalization
             )
             let provisional = try ImportedSession(
                 sessionID: seed.sessionID,
@@ -373,6 +413,26 @@ public actor PortableAudioImportWorkspace: AudioImportPort {
         }
     }
 
+    private func requireCapacity(
+        forCanonicalFrameCount frameCount: UInt64,
+        needsCanonicalCopy: Bool,
+        location: AudioImportStagingLocation
+    ) throws {
+        let available: UInt64
+        switch persistence.availableCapacity(at: location) {
+        case let .available(bytes):
+            available = bytes
+        case .unavailable:
+            throw AudioImportFailure.unavailable
+        }
+        let manifests = 2 * UInt64(PortableAudioImportPersistence.maximumManifestBytes)
+        let canonicalCopy = needsCanonicalCopy ? frameCount * 2 + 44 : 0
+        let required = min(UInt64(Int64.max), manifests + canonicalCopy)
+        guard available >= required else {
+            throw AudioImportFailure.insufficientSpace
+        }
+    }
+
     private func revokeAllSelections() {
         for selection in selections.values {
             selection.source.release()
@@ -403,15 +463,25 @@ public actor PortableAudioImportWorkspace: AudioImportPort {
         inspected: InspectedAudio,
         originalFingerprint: AudioArtifactFingerprint,
         canonicalFingerprint: AudioArtifactFingerprint,
-        normalized: CanonicalNormalizationResult
+        normalized: CanonicalNormalizationResult,
+        retention: OriginalAudioRetention,
+        normalization: AudioNormalizationProvenance
     ) throws -> ImportedAudioAsset {
         let original = try OriginalAudioArtifact(
-            relativePath: LibraryRelativePath("audio/original.\(container.rawValue)"),
+            relativePath: LibraryRelativePath(
+                retention == .canonicalizedPCM
+                    ? "audio/audio.wav"
+                    : "audio/original.\(container.rawValue)"
+            ),
             container: container,
-            fingerprint: originalFingerprint,
+            fingerprint: retention == .canonicalizedPCM
+                ? canonicalFingerprint
+                : originalFingerprint,
             decodedCodec: inspected.codec,
             sourceSampleRateHz: inspected.sampleRateHz,
-            sourceChannelCount: inspected.channelCount
+            sourceChannelCount: inspected.channelCount,
+            retention: retention,
+            sourceFingerprint: originalFingerprint
         )
         let canonical = try CanonicalAudioArtifact(
             relativePath: LibraryRelativePath("audio/audio.wav"),
@@ -428,7 +498,7 @@ public actor PortableAudioImportWorkspace: AudioImportPort {
             original: original,
             canonical: canonical,
             sources: [source],
-            normalization: .v1
+            normalization: normalization
         )
     }
 
@@ -468,7 +538,10 @@ public actor PortableAudioImportWorkspace: AudioImportPort {
             normalizationAlgorithmVersion: audio.normalization.algorithmVersion,
             stereoRule: audio.normalization.stereoRule,
             resamplerVersion: audio.normalization.resamplerVersion,
-            quantizerVersion: audio.normalization.quantizerVersion
+            quantizerVersion: audio.normalization.quantizerVersion,
+            originalRetention: audio.original.retention.rawValue,
+            sourceByteCount: audio.original.sourceFingerprint.byteCount,
+            sourceSHA256: audio.original.sourceFingerprint.sha256
         )
     }
 }

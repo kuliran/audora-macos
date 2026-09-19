@@ -42,6 +42,8 @@ private struct PrivateModelSnapshotDirectory {
 
 public final class ConfinedPinnedTranscriptionModel:
     ConfinedTranscriptionModelExecutionCapability,
+    CustomStringConvertible,
+    CustomDebugStringConvertible,
     @unchecked Sendable
 {
     public let capabilityID: TranscriptionModelCapabilityID
@@ -62,6 +64,9 @@ public final class ConfinedPinnedTranscriptionModel:
     }
 
     deinit { files.values.forEach { Darwin.close($0.descriptor) } }
+
+    public var description: String { "<redacted confined transcription model>" }
+    public var debugDescription: String { description }
 
     public func duplicateReadOnlyFileDescriptors() throws -> [String: Int32] {
         var duplicates: [String: Int32] = [:]

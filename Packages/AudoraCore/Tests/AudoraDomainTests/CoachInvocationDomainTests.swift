@@ -239,6 +239,35 @@ final class CoachInvocationDomainTests: XCTestCase {
         }
     }
 
+    func testProviderTransportAuthoritiesNeverPrintBearerValues() throws {
+        let idempotency = try ProviderIdempotencyValue(
+            "synthetic-private-idempotency"
+        )
+        let handle = try CoachProviderTranscriptHandle(
+            "00000000-0000-0000-0000-000000000041"
+        )
+        let authority = try CoachProviderAttemptTransportAuthority(
+            providerIdempotencyValue: idempotency,
+            transcriptHandles: [handle]
+        )
+
+        XCTAssertEqual(
+            String(describing: idempotency),
+            "<redacted provider idempotency value>"
+        )
+        XCTAssertEqual(String(reflecting: idempotency), idempotency.description)
+        XCTAssertEqual(
+            String(describing: handle),
+            "<redacted provider transcript handle>"
+        )
+        XCTAssertEqual(String(reflecting: handle), handle.description)
+        XCTAssertEqual(
+            String(describing: authority),
+            "<redacted provider Attempt transport authority>"
+        )
+        XCTAssertEqual(String(reflecting: authority), authority.description)
+    }
+
     func testInvocationIntentAuthoritySurvivesUnrelatedManifestRename() throws {
         let fixture = try Fixture()
         let invocation = try fixture.invocation()

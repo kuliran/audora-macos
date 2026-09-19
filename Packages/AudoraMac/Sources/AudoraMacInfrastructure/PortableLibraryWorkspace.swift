@@ -109,6 +109,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     private var nextExternalRequest = 0
     private var operationInFlight = false
     private var workspaceGeneration: UInt64 = 0
+    private var rootAuthorityMismatchObserved = false
     private var chatCreationAuthorities:
         [UUID: ChatCreationAuthorityRecord] = [:]
     private var chatCreationAuthorityOrder: [UUID] = []
@@ -146,10 +147,21 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     var pendingExternalRequestCount: Int { externalRequests.count }
 
     func acquireAudioImportScope() -> ActiveLibraryImportScope? {
-        guard let activeScope,
+        guard let activeScope = revalidatedActiveScope(),
               case let .readWrite(authority) = activeScope.loaded,
               let importLease = try? access.acquireAccess(to: activeScope.root)
         else {
+            return nil
+        }
+        let importedRootIdentity = LibraryRootIdentity.capture(importLease.url)
+        let activeRootStillMatches = validateRootIdentityOrRevokeLiveAuthorities(
+            activeScope.root,
+            expected: activeScope.rootIdentity
+        )
+        guard importedRootIdentity == activeScope.rootIdentity,
+              activeRootStillMatches
+        else {
+            importLease.release()
             return nil
         }
         return ActiveLibraryImportScope(
@@ -164,7 +176,9 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
 
     func isCurrentAudioImportScope(_ identity: AudioImportScopeIdentity) -> Bool {
         guard identity.workspaceGeneration == workspaceGeneration,
-              let activeScope,
+              let activeScope = revalidatedActiveScope(
+                  for: identity.libraryID
+              ),
               case let .readWrite(authority) = activeScope.loaded
         else {
             return false
@@ -191,14 +205,26 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     ) -> ActiveLibraryOperationResult<Value> {
         guard reserveOperation() else { return .unavailable }
         defer { operationInFlight = false }
-        guard let activeScope, activeScope.libraryID == scope.libraryID else {
+        guard let activeScope = revalidatedActiveScope(
+            for: scope.libraryID
+        ) else {
             return .unavailable
         }
         switch activeScope.loaded {
         case .readOnly:
             return .readOnly
         case .readWrite:
-            return .performed(operation(activeScope.root))
+            let value = operation(activeScope.root)
+            guard let finalScope = revalidatedActiveScope(
+                for: scope.libraryID
+            ), finalScope.rootIdentity == activeScope.rootIdentity
+            else {
+                return .unavailable
+            }
+            guard case .readWrite = finalScope.loaded else {
+                return .readOnly
+            }
+            return .performed(value)
         }
     }
 
@@ -211,15 +237,27 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     ) -> ActiveLibraryOperationResult<ChatCreationEvidenceAuthority> {
         guard reserveOperation() else { return .unavailable }
         defer { operationInFlight = false }
-        guard let activeScope, activeScope.libraryID == scope.libraryID else {
+        guard let activeScope = revalidatedActiveScope(
+            for: scope.libraryID
+        ) else {
             return .unavailable
         }
         guard case .readWrite = activeScope.loaded else { return .readOnly }
         guard let initialRootIdentity = SessionProcessingRootIdentity.capture(
             activeScope.root
-        ), let fingerprints = operation(activeScope.root),
-              SessionProcessingRootIdentity.capture(activeScope.root) ==
-                initialRootIdentity
+        ), initialRootIdentity == activeScope.rootIdentity
+        else {
+            _ = validateRootIdentityOrRevokeLiveAuthorities(
+                activeScope.root,
+                expected: activeScope.rootIdentity
+            )
+            return .unavailable
+        }
+        guard let fingerprints = operation(activeScope.root),
+              validateRootIdentityOrRevokeLiveAuthorities(
+                  activeScope.root,
+                  expected: activeScope.rootIdentity
+              )
         else {
             return .unavailable
         }
@@ -264,11 +302,15 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         }
         guard record.libraryID == scope.libraryID,
               record.workspaceGeneration == workspaceGeneration,
-              let activeScope,
+              let activeScope = revalidatedActiveScope(
+                  for: scope.libraryID
+              ),
               case .readWrite = activeScope.loaded,
-              activeScope.libraryID == scope.libraryID,
-              SessionProcessingRootIdentity.capture(activeScope.root) ==
-                record.rootIdentity
+              record.rootIdentity == activeScope.rootIdentity,
+              validateRootIdentityOrRevokeLiveAuthorities(
+                  activeScope.root,
+                  expected: activeScope.rootIdentity
+              )
         else {
             chatCreationAuthorities.removeValue(forKey: identifier)
             chatCreationAuthorityOrder.removeAll { $0 == identifier }
@@ -289,11 +331,9 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     public func activeProfileStatementGeneration(in scope: LibraryScope) -> UInt64? {
         guard reserveOperation() else { return nil }
         defer { operationInFlight = false }
-        guard let activeScope, activeScope.libraryID == scope.libraryID else { return nil }
-        guard case let .readWrite(authority) = try? persistence.openWithoutReconcilingImports(
-            at: activeScope.root
-        ),
-              authority.manifest.libraryID == scope.libraryID
+        guard let activeScope = revalidatedActiveScope(
+            for: scope.libraryID
+        ), case let .readWrite(authority) = activeScope.loaded
         else {
             return nil
         }
@@ -349,7 +389,8 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
                 return .failed(.createFailed)
             }
             let locatorResult = await persistLocator(
-                root: destination,
+                root: candidateLease.url,
+                rootIdentity: rootIdentity,
                 libraryID: authority.manifest.libraryID,
                 restoreOnLaunch: true
             )
@@ -400,7 +441,9 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     public func revealActiveLibrary() async -> LibraryRevealRequestOutcome {
         guard reserveOperation() else { return .failed(.revealFailed) }
         defer { operationInFlight = false }
-        guard let activeScope else { return .failed(.revealFailed) }
+        guard let activeScope = revalidatedActiveScope() else {
+            return .failed(.revealFailed)
+        }
         switch await revealer.requestReveal(activeScope.root) {
         case .accepted: return .accepted
         case .rejected: return .failed(.revealFailed)
@@ -411,18 +454,36 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         guard reserveOperation() else { return .failed(.closeFailed) }
         defer { operationInFlight = false }
         guard workspaceGeneration < .max else { return .failed(.closeFailed) }
-        guard let activeScope else {
+        guard let current = activeScope else {
             self.activeScope = nil
+            return .succeeded(recentAvailable: false)
+        }
+        guard let activeScope = revalidatedActiveScope() else {
+            // The selected path no longer names the leased Library authority.
+            // Closing must still return the user to Library home, but must not
+            // persist a bookmark that could grant authority to the replacement.
+            let revalidationAlreadyReleasedLease = self.activeScope == nil
+            self.activeScope = nil
+            if workspaceGeneration < .max {
+                workspaceGeneration += 1
+            }
+            rootAuthorityMismatchObserved = false
+            discardChatCreationAuthorities()
+            if !revalidationAlreadyReleasedLease {
+                current.lease.release()
+            }
             return .succeeded(recentAvailable: false)
         }
         guard let libraryID = activeScope.libraryID else {
             self.activeScope = nil
             workspaceGeneration += 1
+            discardChatCreationAuthorities()
             activeScope.lease.release()
             return .succeeded(recentAvailable: false)
         }
         guard await persistLocator(
             root: activeScope.root,
+            rootIdentity: activeScope.rootIdentity,
             libraryID: libraryID,
             restoreOnLaunch: false
         ) else {
@@ -430,6 +491,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         }
         self.activeScope = nil
         workspaceGeneration += 1
+        discardChatCreationAuthorities()
         activeScope.lease.release()
         return .succeeded(recentAvailable: true)
     }
@@ -438,7 +500,9 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     /// writable package root. The URL remains an Infrastructure capability and
     /// is never written into portable recording metadata.
     public func recordingRoot(for scope: LibraryScope) -> URL? {
-        guard let activeScope,
+        guard let activeScope = revalidatedActiveScope(
+            for: scope.libraryID
+        ),
               case let .readWrite(authority) = activeScope.loaded,
               authority.manifest.libraryID == scope.libraryID
         else {
@@ -450,14 +514,26 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
     public func acquireSessionProcessingScope(
         for scope: LibraryScope
     ) -> ActiveLibraryProcessingScope? {
-        guard let activeScope,
+        guard let activeScope = revalidatedActiveScope(
+            for: scope.libraryID
+        ),
               case let .readWrite(authority) = activeScope.loaded,
               authority.manifest.libraryID == scope.libraryID,
               let processingLease = try? access.acquireAccess(to: activeScope.root)
         else { return nil }
         guard let rootIdentity = LibraryRootIdentity.capture(
             processingLease.url
-        ), rootIdentity == activeScope.rootIdentity else {
+        ) else {
+            processingLease.release()
+            return nil
+        }
+        let activeRootStillMatches = validateRootIdentityOrRevokeLiveAuthorities(
+            activeScope.root,
+            expected: activeScope.rootIdentity
+        )
+        guard rootIdentity == activeScope.rootIdentity,
+              activeRootStillMatches
+        else {
             processingLease.release()
             return nil
         }
@@ -476,11 +552,16 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         _ identity: SessionProcessingScopeIdentity
     ) -> Bool {
         guard identity.workspaceGeneration == workspaceGeneration,
-              let activeScope,
+              let activeScope = revalidatedActiveScope(
+                  for: identity.libraryID
+              ),
               case let .readWrite(authority) = activeScope.loaded,
               authority.manifest.libraryID == identity.libraryID,
-              SessionProcessingRootIdentity.capture(activeScope.root) ==
-                identity.rootIdentity
+              identity.rootIdentity == activeScope.rootIdentity,
+              validateRootIdentityOrRevokeLiveAuthorities(
+                  activeScope.root,
+                  expected: activeScope.rootIdentity
+              )
         else { return false }
         return true
     }
@@ -533,12 +614,18 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
             candidateLease.release()
             return .failed(.candidateUnavailable)
         }
-        let loaded: LoadedPortableLibrary
+        let inspected: LoadedPortableLibrary
         do {
-            loaded = try persistence.open(at: candidateLease.url)
+            inspected = try persistence.openWithoutReconcilingImports(
+                at: candidateLease.url,
+                expectedRootIdentity: rootIdentity
+            )
         } catch PortableLibraryPersistenceError.unsupportedOlderSchema {
             candidateLease.release()
             return .failed(.unsupportedOlderSchema)
+        } catch PortableLibraryPersistenceError.installedLibraryMismatch {
+            candidateLease.release()
+            return .failed(.candidateUnavailable)
         } catch PortableLibraryPersistenceError.ioFailure {
             candidateLease.release()
             return .failed(.candidateUnavailable)
@@ -553,6 +640,48 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
             return .failed(.candidateUnavailable)
         }
 
+        let inspectedCandidate = ActiveScope(
+            lease: candidateLease,
+            loaded: inspected,
+            rootIdentity: rootIdentity
+        )
+        if let expectedID, inspectedCandidate.libraryID != expectedID {
+            candidateLease.release()
+            return .failed(.identityMismatch)
+        }
+
+        let loaded: LoadedPortableLibrary
+        switch inspected {
+        case let .readWrite(authority):
+            do {
+                loaded = try persistence.open(
+                    at: candidateLease.url,
+                    expectedRootIdentity: rootIdentity,
+                    expectedLibraryID: authority.manifest.libraryID
+                )
+            } catch PortableLibraryPersistenceError.unsupportedOlderSchema {
+                candidateLease.release()
+                return .failed(.unsupportedOlderSchema)
+            } catch PortableLibraryPersistenceError.installedLibraryMismatch {
+                candidateLease.release()
+                return .failed(.candidateUnavailable)
+            } catch PortableLibraryPersistenceError.ioFailure {
+                candidateLease.release()
+                return .failed(.candidateUnavailable)
+            } catch {
+                candidateLease.release()
+                return .failed(.candidateCorrupt)
+            }
+        case .readOnly:
+            // Unknown newer roots must remain byte-identical. There is no
+            // supported writable candidate whose staging this app may reconcile.
+            loaded = inspected
+        }
+        guard LibraryRootIdentity.capture(candidateLease.url) == rootIdentity
+        else {
+            candidateLease.release()
+            return .failed(.candidateUnavailable)
+        }
         let candidate = ActiveScope(
             lease: candidateLease,
             loaded: loaded,
@@ -573,6 +702,7 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         if let libraryID = candidate.libraryID,
            !(await persistLocator(
                root: candidate.root,
+               rootIdentity: candidate.rootIdentity,
                libraryID: libraryID,
                restoreOnLaunch: restoreOnLaunch
            ))
@@ -597,8 +727,129 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         let previous = activeScope
         activeScope = candidate
         workspaceGeneration += 1
+        rootAuthorityMismatchObserved = false
+        discardChatCreationAuthorities()
         previous?.lease.release()
         return true
+    }
+
+    private func discardChatCreationAuthorities() {
+        chatCreationAuthorities.removeAll(keepingCapacity: false)
+        chatCreationAuthorityOrder.removeAll(keepingCapacity: false)
+    }
+
+    /// Revalidates both the selected directory authority and the three Library
+    /// root records before any feature receives a filesystem capability. A
+    /// closed-app copy can retain the same portable Library ID, while its
+    /// device/inode and every process-local grant are necessarily distinct.
+    /// Re-reading here prevents a same-path replacement or a newly installed
+    /// unknown schema from inheriting the prior activation's write authority.
+    private func revalidatedActiveScope(
+        for expectedLibraryID: LibraryID? = nil
+    ) -> ActiveScope? {
+        guard let current = activeScope,
+              expectedLibraryID == nil ||
+                current.libraryID == expectedLibraryID
+        else {
+            return nil
+        }
+        guard LibraryRootIdentity.capture(current.root) ==
+            current.rootIdentity
+        else {
+            revokeLiveAuthoritiesAfterRootAuthorityMismatch(current)
+            return nil
+        }
+        let loaded: LoadedPortableLibrary
+        do {
+            loaded = try persistence.openWithoutReconcilingImports(
+                at: current.root,
+                expectedRootIdentity: current.rootIdentity
+            )
+        } catch {
+            if LibraryRootIdentity.capture(current.root) != current.rootIdentity {
+                revokeLiveAuthoritiesAfterRootAuthorityMismatch(current)
+            }
+            return nil
+        }
+        guard LibraryRootIdentity.capture(current.root) ==
+            current.rootIdentity
+        else {
+            revokeLiveAuthoritiesAfterRootAuthorityMismatch(current)
+            return nil
+        }
+
+        let observedLibraryID: LibraryID?
+        switch loaded {
+        case let .readWrite(authority):
+            observedLibraryID = authority.manifest.libraryID
+        case let .readOnly(libraryID):
+            observedLibraryID = libraryID
+        }
+        if let currentLibraryID = current.libraryID,
+           let observedLibraryID,
+           currentLibraryID != observedLibraryID
+        {
+            revokeLiveAuthoritiesAfterRootAuthorityMismatch(current)
+            return nil
+        }
+        rootAuthorityMismatchObserved = false
+
+        let effective: LoadedPortableLibrary
+        switch (current.loaded, loaded) {
+        case (.readOnly, .readWrite):
+            // Unknown portable state is never made writable by an external
+            // downgrade. The user must explicitly reopen and reselect it.
+            effective = current.loaded
+        case (_, let observed):
+            effective = observed
+        }
+
+        if let expectedLibraryID {
+            switch effective {
+            case let .readWrite(authority):
+                guard authority.manifest.libraryID == expectedLibraryID else {
+                    return nil
+                }
+            case let .readOnly(libraryID):
+                guard libraryID == nil || libraryID == expectedLibraryID else {
+                    return nil
+                }
+            }
+        }
+        let refreshed = ActiveScope(
+            lease: current.lease,
+            loaded: effective,
+            rootIdentity: current.rootIdentity
+        )
+        if expectedLibraryID == nil,
+           let priorLibraryID = current.libraryID,
+           let observedLibraryID = refreshed.libraryID,
+           priorLibraryID != observedLibraryID
+        {
+            return nil
+        }
+        if case .readWrite = current.loaded,
+           case .readOnly = effective
+        {
+            discardChatCreationAuthorities()
+        }
+        activeScope = refreshed
+        return refreshed
+    }
+
+    private func revokeLiveAuthoritiesAfterRootAuthorityMismatch(
+        _ current: ActiveScope
+    ) {
+        guard !rootAuthorityMismatchObserved else { return }
+        rootAuthorityMismatchObserved = true
+        discardChatCreationAuthorities()
+        if workspaceGeneration < .max {
+            workspaceGeneration += 1
+        } else {
+            activeScope = nil
+            rootAuthorityMismatchObserved = false
+            current.lease.release()
+        }
     }
 
     private func reserveOperation() -> Bool {
@@ -609,11 +860,33 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
 
     private func persistLocator(
         root: URL,
+        rootIdentity: LibraryRootIdentity,
         libraryID: LibraryID,
         restoreOnLaunch: Bool
     ) async -> Bool {
         do {
+            guard validateRootIdentityOrRevokeLiveAuthorities(
+                root,
+                expected: rootIdentity
+            ) else {
+                return false
+            }
             let bookmark = try bookmarks.makeBookmark(for: root)
+            guard validateRootIdentityOrRevokeLiveAuthorities(
+                root,
+                expected: rootIdentity
+            ) else {
+                return false
+            }
+            let resolution = try bookmarks.resolveBookmark(bookmark)
+            guard validateRootIdentityOrRevokeLiveAuthorities(
+                root,
+                expected: rootIdentity
+            ), !resolution.isStale,
+                  LibraryRootIdentity.capture(resolution.url) == rootIdentity
+            else {
+                return false
+            }
             try await locatorStore.save(
                 MachineLibraryLocator(
                     expectedLibraryID: libraryID,
@@ -625,6 +898,21 @@ public actor PortableLibraryWorkspace: LibraryWorkspacePort {
         } catch {
             return false
         }
+    }
+
+    private func validateRootIdentityOrRevokeLiveAuthorities(
+        _ root: URL,
+        expected rootIdentity: LibraryRootIdentity
+    ) -> Bool {
+        guard LibraryRootIdentity.capture(root) == rootIdentity else {
+            if let current = activeScope,
+               current.rootIdentity == rootIdentity
+            {
+                revokeLiveAuthoritiesAfterRootAuthorityMismatch(current)
+            }
+            return false
+        }
+        return true
     }
 }
 
@@ -638,24 +926,10 @@ extension PortableLibraryWorkspace: ReviewAnnotationVisibilityPort {
     public func annotationsVisible(in scope: LibraryScope) -> Bool? {
         guard reserveOperation() else { return nil }
         defer { operationInFlight = false }
-        guard let activeScope,
-              activeScope.libraryID == scope.libraryID,
-              LibraryRootIdentity.capture(activeScope.root) ==
-                activeScope.rootIdentity,
-              case let .readWrite(authority) = try? persistence
-                .openWithoutReconcilingImports(
-                    at: activeScope.root,
-                    expectedRootIdentity: activeScope.rootIdentity
-                ),
-              authority.manifest.libraryID == scope.libraryID,
-              LibraryRootIdentity.capture(activeScope.root) ==
-                activeScope.rootIdentity
+        guard let activeScope = revalidatedActiveScope(
+            for: scope.libraryID
+        ), case let .readWrite(authority) = activeScope.loaded
         else { return nil }
-        self.activeScope = ActiveScope(
-            lease: activeScope.lease,
-            loaded: .readWrite(authority),
-            rootIdentity: activeScope.rootIdentity
-        )
         return authority.preferences.annotationsVisible
     }
 
@@ -665,18 +939,9 @@ extension PortableLibraryWorkspace: ReviewAnnotationVisibilityPort {
     ) -> ReviewAnnotationVisibilityWriteResult {
         guard reserveOperation() else { return .unavailable }
         defer { operationInFlight = false }
-        guard let activeScope,
-              activeScope.libraryID == scope.libraryID,
-              LibraryRootIdentity.capture(activeScope.root) ==
-                activeScope.rootIdentity,
-              case let .readWrite(authority) = try? persistence
-                .openWithoutReconcilingImports(
-                    at: activeScope.root,
-                    expectedRootIdentity: activeScope.rootIdentity
-                ),
-              authority.manifest.libraryID == scope.libraryID,
-              LibraryRootIdentity.capture(activeScope.root) ==
-                activeScope.rootIdentity,
+        guard let activeScope = revalidatedActiveScope(
+            for: scope.libraryID
+        ), case let .readWrite(authority) = activeScope.loaded,
               let preferences = try? LibraryPreferences(
                   language: authority.preferences.language,
                   annotationsVisible: visible,
@@ -711,20 +976,10 @@ extension PortableLibraryWorkspace: ReviewAnnotationVisibilityPort {
         activeScope: ActiveScope,
         scope: LibraryScope
     ) -> ReviewAnnotationVisibilityWriteResult {
-        guard case let .readWrite(reopened) = try? persistence
-            .openWithoutReconcilingImports(
-                at: activeScope.root,
-                expectedRootIdentity: activeScope.rootIdentity
-            ),
-              reopened.manifest.libraryID == scope.libraryID,
-              LibraryRootIdentity.capture(activeScope.root) ==
-                activeScope.rootIdentity
+        guard let refreshed = revalidatedActiveScope(for: scope.libraryID),
+              refreshed.rootIdentity == activeScope.rootIdentity,
+              case let .readWrite(reopened) = refreshed.loaded
         else { return .unavailable }
-        self.activeScope = ActiveScope(
-            lease: activeScope.lease,
-            loaded: .readWrite(reopened),
-            rootIdentity: activeScope.rootIdentity
-        )
         let current = reopened.preferences.annotationsVisible
         return switch writeOutcome {
         case .committed: .committed(visible: current)

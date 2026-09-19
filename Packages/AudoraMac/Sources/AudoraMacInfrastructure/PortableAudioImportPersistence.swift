@@ -9,6 +9,7 @@ enum AudioImportPersistenceFault: Hashable, Sendable {
     case beforeSourceFinalValidation
     case afterSourceCopy
     case afterCanonicalWrite
+    case afterCanonicalizingSourceRename
     case afterAudioManifestInstall
     case afterSessionManifestInstall
     case beforeStagedValidation
@@ -20,6 +21,19 @@ enum AudioImportPersistenceFault: Hashable, Sendable {
 enum AudioImportCapacity: Equatable, Sendable {
     case available(UInt64)
     case unavailable
+}
+
+struct CompatiblePCMWAVDescription: Equatable, Sendable {
+    let dataOffset: UInt64
+    let dataByteCount: UInt64
+    let frameCount: UInt64
+    let sourceByteCount: UInt64
+    let isStrictCanonical: Bool
+}
+
+struct CanonicalizedPCMWAV: Equatable, Sendable {
+    let normalization: CanonicalNormalizationResult
+    let fingerprint: AudioArtifactFingerprint
 }
 
 enum LoadedImportedSession: Equatable, Sendable {
@@ -111,6 +125,10 @@ final class OpenedAudioImportSource: @unchecked Sendable {
 struct PortableAudioImportPersistence: @unchecked Sendable {
     static let maximumManifestBytes = 65_536
     static let canonicalWAVHeaderBytes = 44
+    /// Bounds descriptor reads for the compatibility fast path. A WAV with a
+    /// larger top-level chunk inventory remains valid input but is handled by
+    /// the ordinary decoder instead of spending unbounded work on eligibility.
+    static let maximumCompatiblePCMWAVChunks = 4_096
 
     private let fault: @Sendable (AudioImportPersistenceFault) throws -> Void
     private let capacityProbe: @Sendable (Int32) -> AudioImportCapacity
@@ -395,6 +413,237 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         )
     }
 
+    /// Recognizes the narrow WAV form whose decoded samples already are the
+    /// canonical timeline. Optional RIFF chunks are allowed and discarded, but
+    /// multiple data chunks, `wavl`/`slnt` presentation constructs, non-PCM
+    /// encoding, and any malformed/padded layout are ineligible and continue
+    /// through the ordinary decoder.
+    func inspectCompatiblePCMWAV(
+        in location: AudioImportStagingLocation,
+        expected: AudioArtifactFingerprint,
+        maximumFrameCount: UInt64
+    ) throws -> CompatiblePCMWAVDescription? {
+        guard location.container == .wav else { return nil }
+        let audioDirectory = try openDirectory(
+            components: location.stagedSessionComponents + ["audio"],
+            under: location.rootDescriptor
+        )
+        defer { Darwin.close(audioDirectory) }
+        let descriptor = try openRegularFile(
+            named: location.originalRelativeName,
+            under: audioDirectory,
+            nonblocking: true
+        )
+        defer { Darwin.close(descriptor) }
+        guard try fingerprint(
+            descriptor: descriptor,
+            maximumBytes: expected.byteCount
+        ) == expected else {
+            throw AudioImportFailure.candidateCorrupt
+        }
+        guard lseek(descriptor, 0, SEEK_SET) == 0 else {
+            throw AudioImportFailure.candidateCorrupt
+        }
+        return try compatiblePCMWAVDescription(
+            descriptor: descriptor,
+            sourceByteCount: expected.byteCount,
+            maximumFrameCount: maximumFrameCount
+        )
+    }
+
+    /// Replaces only the Library-owned staged source copy with one strict
+    /// canonical artifact. The external selection is never renamed, linked, or
+    /// opened for writing. Strict canonical input uses a same-directory rename;
+    /// other eligible input is copied by descriptor before the staged original
+    /// is unlinked, so the operation has no cross-filesystem dependency.
+    func canonicalizeCompatiblePCMWAV(
+        _ description: CompatiblePCMWAVDescription,
+        in location: AudioImportStagingLocation,
+        expectedSource: AudioArtifactFingerprint
+    ) throws -> CanonicalizedPCMWAV {
+        let audioDirectory = try openDirectory(
+            components: location.stagedSessionComponents + ["audio"],
+            under: location.rootDescriptor
+        )
+        defer { Darwin.close(audioDirectory) }
+
+        let source = try openRegularFile(
+            named: location.originalRelativeName,
+            under: audioDirectory,
+            nonblocking: true
+        )
+        defer { Darwin.close(source) }
+        var sourceBefore = stat()
+        guard fstat(source, &sourceBefore) == 0,
+              (sourceBefore.st_mode & S_IFMT) == S_IFREG,
+              try fingerprint(
+                  descriptor: source,
+                  maximumBytes: expectedSource.byteCount
+              ) == expectedSource,
+              lseek(source, 0, SEEK_SET) == 0,
+              try compatiblePCMWAVDescription(
+                  descriptor: source,
+                  sourceByteCount: expectedSource.byteCount,
+                  maximumFrameCount: CanonicalAudioFormat.maximumFrameCount
+              ) == description
+        else {
+            throw AudioImportFailure.candidateCorrupt
+        }
+
+        let expectedCanonicalFingerprint: AudioArtifactFingerprint
+        if description.isStrictCanonical {
+            guard try entryIdentity(
+                named: location.originalRelativeName,
+                under: audioDirectory,
+                expectedType: S_IFREG
+            ) == ConfinedEntryIdentity(sourceBefore) else {
+                throw AudioImportFailure.candidateCorrupt
+            }
+            try confinedWrite.renameNoReplace(
+                from: location.originalRelativeName,
+                under: audioDirectory,
+                to: "audio.wav",
+                under: audioDirectory,
+                collision: .destinationCollision
+            )
+            guard try entryIdentity(
+                named: "audio.wav",
+                under: audioDirectory,
+                expectedType: S_IFREG
+            ) == ConfinedEntryIdentity(sourceBefore),
+                try fingerprint(
+                    descriptor: source,
+                    maximumBytes: expectedSource.byteCount
+                ) == expectedSource
+            else {
+                throw AudioImportFailure.candidateCorrupt
+            }
+            try flush(audioDirectory)
+            try fault(.afterCanonicalWrite)
+            expectedCanonicalFingerprint = expectedSource
+        } else {
+            let consumedName = ".\(location.originalRelativeName).canonicalizing"
+            let destination = try openExclusiveFile(named: "audio.wav", under: audioDirectory)
+            var destinationOpen = true
+            defer { if destinationOpen { Darwin.close(destination) } }
+            var canonicalHasher = SHA256()
+            do {
+                let header = Self.canonicalWAVHeader(frameCount: description.frameCount)
+                try writeAll(header, to: destination)
+                canonicalHasher.update(data: header)
+                var copied: UInt64 = 0
+                var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+                while copied < description.dataByteCount {
+                    try Task.checkCancellation()
+                    let requested = Int(min(UInt64(buffer.count), description.dataByteCount - copied))
+                    let count = buffer.withUnsafeMutableBytes { bytes -> Int in
+                        guard let base = bytes.baseAddress else { return 0 }
+                        while true {
+                            let result = Darwin.pread(
+                                source,
+                                base,
+                                requested,
+                                off_t(description.dataOffset + copied)
+                            )
+                            if result < 0, errno == EINTR { continue }
+                            return result
+                        }
+                    }
+                    guard count > 0 else { throw AudioImportFailure.candidateCorrupt }
+                    let copiedData = Data(buffer[0..<count])
+                    try writeAll(copiedData, to: destination)
+                    canonicalHasher.update(data: copiedData)
+                    copied += UInt64(count)
+                }
+                try flush(destination)
+                guard Darwin.close(destination) == 0 else {
+                    destinationOpen = false
+                    throw AudioImportFailure.writeFailed
+                }
+                destinationOpen = false
+                var sourceAfter = stat()
+                guard fstat(source, &sourceAfter) == 0,
+                      sameSource(sourceBefore, sourceAfter)
+                else {
+                    throw AudioImportFailure.candidateCorrupt
+                }
+                try flush(audioDirectory)
+            } catch {
+                _ = unlinkat(audioDirectory, "audio.wav", 0)
+                throw error
+            }
+            expectedCanonicalFingerprint = try AudioArtifactFingerprint(
+                byteCount: UInt64(Self.canonicalWAVHeaderBytes) + description.dataByteCount,
+                sha256: Self.hexDigest(canonicalHasher.finalize())
+            )
+            try fault(.afterCanonicalWrite)
+            guard try entryIdentity(
+                named: location.originalRelativeName,
+                under: audioDirectory,
+                expectedType: S_IFREG
+            ) == ConfinedEntryIdentity(sourceBefore) else {
+                throw AudioImportFailure.candidateCorrupt
+            }
+            do {
+                try confinedWrite.renameNoReplace(
+                    from: location.originalRelativeName,
+                    under: audioDirectory,
+                    to: consumedName,
+                    under: audioDirectory,
+                    collision: .destinationCollision
+                )
+            } catch {
+                _ = unlinkat(audioDirectory, "audio.wav", 0)
+                throw error
+            }
+            guard try entryIdentity(
+                named: consumedName,
+                under: audioDirectory,
+                expectedType: S_IFREG
+            ) == ConfinedEntryIdentity(sourceBefore) else {
+                throw AudioImportFailure.candidateCorrupt
+            }
+            // This fault models abrupt process loss: both exact owned staging
+            // artifacts intentionally remain for relaunch reconciliation.
+            try fault(.afterCanonicalizingSourceRename)
+            guard unlinkat(audioDirectory, consumedName, 0) == 0 else {
+                throw AudioImportFailure.writeFailed
+            }
+            try flush(audioDirectory)
+        }
+
+        let byteCount = 44 + description.dataByteCount
+        let fingerprint = try fingerprint(
+            components: location.stagedSessionComponents + ["audio", "audio.wav"],
+            under: location.rootDescriptor,
+            maximumBytes: byteCount
+        )
+        guard fingerprint.byteCount == byteCount,
+              fingerprint == expectedCanonicalFingerprint
+        else {
+            throw AudioImportFailure.candidateCorrupt
+        }
+        if description.isStrictCanonical {
+            guard try entryIdentity(
+                named: "audio.wav",
+                under: audioDirectory,
+                expectedType: S_IFREG
+            ) == ConfinedEntryIdentity(sourceBefore) else {
+                throw AudioImportFailure.candidateCorrupt
+            }
+        }
+        return CanonicalizedPCMWAV(
+            normalization: CanonicalNormalizationResult(
+                frameCount: description.frameCount,
+                durationMilliseconds: try CanonicalAudioFormat.durationMilliseconds(
+                    forFrameCount: description.frameCount
+                ),
+                byteCount: byteCount
+            ),
+            fingerprint: fingerprint
+        )
+    }
+
     func didFinishCanonicalWrite(in location: AudioImportStagingLocation) throws {
         let audioDirectory = try openDirectory(
             components: location.stagedSessionComponents + ["audio"],
@@ -615,9 +864,10 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         )
     }
 
-    /// Removes only bounded, exact v1 import publication trees. Anything that
-    /// is unknown, too large to inspect, or carries a newer root version stays
-    /// byte-identical for a newer Audora to understand.
+    /// Removes only bounded, exact supported v1/v2 import publication trees,
+    /// including the owned source name used between canonical copy and unlink.
+    /// Anything unknown, too large to inspect, or carrying a newer root version
+    /// stays byte-identical for a newer Audora to understand.
     func reconcileAbandonedStaging(under rootDescriptor: Int32) {
         guard let publications = try? openDirectory(
             components: ["staging", "publications"],
@@ -720,7 +970,8 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
                 guard isCurrentOrIncompleteManifest(named: name, under: audio) else {
                     return false
                 }
-            case "audio.wav", "original.wav", "original.m4a":
+            case "audio.wav", "original.wav", "original.m4a",
+                ".original.wav.canonicalizing":
                 guard isBoundedRegularFile(named: name, under: audio) else {
                     return false
                 }
@@ -749,7 +1000,9 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         guard let version = try? confinedRead.schemaVersion(in: data) else {
             return true
         }
-        return version == 1
+        let isAudioManifest = name == "audio.json" ||
+            Self.isManifestPartial(name, rootName: "audio.json")
+        return isAudioManifest ? (version == 1 || version == 2) : version == 1
     }
 
     private func isBoundedRegularFile(named name: String, under parent: Int32) -> Bool {
@@ -830,6 +1083,7 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
             if let audio = try? openDirectory(components: ["audio"], under: session) {
                 for file in [
                     location.originalRelativeName,
+                    ".original.wav.canonicalizing",
                     "audio.wav",
                     "audio.json",
                 ] {
@@ -861,7 +1115,7 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         let source = audio.sources[0]
         return try deterministicJSON(
             AudioManifestDTO(
-                schemaVersion: 1,
+                schemaVersion: original.retention == .canonicalizedPCM ? 2 : 1,
                 acquisitionKind: "imported",
                 original: OriginalAudioDTO(
                     relativePath: original.relativePath.description,
@@ -870,7 +1124,16 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
                     sha256: original.fingerprint.sha256,
                     decodedCodec: original.decodedCodec.rawValue,
                     sourceSampleRateHz: original.sourceSampleRateHz,
-                    sourceChannelCount: original.sourceChannelCount
+                    sourceChannelCount: original.sourceChannelCount,
+                    retention: original.retention == .canonicalizedPCM
+                        ? original.retention.rawValue
+                        : nil,
+                    sourceByteCount: original.retention == .canonicalizedPCM
+                        ? original.sourceFingerprint.byteCount
+                        : nil,
+                    sourceSha256: original.retention == .canonicalizedPCM
+                        ? original.sourceFingerprint.sha256
+                        : nil
                 ),
                 canonical: CanonicalAudioDTO(
                     relativePath: canonical.relativePath.description,
@@ -956,7 +1219,7 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         guard sessionDTO.audioManifestSha256 == Self.sha256(audioData) else {
             throw AudioImportFailure.candidateCorrupt
         }
-        if audioVersion > 1 {
+        if audioVersion > 2 {
             return .readOnly(sessionID: expectedSessionID)
         }
         let audio = try decodeAudio(audioData)
@@ -966,22 +1229,25 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
             throw AudioImportFailure.candidateCorrupt
         }
         if audioValidation == .completeEvidence {
-            let original = try fingerprint(
-                components: components + [
-                    "audio", audio.original.relativePath.components.last!,
-                ],
-                under: rootDescriptor,
-                maximumBytes: audio.original.fingerprint.byteCount
-            )
             let canonical = try fingerprint(
                 components: components + ["audio", "audio.wav"],
                 under: rootDescriptor,
                 maximumBytes: audio.canonical.fingerprint.byteCount
             )
-            guard original == audio.original.fingerprint,
-                  canonical == audio.canonical.fingerprint
-            else {
+            guard canonical == audio.canonical.fingerprint else {
                 throw AudioImportFailure.candidateCorrupt
+            }
+            if audio.original.retention == .byteExact {
+                let original = try fingerprint(
+                    components: components + [
+                        "audio", audio.original.relativePath.components.last!,
+                    ],
+                    under: rootDescriptor,
+                    maximumBytes: audio.original.fingerprint.byteCount
+                )
+                guard original == audio.original.fingerprint else {
+                    throw AudioImportFailure.candidateCorrupt
+                }
             }
             try validateCanonicalWAV(
                 components: components + ["audio", "audio.wav"],
@@ -1105,15 +1371,26 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
 
     private func decodeAudioValidated(_ data: Data) throws -> ImportedAudioAsset {
         let dictionary = try jsonDictionary(data)
+        guard let schemaVersion = (dictionary["schemaVersion"] as? NSNumber)?.uint64Value,
+              schemaVersion == 1 || schemaVersion == 2
+        else {
+            throw AudioImportFailure.candidateCorrupt
+        }
+        let v1OriginalKeys = Set([
+            "relativePath", "container", "byteCount", "sha256", "decodedCodec",
+            "sourceSampleRateHz", "sourceChannelCount",
+        ])
+        let v2OriginalKeys = v1OriginalKeys.union([
+            "retention", "sourceByteCount", "sourceSha256",
+        ])
         guard Set(dictionary.keys) == Set([
             "schemaVersion", "acquisitionKind", "original", "canonical", "sources",
             "normalization",
         ]),
             let originalDictionary = dictionary["original"] as? [String: Any],
-            Set(originalDictionary.keys) == Set([
-                "relativePath", "container", "byteCount", "sha256", "decodedCodec",
-                "sourceSampleRateHz", "sourceChannelCount",
-            ]),
+            Set(originalDictionary.keys) == (schemaVersion == 1
+                ? v1OriginalKeys
+                : v2OriginalKeys),
             let canonicalDictionary = dictionary["canonical"] as? [String: Any],
             Set(canonicalDictionary.keys) == Set([
                 "relativePath", "byteCount", "sha256", "frameCount", "durationMs",
@@ -1133,7 +1410,34 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
             throw AudioImportFailure.candidateCorrupt
         }
         let dto: AudioManifestDTO = try decode(AudioManifestDTO.self, data)
-        guard dto.schemaVersion == 1,
+        let retention: OriginalAudioRetention
+        let sourceFingerprint: AudioArtifactFingerprint
+        if schemaVersion == 1 {
+            guard dto.original.retention == nil,
+                  dto.original.sourceByteCount == nil,
+                  dto.original.sourceSha256 == nil
+            else {
+                throw AudioImportFailure.candidateCorrupt
+            }
+            retention = .byteExact
+            sourceFingerprint = try AudioArtifactFingerprint(
+                byteCount: dto.original.byteCount,
+                sha256: dto.original.sha256
+            )
+        } else {
+            guard dto.original.retention == OriginalAudioRetention.canonicalizedPCM.rawValue,
+                  let sourceByteCount = dto.original.sourceByteCount,
+                  let sourceSha256 = dto.original.sourceSha256
+            else {
+                throw AudioImportFailure.candidateCorrupt
+            }
+            retention = .canonicalizedPCM
+            sourceFingerprint = try AudioArtifactFingerprint(
+                byteCount: sourceByteCount,
+                sha256: sourceSha256
+            )
+        }
+        guard dto.schemaVersion == schemaVersion,
               dto.acquisitionKind == "imported",
               let container = ImportedAudioContainer(rawValue: dto.original.container),
               let codec = DecodedAudioCodec(rawValue: dto.original.decodedCodec),
@@ -1162,7 +1466,9 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
             ),
             decodedCodec: codec,
             sourceSampleRateHz: dto.original.sourceSampleRateHz,
-            sourceChannelCount: dto.original.sourceChannelCount
+            sourceChannelCount: dto.original.sourceChannelCount,
+            retention: retention,
+            sourceFingerprint: sourceFingerprint
         )
         let canonical = try CanonicalAudioArtifact(
             relativePath: LibraryRelativePath(dto.canonical.relativePath),
@@ -1238,6 +1544,150 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         else {
             throw AudioImportFailure.candidateCorrupt
         }
+    }
+
+    private func compatiblePCMWAVDescription(
+        descriptor: Int32,
+        sourceByteCount: UInt64,
+        maximumFrameCount: UInt64
+    ) throws -> CompatiblePCMWAVDescription? {
+        guard sourceByteCount >= 44, sourceByteCount <= UInt64(UInt32.max) + 8 else {
+            return nil
+        }
+        guard let riff = preadBytes(descriptor, count: 12, offset: 0),
+              Array(riff[0..<4]) == Array("RIFF".utf8),
+              Array(riff[8..<12]) == Array("WAVE".utf8),
+              UInt64(littleUInt32(riff, 4)) + 8 == sourceByteCount
+        else {
+            return nil
+        }
+
+        var offset: UInt64 = 12
+        var sawFormat = false
+        var dataOffset: UInt64?
+        var dataByteCount: UInt64?
+        var chunkCount = 0
+        while offset < sourceByteCount {
+            try Task.checkCancellation()
+            chunkCount += 1
+            guard chunkCount <= Self.maximumCompatiblePCMWAVChunks else {
+                return nil
+            }
+            guard sourceByteCount - offset >= 8,
+                  let chunkHeader = preadBytes(
+                      descriptor,
+                      count: 8,
+                      offset: off_t(offset)
+                  )
+            else {
+                return nil
+            }
+            let identifier = Array(chunkHeader[0..<4])
+            let payloadBytes = UInt64(littleUInt32(chunkHeader, 4))
+            let payloadOffset = offset + 8
+            let paddedBytes = payloadBytes + (payloadBytes & 1)
+            let (nextOffset, overflow) = payloadOffset.addingReportingOverflow(paddedBytes)
+            guard !overflow, nextOffset <= sourceByteCount else { return nil }
+
+            if identifier == Array("fmt ".utf8) {
+                guard !sawFormat, payloadBytes == 16,
+                      let format = preadBytes(
+                          descriptor,
+                          count: 16,
+                          offset: off_t(payloadOffset)
+                      ),
+                      littleUInt16(format, 0) == 1,
+                      littleUInt16(format, 2) == 1,
+                      littleUInt32(format, 4) == CanonicalAudioFormat.sampleRateHz,
+                      littleUInt32(format, 8) == 32_000,
+                      littleUInt16(format, 12) == 2,
+                      littleUInt16(format, 14) == 16
+                else {
+                    return nil
+                }
+                sawFormat = true
+            } else if identifier == Array("data".utf8) {
+                guard sawFormat,
+                      dataOffset == nil,
+                      payloadBytes > 0,
+                      payloadBytes.isMultiple(of: 2)
+                else {
+                    return nil
+                }
+                dataOffset = payloadOffset
+                dataByteCount = payloadBytes
+            } else if identifier == Array("LIST".utf8) {
+                guard payloadBytes >= 4,
+                      let listType = preadBytes(
+                          descriptor,
+                          count: 4,
+                          offset: off_t(payloadOffset)
+                      )
+                else {
+                    return nil
+                }
+                if Array(listType) == Array("wavl".utf8) {
+                    return nil
+                }
+            } else if identifier == Array("slnt".utf8) ||
+                identifier == Array("plst".utf8) ||
+                identifier == Array("smpl".utf8)
+            {
+                return nil
+            }
+            offset = nextOffset
+        }
+        guard offset == sourceByteCount,
+              sawFormat,
+              let dataOffset,
+              let dataByteCount
+        else {
+            return nil
+        }
+        let frameCount = dataByteCount / 2
+        guard frameCount > 0, frameCount <= maximumFrameCount else {
+            if frameCount > maximumFrameCount { throw AudioImportFailure.durationExceeded }
+            return nil
+        }
+        return CompatiblePCMWAVDescription(
+            dataOffset: dataOffset,
+            dataByteCount: dataByteCount,
+            frameCount: frameCount,
+            sourceByteCount: sourceByteCount,
+            isStrictCanonical: dataOffset == 44 && sourceByteCount == 44 + dataByteCount
+        )
+    }
+
+    private func preadBytes(_ descriptor: Int32, count: Int, offset: off_t) -> [UInt8]? {
+        var bytes = [UInt8](repeating: 0, count: count)
+        return preadAll(descriptor, into: &bytes, offset: offset) ? bytes : nil
+    }
+
+    private static func canonicalWAVHeader(frameCount: UInt64) -> Data {
+        let dataByteCount = UInt32(frameCount * 2)
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(44)
+        bytes.append(contentsOf: "RIFF".utf8)
+        appendLittleEndian(UInt32(36) + dataByteCount, to: &bytes)
+        bytes.append(contentsOf: "WAVEfmt ".utf8)
+        appendLittleEndian(UInt32(16), to: &bytes)
+        appendLittleEndian(UInt16(1), to: &bytes)
+        appendLittleEndian(UInt16(1), to: &bytes)
+        appendLittleEndian(UInt32(16_000), to: &bytes)
+        appendLittleEndian(UInt32(32_000), to: &bytes)
+        appendLittleEndian(UInt16(2), to: &bytes)
+        appendLittleEndian(UInt16(16), to: &bytes)
+        bytes.append(contentsOf: "data".utf8)
+        appendLittleEndian(dataByteCount, to: &bytes)
+        return Data(bytes)
+    }
+
+    private static func appendLittleEndian<T: FixedWidthInteger>(
+        _ value: T,
+        to bytes: inout [UInt8]
+    ) {
+        var little = value.littleEndian
+        withUnsafeBytes(of: &little) { bytes.append(contentsOf: $0) }
     }
 
     private func fingerprint(
@@ -1480,6 +1930,14 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         named name: String,
         under parent: Int32
     ) throws -> ConfinedEntryIdentity {
+        try entryIdentity(named: name, under: parent, expectedType: S_IFDIR)
+    }
+
+    private func entryIdentity(
+        named name: String,
+        under parent: Int32,
+        expectedType: mode_t
+    ) throws -> ConfinedEntryIdentity {
         guard Self.isSafeComponent(name) else {
             throw AudioImportFailure.candidateCorrupt
         }
@@ -1487,7 +1945,7 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
         let result = name.withCString {
             fstatat(parent, $0, &metadata, AT_SYMLINK_NOFOLLOW)
         }
-        guard result == 0, (metadata.st_mode & S_IFMT) == S_IFDIR else {
+        guard result == 0, (metadata.st_mode & S_IFMT) == expectedType else {
             throw AudioImportFailure.candidateCorrupt
         }
         return ConfinedEntryIdentity(metadata)
@@ -1538,7 +1996,8 @@ struct PortableAudioImportPersistence: @unchecked Sendable {
 
     private func detectedContainer(_ bytes: [UInt8]) -> ImportedAudioContainer? {
         guard bytes.count >= 12 else { return nil }
-        if Array(bytes[0..<4]) == Array("RIFF".utf8),
+        let signature = Array(bytes[0..<4])
+        if ["RIFF", "RIFX", "RF64"].map({ Array($0.utf8) }).contains(signature),
            Array(bytes[8..<12]) == Array("WAVE".utf8)
         {
             return .wav
@@ -1647,6 +2106,9 @@ private struct OriginalAudioDTO: Codable {
     let decodedCodec: String
     let sourceSampleRateHz: UInt32
     let sourceChannelCount: UInt32
+    let retention: String?
+    let sourceByteCount: UInt64?
+    let sourceSha256: String?
 }
 
 private struct CanonicalAudioDTO: Codable {

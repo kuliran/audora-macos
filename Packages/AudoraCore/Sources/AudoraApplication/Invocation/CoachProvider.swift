@@ -21,19 +21,31 @@ public enum CoachProviderRunError: Error, Equatable, Sendable {
 /// A complete provider result. The bytes remain opaque until Application runs
 /// the whole-response trust gate.
 @_spi(InvocationInfrastructure)
-public struct CoachProviderCompleteResponse: Equatable, Sendable {
+public struct CoachProviderCompleteResponse:
+    Equatable,
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public let body: Data
 
     public init(body: Data) {
         self.body = body
     }
+
+    public var description: String { "<redacted Coach provider response>" }
+    public var debugDescription: String { description }
 }
 
 /// The exact bounded semantic request plus launch instruction selected by
 /// Application. Infrastructure may frame these values for its qualified
 /// transport but must not reconstruct or supplement the semantic request.
 @_spi(InvocationInfrastructure)
-public struct CoachRequest: Sendable {
+public struct CoachRequest:
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public let body: Data
     public let outputTokenCeiling: Int
     public let pinnedInstruction: String
@@ -52,13 +64,20 @@ public struct CoachRequest: Sendable {
         self.pinnedInstruction = pinnedInstruction
         self.providerBinding = providerBinding
     }
+
+    public var description: String { "<redacted Coach request>" }
+    public var debugDescription: String { description }
 }
 
 /// Durable Attempt authority supplied separately from model-visible request
 /// bytes. None of these values may be included in diagnostics or provider
 /// context except through the adapter's qualified transport controls.
 @_spi(InvocationInfrastructure)
-public struct ProviderAttemptMetadata: Sendable {
+public struct ProviderAttemptMetadata:
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public let attemptID: CoachProviderAttemptID
     public let attemptOrdinal: UInt8
     public let attemptKind: CoachProviderAttemptKind
@@ -78,6 +97,12 @@ public struct ProviderAttemptMetadata: Sendable {
         self.providerIdempotencyValue = providerIdempotencyValue
         self.control = control
     }
+
+    public var description: String {
+        "<redacted provider Attempt metadata>"
+    }
+
+    public var debugDescription: String { description }
 }
 
 @_spi(InvocationInfrastructure)

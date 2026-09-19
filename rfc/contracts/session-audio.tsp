@@ -12,6 +12,12 @@ namespace Audora.Contracts {
     microphone: MicrophoneAudioManifest,
   }
 
+  /** Versioned imported-audio layouts. */
+  union ImportedAudioManifest {
+    retained: RetainedImportedAudioManifest,
+    canonicalizedPCM: CanonicalizedPCMImportedAudioManifest,
+  }
+
   /** Closed union of every persisted Session aggregate-manifest variant. */
   @jsonSchema
   @id("SessionManifest.json")
@@ -21,7 +27,7 @@ namespace Audora.Contracts {
   }
 
   /** Audio imported from a user-selected portable source file. */
-  model ImportedAudioManifest {
+  model RetainedImportedAudioManifest {
     schemaVersion: 1;
     acquisitionKind: "imported";
     original: OriginalAudioArtifact;
@@ -32,6 +38,25 @@ namespace Audora.Contracts {
     sources: ImportedAudioSource[];
 
     normalization: AudioNormalization;
+  }
+
+  /**
+   * A compatible PCM WAV whose selected container was replaced inside staging
+   * by the one strict canonical artifact. `original` describes that real path;
+   * `sourceByteCount` and `sourceSha256` are provenance for the discarded
+   * selected container and never claim that those bytes remain addressable.
+   */
+  model CanonicalizedPCMImportedAudioManifest {
+    schemaVersion: 2;
+    acquisitionKind: "imported";
+    original: CanonicalizedPCMSourceProvenance;
+    canonical: CanonicalAudioArtifact;
+
+    @minItems(1)
+    @maxItems(1)
+    sources: ImportedAudioSource[];
+
+    normalization: CompatiblePCMWAVNormalization;
   }
 
   /** Session-owned canonical microphone Audio Asset metadata. */
@@ -112,6 +137,14 @@ namespace Audora.Contracts {
     quantizerVersion: "s16-round-away-saturate-v1";
   }
 
+  model CompatiblePCMWAVNormalization {
+    algorithmId: "audora-compatible-pcm-wav";
+    algorithmVersion: 1;
+    stereoRule: "identity-mono";
+    resamplerVersion: "identity-16000hz";
+    quantizerVersion: "identity-s16le";
+  }
+
   model CanonicalAudioFormat {
     sampleRateHz: 16000;
     channelCount: 1;
@@ -156,6 +189,19 @@ namespace Audora.Contracts {
     @minValue(1)
     @maxValue(2)
     sourceChannelCount: integer;
+  }
+
+  model CanonicalizedPCMSourceProvenance {
+    relativePath: "audio/audio.wav";
+    container: "wav";
+    byteCount: PositiveByteCount;
+    sha256: Sha256Hex;
+    decodedCodec: "linearPCM";
+    sourceSampleRateHz: 16000;
+    sourceChannelCount: 1;
+    retention: "canonicalizedPCM";
+    sourceByteCount: PositiveByteCount;
+    sourceSha256: Sha256Hex;
   }
 
   @pattern("^src-0001$")

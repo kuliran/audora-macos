@@ -203,12 +203,16 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
 
     public func open(
         at root: URL,
-        requirePackageExtension: Bool = true
+        requirePackageExtension: Bool = true,
+        expectedRootIdentity: LibraryRootIdentity? = nil,
+        expectedLibraryID: LibraryID? = nil
     ) throws -> LoadedPortableLibrary {
         try open(
             at: root,
             requirePackageExtension: requirePackageExtension,
-            reconcileAbandonedImports: true
+            reconcileAbandonedImports: true,
+            expectedRootIdentity: expectedRootIdentity,
+            expectedLibraryID: expectedLibraryID
         )
     }
 
@@ -223,7 +227,8 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
             at: root,
             requirePackageExtension: requirePackageExtension,
             reconcileAbandonedImports: false,
-            expectedRootIdentity: expectedRootIdentity
+            expectedRootIdentity: expectedRootIdentity,
+            expectedLibraryID: nil
         )
     }
 
@@ -231,7 +236,8 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         at root: URL,
         requirePackageExtension: Bool,
         reconcileAbandonedImports: Bool,
-        expectedRootIdentity: LibraryRootIdentity? = nil
+        expectedRootIdentity: LibraryRootIdentity? = nil,
+        expectedLibraryID: LibraryID? = nil
     ) throws -> LoadedPortableLibrary {
         do {
             if requirePackageExtension, root.pathExtension != "audoralibrary" {
@@ -252,7 +258,8 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
             try fault(.afterRootDescriptorOpened)
             let loaded = try load(
                 from: rootDescriptor,
-                reconcileAbandonedImports: reconcileAbandonedImports
+                reconcileAbandonedImports: reconcileAbandonedImports,
+                expectedLibraryID: expectedLibraryID
             )
             if let expectedRootIdentity {
                 guard LibraryRootIdentity.capture(rootDescriptor) ==
@@ -474,7 +481,8 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
     /// feature-owned mutation validation must opt out while it holds authority.
     func load(
         from rootDescriptor: Int32,
-        reconcileAbandonedImports: Bool = true
+        reconcileAbandonedImports: Bool = true,
+        expectedLibraryID: LibraryID? = nil
     ) throws -> LoadedPortableLibrary {
         try validateExpectedLayout(under: rootDescriptor)
 
@@ -509,6 +517,12 @@ public struct PortableLibraryPersistence: @unchecked Sendable {
         let profileHead = profileVersion == 1
             ? try decodeProfileHead(profileHeadData)
             : nil
+
+        if let expectedLibraryID,
+           manifest?.libraryID != expectedLibraryID
+        {
+            throw PortableLibraryPersistenceError.installedLibraryMismatch
+        }
 
         if manifestVersion > 1 || preferencesVersion > 1 || profileVersion > 1 {
             return .readOnly(libraryID: manifest?.libraryID)

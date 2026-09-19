@@ -209,10 +209,13 @@ same-basename resource families distinct by their package subdirectories.
 
 ## Audio import contracts
 
-`ImportedAudioManifest` contains a sealed union over the three v1
-container/codec pairs:
-PCM WAV, AAC-LC M4A, and ALAC M4A. It retains the exact original artifact by a
-portable relative path and binds the canonical `audio/audio.wav` artifact. The
+`ImportedAudioManifest` is a versioned sealed union. Schema v1 covers the three
+byte-exact retained container/codec pairs—PCM WAV, AAC-LC M4A, and ALAC M4A—and
+binds their portable original path plus canonical `audio/audio.wav`. Schema v2 is
+limited to an eligible compatible PCM WAV and stores one canonical artifact. Its
+`original` role truthfully repeats the canonical path and artifact fingerprint;
+separate `sourceByteCount` and `sourceSha256` fields record provenance for the
+discarded selected container. The
 canonical representation is 16 kHz, mono, signed 16-bit little-endian PCM; its
 frame count is authoritative and is limited to 43,200,000 frames. Duration uses
 integer ceiling from that frame count and cannot exceed 2,700,000 ms.

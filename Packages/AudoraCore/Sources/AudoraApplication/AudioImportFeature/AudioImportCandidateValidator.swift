@@ -10,7 +10,7 @@ public enum AudioImportCandidateValidator {
               candidate.sessionID == expectedSeed.sessionID.rawValue,
               candidate.createdAt == expectedSeed.createdAt.rawValue,
               candidate.canonicalFrameCount <= policy.maximumCanonicalFrames,
-              candidate.originalByteCount <= policy.maximumSourceBytes,
+              candidate.sourceByteCount <= policy.maximumSourceBytes,
               candidate.canonicalContainer == CanonicalAudioFormat.v1.container,
               candidate.canonicalEncoding == CanonicalAudioFormat.v1.encoding.rawValue,
               candidate.canonicalSampleRateHz == CanonicalAudioFormat.sampleRateHz,
@@ -23,6 +23,9 @@ public enum AudioImportCandidateValidator {
         do {
             guard let container = ImportedAudioContainer(rawValue: candidate.originalContainer),
                   let codec = DecodedAudioCodec(rawValue: candidate.decodedCodec),
+                  let retention = OriginalAudioRetention(
+                      rawValue: candidate.originalRetention
+                  ),
                   let role = AudioSourceRole(rawValue: candidate.audioSourceRole),
                   let normalization = AudioNormalizationProvenance(
                       algorithmID: candidate.normalizationAlgorithmID,
@@ -43,7 +46,12 @@ public enum AudioImportCandidateValidator {
                 ),
                 decodedCodec: codec,
                 sourceSampleRateHz: candidate.sourceSampleRateHz,
-                sourceChannelCount: candidate.sourceChannelCount
+                sourceChannelCount: candidate.sourceChannelCount,
+                retention: retention,
+                sourceFingerprint: AudioArtifactFingerprint(
+                    byteCount: candidate.sourceByteCount,
+                    sha256: candidate.sourceSHA256
+                )
             )
             let canonical = try CanonicalAudioArtifact(
                 relativePath: LibraryRelativePath(candidate.canonicalRelativePath),

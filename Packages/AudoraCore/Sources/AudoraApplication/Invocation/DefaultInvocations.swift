@@ -2282,7 +2282,11 @@ private final class ProviderAttemptTranscriptReadGate: @unchecked Sendable {
 }
 
 @_spi(InvocationInfrastructure)
-public struct CoachTranscriptAccess: Sendable {
+public struct CoachTranscriptAccess:
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public let handles: [CoachProviderTranscriptHandle]
 
     private let capability: AttemptTranscriptAccessCapability
@@ -2306,6 +2310,9 @@ public struct CoachTranscriptAccess: Sendable {
     init(grant: AttemptTranscriptAccessGrant) {
         self.init(grant: grant, completion: ProviderAttemptCompletion())
     }
+
+    public var description: String { "<redacted Coach transcript access>" }
+    public var debugDescription: String { description }
 
     /// The provider can request one typed nonempty subset. Capability material
     /// never becomes model-visible or printable.

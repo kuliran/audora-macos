@@ -43,7 +43,11 @@ public struct ConfinedTranscriptionWorkerLimits: Equatable, Sendable {
 /// production host also fixes the executable and arguments, uses anonymous
 /// pipes, supplies an allowlisted empty environment/home, confines relative
 /// job/model paths, and applies these bounds before returning any bytes.
-public struct ConfinedTranscriptionWorkerInvocation: Sendable {
+public struct ConfinedTranscriptionWorkerInvocation:
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public let execution: TranscriptionExecutionReference
     public let profile: QualifiedTranscriptionProfile
     public let runtime: any ConfinedTranscriptionRuntimeExecutionCapability
@@ -63,11 +67,21 @@ public struct ConfinedTranscriptionWorkerInvocation: Sendable {
         self.networkAccess = networkAccess
         self.limits = limits
     }
+
+    public var description: String {
+        "<redacted transcription worker invocation>"
+    }
+
+    public var debugDescription: String { description }
 }
 
 /// Private inputs granted only after the adapter accepts the exact startup
 /// hello. A worker that fails qualification never receives either authority.
-public struct ConfinedTranscriptionWorkerExecution: Sendable {
+public struct ConfinedTranscriptionWorkerExecution:
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public let execution: TranscriptionExecutionReference
     public let requestJSON: Data
     public let canonicalAudio: ConfinedCanonicalAudioInput
@@ -84,12 +98,23 @@ public struct ConfinedTranscriptionWorkerExecution: Sendable {
         self.canonicalAudio = canonicalAudio
         self.model = model
     }
+
+    public var description: String {
+        "<redacted transcription worker execution>"
+    }
+
+    public var debugDescription: String { description }
 }
 
 /// A regular, descriptor-confined artifact already read by the execution host.
 /// The relative path remains attached so the JSONL reference can be matched
 /// exactly without admitting an arbitrary worker-supplied path.
-public struct ConfinedTranscriptionWorkerArtifact: Equatable, Sendable {
+public struct ConfinedTranscriptionWorkerArtifact:
+    Equatable,
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public let relativePath: String
     public let data: Data
 
@@ -97,9 +122,20 @@ public struct ConfinedTranscriptionWorkerArtifact: Equatable, Sendable {
         self.relativePath = relativePath
         self.data = data
     }
+
+    public var description: String {
+        "<redacted transcription worker artifact>"
+    }
+
+    public var debugDescription: String { description }
 }
 
-public struct ConfinedTranscriptionWorkerResult: Equatable, Sendable {
+public struct ConfinedTranscriptionWorkerResult:
+    Equatable,
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     /// Exact bounded audit copy of the lines already delivered live through
     /// `execute`. The adapter rejects a missing, reordered, or changed copy.
     public let stdoutLines: [Data]
@@ -115,6 +151,12 @@ public struct ConfinedTranscriptionWorkerResult: Equatable, Sendable {
         self.candidateArtifact = candidateArtifact
         self.exitStatus = exitStatus
     }
+
+    public var description: String {
+        "<redacted transcription worker result>"
+    }
+
+    public var debugDescription: String { description }
 }
 
 public struct ConfinedTranscriptionCandidateRecoveryRequest: Equatable, Sendable {

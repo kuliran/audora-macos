@@ -170,6 +170,23 @@ final class DefaultInvocationsTests: XCTestCase {
                 "control",
             ])
         )
+        XCTAssertEqual(
+            String(describing: request.request),
+            "<redacted Coach request>"
+        )
+        XCTAssertEqual(
+            String(describing: request.execution),
+            "<redacted provider Attempt metadata>"
+        )
+        let transcriptAccess = try XCTUnwrap(request.transcriptAccess)
+        XCTAssertEqual(
+            String(describing: transcriptAccess),
+            "<redacted Coach transcript access>"
+        )
+        XCTAssertEqual(
+            String(reflecting: transcriptAccess),
+            transcriptAccess.description
+        )
         let lateRead = await request.transcriptAccess?.read(
             transportRequestID: AttemptTranscriptTransportRequestID("late-read")!,
             handles: request.exchange.transcriptHandles

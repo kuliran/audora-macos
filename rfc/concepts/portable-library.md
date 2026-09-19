@@ -21,7 +21,7 @@ Audora Library.audoralibrary/
 │       ├── session.json
 │       ├── audio/
 │       │   ├── audio.json
-│       │   ├── original.<ext>  # imported media only
+│       │   ├── original.<ext>  # retained-source imports only; absent for schema-v2 compatible WAV
 │       │   └── audio.wav       # canonical mono timeline
 │       ├── transcripts/
 │       └── annotations/
@@ -582,10 +582,15 @@ Chat messages are authoritative Chat-owned content. Moving, restoring, or losing
 Session changes only structured-reference resolution; it never rewrites Chat prose
 or accepted Profile Statements.
 
-Audio import copies the exact source into the Session and retains it for that
-Session's lifetime. Audora also creates canonical mono WAV and never depends on an
-external absolute URL. Every stored artifact path is relative and rejects `..`,
-absolute paths, and symlinks.
+Audio import first copies the exact source into Session staging and never depends
+on an external absolute URL. It normally retains that byte-exact copy beside the
+canonical mono WAV. For the precisely eligible gap-free canonical-format PCM WAV
+defined by the audio-processing contract, schema v2 instead retains one
+`audio/audio.wav`: its artifact path and fingerprint describe those actual bytes,
+while separate source-byte count and SHA-256 fields preserve provenance for the
+discarded selected container. Existing schema-v1 Sessions with both
+`original.wav` and `audio.wav` remain valid and reopen without migration. Every
+stored artifact path is relative and rejects `..`, absolute paths, and symlinks.
 
 Machine-local state outside the Library includes:
 

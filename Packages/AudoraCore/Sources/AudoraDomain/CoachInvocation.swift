@@ -37,7 +37,12 @@ public enum ProviderIdempotencyValueError: Error, Equatable, Sendable {
 
 /// Opaque provider deduplication authority. It is deliberately non-descriptive
 /// and never projected to Presentation or diagnostics.
-public struct ProviderIdempotencyValue: Hashable, Sendable {
+public struct ProviderIdempotencyValue:
+    Hashable,
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public static let maximumUTF8Bytes = 128
     public let rawValue: String
 
@@ -54,6 +59,9 @@ public struct ProviderIdempotencyValue: Hashable, Sendable {
         }
         self.rawValue = rawValue
     }
+
+    public var description: String { "<redacted provider idempotency value>" }
+    public var debugDescription: String { description }
 }
 
 public enum CoachProviderAttemptKind: String, Codable, Equatable, Sendable {
@@ -66,7 +74,12 @@ public enum CoachProviderTranscriptHandleError: Error, Equatable, Sendable {
 }
 
 /// Opaque Attempt-local route to one on-demand Chat Session Attachment.
-public struct CoachProviderTranscriptHandle: Hashable, Sendable {
+public struct CoachProviderTranscriptHandle:
+    Hashable,
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public static let canonicalUTF8ByteCount = 36
     public let rawValue: String
 
@@ -87,6 +100,9 @@ public struct CoachProviderTranscriptHandle: Hashable, Sendable {
         }
         self.rawValue = rawValue
     }
+
+    public var description: String { "<redacted provider transcript handle>" }
+    public var debugDescription: String { description }
 }
 
 public enum CoachProviderAttemptError: Error, Equatable, Sendable {
@@ -99,7 +115,12 @@ public enum CoachProviderAttemptError: Error, Equatable, Sendable {
 /// Process-live provider transport authority. These opaque values are never a
 /// durable part of an Attempt; relaunch retires work instead of reconstructing
 /// or resuming this capability.
-public struct CoachProviderAttemptTransportAuthority: Equatable, Sendable {
+public struct CoachProviderAttemptTransportAuthority:
+    Equatable,
+    Sendable,
+    CustomStringConvertible,
+    CustomDebugStringConvertible
+{
     public let providerIdempotencyValue: ProviderIdempotencyValue
     public let transcriptHandles: [CoachProviderTranscriptHandle]
 
@@ -113,6 +134,12 @@ public struct CoachProviderAttemptTransportAuthority: Equatable, Sendable {
         self.providerIdempotencyValue = providerIdempotencyValue
         self.transcriptHandles = transcriptHandles
     }
+
+    public var description: String {
+        "<redacted provider Attempt transport authority>"
+    }
+
+    public var debugDescription: String { description }
 }
 
 /// Fresh authority for the only atomic publication an Attempt may propose.
