@@ -300,9 +300,14 @@ instructions. The production adapter remains blocked on:
 1. one authenticated valid `CoachResponse` under the pinned byte/token limits;
 2. a provider-side output-token ceiling at or below `responseReservedTokens`;
 3. qualification of an exact model-facing tool allowlist containing, later,
-   only Audora's scoped transcript read, with no ambient filesystem tool; and
+   only Audora's scoped transcript read, with no ambient filesystem tool;
 4. real-environment qualification of authentication, quota, transient, and
-   unavailable-model signals without weakening diagnostic redaction.
+   unavailable-model signals without weakening diagnostic redaction; and
+5. a qualification-bound `CoachProviderDataUseAssurance` proving submitted
+   content is prohibited from provider training/model-improvement use. For a
+   personal ChatGPT login, this includes the owner's dated attestation that
+   **Improve the model for everyone** is off; `--ephemeral` is not evidence of
+   that account setting.
 
 Until those points pass on the exact shipping CLI/model pair, Audora must not wire
 this spike into the application composition root.
@@ -324,14 +329,19 @@ this spike into the application composition root.
 3. Verify the exact build's documented same-process token mechanism with
    `cli_auth_credentials_store="ephemeral"`, without copying a login store or
    restoring an ordinary home.
-4. Keep the pinned system `PATH`, private `TMPDIR`, empty client home, explicit
+4. Bind the exact authentication posture to reviewed no-training evidence. For a
+   personal ChatGPT login, record the owner's dated attestation that **Improve the
+   model for everyone** is off without inspecting browser/account storage. Pin its
+   evidence identifier, reference, and content SHA-256 in the qualification-owned
+   `CoachProviderDataUseAssurance`.
+5. Keep the pinned system `PATH`, private `TMPDIR`, empty client home, explicit
    residue rejection, successful scope removal, existing feature/tool disables,
    and bounded JSONL process host inside that runtime authority.
-5. Only after those controls exist, add one `VerifiedRuntime` entry containing the
+6. Only after those controls exist, add one `VerifiedRuntime` entry containing the
    exact, non-normalized-away canonical CLI identity (including build metadata),
    entry-executable SHA-256, and the proof's complete runtime-manifest identity.
    Matrix membership without the matching live proof remains closed.
-6. Rerun `--preflight` without authorization and confirm that both probes agree
+7. Rerun `--preflight` without authorization and confirm that both probes agree
    and it still reports zero launched cases. Enable `--execute` only after an
    independent review proves that the descriptor-bound bytes receiving
    `CODEX_ACCESS_TOKEN` are exactly the qualified runtime.

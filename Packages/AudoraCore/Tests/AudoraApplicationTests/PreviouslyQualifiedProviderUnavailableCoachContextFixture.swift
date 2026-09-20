@@ -113,7 +113,8 @@ private func previouslyQualifiedProviderUnavailableConfiguration()
             attachmentProjectionPolicy: try! CoachAttachmentProjectionPolicy(
                 maximumInlineTranscriptTokens: 64,
                 tokenEstimator: .utf8ByteUpperBound()
-            )
+            ),
+            dataUseAssurance: .testProhibited
         )
     )
 }

@@ -21,11 +21,20 @@ protocol CoachProvider {
 ```
 
 The exact configuration binding includes the descriptor, provider/model/adapter
-identity, response-collector byte ceiling, every provider framing byte and hidden
-token allowance, inline-transcript threshold, and tokenizer identity and declared
+identity, qualified no-training/model-improvement data-use assurance,
+response-collector byte ceiling, every provider framing byte and hidden token
+allowance, inline-transcript threshold, and tokenizer identity and declared
 behavior. Context measurement freezes this whole binding into `CoachRequest`; the
-gateway rejects any unequal binding before request bytes or transcript capabilities
-reach a transport.
+gateway rejects any unequal or stale binding before request bytes or transcript
+capabilities reach a transport. Provider identity alone and the CLI's local
+`--ephemeral` behavior are not substitutes for that assurance.
+
+The provider-neutral `CoachProviderDataUseAssurance` binds a bounded reviewed
+evidence identifier, policy reference, policy-content SHA-256, and an explicit
+statement that submitted-content training and model-improvement use is prohibited.
+Missing, malformed, or permissive assurance fails configuration before context is
+serialized; changing only the assurance makes the gateway reject the request
+before transport launch.
 
 Infrastructure qualification, rather than the transport itself, creates one
 immutable `QualifiedCoachProviderBundle` that binds that configuration to the exact
@@ -1099,5 +1108,8 @@ transcript delivery may extend the provider contract then; the current code carr
 no unused local-provider branch.
 
 `--ephemeral` prevents Codex from persisting a local rollout file. It is not a claim
-about OpenAI-side retention or training. Remote handling follows the signed-in
-account's applicable terms and data controls.
+about provider-side retention or training. Provider qualification must bind the
+exact account/service posture under which submitted content is not used to train
+or improve provider models. Keeping audio local reduces disclosure, but does not
+establish that transcript text cannot be training material. Remote handling
+follows the qualified provider's applicable terms and data controls.

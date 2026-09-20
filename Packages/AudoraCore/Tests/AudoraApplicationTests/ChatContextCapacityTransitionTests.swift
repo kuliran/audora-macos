@@ -491,7 +491,8 @@ private actor DynamicCapacitySnapshotPort:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
                                     tokenEstimator: .utf8ByteUpperBound()
-                                )
+                                ),
+                            dataUseAssurance: .testProhibited
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(

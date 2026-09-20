@@ -77,8 +77,10 @@ NASA's [media usage guidelines](https://www.nasa.gov/nasa-brand-center/images-an
 ## Gate status
 
 These sources and reproduced hashes remove the candidate-audio identity blocker.
-They do **not** make issue #3 pass by themselves. The gate remains blocked until
-the exact intervals are acoustically reviewed, references are hand-labeled and
-hashed, each fixture is explicitly marked ready, and the pinned CrisperWhisper
-benchmark completes all quality, timing, cancellation, cached-offline, memory,
-runtime, and thermal checks.
+They do **not** make release qualification pass by themselves. Acoustic review,
+hand-labeled references, and the full 45-minute quality/timing/performance run are
+explicitly deferred until the application is otherwise ready, and each manifest
+entry must remain not ready in the meantime. That deferral does not block building
+the real Crisper adapter or its execution-admission work: the pinned runtime/model,
+compatibility patch, confinement, real cached-offline inference, cancellation, and
+candidate boundary still have to pass without a fake provider or bypass.

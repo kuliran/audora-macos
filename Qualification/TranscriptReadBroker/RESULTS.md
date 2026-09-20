@@ -28,4 +28,6 @@ Recorded 8 September 2026 on Apple Silicon macOS with Swift 6.
 The broker gate passes for synthetic fixtures. The Codex Coach Provider remains
 unqualified until the exact shipping CLI/model pair proves an authenticated valid
 structured response, provider-side output ceiling, scoped model-visible tool
-surface, pinned tokenizer, and complete hidden framing.
+surface, pinned tokenizer, complete hidden framing, and a qualification-bound
+assurance that submitted content is prohibited from provider training/model-
+improvement use.

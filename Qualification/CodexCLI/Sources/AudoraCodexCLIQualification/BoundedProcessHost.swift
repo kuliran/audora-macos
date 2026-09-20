@@ -370,7 +370,7 @@ struct BoundedProcessHost: Sendable {
         path: String
     ) -> Int32 {
         path.withCString { pathPointer in
-            posix_spawn_file_actions_addchdir_np(&fileActions, pathPointer)
+            posix_spawn_file_actions_addchdir(&fileActions, pathPointer)
         }
     }
 

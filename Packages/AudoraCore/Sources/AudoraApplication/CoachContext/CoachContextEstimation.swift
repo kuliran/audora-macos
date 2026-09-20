@@ -356,6 +356,64 @@ public struct CoachProviderFraming: Equatable, Sendable {
     }
 }
 
+/// Validation failures for reviewed provider data-use evidence.
+@_spi(CoachContextQualification)
+public enum CoachProviderDataUseAssuranceError: Error, Equatable, Sendable {
+    case invalidIdentifier
+    case invalidPolicyReference
+    case invalidPolicySHA256
+}
+
+/// Immutable evidence binding for the provider's submitted-content data-use posture.
+///
+/// This value records the exact reviewed policy evidence. It does not infer a
+/// provider's posture from product identity, account state, or the fact that
+/// audio is excluded from a request.
+@_spi(CoachContextQualification)
+public struct CoachProviderDataUseAssurance: Equatable, Sendable {
+    public let identifier: String
+    public let policyReference: String
+    public let policySHA256: String
+    public let submittedContentTrainingAndModelImprovementProhibited: Bool
+
+    public init(
+        identifier: String,
+        policyReference: String,
+        policySHA256: String,
+        submittedContentTrainingAndModelImprovementProhibited: Bool
+    ) throws {
+        guard Self.isBoundedIdentifier(identifier) else {
+            throw CoachProviderDataUseAssuranceError.invalidIdentifier
+        }
+        guard (1...2_048).contains(policyReference.utf8.count),
+              policyReference.utf8.allSatisfy({ (33...126).contains($0) })
+        else {
+            throw CoachProviderDataUseAssuranceError.invalidPolicyReference
+        }
+        guard AudioArtifactFingerprint.isSHA256(policySHA256) else {
+            throw CoachProviderDataUseAssuranceError.invalidPolicySHA256
+        }
+        self.identifier = identifier
+        self.policyReference = policyReference
+        self.policySHA256 = policySHA256
+        self.submittedContentTrainingAndModelImprovementProhibited =
+            submittedContentTrainingAndModelImprovementProhibited
+    }
+
+    private static func isBoundedIdentifier(_ value: String) -> Bool {
+        (1...128).contains(value.utf8.count) && value.utf8.allSatisfy {
+            (48...57).contains($0) || (65...90).contains($0) ||
+                (97...122).contains($0) || $0 == 45 || $0 == 46 || $0 == 95
+        }
+    }
+}
+
+@_spi(CoachContextQualification)
+public enum CoachProviderConfigurationBindingError: Error, Equatable, Sendable {
+    case missingDataUseAssurance
+    case submittedContentTrainingAndModelImprovementNotProhibited
+}
+
 /// Qualified implementation details that intentionally remain outside provider DTOs.
 @_spi(CoachContextQualification)
 public struct CoachProviderEstimationPolicy: Sendable {
@@ -363,6 +421,7 @@ public struct CoachProviderEstimationPolicy: Sendable {
     public let responseCollectorByteCeiling: Int
     public let framing: CoachProviderFraming
     public let attachmentProjectionPolicy: CoachAttachmentProjectionPolicy
+    public let dataUseAssurance: CoachProviderDataUseAssurance?
     public var tokenEstimator: CoachTokenEstimator {
         attachmentProjectionPolicy.tokenEstimator
     }
@@ -371,12 +430,14 @@ public struct CoachProviderEstimationPolicy: Sendable {
         providerIdentifier: String,
         responseCollectorByteCeiling: Int,
         framing: CoachProviderFraming,
-        attachmentProjectionPolicy: CoachAttachmentProjectionPolicy
+        attachmentProjectionPolicy: CoachAttachmentProjectionPolicy,
+        dataUseAssurance: CoachProviderDataUseAssurance?
     ) {
         self.providerIdentifier = providerIdentifier
         self.responseCollectorByteCeiling = responseCollectorByteCeiling
         self.framing = framing
         self.attachmentProjectionPolicy = attachmentProjectionPolicy
+        self.dataUseAssurance = dataUseAssurance
     }
 }
 
@@ -397,11 +458,21 @@ public struct CoachProviderConfigurationBinding: Equatable, Sendable {
     public let estimatorIdentifier: String
     public let estimatorMode: CoachTokenEstimateMode
     public let estimatorMaximumUTF8BytesPerToken: Int
+    public let dataUseAssurance: CoachProviderDataUseAssurance
 
     public init(
         descriptor: CoachProviderDescriptor,
         policy: CoachProviderEstimationPolicy
-    ) {
+    ) throws {
+        guard let dataUseAssurance = policy.dataUseAssurance else {
+            throw CoachProviderConfigurationBindingError.missingDataUseAssurance
+        }
+        guard dataUseAssurance
+            .submittedContentTrainingAndModelImprovementProhibited
+        else {
+            throw CoachProviderConfigurationBindingError
+                .submittedContentTrainingAndModelImprovementNotProhibited
+        }
         self.descriptor = descriptor
         providerIdentifier = policy.providerIdentifier
         responseCollectorByteCeiling = policy.responseCollectorByteCeiling
@@ -412,6 +483,7 @@ public struct CoachProviderConfigurationBinding: Equatable, Sendable {
         estimatorMode = policy.tokenEstimator.mode
         estimatorMaximumUTF8BytesPerToken =
             policy.tokenEstimator.maximumUTF8BytesPerToken
+        self.dataUseAssurance = dataUseAssurance
     }
 }
 
@@ -1041,6 +1113,8 @@ public struct CoachContextPlanner: Sendable {
 public enum CoachProviderDescriptorValidationError: Error, Equatable, Sendable {
     case emptyDisplayName
     case emptyProviderIdentifier
+    case missingDataUseAssurance
+    case submittedContentTrainingAndModelImprovementNotProhibited
     case contextWindowMustBePositive
     case responseReserveMustBePositive
     case safetyMarginMustBeNonnegative
@@ -1261,6 +1335,12 @@ func basicValidationError(
 ) -> CoachProviderDescriptorValidationError? {
     guard !descriptor.displayName.isEmpty else { return .emptyDisplayName }
     guard !policy.providerIdentifier.isEmpty else { return .emptyProviderIdentifier }
+    guard let dataUseAssurance = policy.dataUseAssurance else {
+        return .missingDataUseAssurance
+    }
+    guard dataUseAssurance.submittedContentTrainingAndModelImprovementProhibited else {
+        return .submittedContentTrainingAndModelImprovementNotProhibited
+    }
     guard descriptor.contextBudget.contextWindowTokens > 0 else {
         return .contextWindowMustBePositive
     }

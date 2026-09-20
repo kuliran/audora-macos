@@ -8632,7 +8632,8 @@ private struct AlwaysFitCoachContextSnapshotPort:
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: .utf8ByteUpperBound()
-                )
+                ),
+                dataUseAssurance: .testProhibited
             )
         )
     }
@@ -8808,7 +8809,8 @@ private actor GrowingNewChatProfileSnapshotPort:
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: .utf8ByteUpperBound()
-                )
+                ),
+                dataUseAssurance: .testProhibited
             )
         )
     }

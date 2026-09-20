@@ -165,7 +165,7 @@ final class QualificationHarnessTests: XCTestCase {
 
         XCTAssertFalse(report.fullyQualifiedForProduction)
         XCTAssertFalse(report.modelFacingToolSurfaceQualified)
-        XCTAssertEqual(report.externalLimitations.count, 5)
+        XCTAssertEqual(report.externalLimitations.count, 6)
         XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("max-output-token") }))
         XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("exact tokenizer") }))
         XCTAssertTrue(report.externalLimitations.contains(where: { $0.contains("tool allowlist") }))
@@ -179,6 +179,12 @@ final class QualificationHarnessTests: XCTestCase {
             report.externalLimitations.contains(where: {
                 $0.contains("code-signing")
                     && $0.contains("authorized execution remains unavailable")
+            })
+        )
+        XCTAssertTrue(
+            report.externalLimitations.contains(where: {
+                $0.contains("provider data-use assurance")
+                    && $0.contains("training or model-improvement use")
             })
         )
     }

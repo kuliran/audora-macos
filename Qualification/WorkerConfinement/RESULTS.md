@@ -33,20 +33,20 @@ The fixture executable was optimized and ad-hoc signed with Hardened Runtime. Th
 report retains no local paths, environment values, raw stderr, fixture content, or
 candidate text.
 
-## Production result: blocked
+## Production execution-admission result: blocked
 
 This result does **not** claim real CrisperWhisper inference or engine selection.
-Production qualification remains blocked for the exact reasons recorded in the
-JSON artifact:
+Production execution admission remains blocked for the exact reasons recorded in
+the JSON artifact:
 
 - `AUDORA_COMPATIBILITY_PATCH_UNPINNED`
 - `LOCKED_RUNTIME_NOT_PROVIDED`
 - `PINNED_MODEL_NOT_PROVIDED`
 - `REAL_CACHED_INFERENCE_NOT_RUN`
-- `MINIMUM_MACOS_15_BASELINE_NOT_RUN`
 
 The real compatibility patch must be pinned, the exact Python/package runtime and
 model snapshot supplied without inspecting a user's credential stores, and cached
 MPS inference plus this attack matrix rerun from the signed Release composition on
-the minimum supported macOS 15 baseline. The Apple-private `sandbox-exec` mechanism
-also remains subject to baseline availability testing.
+the supported macOS 26 family. The recorded macOS 26.6.2 run is therefore the
+baseline proof for the Apple-private `sandbox-exec` mechanism; version one does
+not separately promise qualification on the unpatched 26.0 point release.

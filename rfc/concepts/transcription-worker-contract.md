@@ -17,11 +17,13 @@ protocol TranscriptionEngine {
 }
 ```
 
-The provisional initial adapter is CrisperWhisper Small in English verbatim mode
-using pinned Python, PyTorch, Transformers, model revision, and decoding options.
-It executes locally through Apple MPS but is not a native Swift/Core ML model.
-Version-one validation rejects unsupported languages rather than silently using
-automatic detection or another model.
+The selected private, non-commercial implementation target is CrisperWhisper Small
+in English verbatim mode using pinned Python, PyTorch, Transformers, model
+revision, and decoding options. It cannot execute until the exact profile passes
+execution admission, and it is not release-qualified until the deferred corpus
+passes. It executes locally through Apple MPS but is not a native Swift/Core ML
+model. Version-one validation rejects unsupported languages rather than silently
+using automatic detection or another model.
 
 `TranscriptionCandidate` is a semantically untrusted Application DTO plus
 provenance, diagnostics, and claimed timing coverage. Infrastructure has already
@@ -31,15 +33,22 @@ session manifest. Domain/Application validation is the only path that promotes i
 to `TranscriptRevision`.
 
 Model weights and generated outputs carry separate licensing constraints. The
-engine descriptor exposes a reviewed `EngineUsePolicy` including
-covered artifacts, private-local evaluation/export, external processing, public
-distribution, commercial-use booleans, and a pinned license reference/hash.
-CrisperWhisper is private local evaluation-only under Audora's conservative
-policy: routine operational use, public sharing, and external processing remain
-disabled until the exact license obligations are cleared or a compatible
-replacement is secured. The license does not name Codex or ban all AI inference;
-see
+engine descriptor exposes a reviewed `EngineUsePolicy` including covered
+artifacts, private-local use/export, external processing, public distribution,
+commercial-use booleans, and a pinned license reference/hash. For the selected
+private, non-commercial personal build, the Crisper policy permits local use,
+private export, and user-triggered processing by a qualified Codex provider whose
+data controls exclude submitted content from model training or improvement. It
+continues to prohibit commercial use and public distribution. Audio remains local;
+that reduces disclosure but is not treated as proof that transcript text could not
+be used for training. See
 [`execution-and-distribution.md`](execution-and-distribution.md).
+
+`externalProcessingAllowed` is provider-agnostic: it records that the engine terms
+permit covered output to leave the app for external inference within that private,
+non-commercial scope. It does not certify any provider. Effective authorization
+also requires the separately qualified provider data-use assurance and an explicit
+Speaker-triggered action.
 
 ## Process boundary
 

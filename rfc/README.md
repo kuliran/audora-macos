@@ -31,8 +31,9 @@ The essential loop is:
 
 1. Record mono microphone audio or import a mono/stereo M4A or WAV file.
 2. Seal and save the audio before inference starts.
-3. Transcribe locally with the qualified engine; the current personal-evaluation
-   candidate is CrisperWhisper Small.
+3. Transcribe locally with the execution-admitted engine; CrisperWhisper Small is
+   the selected private, non-commercial implementation target and is not treated
+   as release-qualified until the deferred corpus passes.
 4. Validate and atomically publish the completed transcript.
 5. Add local, non-destructive speech annotations.
 6. Review the transcript alongside synchronized audio.
@@ -76,8 +77,10 @@ Retry/Discard publication failure when the local write fails.
   transmitted when provider and engine-use policies both allow it.
 - **Explicit egress.** Codex runs only because the Speaker sends, retries, or
   reconsiders. The invoked Chat's Profile, Memory, history, trigger, and immutable
-  attachments define the scope; audio is never sent, and Engine-use Policy may
-  prohibit external processing.
+  attachments define the scope; audio is never sent. Effective authorization
+  requires both an Engine-use Policy that permits external processing and a
+  qualified provider data-use posture that prohibits training/model-improvement
+  use of submitted content.
 - **Speech behavior, not character.** Audora describes evidence-linked speaking
   behavior and user-authored goals or preferences. It does not infer personality,
   character, motives, identity, or psychological traits from speech.
@@ -97,7 +100,7 @@ Retry/Discard publication failure when the local write fails.
 
 | Area | Committed behavior |
 | --- | --- |
-| Platform | Apple Silicon Mac; macOS 15 or later for the initial supported build |
+| Platform | Apple Silicon Mac; deployment target macOS 26.0, with a current macOS 26 update required for the initial supported build |
 | Distribution | Private, non-commercial personal build; no public or commercial distribution |
 | App execution | Signed, Hardened Runtime, deliberately non-App-Sandbox personal build; App Sandbox packaging is backlog |
 | Portability | Domain, Application, and Contracts compile and test on macOS and Linux; no non-macOS application ships |
@@ -106,13 +109,13 @@ Retry/Discard publication failure when the local write fails.
 | Capture | One mono microphone recording with Record, Stop, and microphone mute |
 | Import | One mono or stereo M4A/WAV deterministically normalized to canonical mono; byte-exact source containers are retained except eligible canonical-format PCM WAV, whose source provenance is recorded while one canonical artifact is stored |
 | Duration | At most 45 minutes per recording or imported file |
-| Transcription | Post-recording, local verbatim engine; CrisperWhisper Small/MPS is the provisional evaluation candidate |
+| Transcription | Post-recording, local verbatim engine; CrisperWhisper Small/MPS is the selected private, non-commercial implementation target, with execution admission required before use and full release qualification deferred |
 | Worker | App-supervised local process behind a transport-neutral port; first profile uses versioned JSON Lines over anonymous pipes |
 | Processing | Durable states, visible phases, monotonic progress, approximate ETA, Cancel, Retry |
 | Transcript | Immutable revisions retained in version one, stable line/word IDs, integer-millisecond timings |
 | Review | Audio player, word-level seek with line fallback, active-word highlighting, and exact-revision Evidence Reference highlighting and seek |
 | Annotation | Local Textual Events and Audio Events; broader reformulation interpretation belongs to coaching |
-| Coach | Required user-triggered capability behind a replaceable provider port; Codex is the only version-one provider, receives small attached transcripts inline and can retrieve large ones through a capability-scoped batch read, and runs only when Engine-use Policy permits external processing |
+| Coach | Required user-triggered capability behind a replaceable provider port; Codex is the only version-one provider, receives small attached transcripts inline and can retrieve large ones through a capability-scoped batch read, and runs only when Engine-use Policy permits external processing and the qualified provider binding prohibits training/model-improvement use of submitted content |
 | Development Profile | One compact, revisioned structured statement set included in every coaching request; it records goals, preferences, accepted speaking observations, and growth directions without becoming a chronological log or character inference |
 | Chat | Persisted but disposable, finite-capacity reflection over the Development Profile and zero or more immutable Chat Session Attachments; it owns current bounded structured Coach Memory, one recoverable Chat Draft, at most one Pending User Turn, successful ordered Markdown/Evidence Observation message blocks, and at most one unresolved Profile effect with its exact Reconsider sidecar when active or failed |
 | Storage | One active portable Library, isolated from every other Library, containing its preferences, Development Profile, Sessions with owned audio, and chats |
@@ -681,9 +684,10 @@ See [`concepts/portable-library.md`](concepts/portable-library.md).
   the adversarial production-restriction harness and its recorded synthetic proof
   are under
   [`Qualification/WorkerConfinement`](../Qualification/WorkerConfinement/README.md).
-  Both artifacts keep real Crisper qualification blocked while the locked
-  runtime/model and compatibility patch are absent; a blocked gate does not
-  promote the provisional candidate.
+  The locked runtime/model and compatibility patch still block real execution
+  admission. Human-reviewed corpus scoring and the 45-minute benchmark remain
+  deferred release gates; their blocked state does not prevent building the real
+  adapter, but it cannot be reported as a qualification pass.
 - [`implementation-plan.md`](concepts/implementation-plan.md): ordered delivery
   phases and repository strategy.
 - [`release-readiness.md`](concepts/release-readiness.md): acceptance and release

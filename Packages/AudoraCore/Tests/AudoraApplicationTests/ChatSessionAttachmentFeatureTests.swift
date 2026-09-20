@@ -1497,7 +1497,8 @@ private actor ChangingAttachmentConfigurationSource:
                     "configuration-(configurationGeneration)-fixture-v1",
                 responseCollectorByteCeiling: 8_192,
                 framing: .testZero,
-                attachmentProjectionPolicy: policy
+                attachmentProjectionPolicy: policy,
+                dataUseAssurance: .testProhibited
             )
         )
     }
@@ -1921,7 +1922,8 @@ private actor AttachmentCapacitySource:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
                                     tokenEstimator: .utf8ByteUpperBound()
-                                )
+                                ),
+                            dataUseAssurance: .testProhibited
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(
@@ -1986,7 +1988,8 @@ private struct KnownQualifiedProviderUnavailableCapacitySource:
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: .utf8ByteUpperBound()
-                )
+                ),
+                dataUseAssurance: .testProhibited
             )
         )
     }

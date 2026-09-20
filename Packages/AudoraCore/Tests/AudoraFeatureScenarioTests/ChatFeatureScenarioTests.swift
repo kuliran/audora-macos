@@ -2489,7 +2489,8 @@ private func scenarioProviderUnavailableCapacityLowerBound()
                 attachmentProjectionPolicy: try! CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: .utf8ByteUpperBound()
-                )
+                ),
+                dataUseAssurance: .testProhibited
             )
         )
     )
@@ -2634,7 +2635,8 @@ private actor ScenarioCoachContextSnapshotPort:
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: .utf8ByteUpperBound()
-                )
+                ),
+                dataUseAssurance: .testProhibited
             )
         )
     }
@@ -2693,7 +2695,8 @@ private actor ScenarioCoachContextSnapshotPort:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
                                     tokenEstimator: .utf8ByteUpperBound()
-                                )
+                                ),
+                            dataUseAssurance: .testProhibited
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(
@@ -2757,7 +2760,8 @@ private actor ScenarioCoachContextSnapshotPort:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
                                     tokenEstimator: rejectingEstimator
-                                )
+                                ),
+                            dataUseAssurance: .testProhibited
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(
@@ -2833,7 +2837,8 @@ private actor ScenarioCoachContextSnapshotPort:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
                                     tokenEstimator: .utf8ByteUpperBound()
-                                )
+                                ),
+                            dataUseAssurance: .testProhibited
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(

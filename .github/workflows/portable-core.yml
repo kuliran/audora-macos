@@ -9,13 +9,13 @@ permissions:
 
 jobs:
   swift:
-    name: Swift 6.0 / ${{ matrix.os }}
+    name: Portable Core / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os:
-          - macos-15
+          - macos-26
           - ubuntu-24.04
 
     steps:
@@ -26,20 +26,20 @@ jobs:
         if: runner.os == 'Linux'
         with:
           swift-version: "6.0"
-      - name: Validate bundled Xcode Swift 6.0 toolchain
+      - name: Validate bundled Xcode 26.0.1 toolchain
         if: runner.os == 'macOS'
         env:
-          DEVELOPER_DIR: /Applications/Xcode_16.0.app/Contents/Developer
+          DEVELOPER_DIR: /Applications/Xcode_26.0.1.app/Contents/Developer
         run: |
           xcodebuild -version
           swift --version
       - name: Run portable Core gate on Linux
         if: runner.os == 'Linux'
         run: scripts/check-portable-core.sh
-      - name: Run portable Core gate with Xcode 16.0
+      - name: Run portable Core gate with Xcode 26.0.1
         if: runner.os == 'macOS'
         env:
-          DEVELOPER_DIR: /Applications/Xcode_16.0.app/Contents/Developer
+          DEVELOPER_DIR: /Applications/Xcode_26.0.1.app/Contents/Developer
         run: scripts/check-portable-core.sh
 
   contracts:
@@ -61,16 +61,16 @@ jobs:
       - run: pnpm contracts:check
 
   macos-library:
-    name: macOS Library + audio import + synthetic Recording / Swift 6.0
-    runs-on: macos-15
+    name: macOS 26 Library + audio import + synthetic Recording / Xcode 26.0.1
+    runs-on: macos-26
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.0.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.0.1.app/Contents/Developer
 
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Validate bundled Xcode Swift 6.0 toolchain
+      - name: Validate bundled Xcode 26.0.1 toolchain
         run: |
           xcodebuild -version
           swift --version

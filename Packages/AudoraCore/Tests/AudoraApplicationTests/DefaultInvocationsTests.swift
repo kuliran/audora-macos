@@ -5046,7 +5046,8 @@ private actor InvocationContextSource:
                                 try CoachAttachmentProjectionPolicy(
                                     maximumInlineTranscriptTokens: 8_192,
                                     tokenEstimator: tokenEstimator
-                                )
+                                ),
+                            dataUseAssurance: .testProhibited
                         )
                     ),
                     authority: CoachContextSnapshotAuthority(

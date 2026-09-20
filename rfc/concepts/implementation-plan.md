@@ -4,11 +4,15 @@ Each phase must be independently testable and leave saved audio recoverable.
 The contract and persistence work starts only after the RFC, TypeSpec, generated
 schemas, examples, and readiness fixtures describe the same model.
 
-0. **Feasibility gates:** prove the selected signed Release profile and worker
-   confinement; qualify the pinned transcription runtime and its downstream-
-   coaching use; prove Codex structured output, the single transcript-read
-   capability, cancellation, and safe provider-error extraction; and qualify a
-   conservative context estimator against the exact serialized provider envelopes.
+0. **Execution feasibility gates:** prove the selected signed execution profile
+   and worker confinement; admit the pinned real transcription runtime/model only
+   after its compatibility patch, cached-offline inference, cancellation, and
+   candidate boundary pass; prove Codex structured output, the single transcript-
+   read capability, qualification-bound no-training/model-improvement assurance,
+   cancellation, and safe provider-error extraction; and qualify a conservative
+   context estimator against the exact serialized provider envelopes.
+   Human-labeled corpus scoring and the complete 45-minute performance run are
+   release gates in phase 9, not prerequisites for building the real adapters.
 1. **Boundaries and contracts:** create the Domain, Application, Contracts,
    Infrastructure, and Presentation targets plus a clean composition root. Compile
    the TypeSpec-authored provider contract into checked-in JSON Schemas, add stable
@@ -68,12 +72,15 @@ schemas, examples, and readiness fixtures describe the same model.
    through a normal Invocation and require review again. Delete accepted,
    discarded, withdrawn, and otherwise resolved Proposals; accepted-Proposal audit
    UI remains backlog.
-9. **Presentation and packaging:** implement processing/interrupted Chat-row state,
+9. **Presentation, packaging, and release qualification:**
+   implement processing/interrupted Chat-row state,
    disabled controls during processing or admission cooldown, locked-Draft
    Retry/Discard behavior, accessible evidence inset blocks and controls, Profile
    health and Profile-update UI, one main Library window, signing, model
    preparation, offline behavior, and removal of Convex/Clerk/web/live-ASR
-   dependencies from the native target.
+   dependencies from the native target. Then complete the hand-reviewed Crisper
+   corpus and the Release-mode one-minute, 12-minute, and 45-minute quality,
+   timing, memory, thermal, and performance run before declaring version one ready.
 
 History compaction, Coach Memory compaction, infinite Chats, Trash cleanup,
 Profile Inspector, accepted-Proposal audit UI, and alternate coach-provider modes

@@ -97,7 +97,10 @@ that Codex CLI 0.143.0 is not a qualified provider: an authenticated structured
 response did not complete, no documented provider-side output ceiling exists, and
 the shipping core tool surface was not proven reducible to only this scoped tool.
 Issue #6 supplies exact estimation mechanics, but the shipping CLI/model pair still
-lacks a qualified tokenizer and complete hidden-framing evidence. This package does
-not weaken those blockers or use a different engine to manufacture a pass.
+lacks a qualified tokenizer, complete hidden-framing evidence, and a qualification-
+bound assurance that submitted content is prohibited from provider training/model-
+improvement use. This package does not weaken those blockers or use a different
+engine to manufacture a pass. The complete provider blocker list remains in
+[`Qualification/CodexCLI`](../CodexCLI/README.md).
 
 See [RESULTS.md](RESULTS.md) for the recorded gate result.

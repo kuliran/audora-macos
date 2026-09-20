@@ -426,11 +426,20 @@ execution profile.
   psychological traits are rejected; Profile content describes evidence-linked
   speaking behavior, goals, and user-authored self-assessment.
 - At least one qualified transcription/use profile permits the selected evidence
-  to become downstream Coach context. Acceptance cannot launder evidence from an
-  engine whose terms prohibit that use.
+  to become downstream Coach context, and the exact provider binding carries a
+  qualified assurance that submitted content is not used for training or model
+  improvement. Acceptance cannot launder evidence from an engine whose terms
+  prohibit that use, and local audio retention cannot substitute for the provider
+  assurance.
 
 ## Portable architecture and qualification
 
+- Crisper execution admission and release qualification are separate milestones.
+  The real adapter may be integrated after the exact runtime/model,
+  compatibility-patch, confinement, cached-offline inference, cancellation, and
+  candidate boundary pass. Human-reviewed corpus scoring and the complete
+  45-minute run remain mandatory release evidence, but do not block constructing
+  the adapter or completing unrelated application work.
 - Domain and Application tests run without SwiftUI, AVFoundation, the
   transcription runtime, Codex, network access, or a real user Library.
 - Domain, Application, and Contracts compile and pass their portable suites on

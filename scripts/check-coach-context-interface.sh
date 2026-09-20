@@ -66,7 +66,11 @@ for forbidden_symbol in \
   CoachContextBudget \
   CoachProviderDescriptor \
   CoachProviderFraming \
+  CoachProviderDataUseAssuranceError \
+  CoachProviderDataUseAssurance \
+  CoachProviderConfigurationBindingError \
   CoachProviderEstimationPolicy \
+  CoachProviderConfigurationBinding \
   PreparedCoachTranscriptHandleError \
   PreparedCoachTranscriptHandle \
   PreparedCoachAttachment \

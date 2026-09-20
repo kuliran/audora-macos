@@ -14,10 +14,10 @@
     "usePolicy": {
       "commercialUseAllowed": false,
       "coveredArtifacts": ["transcriptRevision"],
-      "externalProcessingAllowed": false,
+      "externalProcessingAllowed": true,
       "licenseReference": "pinned-license-reference",
       "licenseSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-      "policyId": "crisper-evaluation-v1",
+      "policyId": "crisper-private-noncommercial-v2",
       "privateExportAllowed": true,
       "privateLocalUseAllowed": true,
       "publicDistributionAllowed": false

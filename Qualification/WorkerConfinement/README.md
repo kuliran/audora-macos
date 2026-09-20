@@ -61,15 +61,18 @@ that permits applying the child profile.
 
 `sandbox-exec` and its Seatbelt profile language are Apple system-private
 interfaces. The checked-in result proves the mechanism only on its recorded host;
-the clean minimum macOS 15 Release baseline must still be exercised.
+the recorded macOS 26.6.2 host is within version one's supported macOS 26 family.
+The app's deployment target remains 26.0, but version one requires a current
+macOS 26 update rather than separately qualifying the unpatched 26.0 point release.
 
-## Production qualification is still blocked
+## Production execution admission is still blocked
 
 The synthetic restriction proof does not promote CrisperWhisper Small or claim a
 real cached inference passed. The current engine lock has no compatibility patch
 ID, and this repository has neither the locked Python environment nor the pinned
 model snapshot. A production run must use the exact locked runtime/model, report
-the real startup handshake, exercise MPS and the fixed audio corpus, and repeat the
-same attacks under the supported signed Release composition. Those limits are
-machine-readable in `results/2026-08-30-local.json` and summarized in
-`RESULTS.md`.
+the real startup handshake, exercise cached-offline MPS inference with pinned
+public smoke audio, and repeat the same attacks under the supported signed Release
+composition. The hand-reviewed four-fixture corpus remains a separate deferred
+release gate. These execution-admission limits are machine-readable in
+`results/2026-08-30-local.json` and summarized in `RESULTS.md`.

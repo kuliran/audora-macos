@@ -48,9 +48,9 @@ The ticket-scoped
 provides the deny-by-default launch profile, bounded process host, synthetic
 attack worker, and recorded result for the transcription subset of this gate. Its
 synthetic restriction proof passes on the recorded host, but production Crisper
-qualification remains blocked until the exact runtime/model and a non-null
+execution admission remains blocked until the exact runtime/model and a non-null
 compatibility patch are supplied and real cached MPS inference passes on the
-minimum supported macOS baseline.
+supported macOS 26 execution profile.
 
 Transcription and Codex need different policies. Cached ASR is no-network and must
 pass the stronger worker-confinement tests above. Codex has intentional OpenAI
@@ -112,15 +112,15 @@ Every transcription revision stores an engine descriptor and a reviewed policy:
 
 ```text
 EngineUsePolicy
-  policyVersion
-  licenseReference
+  policyID
   coveredArtifacts
-  privateLocalEvaluationAllowed
-  privateSameLicenseeCopyAllowed
+  privateLocalUseAllowed
+  privateExportAllowed
   externalProcessingAllowed
-  unboundRecipientDistributionAllowed
   publicDistributionAllowed
   commercialUseAllowed
+  licenseReference
+  licenseSHA256
 ```
 
 Application use cases enforce this policy before export, coaching, or distribution
@@ -149,21 +149,42 @@ inference. It does, however:
 - require non-commercial Output distribution/publication to mark the Output and
   contractually bind recipients to the applicable license restrictions.
 
-Sending a transcript to Codex for inference is not itself model training. The
-unresolved question is whether transmission to OpenAI is distribution to a
-recipient and whether the ordinary service terms satisfy the recipient and
-third-party-use clauses. Audora therefore conservatively sets
-`externalProcessingAllowed = false` for Crisper-derived material until Nyra grants
-written permission or a documented legal review clears the exact OpenAI/Codex use
-profile. Disabling provider training is necessary if the provider could otherwise
-use the material to improve a model, but it does not by itself resolve the
-recipient-contract question.
+The product owner has fixed version one to a private, non-commercial personal
+build and accepts Crisper Small for that scope. The corresponding selected
+`EngineUsePolicy` permits private local use, private export, and user-triggered
+external processing by the qualified Codex provider. It continues to prohibit
+commercial use and public distribution.
 
-Crisper Small consequently remains an evaluation candidate, not an unconditional
-version-one default. Commercial/public distribution and routine operational use
-remain blocked on written permission or a compatible replacement engine. Private
-same-licensee copies may be distinguished from giving Output to another recipient;
-public or unbound recipient distribution remains disabled.
+External processing is conditional on the qualified provider configuration using
+an account or service policy under which submitted content is not used to train or
+improve the provider's models. Absence of audio is useful data minimization, but it
+is not the training safeguard: transcript text alone could be training material
+for a language model. The provider's no-training data control is the operative
+condition. Audora sends transcript evidence only after an explicit Speaker action
+and never sends the source audio.
+
+For the selected ChatGPT-authenticated Codex CLI on a personal plan, provider
+qualification records a dated owner attestation that **Improve the model for
+everyone** is off; OpenAI documents that this account setting applies to Codex
+tasks. `--ephemeral` does not prove the account setting. Audora neither discovers
+credentials nor reads account/browser state. A future managed workspace or API
+adapter may instead bind its applicable no-training policy to the same provider-
+neutral assurance. See OpenAI's
+[`Data Controls FAQ`](https://help.openai.com/en/articles/7730893-data-controls-faq).
+
+This is the product owner's recorded policy decision and accepted licensing risk
+for the private personal build, including the license's separately worded
+operational-use and recipient obligations. It is not legal advice or a general
+interpretation granting commercial or public rights. A future provider or account
+posture that cannot establish the same no-training condition fails closed at
+provider qualification even though the persisted engine policy permits external
+processing in principle.
+
+Previously persisted Transcript Revisions whose immutable policy records
+`externalProcessingAllowed = false` are not rewritten by this decision. They stay
+ineligible for Coach context unless the Speaker deliberately reprocesses the
+source into a new Revision carrying the reviewed policy and exact execution
+provenance.
 
 The authoritative terms are the
 [`CrisperWhisper2.0 Small model license`](https://huggingface.co/nyralabs/CrisperWhisper2.0_small/blob/4c0619bf87d2d4b7e15e68292dd8402aae4101f8/LICENSE.md).
@@ -189,8 +210,15 @@ patch ID; mismatches fail before audio processing.
 
 ## Qualification corpus
 
-The provisional engine becomes the selected v1 engine only after Release-mode,
-offline tests on the supported Apple Silicon/macOS baseline cover:
+Qualification has two deliberately separate milestones. Real implementation may
+proceed after **execution admission** proves the exact runtime/model lock, non-null
+compatibility patch, worker confinement, cached offline inference, cancellation,
+and candidate-validation boundary. Execution admission must use real Crisper
+inference and cannot be replaced with a fixture provider or a bypass flag.
+
+Before Audora is declared release-ready, **release qualification** must additionally
+run Release-mode offline tests on the supported Apple Silicon/macOS baseline that
+cover:
 
 - short clips and at least 1-, 12-, and 45-minute recordings;
 - quiet speech, fillers, repetitions, cutoffs, laughter, long pauses, and final
@@ -201,13 +229,16 @@ offline tests on the supported Apple Silicon/macOS baseline cover:
   worker reclamation;
 - missing/corrupt model behavior and no-network cached inference.
 
-Acceptance uses hand-labeled fixtures and thresholds. It does not claim perfect
-word recovery. Gate zero must publish numeric corpus-coverage, integrity, runtime,
-memory, and thermal thresholds in a versioned qualification fixture before the
-engine is selected; this RFC intentionally does not invent them after one
-benchmark. The pinned profile, predeclared thresholds, reproducible runner, and
-current blocked preflight are published under
+The product owner's prior testing on personal recordings selects Crisper as the
+implementation target; it is not reproducible corpus evidence and is not recorded
+as a benchmark pass. Hand-labeled fixtures, the full 45-minute run, and their
+quality/timing/performance thresholds remain deferred release evidence. Their
+missing state must stay explicit in the manifest and reports until the real run is
+performed. The pinned profile, predeclared thresholds, reproducible runner, and
+current blocked release preflight are published under
 [`Qualification/CrisperBenchmark`](../../Qualification/CrisperBenchmark/README.md).
-The blocked result does not select Crisper or another engine. If Crisper fails
-qualification or licensing, the engine contract remains and the replacement
-decision updates the central RFC before implementation.
+That blocked release result no longer prevents construction of the real adapter;
+it does prevent claiming the 45-minute workflow and release thresholds have
+passed. If Crisper later fails execution admission or deferred release
+qualification, the engine contract remains and the replacement decision updates
+the central RFC.

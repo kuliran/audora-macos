@@ -44,8 +44,9 @@ regression is the decision evidence.
 - The amended persistence, scenario-runner, normalizer, and macOS infrastructure
   test sources passed direct Swift 6.3.3 strict type checking on macOS 26.6.2
   arm64. A direct short-normalizer executable produced the checked-in 8/44.1/48
-  kHz frame-count, byte-count, and SHA-256 goldens. These local results do not
-  qualify macOS 15 or Apple Swift 6.0; that CI lane must reproduce the hashes.
+  kHz frame-count, byte-count, and SHA-256 goldens. This macOS 26.6.2 run is within
+  the supported macOS 26 family and qualifies that baseline; version one does not
+  separately promise the unpatched 26.0 point release.
 - A direct synthetic runtime smoke covering partition-invariant 8/44.1/48 kHz
   normalization plus staged install, exact original-byte retention, and reopen:
   passed. Descriptor-backed AVURLAsset inspection also passed.
@@ -55,8 +56,9 @@ regression is the decision evidence.
   failure in this host environment, so the edited-AAC canonical drain and real
   internal-discontinuity assertions are covered by the macOS CI suite rather
   than claimed as locally executed.
-- The `macos-15` CI lane runs the complete `AudoraMac` package tests and Debug and
-  Release app builds with Apple Swift 6.0. The Ubuntu lane remains restricted to
+- The `macos-26` CI lane runs the complete `AudoraMac` package tests and Debug and
+  Release app builds with the hosted Xcode 26.0.1 image. The host may advance
+  within the supported macOS 26 family. The Ubuntu lane remains restricted to
   portable Core and scenarios.
 
 Only synthetic fixtures are in scope. A successful CI run is required before

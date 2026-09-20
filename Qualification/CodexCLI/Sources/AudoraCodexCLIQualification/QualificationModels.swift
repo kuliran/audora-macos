@@ -411,6 +411,7 @@ public struct QualificationSuiteReport: Codable, Equatable, Sendable {
             "The recorded Codex CLI 0.143 probe did not establish an exact model-facing tool allowlist for an independently verified build; current configuration documentation alone is not runtime qualification.",
             "Current Codex documentation defines same-process CODEX_ACCESS_TOKEN input, but no exact executable/runtime pair has been authorized and exercised from a clean isolated home.",
             "An entry-executable hash does not bind macOS code-signing or quarantine state, non-system dynamic libraries, runtime-loaded code, or helper executables; authorized execution remains unavailable until one complete runtime authority preserves and verifies those controls.",
+            "No qualification-bound provider data-use assurance currently proves that submitted content is prohibited from training or model-improvement use; local ephemeral execution and keeping source audio off the transport do not establish that policy.",
         ]
     }
 

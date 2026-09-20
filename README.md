@@ -63,8 +63,8 @@ Retry or Discard.
 ## Requirements
 
 - Apple Silicon Mac
-- macOS 15 or newer
-- Full Xcode (Command Line Tools alone are insufficient)
+- macOS 26 with current system updates (deployment target 26.0)
+- Full Xcode 26.0 or newer (Command Line Tools alone are insufficient)
 
 ## Build and run
 

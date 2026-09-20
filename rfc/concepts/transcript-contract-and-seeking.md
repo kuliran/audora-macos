@@ -186,6 +186,7 @@ may omit the visual emphasis of disfluencies but cannot mutate the stored revisi
 
 Exports record revision and engine provenance when using structured JSON. Plain
 text exports remain human-readable and do not include local paths. Export controls
-also enforce the selected revision's `EngineUsePolicy`; the evaluation Crisper
-profile may only expose uses permitted by its model/output license. Public or
-commercial export is not assumed merely because Audora can serialize a transcript.
+also enforce the selected revision's `EngineUsePolicy`; the private,
+non-commercial Crisper profile may only expose uses permitted by its model/output
+license. Public or commercial export is not assumed merely because Audora can
+serialize a transcript.

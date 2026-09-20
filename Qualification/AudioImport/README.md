@@ -21,7 +21,8 @@ the inclusive 43,200,000-frame boundary, contract resources, and Application
 scenarios. The contract check executes every audio-import golden and scenario
 against its generated schema.
 
-Run from the repository root on macOS 15 with Swift 6.0:
+Run from the repository root on macOS 26 with current system updates and Xcode
+26.0 or later:
 
 ```sh
 Qualification/AudioImport/run-tests.sh

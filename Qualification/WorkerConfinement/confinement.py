@@ -712,7 +712,6 @@ def build_qualification_report() -> dict[str, Any]:
         "LOCKED_RUNTIME_NOT_PROVIDED",
         "PINNED_MODEL_NOT_PROVIDED",
         "REAL_CACHED_INFERENCE_NOT_RUN",
-        "MINIMUM_MACOS_15_BASELINE_NOT_RUN",
     ]
     if not isinstance(patch_id, str) or not patch_id:
         reason_codes.append("AUDORA_COMPATIBILITY_PATCH_UNPINNED")

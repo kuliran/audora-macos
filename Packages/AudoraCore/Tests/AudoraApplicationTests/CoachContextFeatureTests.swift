@@ -598,7 +598,8 @@ final class CoachContextFeatureTests: XCTestCase {
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: tokenEstimator
-                )
+                ),
+                dataUseAssurance: .testProhibited
             )
         )
     }

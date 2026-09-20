@@ -674,7 +674,8 @@ private actor ReconsiderContextSnapshotPort: CoachContextSnapshotPort {
             attachmentProjectionPolicy: try! CoachAttachmentProjectionPolicy(
                 maximumInlineTranscriptTokens: 100_000,
                 tokenEstimator: .utf8ByteUpperBound()
-            )
+            ),
+            dataUseAssurance: .testProhibited
         )
     )
 

@@ -304,8 +304,8 @@ bounds and confines its bytes, checks its detached SHA-256, and parses its close
 shape. Application still requires exact source, Job, engine-lock, runtime-lock,
 patch, timing, coverage, and textual evidence validation before publication.
 Checked-in scenarios cover a synthetic qualified offline success, the current
-production qualification block with no fallback, Candidate rejection with no
-selection, and explicit model Prepare/Start.
+production execution-admission block with no fallback, Candidate rejection with
+no selection, and explicit model Prepare/Start.
 
 ## Transcript Revision contract
 
@@ -430,6 +430,13 @@ descriptor unless:
 
 This guarantees that accepting a maximum-sized Memory cannot make the next minimal
 turn or its own valid response structurally impossible.
+
+The qualification-only `CoachProviderConfigurationBinding` is deliberately not a
+provider JSON DTO. In addition to the descriptor, framing, tokenizer, and
+collector limits, it requires a reviewed `CoachProviderDataUseAssurance` whose
+identity, reference, and policy-content hash are bound into equality and whose
+submitted-content training/model-improvement posture is prohibited. Missing or
+permissive assurance is rejected before request serialization or transport launch.
 
 ## Source ordering
 

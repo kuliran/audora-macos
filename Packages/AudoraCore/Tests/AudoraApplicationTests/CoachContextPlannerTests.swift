@@ -717,7 +717,8 @@ final class CoachContextPlannerTests: XCTestCase {
             providerIdentifier: "non-default-threshold-fixture-v1",
             responseCollectorByteCeiling: 8_192,
             framing: .testZero,
-            attachmentProjectionPolicy: atLimit
+            attachmentProjectionPolicy: atLimit,
+            dataUseAssurance: .testProhibited
         )
 
         XCTAssertEqual(
@@ -1151,7 +1152,8 @@ final class CoachContextPlannerTests: XCTestCase {
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 8_192,
                     tokenEstimator: estimator
-                )
+                ),
+                dataUseAssurance: .testProhibited
             )
         )
     }
@@ -1326,7 +1328,8 @@ private struct FixedAttachmentProjectionConfigurationAuthority:
                         providerIdentifier: "fixed-attachment-projection-v1",
                         responseCollectorByteCeiling: 8_192,
                         framing: .testZero,
-                        attachmentProjectionPolicy: policy
+                        attachmentProjectionPolicy: policy,
+                        dataUseAssurance: .testProhibited
                     )
                 ),
                 stamp: stamp

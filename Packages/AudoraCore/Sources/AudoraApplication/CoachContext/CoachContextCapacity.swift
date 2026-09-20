@@ -382,10 +382,7 @@ enum CoachContextConfigurationError: Error, Equatable, Sendable {
 struct CoachContextConfiguration: Sendable {
     let descriptor: CoachProviderDescriptor
     let policy: CoachProviderEstimationPolicy
-
-    var providerBinding: CoachProviderConfigurationBinding {
-        CoachProviderConfigurationBinding(descriptor: descriptor, policy: policy)
-    }
+    let providerBinding: CoachProviderConfigurationBinding
 
     init(
         descriptor: CoachProviderDescriptor,
@@ -396,6 +393,10 @@ struct CoachContextConfiguration: Sendable {
         }
         self.descriptor = descriptor
         self.policy = policy
+        providerBinding = try CoachProviderConfigurationBinding(
+            descriptor: descriptor,
+            policy: policy
+        )
     }
 }
 

@@ -10,7 +10,10 @@ final class QualificationGatedCoachProviderTests: XCTestCase {
             body: Data("private user and transcript content".utf8),
             outputTokenCeiling: 512,
             pinnedInstruction: "private pinned instruction",
-            providerBinding: qualifiedBinding(descriptor: Self.descriptor)
+            providerBinding: qualifiedBinding(
+                descriptor: Self.descriptor,
+                dataUseAssurance: .testProhibited
+            )
         )
         let execution = try Self.execution
         let response = CoachProviderCompleteResponse(
@@ -62,7 +65,10 @@ final class QualificationGatedCoachProviderTests: XCTestCase {
     {
         let response = CoachProviderCompleteResponse(body: Data(#"{"messageBlocks":[]}"#.utf8))
         let provider = QualifiedCoachProviderFixture(response: response)
-        let binding = qualifiedBinding(descriptor: Self.descriptor)
+        let binding = qualifiedBinding(
+            descriptor: Self.descriptor,
+            dataUseAssurance: .testProhibited
+        )
         let gateway = QualificationGatedCoachProvider(
             qualifiedBundle: QualifiedCoachProviderBundle(
                 configuration: binding,
@@ -93,7 +99,10 @@ final class QualificationGatedCoachProviderTests: XCTestCase {
         )
         let gateway = QualificationGatedCoachProvider(
             qualifiedBundle: QualifiedCoachProviderBundle(
-                configuration: qualifiedBinding(descriptor: Self.descriptor),
+                configuration: qualifiedBinding(
+                    descriptor: Self.descriptor,
+                    dataUseAssurance: .testProhibited
+                ),
                 transport: provider
             )
         )
@@ -103,7 +112,8 @@ final class QualificationGatedCoachProviderTests: XCTestCase {
             pinnedInstruction: "Return one complete structured response.",
             providerBinding: qualifiedBinding(
                 descriptor: Self.descriptor,
-                providerIdentifier: "same-limits-different-qualified-provider"
+                providerIdentifier: "same-limits-different-qualified-provider",
+                dataUseAssurance: .testProhibited
             )
         )
 
@@ -121,11 +131,59 @@ final class QualificationGatedCoachProviderTests: XCTestCase {
         XCTAssertEqual(runCount, 0)
     }
 
+    func testGatewayRejectsDifferentDataUseAssuranceBeforeTransport() async throws {
+        let runRecorder = CoachProviderRunRecorder()
+        let provider = QualifiedCoachProviderFixture(
+            response: CoachProviderCompleteResponse(body: Data("{}".utf8)),
+            runRecorder: runRecorder
+        )
+        let gateway = QualificationGatedCoachProvider(
+            qualifiedBundle: QualifiedCoachProviderBundle(
+                configuration: qualifiedBinding(
+                    descriptor: Self.descriptor,
+                    dataUseAssurance: .testProhibited
+                ),
+                transport: provider
+            )
+        )
+        let changedAssurance = try CoachProviderDataUseAssurance(
+            identifier: "test-no-training-v2",
+            policyReference: "urn:audora:test:no-training:v2",
+            policySHA256: String(repeating: "b", count: 64),
+            submittedContentTrainingAndModelImprovementProhibited: true
+        )
+        let mismatched = CoachRequest(
+            body: Data("{}".utf8),
+            outputTokenCeiling: 256,
+            pinnedInstruction: "Return one complete structured response.",
+            providerBinding: qualifiedBinding(
+                descriptor: Self.descriptor,
+                dataUseAssurance: changedAssurance
+            )
+        )
+
+        do {
+            _ = try await gateway.run(
+                request: mismatched,
+                execution: try Self.execution,
+                transcriptAccess: nil
+            )
+            XCTFail("data-use assurance mismatch must not reach the provider")
+        } catch let error as CoachProviderRunError {
+            XCTAssertEqual(error, .userRetryableFailure)
+        }
+        let runCount = await runRecorder.count()
+        XCTAssertEqual(runCount, 0)
+    }
+
     private static let request = CoachRequest(
         body: Data("{}".utf8),
         outputTokenCeiling: 512,
         pinnedInstruction: "Return one complete structured response.",
-        providerBinding: qualifiedBinding(descriptor: descriptor)
+        providerBinding: qualifiedBinding(
+            descriptor: descriptor,
+            dataUseAssurance: .testProhibited
+        )
     )
 
     private static let descriptor = CoachProviderDescriptor(
@@ -200,9 +258,10 @@ private actor CoachProviderRunRecorder {
 
 private func qualifiedBinding(
     descriptor: CoachProviderDescriptor,
-    providerIdentifier: String = "qualified-provider-fixture-v1"
+    providerIdentifier: String = "qualified-provider-fixture-v1",
+    dataUseAssurance: CoachProviderDataUseAssurance
 ) -> CoachProviderConfigurationBinding {
-    CoachProviderConfigurationBinding(
+    try! CoachProviderConfigurationBinding(
         descriptor: descriptor,
         policy: CoachProviderEstimationPolicy(
             providerIdentifier: providerIdentifier,
@@ -211,7 +270,8 @@ private func qualifiedBinding(
             attachmentProjectionPolicy: try! CoachAttachmentProjectionPolicy(
                 maximumInlineTranscriptTokens: 1_024,
                 tokenEstimator: .utf8ByteUpperBound()
-            )
+            ),
+            dataUseAssurance: dataUseAssurance
         )
     )
 }

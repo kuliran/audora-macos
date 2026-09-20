@@ -5706,11 +5706,11 @@ private struct ProcessingFixture {
             fingerprint: audioFingerprint
         )
         let policy = try EngineUsePolicy(
-            policyID: "crisper-evaluation-v1",
+            policyID: "crisper-private-noncommercial-v2",
             coveredArtifacts: [.transcriptRevision],
             privateLocalUseAllowed: true,
             privateExportAllowed: true,
-            externalProcessingAllowed: false,
+            externalProcessingAllowed: true,
             publicDistributionAllowed: false,
             commercialUseAllowed: false,
             licenseReference: "https://example.invalid/pinned-license",

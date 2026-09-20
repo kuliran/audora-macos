@@ -1,8 +1,27 @@
 # CrisperWhisper Small qualification
 
-This directory is the versioned gate-zero corpus and benchmark for the one
-selected transcription candidate. It does not select a fallback engine and a
-failed or blocked run does not change `engine-lock.v1.json`.
+This directory is the versioned release-qualification corpus and benchmark for the
+selected transcription target. Its engine lock also pins the profile that a
+separate shipping-path execution-admission smoke must use. It does not select a
+fallback engine, and a failed or blocked run does not change
+`engine-lock.v1.json`.
+
+## Qualification stages
+
+- **Execution admission** proves the exact runtime/model lock, a non-null
+  compatibility patch, worker confinement, real cached-offline inference,
+  cancellation/reaping, and the candidate-validation boundary. Passing this stage
+  permits the real adapter to run; a fixture provider or bypass flag cannot stand
+  in for it. The production worker and smoke artifact still need to be added; this
+  release benchmark is not weakened into an execution-only mode.
+- **Release qualification** adds the hand-reviewed corpus, the full 45-minute run,
+  and all quality, timing, memory, thermal, and performance thresholds below. It
+  may be completed after the rest of the app is ready, but must pass before the
+  release is called qualified.
+
+The product owner's prior testing on personal recordings selects Crisper as the
+implementation target. It is not reproducible benchmark evidence, so the corpus
+manifest and recorded report remain blocked until the deferred review is done.
 
 ## Pinned profile
 
@@ -66,9 +85,9 @@ and RTF calculations. Missing RSS or MPS allocation telemetry is a failed gate,
 not a zero measurement or evidence of low memory use.
 
 The current upstream profile has no pinned callback from inside its model call,
-so cancellation qualification is intentionally blocked with
-`ACTIVE_INFERENCE_PROOF_UNAVAILABLE`. A pre-call worker acknowledgement or an
-apparently live process is not accepted as evidence that inference is active.
+so execution admission and cancellation qualification are intentionally blocked
+with `ACTIVE_INFERENCE_PROOF_UNAVAILABLE`. A pre-call worker acknowledgement or
+an apparently live process is not accepted as evidence that inference is active.
 
 ## Public candidate audio
 
@@ -136,7 +155,9 @@ reference, so neither fixture is marked ready or counts as qualification evidenc
 The local corpus layout and hand-label schema are documented in
 `fixtures/README.md`. After every candidate interval has been listened to and
 hand-corrected, pin every derived audio/reference hash and mark each manifest
-entry `ready`.
+entry `ready`. This human-labeling work and the complete 45-minute run may be
+deferred until the application is otherwise ready; neither can be reported as
+passed, and the application cannot be declared release-qualified, before then.
 
 Create an isolated environment from the checked-in lock, then run:
 
@@ -169,16 +190,18 @@ PYTHON_BIN=python3.12 sh run-tests.sh
 ## Recorded outcome
 
 `results/2026-09-12-local-preflight.json` is the current, explicitly
-`preflight-only` Apple Silicon report; no inference was attempted. Its engine,
-corpus, and public-source-plan hashes match the current configuration. All four
-corpus cases, cancellation, and cached-offline inference are **blocked**, not
-passed: the AMI audio candidates are absent on the recorded host, no reviewed
-reference hashes are pinned, no prepared local model snapshot was supplied, and
-the locked Python runtime and packages are not installed. Both NASA audio files
-were present with the pinned format, duration, and SHA-256 when preflight was
-recorded, but their manifest entries remain explicitly not ready pending acoustic
-review and hand-aligned references. The engine selection and decoding
-configuration were not changed. The compatibility-patch callback needed to prove
-cancellation during active model inference is also absent
-(`audoraCompatibilityPatchId` is null), so cancellation remains blocked even
-after the corpus, model, and runtime prerequisites are supplied.
+`preflight-only` Apple Silicon release-qualification report; no inference was
+attempted. Its engine, corpus, and public-source-plan hashes match the current
+configuration. All four corpus cases, cancellation, and cached-offline inference
+are **blocked**, not passed: the AMI audio candidates are absent on the recorded
+host, no reviewed reference hashes are pinned, no prepared local model snapshot
+was supplied, and the locked Python runtime and packages are not installed. Both
+NASA audio files were present with the pinned format, duration, and SHA-256 when
+preflight was recorded, but their manifest entries remain explicitly not ready
+pending the deferred acoustic review and hand-aligned references. The engine
+selection and decoding configuration were not changed. Execution admission also
+remains blocked because the real runtime/model are unavailable and the
+compatibility-patch callback required to prove cancellation during active model
+inference is absent (`audoraCompatibilityPatchId` is null). These blockers must be
+resolved by the real adapter and artifacts, not by a fake provider or temporary
+substitution.

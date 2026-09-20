@@ -47,6 +47,6 @@ intended certificate name.
 The visible `NSOpenPanel`, microphone TCC decision, and Launch Services focus
 behavior require a human desktop run. Follow the interactive steps in
 [`README.md`](README.md) and record the chosen test Library, permission result,
-and one-window observation without committing the Library path. The minimum
-supported macOS 15 baseline also remains to be exercised; this recorded run was on
-macOS 26.6.2.
+and one-window observation without committing the Library path. This recorded run
+was on macOS 26.6.2, within the supported macOS 26 family; version one does not
+separately promise the unpatched 26.0 point release.

@@ -2224,7 +2224,8 @@ private actor ProfileReconsiderationContextSource: CoachContextSnapshotPort {
                 attachmentProjectionPolicy: try CoachAttachmentProjectionPolicy(
                     maximumInlineTranscriptTokens: 1_024,
                     tokenEstimator: .utf8ByteUpperBound()
-                )
+                ),
+                dataUseAssurance: .testProhibited
             )
         )
     }

@@ -589,7 +589,8 @@ final class PortableTranscriptRevisionPersistenceTests: XCTestCase {
                 providerIdentifier: "attachment-privacy-fixture-v1",
                 responseCollectorByteCeiling: 8_192,
                 framing: .testUnframed,
-                attachmentProjectionPolicy: projectionPolicy
+                attachmentProjectionPolicy: projectionPolicy,
+                dataUseAssurance: .testProhibited
             )
             let request = try CoachContextPlanner().estimate(
                 PreparedCoachContext(
@@ -2932,7 +2933,9 @@ private func transcriptRevision(
         sessionDurationMilliseconds: durationMilliseconds
     )
     let usePolicy = try EngineUsePolicy(
-        policyID: "crisper-evaluation-v1",
+        policyID: externalProcessingAllowed
+            ? "crisper-private-noncommercial-v2"
+            : "synthetic-external-processing-denied-v1",
         coveredArtifacts: [.transcriptRevision],
         privateLocalUseAllowed: true,
         privateExportAllowed: true,
