@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "evidenceIdentifier": "chatgpt-data-controls-owner-attestation-2026-09-20-v1",
+  "attestedStateAsOf": "2026-09-20",
+  "providerAuthenticationPosture": "ChatGPT account intended for Audora Codex provider qualification",
+  "setting": "Improve the model for everyone",
+  "settingDisabled": true,
+  "attestationMethod": "product-owner self-report",
+  "independentlyInspected": false,
+  "browserOrAccountStateInspected": false,
+  "officialPolicyReference": "https://help.openai.com/en/articles/5722486-how-your-data-is-used-to-improve-model-performance",
+  "qualificationStatus": "evidence-recorded-not-yet-bound",
+  "supersededWhen": [
+    "the ChatGPT account used for provider qualification changes",
+    "Improve the model for everyone is enabled",
+    "the provider data-use policy changes"
+  ]
+}

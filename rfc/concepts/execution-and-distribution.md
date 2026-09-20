@@ -163,13 +163,16 @@ for a language model. The provider's no-training data control is the operative
 condition. Audora sends transcript evidence only after an explicit Speaker action
 and never sends the source audio.
 
-For the selected ChatGPT-authenticated Codex CLI on a personal plan, provider
-qualification records a dated owner attestation that **Improve the model for
-everyone** is off; OpenAI documents that this account setting applies to Codex
-tasks. `--ephemeral` does not prove the account setting. Audora neither discovers
-credentials nor reads account/browser state. A future managed workspace or API
-adapter may instead bind its applicable no-training policy to the same provider-
-neutral assurance. See OpenAI's
+For the selected ChatGPT-authenticated Codex CLI on a personal plan, the product
+owner attested on 20 September 2026 that **Improve the model for everyone** is
+off. The self-reported evidence is recorded under
+[`Qualification/CodexCLI/evidence`](../../Qualification/CodexCLI/evidence/chatgpt-data-controls-owner-attestation-2026-09-20.json)
+without inspecting account or browser state. OpenAI documents that this account
+setting applies to Codex tasks. `--ephemeral` does not prove the account setting,
+and the attestation alone does not qualify a provider: its exact content hash must
+still be bound to the shipping authentication/runtime configuration. A future
+managed workspace or API adapter may instead bind its applicable no-training
+policy to the same provider-neutral assurance. See OpenAI's
 [`Data Controls FAQ`](https://help.openai.com/en/articles/7730893-data-controls-faq).
 
 This is the product owner's recorded policy decision and accepted licensing risk

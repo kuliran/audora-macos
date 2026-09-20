@@ -304,10 +304,15 @@ instructions. The production adapter remains blocked on:
 4. real-environment qualification of authentication, quota, transient, and
    unavailable-model signals without weakening diagnostic redaction; and
 5. a qualification-bound `CoachProviderDataUseAssurance` proving submitted
-   content is prohibited from provider training/model-improvement use. For a
-   personal ChatGPT login, this includes the owner's dated attestation that
-   **Improve the model for everyone** is off; `--ephemeral` is not evidence of
-   that account setting.
+   content is prohibited from provider training/model-improvement use. The owner
+   attested on 20 September 2026 that **Improve the model for everyone** is off;
+   that self-reported evidence is recorded in
+   [`evidence/chatgpt-data-controls-owner-attestation-2026-09-20.json`](evidence/chatgpt-data-controls-owner-attestation-2026-09-20.json)
+   with SHA-256
+   `3c5f7802ed514f6b6fd80f8dcbf1f12b6b34313b0942ead58bfc553bf04958db`.
+   The remaining blocker is binding that exact evidence to the shipping
+   authentication/runtime configuration; `--ephemeral` is not evidence of the
+   account setting.
 
 Until those points pass on the exact shipping CLI/model pair, Audora must not wire
 this spike into the application composition root.
@@ -329,11 +334,11 @@ this spike into the application composition root.
 3. Verify the exact build's documented same-process token mechanism with
    `cli_auth_credentials_store="ephemeral"`, without copying a login store or
    restoring an ordinary home.
-4. Bind the exact authentication posture to reviewed no-training evidence. For a
-   personal ChatGPT login, record the owner's dated attestation that **Improve the
-   model for everyone** is off without inspecting browser/account storage. Pin its
-   evidence identifier, reference, and content SHA-256 in the qualification-owned
-   `CoachProviderDataUseAssurance`.
+4. Bind the exact authentication posture to the recorded 20 September 2026 owner
+   attestation without inspecting browser/account storage. Confirm that none of
+   the artifact's supersession conditions has occurred, then pin its evidence
+   identifier, repository reference, and content SHA-256 in the qualification-
+   owned `CoachProviderDataUseAssurance`.
 5. Keep the pinned system `PATH`, private `TMPDIR`, empty client home, explicit
    residue rejection, successful scope removal, existing feature/tool disables,
    and bounded JSONL process host inside that runtime authority.
